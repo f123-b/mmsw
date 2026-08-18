@@ -1,10 +1,14 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { JSX } from "react";
 import { create } from "zustand";
-import type { AudioSidecarEvent } from "@interview-copilot/protocol";
+import type { AudioDevices, AudioSidecarEvent, ProbeResult } from "@interview-copilot/protocol";
 import type { SessionState } from "@interview-copilot/shared";
 import { normalizeMeter } from "@interview-copilot/shared";
 import type { OverlayMode } from "../main/overlay-manager";
+import type { ScreenshotResult } from "../main/screenshot-manager";
+
+const DETECT_THRESHOLD = 0.08;
+const DEFAULT_DEVICES: AudioDevices = { inputs: [], outputs: [] };
 
 interface AudioStore {
   mic: number;
@@ -12,13 +16,21 @@ interface AudioStore {
   state: "STARTING" | "READY" | "DEGRADED" | "RECOVERING" | "FAILED" | "STOPPED";
   micHealth: "ok" | "degraded" | "failed" | "unknown";
   loopbackHealth: "ok" | "degraded" | "failed" | "unknown";
+  micDetected: boolean;
+  systemDetected: boolean;
   overlayMode: OverlayMode;
   sessionState: SessionState;
-  diagnostic?: string;
+  automationMode: "MANUAL" | "AUTO";
+  probeResult?: ProbeResult;
+  bufferStats?: { queuedFrames: number; droppedFrames: number; bufferDurationMs: number };
+  screenshot?: ScreenshotResult;
+  notice?: string;
   applyEvent: (event: AudioSidecarEvent) => void;
   setOverlayMode: (mode: OverlayMode) => void;
   setSessionState: (state: SessionState) => void;
-  setDiagnostic: (message: string) => void;
+  setAutomationMode: (mode: "MANUAL" | "AUTO") => void;
+  setScreenshot: (screenshot: ScreenshotResult) => void;
+  setNotice: (notice?: string) => void;
 }
 
 const useAudioStore = create<AudioStore>((set) => ({
@@ -27,21 +39,37 @@ const useAudioStore = create<AudioStore>((set) => ({
   state: "STOPPED",
   micHealth: "unknown",
   loopbackHealth: "unknown",
+  micDetected: false,
+  systemDetected: false,
   overlayMode: "interactive",
   sessionState: "IDLE",
+  automationMode: "MANUAL",
   applyEvent: (event) => set((current) => {
     if (event.type === "meter") {
-      return { mic: normalizeMeter(event.mic), system: normalizeMeter(event.system) };
+      return {
+        mic: normalizeMeter(event.mic),
+        system: normalizeMeter(event.system),
+        micDetected: event.mic >= DETECT_THRESHOLD,
+        systemDetected: event.system >= DETECT_THRESHOLD
+      };
     }
     if (event.type === "audio_health") {
-      return { micHealth: event.mic, loopbackHealth: event.loopback, state: event.mic === "ok" && event.loopback === "ok" ? "READY" : "DEGRADED" };
+      return {
+        micHealth: event.mic,
+        loopbackHealth: event.loopback,
+        state: event.mic === "ok" && event.loopback === "ok" ? "READY" : "DEGRADED"
+      };
     }
     if (event.type === "audio_state") return { state: event.state };
-    return { state: event.recoverable ? "DEGRADED" : "FAILED", diagnostic: event.reason };
+    if (event.type === "probe_result") return { probeResult: event, state: event.mic.ok && event.system.ok ? "READY" : "FAILED" };
+    if (event.type === "audio_buffer") return { bufferStats: event };
+    return { state: event.recoverable ? "DEGRADED" : "FAILED", notice: event.reason };
   }),
   setOverlayMode: (overlayMode) => set({ overlayMode }),
   setSessionState: (sessionState) => set({ sessionState }),
-  setDiagnostic: (diagnostic) => set({ diagnostic })
+  setAutomationMode: (automationMode) => set({ automationMode }),
+  setScreenshot: (screenshot) => set({ screenshot }),
+  setNotice: (notice) => set({ notice })
 }));
 
 function Meter({ label, value, accent }: { label: string; value: number; accent: string }): JSX.Element {
@@ -53,13 +81,20 @@ function Meter({ label, value, accent }: { label: string; value: number; accent:
   );
 }
 
+function DetectionBadge({ label, detected }: { label: string; detected: boolean }): JSX.Element {
+  return <span className={`detection-badge ${detected ? "detected" : "waiting"}`}><span />{label}: {detected ? "detected" : "waiting"}</span>;
+}
+
 function StatusPill({ state }: { state: string }): JSX.Element {
   const tone = state === "READY" || state === "RUNNING" ? "success" : state === "FAILED" ? "danger" : "warning";
   return <span className={`status-pill ${tone}`}><span className="status-dot" />{state}</span>;
 }
 
 function OverlayView(): JSX.Element {
-  const { mic, system, state, overlayMode, setOverlayMode } = useAudioStore();
+  const { mic, system, state, overlayMode } = useAudioStore();
+  const toggleMode = async () => {
+    await window.interviewCopilot.overlay.setMode(overlayMode === "interactive" ? "passive" : "interactive");
+  };
   return (
     <main className="overlay-shell">
       <div className="overlay-bar"><span>Interview Copilot</span><StatusPill state={state} /></div>
@@ -69,38 +104,83 @@ function OverlayView(): JSX.Element {
         <div className="answer-placeholder">答案将在确认完整问题后显示</div>
         <div className="overlay-meters"><Meter label="MIC" value={mic} accent="#8b5cf6" /><Meter label="SYSTEM" value={system} accent="#22d3ee" /></div>
       </section>
-      <button className="overlay-mode" onClick={() => void setOverlayMode(overlayMode === "interactive" ? "passive" : "interactive")}>
+      <button className="overlay-mode" onClick={() => void toggleMode()}>
         {overlayMode === "interactive" ? "切换 Passive 模式" : "切换 Interactive 模式"}
       </button>
     </main>
   );
 }
 
+function storedDevice(key: string): string | undefined {
+  try { return localStorage.getItem(key) ?? undefined; } catch { return undefined; }
+}
+
+function persistDevice(key: string, value: string): void {
+  try { localStorage.setItem(key, value); } catch { /* localStorage can be unavailable in hardened environments */ }
+}
+
 export function App(): JSX.Element {
   const isOverlay = useMemo(() => new URLSearchParams(window.location.search).get("window") === "overlay", []);
   const store = useAudioStore();
+  const [devices, setDevices] = useState<AudioDevices>(DEFAULT_DEVICES);
+  const [inputDeviceId, setInputDeviceId] = useState("");
+  const [outputDeviceId, setOutputDeviceId] = useState("");
 
   useEffect(() => {
+    const loadDevices = async () => {
+      try {
+        const listed = await window.interviewCopilot.audio.listDevices();
+        setDevices(listed);
+        const savedInput = storedDevice("interview-copilot.input-device");
+        const savedOutput = storedDevice("interview-copilot.output-device");
+        const input = listed.inputs.some((device) => device.id === savedInput) ? savedInput ?? "" : listed.inputs.find((device) => device.default)?.id ?? listed.inputs[0]?.id ?? "";
+        const output = listed.outputs.some((device) => device.id === savedOutput) ? savedOutput ?? "" : listed.outputs.find((device) => device.default)?.id ?? listed.outputs[0]?.id ?? "";
+        setInputDeviceId(input);
+        setOutputDeviceId(output);
+        if (input) persistDevice("interview-copilot.input-device", input);
+        if (output) persistDevice("interview-copilot.output-device", output);
+      } catch (error) {
+        store.setNotice(`设备枚举失败：${String(error)}`);
+      }
+    };
+    void loadDevices();
+
     const cleanups = [
       window.interviewCopilot.events.onAudio(store.applyEvent),
-      window.interviewCopilot.events.onAudioDiagnostic(store.setDiagnostic),
       window.interviewCopilot.events.onSessionState(store.setSessionState),
-      window.interviewCopilot.events.onOverlayMode(store.setOverlayMode)
+      window.interviewCopilot.events.onOverlayMode(store.setOverlayMode),
+      window.interviewCopilot.events.onScreenshot(store.setScreenshot),
+      window.interviewCopilot.events.onScreenshotError(store.setNotice),
+      window.interviewCopilot.events.onShortcut((shortcut) => {
+        if (shortcut === "toggle-automation") {
+          const next = useAudioStore.getState().automationMode === "MANUAL" ? "AUTO" : "MANUAL";
+          useAudioStore.getState().setAutomationMode(next);
+          useAudioStore.getState().setNotice(`Automation 已切换为 ${next}`);
+        } else if (shortcut === "answer-latest") {
+          useAudioStore.getState().setNotice("Answer latest shortcut received");
+        } else if (shortcut === "screenshot-answer") {
+          useAudioStore.getState().setNotice("Screenshot shortcut received");
+        } else if (shortcut === "end-interview") {
+          useAudioStore.getState().setNotice("End interview shortcut received");
+        }
+      })
     ];
-    void window.interviewCopilot.session.getState().then(store.setSessionState);
     return () => cleanups.forEach((cleanup) => cleanup());
-  }, [store.applyEvent, store.setDiagnostic, store.setOverlayMode, store.setSessionState]);
+  }, []);
 
   if (isOverlay) return <OverlayView />;
 
   const startAudio = async () => {
-    await window.interviewCopilot.audio.start({ meterOnly: true });
+    persistDevice("interview-copilot.input-device", inputDeviceId);
+    persistDevice("interview-copilot.output-device", outputDeviceId);
+    await window.interviewCopilot.audio.start({ inputDeviceId, outputDeviceId, meterOnly: true });
   };
-  const stopAudio = async () => {
-    await window.interviewCopilot.audio.stop();
-  };
-  const openOverlay = async () => {
-    await window.interviewCopilot.overlay.show();
+  const stopAudio = async () => { await window.interviewCopilot.audio.stop(); };
+  const probeAudio = async () => { await window.interviewCopilot.audio.probe({ inputDeviceId, outputDeviceId }); };
+  const openOverlay = async () => { await window.interviewCopilot.overlay.show(); };
+  const captureScreenshot = async () => {
+    try { store.setScreenshot(await window.interviewCopilot.screenshot.capture()); }
+    catch (error) { store.setNotice(`截图失败：${String(error)}`); }
   };
 
   return (
@@ -122,16 +202,35 @@ export function App(): JSX.Element {
         <header className="topbar"><div><div className="eyebrow">REALTIME WORKSPACE</div><h1>面试工作台</h1></div><StatusPill state={store.state} /></header>
         <div className="content-scroll">
           <section className="hero-card">
-            <div><div className="eyebrow accent-text">READY WHEN YOU ARE</div><h2>开始一场更专注的面试</h2><p>先完成音频检测，再进入实时转写和回答流程。</p></div>
-            <div className="hero-actions"><button className="primary-button" onClick={startAudio}>启动音频检测</button><button className="secondary-button" onClick={openOverlay}>打开悬浮窗</button></div>
+            <div><div className="eyebrow accent-text">PHASE 1 AUDIO VALIDATION</div><h2>验证两条独立音频路径</h2><p>先确认 MIC 和 SYSTEM Loopback，再进入后续实时处理阶段。</p></div>
+            <div className="hero-actions"><button className="primary-button" onClick={() => void startAudio()}>启动音频检测</button><button className="secondary-button" onClick={() => void captureScreenshot()}>截图测试</button><button className="secondary-button" onClick={openOverlay}>打开悬浮窗</button></div>
           </section>
 
           <div className="dashboard-grid">
-            <section className="panel audio-panel"><div className="panel-heading"><div><div className="eyebrow">AUDIO TEST</div><h3>双通道音频</h3></div><StatusPill state={store.state} /></div><p className="muted">LEFT = MIC · RIGHT = SYSTEM LOOPBACK</p><div className="meters"><Meter label="MIC / 用户" value={store.mic} accent="#8b5cf6" /><Meter label="SYSTEM / 对方" value={store.system} accent="#22d3ee" /></div><div className="audio-actions"><button className="secondary-button" onClick={() => void window.interviewCopilot.audio.probe()}>探测设备</button><button className="ghost-button" onClick={stopAudio}>停止 Sidecar</button></div>{store.diagnostic && <div className="diagnostic">{store.diagnostic}</div>}</section>
-            <section className="panel setup-panel"><div className="panel-heading"><div><div className="eyebrow">INTERVIEW SETUP</div><h3>开始前配置</h3></div><span className="step-count">01 / 05</span></div><div className="setup-list"><div><span className="setup-icon">P</span><span>Profile</span><strong>默认 Profile</strong></div><div><span className="setup-icon">⌁</span><span>Microphone</span><strong>未选择设备</strong></div><div><span className="setup-icon">◉</span><span>System Audio</span><strong>未选择设备</strong></div><div><span className="setup-icon">A</span><span>Automation</span><strong>MANUAL</strong></div></div><button className="primary-button full-width" onClick={openOverlay}>进入面试设置</button></section>
+            <section className="panel audio-panel">
+              <div className="panel-heading"><div><div className="eyebrow">AUDIO TEST</div><h3>双通道音频</h3></div><StatusPill state={store.state} /></div>
+              <p className="muted">LEFT = MIC · RIGHT = SYSTEM LOOPBACK · threshold {DETECT_THRESHOLD}</p>
+              <div className="meters"><Meter label="MIC / 用户" value={store.mic} accent="#8b5cf6" /><Meter label="SYSTEM / 对方" value={store.system} accent="#22d3ee" /></div>
+              <div className="detections"><DetectionBadge label="MIC" detected={store.micDetected} /><DetectionBadge label="SYSTEM" detected={store.systemDetected} /></div>
+              <div className="audio-actions"><button className="secondary-button" onClick={() => void probeAudio()}>Probe 2s</button><button className="ghost-button" onClick={stopAudio}>停止 Sidecar</button></div>
+              {store.bufferStats && <div className="buffer-stats">buffer {store.bufferStats.bufferDurationMs}ms · queued {store.bufferStats.queuedFrames} · dropped {store.bufferStats.droppedFrames}</div>}
+              {store.notice && <div className="diagnostic">{store.notice}</div>}
+            </section>
+
+            <section className="panel setup-panel">
+              <div className="panel-heading"><div><div className="eyebrow">DEVICE SETUP</div><h3>音频设备</h3></div><span className="step-count">Phase 1</span></div>
+              <label className="device-field"><span>Microphone</span><select value={inputDeviceId} onChange={(event) => { setInputDeviceId(event.target.value); persistDevice("interview-copilot.input-device", event.target.value); }}><option value="">选择麦克风</option>{devices.inputs.map((device) => <option value={device.id} key={device.id}>{device.name}{device.default ? " · 默认" : ""}</option>)}</select></label>
+              <label className="device-field"><span>System Audio</span><select value={outputDeviceId} onChange={(event) => { setOutputDeviceId(event.target.value); persistDevice("interview-copilot.output-device", event.target.value); }}><option value="">选择输出设备</option>{devices.outputs.map((device) => <option value={device.id} key={device.id}>{device.name}{device.default ? " · 默认" : ""}</option>)}</select></label>
+              <div className="setup-list compact"><div><span className="setup-icon">A</span><span>Automation</span><strong>{store.automationMode}</strong></div><div><span className="setup-icon">◉</span><span>Sidecar</span><strong>{store.state}</strong></div></div>
+              <button className="primary-button full-width" onClick={() => void startAudio()}>使用当前设备启动</button>
+            </section>
           </div>
 
-          <section className="panel flow-panel"><div className="panel-heading"><div><div className="eyebrow">CORE PIPELINE</div><h3>实时链路</h3></div><span className="muted">Phase 1 foundation</span></div><div className="pipeline"><div className="pipeline-node active"><b>01</b><span>WASAPI</span><small>双通道捕获</small></div><div className="pipeline-line" /><div className="pipeline-node"><b>02</b><span>ASR</span><small>下一阶段</small></div><div className="pipeline-line" /><div className="pipeline-node"><b>03</b><span>QUESTION</span><small>边界检测</small></div><div className="pipeline-line" /><div className="pipeline-node"><b>04</b><span>ANSWER</span><small>流式输出</small></div></div></section>
+          {store.probeResult && <section className="panel probe-panel"><div className="panel-heading"><div><div className="eyebrow">PROBE RESULT</div><h3>2 秒采集统计</h3></div><span className="muted">{store.probeResult.durationMs}ms</span></div><div className="probe-grid"><div><strong>MIC</strong><span>{store.probeResult.mic.ok ? "OK" : "FAILED"} · {store.probeResult.mic.sampleRate}Hz · {store.probeResult.mic.channels}ch</span><small>callbacks {store.probeResult.mic.callbackCount} · samples {store.probeResult.mic.sampleCount} · peak {store.probeResult.mic.peak.toFixed(2)}</small></div><div><strong>SYSTEM</strong><span>{store.probeResult.system.ok ? "OK" : "FAILED"} · {store.probeResult.system.sampleRate}Hz · {store.probeResult.system.channels}ch</span><small>callbacks {store.probeResult.system.callbackCount} · samples {store.probeResult.system.sampleCount} · peak {store.probeResult.system.peak.toFixed(2)}</small></div></div></section>}
+
+          {store.screenshot && <section className="panel screenshot-panel"><div className="panel-heading"><div><div className="eyebrow">SCREENSHOT TEST</div><h3>最近截图</h3></div><span className="muted">{store.screenshot.mimeType} · {store.screenshot.size} bytes</span></div><img className="screenshot-preview" src={store.screenshot.dataUrl} alt="最近一次桌面截图" /><div className="muted screenshot-path">已保存：{store.screenshot.path}</div></section>}
+
+          <section className="panel flow-panel"><div className="panel-heading"><div><div className="eyebrow">CORE PIPELINE</div><h3>实时链路</h3></div><span className="muted">Phase 1 foundation · Phase 2 NOT STARTED</span></div><div className="pipeline"><div className="pipeline-node active"><b>01</b><span>WASAPI</span><small>双通道捕获</small></div><div className="pipeline-line" /><div className="pipeline-node"><b>02</b><span>ASR</span><small>下一阶段</small></div><div className="pipeline-line" /><div className="pipeline-node"><b>03</b><span>QUESTION</span><small>边界检测</small></div><div className="pipeline-line" /><div className="pipeline-node"><b>04</b><span>ANSWER</span><small>流式输出</small></div></div></section>
         </div>
       </section>
     </main>

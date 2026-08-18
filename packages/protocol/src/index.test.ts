@@ -32,4 +32,22 @@ describe("audio protocol", () => {
       timestamp: 1
     }))).toThrow();
   });
+
+  it("validates probe and buffer statistics", () => {
+    expect(parseAudioSidecarEvent(JSON.stringify({
+      type: "probe_result",
+      mic: { ok: true, sampleRate: 48_000, channels: 1, peak: 0.43, callbackCount: 50, sampleCount: 2_400_000 },
+      system: { ok: true, sampleRate: 48_000, channels: 2, peak: 0.61, callbackCount: 50, sampleCount: 4_800_000 },
+      durationMs: 2_000,
+      timestamp: 123
+    }))).toMatchObject({ type: "probe_result", mic: { callbackCount: 50 } });
+
+    expect(parseAudioSidecarEvent(JSON.stringify({
+      type: "audio_buffer",
+      queuedFrames: 1_024,
+      droppedFrames: 64,
+      bufferDurationMs: 64,
+      timestamp: 123
+    }))).toMatchObject({ type: "audio_buffer", droppedFrames: 64 });
+  });
 });

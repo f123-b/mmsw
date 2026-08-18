@@ -10,16 +10,21 @@ import {
   type AudioSidecarEvent
 } from "@interview-copilot/protocol";
 
-export type AudioManagerEvent = AudioSidecarEvent | {
-  type: "audio_process";
-  state: "stopped" | "running";
-};
+export type AudioProcessState = "stopped" | "running";
 
 export interface AudioStartOptions {
   inputDeviceId?: string;
   outputDeviceId?: string;
   meterOnly?: boolean;
   probeOnly?: boolean;
+  autoRecover?: boolean;
+}
+
+const RECOVERY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 10_000] as const;
+
+export function reconnectDelayMs(attempt: number): number {
+  const index = Math.max(0, Math.min(Math.floor(attempt), RECOVERY_DELAYS_MS.length - 1));
+  return RECOVERY_DELAYS_MS[index];
 }
 
 function sidecarPath(): string {
@@ -31,7 +36,11 @@ function sidecarPath(): string {
 
 export class AudioManager extends EventEmitter {
   private process: ChildProcessByStdio<null, Readable, Readable> | undefined;
-  private stdoutBuffer = "";
+  private stderrBuffer = "";
+  private retryTimer: NodeJS.Timeout | undefined;
+  private recoveryAttempt = 0;
+  private manualStop = true;
+  private currentOptions: AudioStartOptions = {};
 
   get configuredPath(): string {
     return sidecarPath();
@@ -47,95 +56,152 @@ export class AudioManager extends EventEmitter {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"]
     });
-
     const stdout = await this.collectStdout(child);
     return audioDevicesSchema.parse(JSON.parse(stdout));
   }
 
   start(options: AudioStartOptions = {}): void {
     if (this.isRunning) return;
+    this.clearRecoveryTimer();
+    this.manualStop = false;
+    this.recoveryAttempt = 0;
+    this.currentOptions = { ...options, autoRecover: options.autoRecover ?? true };
+    this.spawnSidecar(this.currentOptions);
+  }
+
+  stop(): void {
+    this.manualStop = true;
+    this.clearRecoveryTimer();
+    this.recoveryAttempt = 0;
+    const child = this.process;
+    this.process = undefined;
+    if (child && !child.killed) child.kill();
+    this.emit("process", "stopped" as AudioProcessState);
+  }
+
+  probe(options: Omit<AudioStartOptions, "meterOnly" | "probeOnly" | "autoRecover"> = {}): void {
+    this.start({ ...options, probeOnly: true, autoRecover: false });
+  }
+
+  private spawnSidecar(options: AudioStartOptions): void {
     const executable = this.configuredPath;
     if (!existsSync(executable)) {
-      this.emit("event", {
+      this.manualStop = true;
+      this.emitEvent({
         type: "audio_error",
         component: "process",
         reason: `Audio Sidecar not found: ${executable}`,
         recoverable: false,
         timestamp: Date.now()
-      } satisfies AudioSidecarEvent);
-      this.emit("event", {
-        type: "audio_state",
-        state: "FAILED",
-        timestamp: Date.now()
-      } satisfies AudioSidecarEvent);
+      });
+      this.emitEvent({ type: "audio_state", state: "FAILED", timestamp: Date.now() });
       return;
     }
 
-    const args = options.probeOnly
-      ? ["--probe-only"]
-      : options.meterOnly
-      ? ["--meter-only"]
-      : [
-          ...(options.inputDeviceId ? ["--input-device-id", options.inputDeviceId] : []),
-          ...(options.outputDeviceId ? ["--output-device-id", options.outputDeviceId] : [])
-        ];
-    this.stdoutBuffer = "";
+    const args = [
+      ...(options.inputDeviceId ? ["--input-device-id", options.inputDeviceId] : []),
+      ...(options.outputDeviceId ? ["--output-device-id", options.outputDeviceId] : []),
+      ...(options.probeOnly ? ["--probe-only"] : []),
+      ...(options.meterOnly ? ["--meter-only"] : [])
+    ];
+    this.stderrBuffer = "";
     this.process = spawn(executable, args, {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"]
     });
     const child = this.process;
-    this.emit("event", { type: "audio_process", state: "running" } satisfies AudioManagerEvent);
+    this.emit("process", "running" as AudioProcessState);
 
-    child.stdout.on("data", (chunk: Buffer) => this.consumeStdout(chunk.toString("utf8")));
-    child.stderr.on("data", (chunk: Buffer) => {
-      this.emit("diagnostic", chunk.toString("utf8").trim());
+    child.stdout.on("data", (chunk: Buffer) => {
+      this.emit("pcm", Buffer.from(chunk));
     });
+    child.stderr.on("data", (chunk: Buffer) => this.consumeStderr(chunk.toString("utf8")));
     child.on("error", (error) => {
-      this.emit("event", {
+      this.emitEvent({
         type: "audio_error",
         component: "process",
         reason: error.message,
         recoverable: true,
         timestamp: Date.now()
-      } satisfies AudioSidecarEvent);
+      });
+      this.scheduleRecovery();
     });
-    child.on("close", () => {
-      this.process = undefined;
-      this.emit("event", { type: "audio_process", state: "stopped" } satisfies AudioManagerEvent);
+    child.on("close", (code) => {
+      const wasExpected = this.manualStop || Boolean(options.probeOnly);
+      if (this.process === child) this.process = undefined;
+      this.emit("process", "stopped" as AudioProcessState);
+      if (!wasExpected && options.autoRecover !== false) {
+        this.emitEvent({ type: "audio_state", state: "DEGRADED", timestamp: Date.now() });
+        if (code !== 0) {
+          this.emitEvent({
+            type: "audio_error",
+            component: "process",
+            reason: `Audio Sidecar exited with code ${code ?? "unknown"}`,
+            recoverable: true,
+            timestamp: Date.now()
+          });
+        }
+        this.scheduleRecovery();
+      }
     });
   }
 
-  stop(): void {
-    if (!this.process) return;
-    this.process.kill();
-    this.process = undefined;
+  private scheduleRecovery(): void {
+    if (this.manualStop || this.retryTimer) return;
+    const delay = reconnectDelayMs(this.recoveryAttempt);
+    this.recoveryAttempt += 1;
+    this.emitEvent({ type: "audio_state", state: "DEGRADED", timestamp: Date.now() });
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      void this.recover();
+    }, delay);
   }
 
-  probe(): void {
-    this.start({ probeOnly: true });
+  private async recover(): Promise<void> {
+    if (this.manualStop || this.isRunning) return;
+    this.emitEvent({ type: "audio_state", state: "RECOVERING", timestamp: Date.now() });
+    try {
+      const devices = await this.listDevices();
+      const inputExists = !this.currentOptions.inputDeviceId || devices.inputs.some((device) => device.id === this.currentOptions.inputDeviceId);
+      const outputExists = !this.currentOptions.outputDeviceId || devices.outputs.some((device) => device.id === this.currentOptions.outputDeviceId);
+      this.currentOptions = {
+        ...this.currentOptions,
+        inputDeviceId: inputExists ? this.currentOptions.inputDeviceId : undefined,
+        outputDeviceId: outputExists ? this.currentOptions.outputDeviceId : undefined
+      };
+    } catch (error) {
+      this.emit("diagnostic", `Audio recovery device enumeration failed: ${String(error)}`);
+    }
+    if (!this.manualStop) this.spawnSidecar(this.currentOptions);
+  }
+
+  private clearRecoveryTimer(): void {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
   }
 
   private requireSidecar(): string {
     const executable = this.configuredPath;
-    if (!existsSync(executable)) {
-      throw new Error(`Audio Sidecar not found: ${executable}`);
-    }
+    if (!existsSync(executable)) throw new Error(`Audio Sidecar not found: ${executable}`);
     return executable;
   }
 
-  private consumeStdout(chunk: string): void {
-    this.stdoutBuffer += chunk;
-    const lines = this.stdoutBuffer.split(/\r?\n/);
-    this.stdoutBuffer = lines.pop() ?? "";
+  private consumeStderr(chunk: string): void {
+    this.stderrBuffer += chunk;
+    const lines = this.stderrBuffer.split(/\r?\n/);
+    this.stderrBuffer = lines.pop() ?? "";
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
-        this.emit("event", parseAudioSidecarEvent(line));
-      } catch (error) {
-        this.emit("diagnostic", `Invalid sidecar event: ${String(error)}`);
+        this.emitEvent(parseAudioSidecarEvent(line));
+      } catch {
+        this.emit("diagnostic", line.trim());
       }
     }
+  }
+
+  private emitEvent(event: AudioSidecarEvent): void {
+    this.emit("event", event);
   }
 
   private collectStdout(child: ChildProcessByStdio<null, Readable, Readable>): Promise<string> {

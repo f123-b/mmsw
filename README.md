@@ -4,14 +4,18 @@
 
 ## 当前进度
 
-当前提交完成 Phase 1 的桌面端基础骨架：
+当前状态：`Phase 1 IMPLEMENTATION COMPLETE`，`Phase 1 WINDOWS VALIDATION PENDING`，`Phase 2 NOT STARTED`。
+
+已完成 Phase 1 实现：
 
 - Electron `main → preload → renderer` 三层隔离
 - React 主界面与透明 Overlay 窗口
 - 统一的 Zod 协议包，包含音频设备、电平、健康状态和错误事件
 - Session 状态机和全局快捷键入口
 - Rust Audio Sidecar CLI 契约与 Windows 音频后端边界
-- 自动化测试覆盖 Session 状态转移、音频协议和电平归一化
+- MIC / SYSTEM 设备选择、2 秒 Probe、检测状态和截图基础能力
+- PCM stdout 与 JSON stderr 分离、3 秒 buffer 统计和 Sidecar 自动恢复
+- Rust Sidecar 模块化、纯函数测试、Windows CI 和 NSIS 打包配置
 
 Rust 工具链未安装时，桌面端仍可完成 TypeScript 构建与协议/状态机测试；真实 WASAPI 采集需要在 Windows 上安装 Rust 后构建 `crates/audio-sidecar`。
 
@@ -42,7 +46,10 @@ npm run dev
 npm test
 npm run typecheck
 npm run build
+npm run package:win
 ```
+
+真实 Windows 音频验证步骤见 [`docs/phase-1-validation.md`](docs/phase-1-validation.md)。在人工执行 A/B/C 音频测试并完成 Rust MSVC 构建前，不将 Phase 1 标记为正式验收完成。
 
 ## 目录
 

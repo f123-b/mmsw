@@ -47,11 +47,38 @@ export const audioStateSchema = z.object({
   timestamp: z.number().int().nonnegative()
 });
 
+export const probeChannelResultSchema = z.object({
+  ok: z.boolean(),
+  sampleRate: z.number().int().nonnegative(),
+  channels: z.number().int().nonnegative(),
+  peak: z.number().min(0).max(1),
+  callbackCount: z.number().int().nonnegative(),
+  sampleCount: z.number().int().nonnegative()
+});
+
+export const probeResultSchema = z.object({
+  type: z.literal("probe_result"),
+  mic: probeChannelResultSchema,
+  system: probeChannelResultSchema,
+  durationMs: z.number().int().nonnegative(),
+  timestamp: z.number().int().nonnegative()
+});
+
+export const audioBufferSchema = z.object({
+  type: z.literal("audio_buffer"),
+  queuedFrames: z.number().int().nonnegative(),
+  droppedFrames: z.number().int().nonnegative(),
+  bufferDurationMs: z.number().int().nonnegative(),
+  timestamp: z.number().int().nonnegative()
+});
+
 export const audioSidecarEventSchema = z.discriminatedUnion("type", [
   audioHealthSchema,
   audioMeterSchema,
   audioErrorSchema,
-  audioStateSchema
+  audioStateSchema,
+  probeResultSchema,
+  audioBufferSchema
 ]);
 
 export const clientControlMessageSchema = z.discriminatedUnion("type", [
@@ -67,6 +94,9 @@ export type AudioHealth = z.infer<typeof audioHealthSchema>;
 export type AudioMeter = z.infer<typeof audioMeterSchema>;
 export type AudioError = z.infer<typeof audioErrorSchema>;
 export type AudioStateEvent = z.infer<typeof audioStateSchema>;
+export type ProbeChannelResult = z.infer<typeof probeChannelResultSchema>;
+export type ProbeResult = z.infer<typeof probeResultSchema>;
+export type AudioBufferStats = z.infer<typeof audioBufferSchema>;
 export type AudioSidecarEvent = z.infer<typeof audioSidecarEventSchema>;
 export type ClientControlMessage = z.infer<typeof clientControlMessageSchema>;
 

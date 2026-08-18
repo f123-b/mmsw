@@ -10,7 +10,7 @@
 2. Main 进程负责窗口、Overlay、快捷键和 Sidecar 生命周期。
 3. `packages/protocol` 是音频事件与设备描述的唯一 schema 来源。
 4. `packages/shared` 的 Session 状态机拒绝非法转移，避免多个 boolean 拼接状态。
-5. Sidecar 使用 stdout 输出 JSON Lines 健康/电平事件，stderr 只用于诊断。
+5. Sidecar 使用 stdout 输出 PCM，stderr 输出 JSON Lines 健康/电平/Probe/Buffer 事件。
 6. Overlay 支持 Interactive / Passive 两种模式，不启用任何规避第三方监控的隐私策略。
 
 ## Sidecar 接口
@@ -26,12 +26,14 @@ interview-audio.exe --input-device-id <id> --output-device-id <id>
 
 ## 本阶段验收
 
-- [x] UI 能显示 MIC / SYSTEM 两条独立电平。
-- [x] Audio Sidecar 异常不会让 Electron 直接退出，UI 显示 DEGRADED / FAILED。
-- [x] Overlay 可以打开、隐藏并切换 Passive 模式。
-- [x] 协议 schema 和 Session 状态机有自动测试。
-- [ ] 在真实腾讯会议/浏览器场景验证 WASAPI Loopback 与 Mic 的物理隔离（需要 Rust 工具链和真实音频设备）。
+- [x] UI 能显示 MIC / SYSTEM 两条独立电平和 detected 状态。
+- [x] Audio Sidecar 异常不会让 Electron 直接退出，UI 显示 DEGRADED / RECOVERING / FAILED。
+- [x] Overlay 可以打开、隐藏并通过 Main IPC 切换 Passive 模式。
+- [x] 设备枚举、选择、持久化、失效回退和 2 秒 Probe 已接入。
+- [x] PCM stdout 与 JSON stderr 已物理分离。
+- [x] 协议、Session、Overlay、恢复退避和 Rust 纯函数有自动测试。
+- [ ] 真实 MIC / WASAPI Loopback A/B/C 验证：`REQUIRES_MANUAL_WINDOWS_VALIDATION`。
 
 ## 下一阶段
 
-Phase 2 将在现有协议之上接入 WebSocket、PCM backpressure、MIC / REMOTE 分离的 Streaming ASR 和 transcript stabilizer。
+详细收口状态和人工验证步骤见 [phase-1-final.md](./phase-1-final.md) 与 [phase-1-validation.md](./phase-1-validation.md)。Phase 2 仍未开始。

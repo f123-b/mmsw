@@ -3,11 +3,29 @@ import { join } from "node:path";
 
 export type OverlayMode = "interactive" | "passive";
 
+export interface OverlayWindowLike {
+  isDestroyed(): boolean;
+  setFocusable(focusable: boolean): void;
+  setIgnoreMouseEvents(ignore: boolean, options?: { forward?: boolean }): void;
+  webContents: { send(channel: string, payload: unknown): void };
+}
+
+export function applyOverlayMode(window: OverlayWindowLike, mode: OverlayMode): void {
+  const passive = mode === "passive";
+  window.setFocusable(!passive);
+  window.setIgnoreMouseEvents(passive, { forward: true });
+}
+
+export interface OverlayManagerOptions {
+  preloadPath?: string;
+  loadRenderer: (window: BrowserWindow) => Promise<void>;
+}
+
 export class OverlayManager {
   private window: BrowserWindow | undefined;
   private mode: OverlayMode = "interactive";
 
-  constructor(private readonly rendererUrl: string) {}
+  constructor(private readonly options: OverlayManagerOptions) {}
 
   get currentMode(): OverlayMode {
     return this.mode;
@@ -36,13 +54,14 @@ export class OverlayManager {
       show: false,
       focusable: true,
       webPreferences: {
-        preload: join(__dirname, "../preload/index.js"),
+        preload: this.options.preloadPath ?? join(__dirname, "../preload/index.js"),
         contextIsolation: true,
-        nodeIntegration: false
+        nodeIntegration: false,
+        sandbox: true
       }
     });
     this.window.setAlwaysOnTop(true, "screen-saver");
-    void this.window.loadURL(`${this.rendererUrl}?window=overlay`);
+    void this.options.loadRenderer(this.window);
     this.window.once("ready-to-show", () => this.window?.showInactive());
     this.window.on("closed", () => { this.window = undefined; });
     this.applyMode();
@@ -70,9 +89,7 @@ export class OverlayManager {
 
   private applyMode(): void {
     if (!this.window || this.window.isDestroyed()) return;
-    const passive = this.mode === "passive";
-    this.window.setFocusable(!passive);
-    this.window.setIgnoreMouseEvents(passive, { forward: true });
+    applyOverlayMode(this.window, this.mode);
     this.window.webContents.send("overlay:mode", this.mode);
   }
 }
