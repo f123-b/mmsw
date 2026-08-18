@@ -330,3 +330,4 @@ export class QuestionDetector {
 }
 
 export * from "./answer";
+export * from "./profile";
