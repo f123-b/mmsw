@@ -25,24 +25,24 @@ pub fn open(input: &Device, output: &Device) -> Result<CaptureHandle, String> {
     let output_config = output
         .default_output_config()
         .map_err(|error| format!("loopback config failed: {error}"))?;
-    let mic_rate = input_config.sample_rate().0;
-    let system_rate = output_config.sample_rate().0;
-    let mic_channels = input_config.channels;
-    let system_channels = output_config.channels;
+    let mic_rate = input_config.sample_rate();
+    let system_rate = output_config.sample_rate();
+    let mic_channels = input_config.channels();
+    let system_channels = output_config.channels();
     let mic_buffer = new_shared_buffer(mic_rate, mic_channels as usize);
     let system_buffer = new_shared_buffer(system_rate, system_channels as usize);
     let mic_stats = Arc::new(Mutex::new(CaptureStats::new(mic_rate, mic_channels)));
     let system_stats = Arc::new(Mutex::new(CaptureStats::new(system_rate, system_channels)));
     let mic_stream = build_stream_for_format(
         input,
-        &input_config.config(),
+        input_config.config(),
         input_config.sample_format(),
         Arc::clone(&mic_buffer),
         Arc::clone(&mic_stats),
     )?;
     let system_stream = build_stream_for_format(
         output,
-        &output_config.config(),
+        output_config.config(),
         output_config.sample_format(),
         Arc::clone(&system_buffer),
         Arc::clone(&system_stats),
@@ -63,7 +63,7 @@ pub fn open(input: &Device, output: &Device) -> Result<CaptureHandle, String> {
 
 fn build_stream_typed<T>(
     device: &Device,
-    config: &StreamConfig,
+    config: StreamConfig,
     queue: SharedAudioBuffer,
     stats: Arc<Mutex<CaptureStats>>,
 ) -> Result<Stream, String>
@@ -94,7 +94,7 @@ where
 
 fn build_stream_for_format(
     device: &Device,
-    config: &StreamConfig,
+    config: StreamConfig,
     format: SampleFormat,
     queue: SharedAudioBuffer,
     stats: Arc<Mutex<CaptureStats>>,

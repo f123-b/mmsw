@@ -6,7 +6,7 @@ pub fn device_id(device: &Device) -> String {
     device
         .id()
         .map(|id| id.to_string())
-        .unwrap_or_else(|_| device.name().unwrap_or_else(|_| "unknown".to_string()))
+        .unwrap_or_else(|_| device.to_string())
 }
 
 pub fn enumerate(host: &Host) -> Result<DeviceList, String> {
@@ -21,9 +21,7 @@ pub fn enumerate(host: &Host) -> Result<DeviceList, String> {
             let id = device_id(&device);
             DeviceInfo {
                 id: id.clone(),
-                name: device
-                    .name()
-                    .unwrap_or_else(|_| "Unknown microphone".to_string()),
+                name: device.to_string(),
                 kind: "microphone",
                 default: default_input.as_deref() == Some(id.as_str()),
             }
@@ -36,9 +34,7 @@ pub fn enumerate(host: &Host) -> Result<DeviceList, String> {
             let id = device_id(&device);
             DeviceInfo {
                 id: id.clone(),
-                name: device
-                    .name()
-                    .unwrap_or_else(|_| "Unknown output".to_string()),
+                name: device.to_string(),
                 kind: "loopback",
                 default: default_output.as_deref() == Some(id.as_str()),
             }
