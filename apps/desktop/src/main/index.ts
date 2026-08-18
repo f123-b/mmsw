@@ -5,7 +5,7 @@ import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { SessionStateMachine } from "@interview-copilot/shared";
+import { QuestionDetector, SessionStateMachine } from "@interview-copilot/shared";
 
 let mainWindow: BrowserWindow | undefined;
 let overlayManager: OverlayManager | undefined;
@@ -15,6 +15,8 @@ const screenshotManager = new ScreenshotManager({
 });
 const session = new SessionStateMachine();
 const realtimeSession = new RealtimeSession();
+const questionDetector = new QuestionDetector();
+let questionFlushTimer: NodeJS.Timeout | undefined;
 const preloadPath = join(__dirname, "../preload/index.js");
 const rendererFile = join(__dirname, "../renderer/index.html");
 
@@ -126,7 +128,19 @@ app.whenReady().then(() => {
   audioManager.on("diagnostic", (message) => broadcast("audio:diagnostic", message));
   audioManager.on("pcm-packet", (packet: Uint8Array) => realtimeSession.sendAudio(packet));
   realtimeSession.on("state", (state) => broadcast("realtime:state", state));
-  realtimeSession.on("transcript", (snapshot) => broadcast("realtime:transcript", snapshot));
+  realtimeSession.on("transcript", (snapshot, segment) => {
+    broadcast("realtime:transcript", snapshot);
+    if (snapshot.source !== "remote") return;
+    const events = questionDetector.observe(segment);
+    events.forEach((event) => broadcast("question:event", event));
+    if (segment.final) {
+      if (questionFlushTimer) clearTimeout(questionFlushTimer);
+      questionFlushTimer = setTimeout(() => {
+        questionFlushTimer = undefined;
+        questionDetector.flush().forEach((event) => broadcast("question:event", event));
+      }, 500);
+    }
+  });
   realtimeSession.on("message", (message) => broadcast("realtime:message", message));
   realtimeSession.on("diagnostic", (message) => broadcast("realtime:diagnostic", message));
   session.subscribe((state) => broadcast("session:state", state));
@@ -140,6 +154,7 @@ app.on("before-quit", () => {
   globalShortcut.unregisterAll();
   audioManager.stop();
   realtimeSession.disconnect();
+  if (questionFlushTimer) clearTimeout(questionFlushTimer);
   overlayManager?.destroy();
 });
 

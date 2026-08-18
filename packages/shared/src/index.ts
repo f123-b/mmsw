@@ -172,3 +172,159 @@ export class PcmBackpressureQueue {
     this.queuedBytes = 0;
   }
 }
+
+export type QuestionState = "IDLE" | "LISTENING" | "POSSIBLE_QUESTION" | "WAITING_COMPLETION" | "CONFIRMED" | "ANSWERING";
+export type QuestionConfidence = "low" | "medium" | "high";
+export type QuestionStatus = "candidate" | "confirmed" | "superseded" | "ignored" | "answered";
+
+export interface QuestionCandidate {
+  id: string;
+  text: string;
+  confidence: QuestionConfidence;
+  score: number;
+  source: "rules" | "extractor";
+  detectedAt: number;
+  status: QuestionStatus;
+}
+
+export type QuestionEvent =
+  | { type: "question_candidate"; question: QuestionCandidate }
+  | { type: "question_confirmed"; question: QuestionCandidate }
+  | { type: "question_superseded"; previousQuestionId: string; question: QuestionCandidate }
+  | { type: "question_ignored"; question: QuestionCandidate; reason: "duplicate" | "incomplete" };
+
+export interface QuestionDetectorOptions {
+  completenessThreshold?: number;
+  silenceMs?: number;
+  dedupeWindowMs?: number;
+  similarityThreshold?: number;
+}
+
+const QUESTION_WORDS = /为什么|为何|怎么|如何|能不能|可不可以|什么|哪个|哪里|是否|有没有|请问|解释|介绍|区别|原理|原因|吗[？?。.!！]?|呢[？?。.!！]?/i;
+
+function normalizeQuestionText(text: string): string {
+  return text.replace(/[\s，。！？、,.!?]+/g, "").toLowerCase();
+}
+
+function tokenSet(text: string): Set<string> {
+  const normalized = normalizeQuestionText(text);
+  const tokens = normalized.match(/[a-z0-9]+|[\u4e00-\u9fff]/g) ?? [];
+  return new Set(tokens);
+}
+
+export function questionSimilarity(left: string, right: string): number {
+  const a = tokenSet(left);
+  const b = tokenSet(right);
+  if (a.size === 0 && b.size === 0) return 1;
+  const intersection = [...a].filter((token) => b.has(token)).length;
+  return intersection / Math.max(1, new Set([...a, ...b]).size);
+}
+
+export function scoreQuestion(text: string, final: boolean): { score: number; confidence: QuestionConfidence } {
+  const normalized = text.trim();
+  const hasQuestionWord = QUESTION_WORDS.test(normalized);
+  const hasQuestionMark = /[？?]$/.test(normalized);
+  const hasEnoughContext = normalized.length >= 8;
+  const score = Math.min(0.98, (hasQuestionWord ? 0.5 : 0) + (hasQuestionMark ? 0.15 : 0) + (final ? 0.2 : 0) + (hasEnoughContext ? 0.15 : 0));
+  const confidence: QuestionConfidence = score >= 0.88 ? "high" : score >= 0.65 ? "medium" : "low";
+  return { score, confidence };
+}
+
+export class QuestionDetector {
+  private stateValue: QuestionState = "IDLE";
+  private currentText = "";
+  private currentStartMs = 0;
+  private lastInputAt = 0;
+  private currentCandidate: QuestionCandidate | undefined;
+  private questionCounter = 0;
+  private readonly confirmed: QuestionCandidate[] = [];
+  private readonly completenessThreshold: number;
+  private readonly silenceMs: number;
+  private readonly dedupeWindowMs: number;
+  private readonly similarityThreshold: number;
+
+  constructor(options: QuestionDetectorOptions = {}) {
+    this.completenessThreshold = options.completenessThreshold ?? 0.82;
+    this.silenceMs = options.silenceMs ?? 500;
+    this.dedupeWindowMs = options.dedupeWindowMs ?? 15_000;
+    this.similarityThreshold = options.similarityThreshold ?? 0.9;
+  }
+
+  get state(): QuestionState { return this.stateValue; }
+  get lastConfirmed(): QuestionCandidate | undefined { return this.confirmed.at(-1); }
+
+  observe(input: { text: string; final: boolean; startMs: number; endMs: number }, observedAtMs = Date.now()): QuestionEvent[] {
+    const text = input.text.trim();
+    if (!text) return [];
+    if (!this.currentText || input.startMs > this.lastInputAt + this.silenceMs) {
+      this.currentText = text;
+      this.currentStartMs = input.startMs;
+    } else {
+      this.currentText = input.final ? text : text;
+    }
+    this.lastInputAt = Math.max(observedAtMs, input.endMs);
+    this.stateValue = "LISTENING";
+    const scored = scoreQuestion(this.currentText, input.final);
+    if (!QUESTION_WORDS.test(this.currentText) && !/[？?]$/.test(this.currentText)) return [];
+    const candidate = this.makeCandidate(scored, observedAtMs);
+    this.currentCandidate = candidate;
+    this.stateValue = scored.score >= this.completenessThreshold ? "WAITING_COMPLETION" : "POSSIBLE_QUESTION";
+    return [{ type: "question_candidate", question: candidate }];
+  }
+
+  flush(observedAtMs = Date.now()): QuestionEvent[] {
+    const candidate = this.currentCandidate;
+    if (!candidate) {
+      this.stateValue = "IDLE";
+      return [];
+    }
+    if (observedAtMs - this.lastInputAt < this.silenceMs || candidate.score < this.completenessThreshold) {
+      return [{ type: "question_ignored", question: { ...candidate, status: "ignored" }, reason: "incomplete" }];
+    }
+    const duplicate = this.confirmed.some((previous) => observedAtMs - previous.detectedAt < this.dedupeWindowMs && questionSimilarity(previous.text, candidate.text) >= this.similarityThreshold);
+    if (duplicate) {
+      this.stateValue = "IDLE";
+      this.resetBuffer();
+      return [{ type: "question_ignored", question: { ...candidate, status: "ignored" }, reason: "duplicate" }];
+    }
+    const confirmed = { ...candidate, status: "confirmed" as const };
+    const previous = this.confirmed.at(-1);
+    this.confirmed.push(confirmed);
+    this.currentCandidate = confirmed;
+    this.stateValue = "CONFIRMED";
+    const event: QuestionEvent = previous && previous.id !== confirmed.id
+      ? { type: "question_superseded", previousQuestionId: previous.id, question: confirmed }
+      : { type: "question_confirmed", question: confirmed };
+    this.resetBuffer(false);
+    return [event];
+  }
+
+  markAnswering(questionId: string): void {
+    if (this.currentCandidate?.id === questionId) this.stateValue = "ANSWERING";
+  }
+
+  markAnswered(questionId: string): void {
+    const question = this.confirmed.find((candidate) => candidate.id === questionId);
+    if (question) question.status = "answered";
+    if (this.currentCandidate?.id === questionId) this.stateValue = "IDLE";
+  }
+
+  private makeCandidate(scored: { score: number; confidence: QuestionConfidence }, detectedAt: number): QuestionCandidate {
+    return {
+      id: `question-${++this.questionCounter}`,
+      text: this.currentText,
+      confidence: scored.confidence,
+      score: scored.score,
+      source: "rules",
+      detectedAt,
+      status: "candidate"
+    };
+  }
+
+  private resetBuffer(clearCandidate = true): void {
+    this.currentText = "";
+    this.currentStartMs = 0;
+    this.lastInputAt = 0;
+    if (clearCandidate) this.currentCandidate = undefined;
+  }
+}

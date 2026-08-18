@@ -4,6 +4,7 @@ import type { AudioDevices, AudioSidecarEvent } from "@interview-copilot/protoco
 import type { RealtimeServerMessage } from "@interview-copilot/protocol";
 import type { RealtimeConnectOptions } from "../main/realtime-session";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
+import type { QuestionEvent } from "@interview-copilot/shared";
 import type { OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
 
@@ -45,6 +46,7 @@ declare global {
         onRealtimeTranscript(listener: (snapshot: TranscriptSnapshot) => void): () => void;
         onRealtimeMessage(listener: (message: RealtimeServerMessage) => void): () => void;
         onRealtimeDiagnostic(listener: (message: string) => void): () => void;
+        onQuestion(listener: (event: QuestionEvent) => void): () => void;
       };
     };
   }

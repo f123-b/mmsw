@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import type { JSX } from "react";
 import { create } from "zustand";
 import type { AudioDevices, AudioDrift, AudioSidecarEvent, ProbeResult } from "@interview-copilot/protocol";
-import type { SessionState } from "@interview-copilot/shared";
-import { normalizeMeter, type TranscriptSnapshot } from "@interview-copilot/shared";
+import type { QuestionCandidate, QuestionEvent, SessionState, TranscriptSnapshot } from "@interview-copilot/shared";
+import { normalizeMeter } from "@interview-copilot/shared";
 import type { OverlayMode } from "../main/overlay-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
 import { selectDeviceId } from "./device-selection";
@@ -28,6 +28,7 @@ interface AudioStore {
   realtimeState: string;
   remoteTranscript: TranscriptSnapshot;
   micTranscript: TranscriptSnapshot;
+  question?: QuestionCandidate;
   screenshot?: ScreenshotResult;
   notice?: string;
   applyEvent: (event: AudioSidecarEvent) => void;
@@ -38,6 +39,7 @@ interface AudioStore {
   setNotice: (notice?: string) => void;
   setRealtimeState: (state: string) => void;
   applyTranscript: (snapshot: TranscriptSnapshot) => void;
+  applyQuestion: (event: QuestionEvent) => void;
 }
 
 const useAudioStore = create<AudioStore>((set) => ({
@@ -82,7 +84,8 @@ const useAudioStore = create<AudioStore>((set) => ({
   setScreenshot: (screenshot) => set({ screenshot }),
   setNotice: (notice) => set({ notice }),
   setRealtimeState: (realtimeState) => set({ realtimeState }),
-  applyTranscript: (snapshot) => set(snapshot.source === "remote" ? { remoteTranscript: snapshot } : { micTranscript: snapshot })
+  applyTranscript: (snapshot) => set(snapshot.source === "remote" ? { remoteTranscript: snapshot } : { micTranscript: snapshot }),
+  applyQuestion: (event) => set((current) => event.type === "question_confirmed" || event.type === "question_superseded" ? { question: event.question, notice: event.type === "question_superseded" ? "新问题已覆盖上一题" : current.notice } : current)
 }));
 
 function Meter({ label, value, accent }: { label: string; value: number; accent: string }): JSX.Element {
@@ -104,7 +107,7 @@ function StatusPill({ state }: { state: string }): JSX.Element {
 }
 
 function OverlayView(): JSX.Element {
-  const { mic, system, state, overlayMode } = useAudioStore();
+  const { mic, system, state, overlayMode, question } = useAudioStore();
   const toggleMode = async () => {
     await window.interviewCopilot.overlay.setMode(overlayMode === "interactive" ? "passive" : "interactive");
   };
@@ -113,7 +116,7 @@ function OverlayView(): JSX.Element {
       <div className="overlay-bar"><span>Interview Copilot</span><StatusPill state={state} /></div>
       <section className="overlay-card">
         <div className="eyebrow">CURRENT QUESTION</div>
-        <h1>等待面试官问题</h1>
+        <h1>{question?.text ?? "等待面试官问题"}</h1>
         <div className="answer-placeholder">答案将在确认完整问题后显示</div>
         <div className="overlay-meters"><Meter label="MIC" value={mic} accent="#8b5cf6" /><Meter label="SYSTEM" value={system} accent="#22d3ee" /></div>
       </section>
@@ -184,6 +187,7 @@ export function App(): JSX.Element {
       window.interviewCopilot.events.onRealtimeState(store.setRealtimeState),
       window.interviewCopilot.events.onRealtimeTranscript(store.applyTranscript),
       window.interviewCopilot.events.onRealtimeDiagnostic(store.setNotice),
+      window.interviewCopilot.events.onQuestion(store.applyQuestion),
       window.interviewCopilot.events.onShortcut((shortcut) => {
         if (shortcut === "toggle-automation") {
           const next = useAudioStore.getState().automationMode === "MANUAL" ? "AUTO" : "MANUAL";

@@ -5,6 +5,7 @@ import type { AudioDevices, AudioSidecarEvent } from "@interview-copilot/protoco
 import type { RealtimeServerMessage } from "@interview-copilot/protocol";
 import type { RealtimeConnectOptions } from "../main/realtime-session";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
+import type { QuestionEvent } from "@interview-copilot/shared";
 import type { OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
 
@@ -95,6 +96,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, message: string) => listener(message);
       ipcRenderer.on("realtime:diagnostic", handler);
       return () => ipcRenderer.removeListener("realtime:diagnostic", handler);
+    },
+    onQuestion: (listener: (event: QuestionEvent) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, question: QuestionEvent) => listener(question);
+      ipcRenderer.on("question:event", handler);
+      return () => ipcRenderer.removeListener("question:event", handler);
     }
   }
 };
