@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { applyOverlayMode, nextOverlayMode, type OverlayWindowLike } from "./overlay-manager";
+import { applyOverlayMode, nextOverlayMode, type OverlayWindowLike } from "./overlay-mode";
 
 describe("applyOverlayMode", () => {
   function makeWindow(): OverlayWindowLike {

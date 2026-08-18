@@ -1,6 +1,10 @@
 import { app, desktopCapturer, screen } from "electron";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { selectPrimaryScreenSource, type ScreenSourceLike } from "./screen-source-selection";
+
+export { selectPrimaryScreenSource } from "./screen-source-selection";
+export type { ScreenSourceLike } from "./screen-source-selection";
 
 const MAX_DIMENSION = 1_280;
 const MAX_PNG_BYTES = 2 * 1024 * 1024;
@@ -12,19 +16,6 @@ export interface ScreenshotResult {
   height: number;
   size: number;
   dataUrl: string;
-}
-
-export interface ScreenSourceLike {
-  id: string;
-  display_id?: string;
-}
-
-export function selectPrimaryScreenSource<T extends ScreenSourceLike>(
-  sources: readonly T[],
-  primaryDisplayId: number | string
-): T | undefined {
-  const wantedId = String(primaryDisplayId);
-  return sources.find((source) => String(source.display_id ?? "") === wantedId) ?? sources[0];
 }
 
 export interface ScreenshotManagerOptions {

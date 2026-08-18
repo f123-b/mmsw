@@ -1,24 +1,9 @@
 import { BrowserWindow } from "electron";
 import { join } from "node:path";
+import { applyOverlayMode, nextOverlayMode, type OverlayMode } from "./overlay-mode";
 
-export type OverlayMode = "interactive" | "passive";
-
-export function nextOverlayMode(mode: OverlayMode): OverlayMode {
-  return mode === "interactive" ? "passive" : "interactive";
-}
-
-export interface OverlayWindowLike {
-  isDestroyed(): boolean;
-  setFocusable(focusable: boolean): void;
-  setIgnoreMouseEvents(ignore: boolean, options?: { forward?: boolean }): void;
-  webContents: { send(channel: string, payload: unknown): void };
-}
-
-export function applyOverlayMode(window: OverlayWindowLike, mode: OverlayMode): void {
-  const passive = mode === "passive";
-  window.setFocusable(!passive);
-  window.setIgnoreMouseEvents(passive, { forward: true });
-}
+export { applyOverlayMode, nextOverlayMode } from "./overlay-mode";
+export type { OverlayMode, OverlayWindowLike } from "./overlay-mode";
 
 export interface OverlayManagerOptions {
   preloadPath?: string;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectPrimaryScreenSource } from "./screenshot-manager";
+import { selectPrimaryScreenSource } from "./screen-source-selection";
 
 describe("selectPrimaryScreenSource", () => {
   const sources = [

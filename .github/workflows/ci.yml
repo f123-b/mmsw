@@ -47,7 +47,7 @@ jobs:
           cache: npm
 
       - name: Install JavaScript dependencies
-        run: npm ci --ignore-scripts
+        run: npm ci
 
       - name: Build NSIS installer
         run: npm run package:win
