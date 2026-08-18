@@ -328,3 +328,5 @@ export class QuestionDetector {
     if (clearCandidate) this.currentCandidate = undefined;
   }
 }
+
+export * from "./answer";

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import type { JSX } from "react";
 import { create } from "zustand";
-import type { AudioDevices, AudioDrift, AudioSidecarEvent, ProbeResult } from "@interview-copilot/protocol";
+import type { AudioDevices, AudioDrift, AudioSidecarEvent, ProbeResult, RealtimeServerMessage } from "@interview-copilot/protocol";
 import type { QuestionCandidate, QuestionEvent, SessionState, TranscriptSnapshot } from "@interview-copilot/shared";
-import { normalizeMeter } from "@interview-copilot/shared";
+import { normalizeMeter, StableAnswerStateMachine } from "@interview-copilot/shared";
 import type { OverlayMode } from "../main/overlay-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
 import { selectDeviceId } from "./device-selection";
@@ -29,6 +29,9 @@ interface AudioStore {
   remoteTranscript: TranscriptSnapshot;
   micTranscript: TranscriptSnapshot;
   question?: QuestionCandidate;
+  answerText: string;
+  answerStreaming: boolean;
+  answerId?: string;
   screenshot?: ScreenshotResult;
   notice?: string;
   applyEvent: (event: AudioSidecarEvent) => void;
@@ -40,7 +43,10 @@ interface AudioStore {
   setRealtimeState: (state: string) => void;
   applyTranscript: (snapshot: TranscriptSnapshot) => void;
   applyQuestion: (event: QuestionEvent) => void;
+  applyRealtimeMessage: (message: RealtimeServerMessage) => void;
 }
+
+const stableAnswer = new StableAnswerStateMachine();
 
 const useAudioStore = create<AudioStore>((set) => ({
   mic: 0,
@@ -56,6 +62,8 @@ const useAudioStore = create<AudioStore>((set) => ({
   realtimeState: "disconnected",
   remoteTranscript: { source: "remote", final: [] },
   micTranscript: { source: "mic", final: [] },
+  answerText: "",
+  answerStreaming: false,
   applyEvent: (event) => set((current) => {
     if (event.type === "meter") {
       return {
@@ -85,7 +93,19 @@ const useAudioStore = create<AudioStore>((set) => ({
   setNotice: (notice) => set({ notice }),
   setRealtimeState: (realtimeState) => set({ realtimeState }),
   applyTranscript: (snapshot) => set(snapshot.source === "remote" ? { remoteTranscript: snapshot } : { micTranscript: snapshot }),
-  applyQuestion: (event) => set((current) => event.type === "question_confirmed" || event.type === "question_superseded" ? { question: event.question, notice: event.type === "question_superseded" ? "新问题已覆盖上一题" : current.notice } : current)
+  applyQuestion: (event) => set((current) => event.type === "question_confirmed" || event.type === "question_superseded" ? { question: event.question, notice: event.type === "question_superseded" ? "新问题已覆盖上一题" : current.notice } : current),
+  applyRealtimeMessage: (message) => {
+    const snapshot = message.type === "answer_start"
+      ? stableAnswer.start(message.answerId)
+      : message.type === "answer_delta"
+        ? stableAnswer.delta(message.answerId, message.delta)
+        : message.type === "answer_end"
+          ? stableAnswer.end(message.answerId, message.text)
+          : message.type === "answer_cancelled"
+            ? stableAnswer.cancel(message.answerId)
+            : stableAnswer.snapshot;
+    set({ answerText: snapshot.displayedText, answerStreaming: snapshot.streaming, answerId: snapshot.displayedAnswerId });
+  }
 }));
 
 function Meter({ label, value, accent }: { label: string; value: number; accent: string }): JSX.Element {
@@ -107,7 +127,7 @@ function StatusPill({ state }: { state: string }): JSX.Element {
 }
 
 function OverlayView(): JSX.Element {
-  const { mic, system, state, overlayMode, question } = useAudioStore();
+  const { mic, system, state, overlayMode, question, answerText, answerStreaming } = useAudioStore();
   const toggleMode = async () => {
     await window.interviewCopilot.overlay.setMode(overlayMode === "interactive" ? "passive" : "interactive");
   };
@@ -117,7 +137,7 @@ function OverlayView(): JSX.Element {
       <section className="overlay-card">
         <div className="eyebrow">CURRENT QUESTION</div>
         <h1>{question?.text ?? "等待面试官问题"}</h1>
-        <div className="answer-placeholder">答案将在确认完整问题后显示</div>
+        <div className="answer-placeholder">{answerText || "答案将在确认完整问题后显示"}{answerStreaming && <span className="answer-cursor">▌</span>}</div>
         <div className="overlay-meters"><Meter label="MIC" value={mic} accent="#8b5cf6" /><Meter label="SYSTEM" value={system} accent="#22d3ee" /></div>
       </section>
       <button className="overlay-mode" onClick={() => void toggleMode()}>
@@ -186,6 +206,7 @@ export function App(): JSX.Element {
       window.interviewCopilot.events.onScreenshotDiagnostic(store.setNotice),
       window.interviewCopilot.events.onRealtimeState(store.setRealtimeState),
       window.interviewCopilot.events.onRealtimeTranscript(store.applyTranscript),
+      window.interviewCopilot.events.onRealtimeMessage(store.applyRealtimeMessage),
       window.interviewCopilot.events.onRealtimeDiagnostic(store.setNotice),
       window.interviewCopilot.events.onQuestion(store.applyQuestion),
       window.interviewCopilot.events.onShortcut((shortcut) => {

@@ -4,7 +4,7 @@
 
 ## 当前进度
 
-当前状态：`Phase 1 IMPLEMENTATION COMPLETE`，`Phase 1 CI PENDING`，`Phase 1 WINDOWS AUDIO VALIDATION PENDING`，`Phase 2 IMPLEMENTATION COMPLETE`，`Phase 3 IMPLEMENTATION COMPLETE`，`Phase 4 IN PROGRESS`。
+当前状态：`Phase 1 IMPLEMENTATION COMPLETE`，`Phase 1 CI PENDING`，`Phase 1 WINDOWS AUDIO VALIDATION PENDING`，`Phase 2 IMPLEMENTATION COMPLETE`，`Phase 3 IMPLEMENTATION COMPLETE`，`Phase 4 IMPLEMENTATION COMPLETE`，`Phase 5 IN PROGRESS`。
 
 已完成 Phase 1 实现：
 
@@ -31,6 +31,12 @@
 - Remote Transcript question candidate and completeness scoring
 - 500ms silence debounce with explicit question state machine
 - 15-second duplicate suppression and supersede events
+
+已完成 Phase 4 实现：
+
+- Provider abstraction, FAST/NORMAL/DEEP answer modes and model routing
+- Context-limited prompt sections for profile, skills, retrieval and transcript
+- Stable streaming answer replacement and cancellation behavior
 
 Rust 工具链未安装时，桌面端仍可完成 TypeScript 构建与协议/状态机测试；真实 WASAPI 采集需要在 Windows 上安装 Rust 后构建 `crates/audio-sidecar`。
 
@@ -64,7 +70,7 @@ npm run build
 npm run package:win
 ```
 
-真实 Windows 音频验证步骤见 [`docs/phase-1-validation.md`](docs/phase-1-validation.md)，Phase 1.1 收口记录见 [`docs/phase-1.1-final.md`](docs/phase-1.1-final.md)，Phase 2 记录见 [`docs/phase-2.md`](docs/phase-2.md)，Phase 3 记录见 [`docs/phase-3.md`](docs/phase-3.md)。在 CI 通过、人工执行 A/B/C 音频测试并完成 Rust MSVC 构建前，不将 Phase 1 标记为正式验收完成。
+真实 Windows 音频验证步骤见 [`docs/phase-1-validation.md`](docs/phase-1-validation.md)，Phase 1.1 收口记录见 [`docs/phase-1.1-final.md`](docs/phase-1.1-final.md)，Phase 2 记录见 [`docs/phase-2.md`](docs/phase-2.md)，Phase 3 记录见 [`docs/phase-3.md`](docs/phase-3.md)，Phase 4 记录见 [`docs/phase-4.md`](docs/phase-4.md)。在 CI 通过、人工执行 A/B/C 音频测试并完成 Rust MSVC 构建前，不将 Phase 1 标记为正式验收完成。
 
 ## 目录
 
