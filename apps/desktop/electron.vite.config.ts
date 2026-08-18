@@ -4,7 +4,9 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()]
+    plugins: [externalizeDepsPlugin({
+      exclude: ["@interview-copilot/protocol", "@interview-copilot/shared"]
+    })]
   },
   preload: {
     plugins: [externalizeDepsPlugin()]
