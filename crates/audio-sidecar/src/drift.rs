@@ -38,7 +38,7 @@ pub fn correction_frames(drift_frames: i64, packet_frames: usize) -> (usize, usi
 
 #[cfg(test)]
 mod tests {
-    use super::calculate;
+    use super::{calculate, correction_frames};
 
     #[test]
     fn calculates_signed_drift_and_thresholds() {

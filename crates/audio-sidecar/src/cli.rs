@@ -2,7 +2,6 @@ use crate::capture;
 use crate::device;
 use crate::health;
 use crate::protocol::timestamp;
-use cpal::traits::HostTrait;
 
 #[derive(Default)]
 struct Options {

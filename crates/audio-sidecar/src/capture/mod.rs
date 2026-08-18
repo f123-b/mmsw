@@ -6,13 +6,11 @@ use crate::health;
 use crate::meter::peak;
 use crate::mixer::{drain_shared, stats_shared};
 use crate::packet::write_packet;
-use crate::protocol::{
-    emit, timestamp, CaptureStats, Event, FRAMES_PER_PACKET, TARGET_SAMPLE_RATE,
-};
+use crate::protocol::{emit, timestamp, Event, FRAMES_PER_PACKET, TARGET_SAMPLE_RATE};
 use crate::resample::{mono, LinearResampler};
-use cpal::traits::{HostTrait, StreamTrait};
+use cpal::traits::StreamTrait;
 use std::collections::VecDeque;
-use std::io::{self, Write};
+use std::io;
 use std::thread;
 use std::time::{Duration, Instant};
 
