@@ -21,6 +21,21 @@ pub fn calculate(mic_available_frames: usize, system_available_frames: usize) ->
     }
 }
 
+/// Returns a bounded trim from the faster channel after drift is persistent.
+/// The caller applies this only after several degraded reports so normal
+/// callback jitter is not turned into an audible correction.
+pub fn correction_frames(drift_frames: i64, packet_frames: usize) -> (usize, usize) {
+    let correction = drift_frames.unsigned_abs() as usize;
+    let correction = correction.min(packet_frames / 4);
+    if drift_frames > 0 {
+        (correction, 0)
+    } else if drift_frames < 0 {
+        (0, correction)
+    } else {
+        (0, 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::calculate;
@@ -33,5 +48,12 @@ mod tests {
         assert_eq!(calculate(2_000, 640).status, "degraded");
         assert_eq!(calculate(640, 1_920).drift_frames, -1_280);
         assert_eq!(calculate(640, 1_920).drift_ms, -80);
+    }
+
+    #[test]
+    fn trims_only_a_bounded_amount_from_the_faster_channel() {
+        assert_eq!(correction_frames(2_000, 640), (160, 0));
+        assert_eq!(correction_frames(-2_000, 640), (0, 160));
+        assert_eq!(correction_frames(0, 640), (0, 0));
     }
 }

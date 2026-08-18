@@ -1,7 +1,7 @@
 pub mod wasapi;
 
 use crate::device::{select_input, select_output};
-use crate::drift::calculate as calculate_drift;
+use crate::drift::{calculate as calculate_drift, correction_frames};
 use crate::health;
 use crate::meter::peak;
 use crate::mixer::{drain_shared, stats_shared};
@@ -48,6 +48,7 @@ pub fn run(
     let mut stdout = io::stdout().lock();
     let mut last_buffer_report = Instant::now();
     let mut last_drift_report = Instant::now();
+    let mut persistent_drift_reports = 0_u8;
 
     loop {
         mic.extend(mono(
@@ -86,6 +87,18 @@ pub fn run(
         }
         if last_drift_report.elapsed() >= Duration::from_secs(1) {
             let drift = calculate_drift(mic.len(), system.len());
+            if drift.drift_ms.abs() > 80 {
+                persistent_drift_reports = persistent_drift_reports.saturating_add(1);
+            } else {
+                persistent_drift_reports = 0;
+            }
+            if persistent_drift_reports >= 3 {
+                let (mic_drop, system_drop) =
+                    correction_frames(drift.drift_frames, FRAMES_PER_PACKET);
+                mic.drain(..mic_drop.min(mic.len()));
+                system.drain(..system_drop.min(system.len()));
+                persistent_drift_reports = 0;
+            }
             emit(&Event::Drift {
                 mic_available_frames: drift.mic_available_frames,
                 system_available_frames: drift.system_available_frames,
