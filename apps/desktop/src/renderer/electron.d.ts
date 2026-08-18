@@ -31,9 +31,9 @@ declare global {
         onOverlayMode(listener: (mode: OverlayMode) => void): () => void;
         onShortcut(listener: (shortcut: string) => void): () => void;
         onAudioProcess(listener: (state: AudioProcessState) => void): () => void;
-        onPcm(listener: (chunk: Uint8Array) => void): () => void;
         onScreenshot(listener: (result: ScreenshotResult) => void): () => void;
         onScreenshotError(listener: (message: string) => void): () => void;
+        onScreenshotDiagnostic(listener: (message: string) => void): () => void;
       };
     };
   }

@@ -54,11 +54,6 @@ const api = {
       ipcRenderer.on("audio:process", handler);
       return () => ipcRenderer.removeListener("audio:process", handler);
     },
-    onPcm: (listener: (chunk: Uint8Array) => void) => {
-      const handler = (_event: Electron.IpcRendererEvent, chunk: Uint8Array) => listener(chunk);
-      ipcRenderer.on("audio:pcm", handler);
-      return () => ipcRenderer.removeListener("audio:pcm", handler);
-    },
     onScreenshot: (listener: (result: ScreenshotResult) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, result: ScreenshotResult) => listener(result);
       ipcRenderer.on("screenshot:captured", handler);
@@ -68,6 +63,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, message: string) => listener(message);
       ipcRenderer.on("screenshot:error", handler);
       return () => ipcRenderer.removeListener("screenshot:error", handler);
+    },
+    onScreenshotDiagnostic: (listener: (message: string) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, message: string) => listener(message);
+      ipcRenderer.on("screenshot:diagnostic", handler);
+      return () => ipcRenderer.removeListener("screenshot:diagnostic", handler);
     }
   }
 };

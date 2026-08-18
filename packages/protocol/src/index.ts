@@ -72,13 +72,24 @@ export const audioBufferSchema = z.object({
   timestamp: z.number().int().nonnegative()
 });
 
+export const audioDriftSchema = z.object({
+  type: z.literal("audio_drift"),
+  micAvailableFrames: z.number().int().nonnegative(),
+  systemAvailableFrames: z.number().int().nonnegative(),
+  driftFrames: z.number().int(),
+  driftMs: z.number().int(),
+  status: z.enum(["normal", "warning", "degraded"]),
+  timestamp: z.number().int().nonnegative()
+});
+
 export const audioSidecarEventSchema = z.discriminatedUnion("type", [
   audioHealthSchema,
   audioMeterSchema,
   audioErrorSchema,
   audioStateSchema,
   probeResultSchema,
-  audioBufferSchema
+  audioBufferSchema,
+  audioDriftSchema
 ]);
 
 export const clientControlMessageSchema = z.discriminatedUnion("type", [
@@ -97,6 +108,7 @@ export type AudioStateEvent = z.infer<typeof audioStateSchema>;
 export type ProbeChannelResult = z.infer<typeof probeChannelResultSchema>;
 export type ProbeResult = z.infer<typeof probeResultSchema>;
 export type AudioBufferStats = z.infer<typeof audioBufferSchema>;
+export type AudioDrift = z.infer<typeof audioDriftSchema>;
 export type AudioSidecarEvent = z.infer<typeof audioSidecarEventSchema>;
 export type ClientControlMessage = z.infer<typeof clientControlMessageSchema>;
 

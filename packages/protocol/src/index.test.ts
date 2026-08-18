@@ -50,4 +50,16 @@ describe("audio protocol", () => {
       timestamp: 123
     }))).toMatchObject({ type: "audio_buffer", droppedFrames: 64 });
   });
+
+  it("validates audio drift statistics", () => {
+    expect(parseAudioSidecarEvent(JSON.stringify({
+      type: "audio_drift",
+      micAvailableFrames: 1_280,
+      systemAvailableFrames: 640,
+      driftFrames: 640,
+      driftMs: 40,
+      status: "warning",
+      timestamp: 123
+    }))).toMatchObject({ type: "audio_drift", driftMs: 40 });
+  });
 });

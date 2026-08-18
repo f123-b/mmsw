@@ -30,11 +30,28 @@ mod tests {
 
     #[test]
     fn interleaves_left_mic_and_right_system() {
-        let bytes = interleave_pcm16(&[1.0, 2.0], &[3.0, 4.0]);
-        assert_eq!(&bytes[0..2], &i16::MAX.to_le_bytes());
-        assert_eq!(&bytes[2..4], &i16::MAX.to_le_bytes());
-        assert_eq!(&bytes[4..6], &i16::MAX.to_le_bytes());
-        assert_eq!(&bytes[6..8], &i16::MAX.to_le_bytes());
+        let bytes = interleave_pcm16(&[0.1, 0.2], &[0.3, 0.4]);
+        let decoded = bytes
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / i16::MAX as f32)
+            .collect::<Vec<_>>();
+        assert!((decoded[0] - 0.1).abs() < 0.0001);
+        assert!((decoded[1] - 0.3).abs() < 0.0001);
+        assert!((decoded[2] - 0.2).abs() < 0.0001);
+        assert!((decoded[3] - 0.4).abs() < 0.0001);
+    }
+
+    #[test]
+    fn preserves_negative_left_and_right_channels() {
+        let bytes = interleave_pcm16(&[-0.1, 0.2], &[0.3, -0.4]);
+        let decoded = bytes
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / i16::MAX as f32)
+            .collect::<Vec<_>>();
+        assert!((decoded[0] + 0.1).abs() < 0.0001);
+        assert!((decoded[1] - 0.3).abs() < 0.0001);
+        assert!((decoded[2] - 0.2).abs() < 0.0001);
+        assert!((decoded[3] + 0.4).abs() < 0.0001);
     }
 
     #[test]

@@ -7,7 +7,7 @@ pub const TARGET_CHANNELS: usize = 2;
 pub const FRAMES_PER_PACKET: usize = 640;
 pub const BYTES_PER_SAMPLE: usize = 2;
 pub const PCM_PACKET_BYTES: usize = FRAMES_PER_PACKET * TARGET_CHANNELS * BYTES_PER_SAMPLE;
-pub const MAX_BUFFER_FRAMES: usize = TARGET_SAMPLE_RATE as usize * 3;
+pub const MAX_BUFFER_DURATION_SECONDS: u32 = 3;
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +67,16 @@ pub struct ProbeResult {
     pub timestamp: u128,
 }
 
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DriftMetrics {
+    pub mic_available_frames: usize,
+    pub system_available_frames: usize,
+    pub drift_frames: i64,
+    pub drift_ms: i64,
+    pub status: &'static str,
+}
+
 #[derive(Serialize)]
 #[serde(tag = "type")]
 pub enum Event {
@@ -99,6 +109,15 @@ pub enum Event {
         queued_frames: usize,
         dropped_frames: u64,
         buffer_duration_ms: u64,
+        timestamp: u128,
+    },
+    #[serde(rename = "audio_drift")]
+    Drift {
+        mic_available_frames: usize,
+        system_available_frames: usize,
+        drift_frames: i64,
+        drift_ms: i64,
+        status: &'static str,
         timestamp: u128,
     },
     #[serde(rename = "audio_error")]

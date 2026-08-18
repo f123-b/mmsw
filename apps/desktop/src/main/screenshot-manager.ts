@@ -1,4 +1,4 @@
-import { app, desktopCapturer } from "electron";
+import { app, desktopCapturer, screen } from "electron";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -14,14 +14,39 @@ export interface ScreenshotResult {
   dataUrl: string;
 }
 
+export interface ScreenSourceLike {
+  id: string;
+  display_id?: string;
+}
+
+export function selectPrimaryScreenSource<T extends ScreenSourceLike>(
+  sources: readonly T[],
+  primaryDisplayId: number | string
+): T | undefined {
+  const wantedId = String(primaryDisplayId);
+  return sources.find((source) => String(source.display_id ?? "") === wantedId) ?? sources[0];
+}
+
+export interface ScreenshotManagerOptions {
+  onDiagnostic?: (message: string) => void;
+}
+
 export class ScreenshotManager {
+  constructor(private readonly options: ScreenshotManagerOptions = {}) {}
+
   async capturePrimaryDisplay(): Promise<ScreenshotResult> {
+    const primaryDisplay = screen.getPrimaryDisplay();
     const sources = await desktopCapturer.getSources({
       types: ["screen"],
       thumbnailSize: { width: MAX_DIMENSION, height: MAX_DIMENSION }
     });
-    const source = sources[0];
+    const source = selectPrimaryScreenSource(sources, primaryDisplay.id);
     if (!source) throw new Error("No display source available");
+    if (String(source.display_id ?? "") !== String(primaryDisplay.id)) {
+      this.options.onDiagnostic?.(
+        `Primary display source ${primaryDisplay.id} was not found; falling back to ${source.id}`
+      );
+    }
 
     let image = source.thumbnail;
     const original = image.getSize();

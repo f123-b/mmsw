@@ -1,6 +1,7 @@
 mod capture;
 mod cli;
 mod device;
+mod drift;
 mod health;
 mod meter;
 mod mixer;

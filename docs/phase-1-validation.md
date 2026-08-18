@@ -18,6 +18,14 @@ $env:INTERVIEW_COPILOT_AUDIO_SIDECAR = (Resolve-Path 'crates/audio-sidecar/targe
 npm run dev
 ```
 
+如果直接从仓库根目录执行打包，使用：
+
+```powershell
+npm run package:win
+```
+
+该命令应在 `apps/desktop/release/` 生成 NSIS 安装程序；安装后确认 Sidecar 位于应用资源目录的 `resources/audio-sidecar/interview-audio.exe`。
+
 ## 设备与 Probe
 
 1. 启动桌面端，确认 Microphone 和 System Audio 下拉框分别列出输入/输出设备。
@@ -50,9 +58,31 @@ npm run dev
 3. 手动点击停止 Sidecar，再拔插设备；确认不会自动重启。
 4. 断开蓝牙输出设备，重复以上步骤。
 
+5. 修改 Windows 默认输入/输出设备，确认重新枚举后仍能回退到当前有效设备。
+6. 结束 Sidecar 进程，确认恢复状态和退避序列；手动停止后确认不会重启。
+
+## Drift 观察
+
+1. 保持音频采集运行至少 1 分钟。
+2. 在 Audio Test 页面观察 `Drift: XXms`，正常范围为绝对值小于 40ms。
+3. 40~80ms 显示 warning，超过 80ms 显示 degraded；本阶段只观测，不主动丢弃任一路数据。
+
+## Overlay 模式恢复
+
+1. 打开悬浮窗并点击切换到 Passive。
+2. 确认 Overlay 不再获取焦点、鼠标事件可穿透。
+3. 使用 `Ctrl+Alt+P`，确认恢复 Interactive；再次按下应回到 Passive。
+4. 主窗口与 Overlay 的模式状态都应同步更新。
+
+## Primary Display 截图
+
+1. 连接两个显示器，将任意一个设为 Windows 主显示器。
+2. 点击 `截图测试`，确认截图来自 Primary Display，而不是设备枚举顺序中的第一块屏幕。
+3. 若 Electron 无法匹配 display id，UI/diagnostic 应记录 fallback，而不是静默假定为主屏。
+
 ## PCM 验证
 
-正常采集模式下，Sidecar stdout 只输出 PCM，stderr 只输出 JSON event。检查每个完整 packet 为：
+正常采集模式下，Sidecar stdout 只输出 PCM，stderr 只输出 JSON event。Node stdout chunk 可以任意分片，但 AudioManager 对外的 `pcm-packet` 事件每个必须是完整 packet；Renderer 不会收到 raw PCM。检查每个完整 packet 为：
 
 ```text
 640 frames × 2 channels × 2 bytes = 2560 bytes

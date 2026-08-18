@@ -9,6 +9,7 @@ import {
   type AudioDevices,
   type AudioSidecarEvent
 } from "@interview-copilot/protocol";
+import { PcmPacketAssembler } from "./pcm-packet-assembler";
 
 export type AudioProcessState = "stopped" | "running";
 
@@ -21,10 +22,25 @@ export interface AudioStartOptions {
 }
 
 const RECOVERY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 10_000] as const;
+const STABLE_READY_MS = 2_000;
 
 export function reconnectDelayMs(attempt: number): number {
   const index = Math.max(0, Math.min(Math.floor(attempt), RECOVERY_DELAYS_MS.length - 1));
   return RECOVERY_DELAYS_MS[index];
+}
+
+export class RecoveryBackoff {
+  private attempt = 0;
+
+  nextDelayMs(): number {
+    const delay = reconnectDelayMs(this.attempt);
+    this.attempt += 1;
+    return delay;
+  }
+
+  reset(): void {
+    this.attempt = 0;
+  }
 }
 
 function sidecarPath(): string {
@@ -38,7 +54,9 @@ export class AudioManager extends EventEmitter {
   private process: ChildProcessByStdio<null, Readable, Readable> | undefined;
   private stderrBuffer = "";
   private retryTimer: NodeJS.Timeout | undefined;
-  private recoveryAttempt = 0;
+  private stableReadyTimer: NodeJS.Timeout | undefined;
+  private readonly recoveryBackoff = new RecoveryBackoff();
+  private readonly pcmAssembler = new PcmPacketAssembler();
   private manualStop = true;
   private currentOptions: AudioStartOptions = {};
 
@@ -63,8 +81,9 @@ export class AudioManager extends EventEmitter {
   start(options: AudioStartOptions = {}): void {
     if (this.isRunning) return;
     this.clearRecoveryTimer();
+    this.clearStableReadyTimer();
     this.manualStop = false;
-    this.recoveryAttempt = 0;
+    this.recoveryBackoff.reset();
     this.currentOptions = { ...options, autoRecover: options.autoRecover ?? true };
     this.spawnSidecar(this.currentOptions);
   }
@@ -72,7 +91,9 @@ export class AudioManager extends EventEmitter {
   stop(): void {
     this.manualStop = true;
     this.clearRecoveryTimer();
-    this.recoveryAttempt = 0;
+    this.clearStableReadyTimer();
+    this.recoveryBackoff.reset();
+    this.pcmAssembler.reset();
     const child = this.process;
     this.process = undefined;
     if (child && !child.killed) child.kill();
@@ -105,6 +126,7 @@ export class AudioManager extends EventEmitter {
       ...(options.meterOnly ? ["--meter-only"] : [])
     ];
     this.stderrBuffer = "";
+    this.pcmAssembler.reset();
     this.process = spawn(executable, args, {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"]
@@ -113,7 +135,9 @@ export class AudioManager extends EventEmitter {
     this.emit("process", "running" as AudioProcessState);
 
     child.stdout.on("data", (chunk: Buffer) => {
-      this.emit("pcm", Buffer.from(chunk));
+      for (const packet of this.pcmAssembler.push(chunk)) {
+        this.emit("pcm-packet", packet);
+      }
     });
     child.stderr.on("data", (chunk: Buffer) => this.consumeStderr(chunk.toString("utf8")));
     child.on("error", (error) => {
@@ -128,6 +152,8 @@ export class AudioManager extends EventEmitter {
     });
     child.on("close", (code) => {
       const wasExpected = this.manualStop || Boolean(options.probeOnly);
+      this.clearStableReadyTimer();
+      this.pcmAssembler.reset();
       if (this.process === child) this.process = undefined;
       this.emit("process", "stopped" as AudioProcessState);
       if (!wasExpected && options.autoRecover !== false) {
@@ -148,8 +174,7 @@ export class AudioManager extends EventEmitter {
 
   private scheduleRecovery(): void {
     if (this.manualStop || this.retryTimer) return;
-    const delay = reconnectDelayMs(this.recoveryAttempt);
-    this.recoveryAttempt += 1;
+    const delay = this.recoveryBackoff.nextDelayMs();
     this.emitEvent({ type: "audio_state", state: "DEGRADED", timestamp: Date.now() });
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined;
@@ -180,6 +205,11 @@ export class AudioManager extends EventEmitter {
     this.retryTimer = undefined;
   }
 
+  private clearStableReadyTimer(): void {
+    if (this.stableReadyTimer) clearTimeout(this.stableReadyTimer);
+    this.stableReadyTimer = undefined;
+  }
+
   private requireSidecar(): string {
     const executable = this.configuredPath;
     if (!existsSync(executable)) throw new Error(`Audio Sidecar not found: ${executable}`);
@@ -201,6 +231,16 @@ export class AudioManager extends EventEmitter {
   }
 
   private emitEvent(event: AudioSidecarEvent): void {
+    if (event.type === "audio_state" && event.state === "READY") {
+      this.clearStableReadyTimer();
+      const readyProcess = this.process;
+      this.stableReadyTimer = setTimeout(() => {
+        this.stableReadyTimer = undefined;
+        if (!this.manualStop && this.process === readyProcess && this.isRunning) {
+          this.recoveryBackoff.reset();
+        }
+      }, STABLE_READY_MS);
+    }
     this.emit("event", event);
   }
 

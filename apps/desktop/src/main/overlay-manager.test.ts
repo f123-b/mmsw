@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { applyOverlayMode, type OverlayWindowLike } from "./overlay-manager";
+import { applyOverlayMode, nextOverlayMode, type OverlayWindowLike } from "./overlay-manager";
 
 describe("applyOverlayMode", () => {
   function makeWindow(): OverlayWindowLike {
@@ -23,5 +23,10 @@ describe("applyOverlayMode", () => {
     applyOverlayMode(window, "interactive");
     expect(window.setFocusable).toHaveBeenCalledWith(true);
     expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(false, { forward: true });
+  });
+
+  it("toggles mode for the passive recovery shortcut", () => {
+    expect(nextOverlayMode("interactive")).toBe("passive");
+    expect(nextOverlayMode("passive")).toBe("interactive");
   });
 });

@@ -3,6 +3,10 @@ import { join } from "node:path";
 
 export type OverlayMode = "interactive" | "passive";
 
+export function nextOverlayMode(mode: OverlayMode): OverlayMode {
+  return mode === "interactive" ? "passive" : "interactive";
+}
+
 export interface OverlayWindowLike {
   isDestroyed(): boolean;
   setFocusable(focusable: boolean): void;
@@ -80,6 +84,11 @@ export class OverlayManager {
   setMode(mode: OverlayMode): void {
     this.mode = mode;
     this.applyMode();
+  }
+
+  toggleMode(): OverlayMode {
+    this.setMode(nextOverlayMode(this.mode));
+    return this.mode;
   }
 
   destroy(): void {

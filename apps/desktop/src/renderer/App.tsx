@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import type { JSX } from "react";
 import { create } from "zustand";
-import type { AudioDevices, AudioSidecarEvent, ProbeResult } from "@interview-copilot/protocol";
+import type { AudioDevices, AudioDrift, AudioSidecarEvent, ProbeResult } from "@interview-copilot/protocol";
 import type { SessionState } from "@interview-copilot/shared";
 import { normalizeMeter } from "@interview-copilot/shared";
 import type { OverlayMode } from "../main/overlay-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
+import { selectDeviceId } from "./device-selection";
 
 const DETECT_THRESHOLD = 0.08;
 const DEFAULT_DEVICES: AudioDevices = { inputs: [], outputs: [] };
@@ -22,6 +23,7 @@ interface AudioStore {
   sessionState: SessionState;
   automationMode: "MANUAL" | "AUTO";
   probeResult?: ProbeResult;
+  drift?: AudioDrift;
   bufferStats?: { queuedFrames: number; droppedFrames: number; bufferDurationMs: number };
   screenshot?: ScreenshotResult;
   notice?: string;
@@ -63,6 +65,7 @@ const useAudioStore = create<AudioStore>((set) => ({
     if (event.type === "audio_state") return { state: event.state };
     if (event.type === "probe_result") return { probeResult: event, state: event.mic.ok && event.system.ok ? "READY" : "FAILED" };
     if (event.type === "audio_buffer") return { bufferStats: event };
+    if (event.type === "audio_drift") return { drift: event };
     return { state: event.recoverable ? "DEGRADED" : "FAILED", notice: event.reason };
   }),
   setOverlayMode: (overlayMode) => set({ overlayMode }),
@@ -133,8 +136,8 @@ export function App(): JSX.Element {
         setDevices(listed);
         const savedInput = storedDevice("interview-copilot.input-device");
         const savedOutput = storedDevice("interview-copilot.output-device");
-        const input = listed.inputs.some((device) => device.id === savedInput) ? savedInput ?? "" : listed.inputs.find((device) => device.default)?.id ?? listed.inputs[0]?.id ?? "";
-        const output = listed.outputs.some((device) => device.id === savedOutput) ? savedOutput ?? "" : listed.outputs.find((device) => device.default)?.id ?? listed.outputs[0]?.id ?? "";
+        const input = selectDeviceId(listed.inputs, savedInput);
+        const output = selectDeviceId(listed.outputs, savedOutput);
         setInputDeviceId(input);
         setOutputDeviceId(output);
         if (input) persistDevice("interview-copilot.input-device", input);
@@ -151,6 +154,7 @@ export function App(): JSX.Element {
       window.interviewCopilot.events.onOverlayMode(store.setOverlayMode),
       window.interviewCopilot.events.onScreenshot(store.setScreenshot),
       window.interviewCopilot.events.onScreenshotError(store.setNotice),
+      window.interviewCopilot.events.onScreenshotDiagnostic(store.setNotice),
       window.interviewCopilot.events.onShortcut((shortcut) => {
         if (shortcut === "toggle-automation") {
           const next = useAudioStore.getState().automationMode === "MANUAL" ? "AUTO" : "MANUAL";
@@ -214,6 +218,7 @@ export function App(): JSX.Element {
               <div className="detections"><DetectionBadge label="MIC" detected={store.micDetected} /><DetectionBadge label="SYSTEM" detected={store.systemDetected} /></div>
               <div className="audio-actions"><button className="secondary-button" onClick={() => void probeAudio()}>Probe 2s</button><button className="ghost-button" onClick={stopAudio}>停止 Sidecar</button></div>
               {store.bufferStats && <div className="buffer-stats">buffer {store.bufferStats.bufferDurationMs}ms · queued {store.bufferStats.queuedFrames} · dropped {store.bufferStats.droppedFrames}</div>}
+              {store.drift && <div className={`drift-stats ${store.drift.status}`}><span>Drift: {store.drift.driftMs}ms</span><small>{store.drift.status}</small></div>}
               {store.notice && <div className="diagnostic">{store.notice}</div>}
             </section>
 

@@ -9,7 +9,9 @@ import { SessionStateMachine } from "@interview-copilot/shared";
 let mainWindow: BrowserWindow | undefined;
 let overlayManager: OverlayManager | undefined;
 const audioManager = new AudioManager();
-const screenshotManager = new ScreenshotManager();
+const screenshotManager = new ScreenshotManager({
+  onDiagnostic: (message) => broadcast("screenshot:diagnostic", message)
+});
 const session = new SessionStateMachine();
 const preloadPath = join(__dirname, "../preload/index.js");
 const rendererFile = join(__dirname, "../renderer/index.html");
@@ -82,6 +84,10 @@ function registerShortcuts(): void {
     [GLOBAL_SHORTCUTS.answerLatest]: () => broadcast("shortcut", "answer-latest"),
     [GLOBAL_SHORTCUTS.screenshotAnswer]: () => void captureScreenshot(),
     [GLOBAL_SHORTCUTS.toggleOverlay]: () => overlayManager?.toggle(),
+    [GLOBAL_SHORTCUTS.toggleOverlayMode]: () => {
+      const mode = overlayManager?.toggleMode();
+      if (mode) broadcast("overlay:mode", mode);
+    },
     [GLOBAL_SHORTCUTS.toggleAutomation]: () => broadcast("shortcut", "toggle-automation"),
     [GLOBAL_SHORTCUTS.endInterview]: () => {
       if (session.canTransition("ENDING")) session.transition("ENDING");
@@ -107,7 +113,6 @@ app.whenReady().then(() => {
 
   audioManager.on("event", (event) => broadcast("audio:event", event));
   audioManager.on("process", (state) => broadcast("audio:process", state));
-  audioManager.on("pcm", (chunk) => broadcast("audio:pcm", chunk));
   audioManager.on("diagnostic", (message) => broadcast("audio:diagnostic", message));
   session.subscribe((state) => broadcast("session:state", state));
 

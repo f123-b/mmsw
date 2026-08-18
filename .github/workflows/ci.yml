@@ -34,3 +34,27 @@ jobs:
 
       - name: Rust check
         run: cargo check --manifest-path crates/audio-sidecar/Cargo.toml
+
+  package-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install JavaScript dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build NSIS installer
+        run: npm run package:win
+
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: InterviewCopilot-Windows-Installer
+          path: apps/desktop/release/*.exe
+          if-no-files-found: error

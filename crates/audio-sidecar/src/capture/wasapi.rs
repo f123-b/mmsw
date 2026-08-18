@@ -29,8 +29,8 @@ pub fn open(input: &Device, output: &Device) -> Result<CaptureHandle, String> {
     let system_rate = output_config.sample_rate().0;
     let mic_channels = input_config.channels;
     let system_channels = output_config.channels;
-    let mic_buffer = new_shared_buffer(mic_channels as usize);
-    let system_buffer = new_shared_buffer(system_channels as usize);
+    let mic_buffer = new_shared_buffer(mic_rate, mic_channels as usize);
+    let system_buffer = new_shared_buffer(system_rate, system_channels as usize);
     let mic_stats = Arc::new(Mutex::new(CaptureStats::new(mic_rate, mic_channels)));
     let system_stats = Arc::new(Mutex::new(CaptureStats::new(system_rate, system_channels)));
     let mic_stream = build_stream_for_format(
