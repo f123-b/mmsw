@@ -1,0 +1,26 @@
+node_modules/
+dist/
+out/
+coverage/
+.vite/
+*.log
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+
+# Rust
+target/
+
+# Local application data
+apps/desktop/.data/
+*.db
+*.db-shm
+*.db-wal
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+Desktop.ini

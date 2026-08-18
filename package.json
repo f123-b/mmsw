@@ -1,0 +1,21 @@
+{
+  "name": "interview-copilot",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Realtime interview copilot desktop application",
+  "workspaces": [
+    "apps/desktop",
+    "packages/protocol",
+    "packages/shared"
+  ],
+  "scripts": {
+    "dev": "npm --workspace apps/desktop run dev",
+    "build": "npm --workspace apps/desktop run build",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "format:check": "npm run format:check --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
