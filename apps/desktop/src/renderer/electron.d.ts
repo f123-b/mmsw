@@ -1,6 +1,9 @@
 import type { AudioProcessState, AudioStartOptions } from "../main/audio-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
 import type { AudioDevices, AudioSidecarEvent } from "@interview-copilot/protocol";
+import type { RealtimeServerMessage } from "@interview-copilot/protocol";
+import type { RealtimeConnectOptions } from "../main/realtime-session";
+import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
 
@@ -24,6 +27,10 @@ declare global {
       session: {
         getState(): Promise<SessionState>;
       };
+      realtime: {
+        connect(options: RealtimeConnectOptions): Promise<boolean>;
+        disconnect(): Promise<boolean>;
+      };
       events: {
         onAudio(listener: (event: AudioSidecarEvent) => void): () => void;
         onAudioDiagnostic(listener: (message: string) => void): () => void;
@@ -34,6 +41,10 @@ declare global {
         onScreenshot(listener: (result: ScreenshotResult) => void): () => void;
         onScreenshotError(listener: (message: string) => void): () => void;
         onScreenshotDiagnostic(listener: (message: string) => void): () => void;
+        onRealtimeState(listener: (state: string) => void): () => void;
+        onRealtimeTranscript(listener: (snapshot: TranscriptSnapshot) => void): () => void;
+        onRealtimeMessage(listener: (message: RealtimeServerMessage) => void): () => void;
+        onRealtimeDiagnostic(listener: (message: string) => void): () => void;
       };
     };
   }

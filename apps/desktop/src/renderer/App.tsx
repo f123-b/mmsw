@@ -3,7 +3,7 @@ import type { JSX } from "react";
 import { create } from "zustand";
 import type { AudioDevices, AudioDrift, AudioSidecarEvent, ProbeResult } from "@interview-copilot/protocol";
 import type { SessionState } from "@interview-copilot/shared";
-import { normalizeMeter } from "@interview-copilot/shared";
+import { normalizeMeter, type TranscriptSnapshot } from "@interview-copilot/shared";
 import type { OverlayMode } from "../main/overlay-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
 import { selectDeviceId } from "./device-selection";
@@ -25,6 +25,9 @@ interface AudioStore {
   probeResult?: ProbeResult;
   drift?: AudioDrift;
   bufferStats?: { queuedFrames: number; droppedFrames: number; bufferDurationMs: number };
+  realtimeState: string;
+  remoteTranscript: TranscriptSnapshot;
+  micTranscript: TranscriptSnapshot;
   screenshot?: ScreenshotResult;
   notice?: string;
   applyEvent: (event: AudioSidecarEvent) => void;
@@ -33,6 +36,8 @@ interface AudioStore {
   setAutomationMode: (mode: "MANUAL" | "AUTO") => void;
   setScreenshot: (screenshot: ScreenshotResult) => void;
   setNotice: (notice?: string) => void;
+  setRealtimeState: (state: string) => void;
+  applyTranscript: (snapshot: TranscriptSnapshot) => void;
 }
 
 const useAudioStore = create<AudioStore>((set) => ({
@@ -46,6 +51,9 @@ const useAudioStore = create<AudioStore>((set) => ({
   overlayMode: "interactive",
   sessionState: "IDLE",
   automationMode: "MANUAL",
+  realtimeState: "disconnected",
+  remoteTranscript: { source: "remote", final: [] },
+  micTranscript: { source: "mic", final: [] },
   applyEvent: (event) => set((current) => {
     if (event.type === "meter") {
       return {
@@ -72,7 +80,9 @@ const useAudioStore = create<AudioStore>((set) => ({
   setSessionState: (sessionState) => set({ sessionState }),
   setAutomationMode: (automationMode) => set({ automationMode }),
   setScreenshot: (screenshot) => set({ screenshot }),
-  setNotice: (notice) => set({ notice })
+  setNotice: (notice) => set({ notice }),
+  setRealtimeState: (realtimeState) => set({ realtimeState }),
+  applyTranscript: (snapshot) => set(snapshot.source === "remote" ? { remoteTranscript: snapshot } : { micTranscript: snapshot })
 }));
 
 function Meter({ label, value, accent }: { label: string; value: number; accent: string }): JSX.Element {
@@ -114,6 +124,20 @@ function OverlayView(): JSX.Element {
   );
 }
 
+function TranscriptColumn({ label, snapshot }: { label: string; snapshot: TranscriptSnapshot }): JSX.Element {
+  const latest = snapshot.final.slice(-4);
+  return (
+    <div className="transcript-column">
+      <div className="transcript-label">{label}</div>
+      <div className="transcript-lines">
+        {latest.length === 0 && !snapshot.partial && <span className="muted">等待 ASR...</span>}
+        {latest.map((segment) => <div className="transcript-line" key={segment.id}>{segment.text}</div>)}
+        {snapshot.partial && <div className="transcript-line partial" key={snapshot.partial.id}>{snapshot.partial.text}</div>}
+      </div>
+    </div>
+  );
+}
+
 function storedDevice(key: string): string | undefined {
   try { return localStorage.getItem(key) ?? undefined; } catch { return undefined; }
 }
@@ -128,6 +152,8 @@ export function App(): JSX.Element {
   const [devices, setDevices] = useState<AudioDevices>(DEFAULT_DEVICES);
   const [inputDeviceId, setInputDeviceId] = useState("");
   const [outputDeviceId, setOutputDeviceId] = useState("");
+  const [realtimeUrl, setRealtimeUrl] = useState(() => storedDevice("interview-copilot.realtime-url") ?? "");
+  const [realtimeTicket, setRealtimeTicket] = useState("");
 
   useEffect(() => {
     const loadDevices = async () => {
@@ -155,6 +181,9 @@ export function App(): JSX.Element {
       window.interviewCopilot.events.onScreenshot(store.setScreenshot),
       window.interviewCopilot.events.onScreenshotError(store.setNotice),
       window.interviewCopilot.events.onScreenshotDiagnostic(store.setNotice),
+      window.interviewCopilot.events.onRealtimeState(store.setRealtimeState),
+      window.interviewCopilot.events.onRealtimeTranscript(store.applyTranscript),
+      window.interviewCopilot.events.onRealtimeDiagnostic(store.setNotice),
       window.interviewCopilot.events.onShortcut((shortcut) => {
         if (shortcut === "toggle-automation") {
           const next = useAudioStore.getState().automationMode === "MANUAL" ? "AUTO" : "MANUAL";
@@ -186,6 +215,15 @@ export function App(): JSX.Element {
     try { store.setScreenshot(await window.interviewCopilot.screenshot.capture()); }
     catch (error) { store.setNotice(`截图失败：${String(error)}`); }
   };
+  const connectRealtime = async () => {
+    if (!realtimeUrl.trim()) {
+      store.setNotice("请输入 Realtime WebSocket 地址");
+      return;
+    }
+    persistDevice("interview-copilot.realtime-url", realtimeUrl.trim());
+    await window.interviewCopilot.realtime.connect({ url: realtimeUrl.trim(), ticket: realtimeTicket.trim() || undefined });
+  };
+  const disconnectRealtime = async () => { await window.interviewCopilot.realtime.disconnect(); };
 
   return (
     <main className="app-shell">
@@ -231,11 +269,13 @@ export function App(): JSX.Element {
             </section>
           </div>
 
+          <section className="panel realtime-panel"><div className="panel-heading"><div><div className="eyebrow">REALTIME ASR</div><h3>MIC / REMOTE Transcript</h3></div><StatusPill state={store.realtimeState.toUpperCase()} /></div><div className="realtime-connect"><input value={realtimeUrl} onChange={(event) => setRealtimeUrl(event.target.value)} placeholder="wss://host/api/v1/realtime/{interviewId}" aria-label="Realtime WebSocket URL" /><input value={realtimeTicket} onChange={(event) => setRealtimeTicket(event.target.value)} placeholder="短期 ticket（可选）" aria-label="Realtime ticket" type="password" /><button className="secondary-button" onClick={() => void connectRealtime()}>连接 ASR</button><button className="ghost-button" onClick={() => void disconnectRealtime()}>断开</button></div><div className="transcript-grid"><TranscriptColumn label="REMOTE / 面试官" snapshot={store.remoteTranscript} /><TranscriptColumn label="MIC / 用户" snapshot={store.micTranscript} /></div></section>
+
           {store.probeResult && <section className="panel probe-panel"><div className="panel-heading"><div><div className="eyebrow">PROBE RESULT</div><h3>2 秒采集统计</h3></div><span className="muted">{store.probeResult.durationMs}ms</span></div><div className="probe-grid"><div><strong>MIC</strong><span>{store.probeResult.mic.ok ? "OK" : "FAILED"} · {store.probeResult.mic.sampleRate}Hz · {store.probeResult.mic.channels}ch</span><small>callbacks {store.probeResult.mic.callbackCount} · samples {store.probeResult.mic.sampleCount} · peak {store.probeResult.mic.peak.toFixed(2)}</small></div><div><strong>SYSTEM</strong><span>{store.probeResult.system.ok ? "OK" : "FAILED"} · {store.probeResult.system.sampleRate}Hz · {store.probeResult.system.channels}ch</span><small>callbacks {store.probeResult.system.callbackCount} · samples {store.probeResult.system.sampleCount} · peak {store.probeResult.system.peak.toFixed(2)}</small></div></div></section>}
 
           {store.screenshot && <section className="panel screenshot-panel"><div className="panel-heading"><div><div className="eyebrow">SCREENSHOT TEST</div><h3>最近截图</h3></div><span className="muted">{store.screenshot.mimeType} · {store.screenshot.size} bytes</span></div><img className="screenshot-preview" src={store.screenshot.dataUrl} alt="最近一次桌面截图" /><div className="muted screenshot-path">已保存：{store.screenshot.path}</div></section>}
 
-          <section className="panel flow-panel"><div className="panel-heading"><div><div className="eyebrow">CORE PIPELINE</div><h3>实时链路</h3></div><span className="muted">Phase 1 foundation · Phase 2 NOT STARTED</span></div><div className="pipeline"><div className="pipeline-node active"><b>01</b><span>WASAPI</span><small>双通道捕获</small></div><div className="pipeline-line" /><div className="pipeline-node"><b>02</b><span>ASR</span><small>下一阶段</small></div><div className="pipeline-line" /><div className="pipeline-node"><b>03</b><span>QUESTION</span><small>边界检测</small></div><div className="pipeline-line" /><div className="pipeline-node"><b>04</b><span>ANSWER</span><small>流式输出</small></div></div></section>
+          <section className="panel flow-panel"><div className="panel-heading"><div><div className="eyebrow">CORE PIPELINE</div><h3>实时链路</h3></div><span className="muted">Phase 2 realtime foundation · Phase 3 question detector</span></div><div className="pipeline"><div className="pipeline-node active"><b>01</b><span>WASAPI</span><small>双通道捕获</small></div><div className="pipeline-line" /><div className="pipeline-node active"><b>02</b><span>ASR</span><small>PCM + Transcript</small></div><div className="pipeline-line" /><div className="pipeline-node"><b>03</b><span>QUESTION</span><small>边界检测</small></div><div className="pipeline-line" /><div className="pipeline-node"><b>04</b><span>ANSWER</span><small>流式输出</small></div></div></section>
         </div>
       </section>
     </main>

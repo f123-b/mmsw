@@ -4,7 +4,7 @@
 
 ## 当前进度
 
-当前状态：`Phase 1 IMPLEMENTATION COMPLETE`，`Phase 1 CI PENDING`，`Phase 1 WINDOWS AUDIO VALIDATION PENDING`，`Phase 2 NOT STARTED`。
+当前状态：`Phase 1 IMPLEMENTATION COMPLETE`，`Phase 1 CI PENDING`，`Phase 1 WINDOWS AUDIO VALIDATION PENDING`，`Phase 2 IMPLEMENTATION COMPLETE`，`Phase 3 IN PROGRESS`。
 
 已完成 Phase 1 实现：
 
@@ -18,6 +18,13 @@
 - MIC / SYSTEM clock drift 观测、Overlay `Ctrl+Alt+P` 模式切换和 Primary Display 截图选择
 - 原始 PCM 保留在 Electron Main，不广播到 Main Window 或 Overlay Renderer
 - Rust Sidecar 模块化、纯函数测试、Windows CI 和 NSIS 打包配置
+
+已完成 Phase 2 实现：
+
+- Realtime WebSocket protocol and Main-process PCM streaming
+- Bounded 3-second PCM backpressure queue with oldest-packet eviction
+- Independent MIC/REMOTE Transcript stabilization and partial/final rendering
+- Realtime connection recovery with capped exponential backoff
 
 Rust 工具链未安装时，桌面端仍可完成 TypeScript 构建与协议/状态机测试；真实 WASAPI 采集需要在 Windows 上安装 Rust 后构建 `crates/audio-sidecar`。
 
@@ -51,7 +58,7 @@ npm run build
 npm run package:win
 ```
 
-真实 Windows 音频验证步骤见 [`docs/phase-1-validation.md`](docs/phase-1-validation.md)，Phase 1.1 收口记录见 [`docs/phase-1.1-final.md`](docs/phase-1.1-final.md)。在 CI 通过、人工执行 A/B/C 音频测试并完成 Rust MSVC 构建前，不将 Phase 1 标记为正式验收完成。
+真实 Windows 音频验证步骤见 [`docs/phase-1-validation.md`](docs/phase-1-validation.md)，Phase 1.1 收口记录见 [`docs/phase-1.1-final.md`](docs/phase-1.1-final.md)，Phase 2 记录见 [`docs/phase-2.md`](docs/phase-2.md)。在 CI 通过、人工执行 A/B/C 音频测试并完成 Rust MSVC 构建前，不将 Phase 1 标记为正式验收完成。
 
 ## 目录
 

@@ -2,6 +2,9 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { AudioProcessState, AudioStartOptions } from "../main/audio-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
 import type { AudioDevices, AudioSidecarEvent } from "@interview-copilot/protocol";
+import type { RealtimeServerMessage } from "@interview-copilot/protocol";
+import type { RealtimeConnectOptions } from "../main/realtime-session";
+import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
 
@@ -22,6 +25,10 @@ const api = {
   },
   session: {
     getState: (): Promise<SessionState> => ipcRenderer.invoke("session:get-state")
+  },
+  realtime: {
+    connect: (options: RealtimeConnectOptions) => ipcRenderer.invoke("realtime:connect", options),
+    disconnect: () => ipcRenderer.invoke("realtime:disconnect")
   },
   events: {
     onAudio: (listener: (event: AudioSidecarEvent) => void) => {
@@ -68,6 +75,26 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, message: string) => listener(message);
       ipcRenderer.on("screenshot:diagnostic", handler);
       return () => ipcRenderer.removeListener("screenshot:diagnostic", handler);
+    },
+    onRealtimeState: (listener: (state: string) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, state: string) => listener(state);
+      ipcRenderer.on("realtime:state", handler);
+      return () => ipcRenderer.removeListener("realtime:state", handler);
+    },
+    onRealtimeTranscript: (listener: (snapshot: TranscriptSnapshot) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, snapshot: TranscriptSnapshot) => listener(snapshot);
+      ipcRenderer.on("realtime:transcript", handler);
+      return () => ipcRenderer.removeListener("realtime:transcript", handler);
+    },
+    onRealtimeMessage: (listener: (message: RealtimeServerMessage) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, message: RealtimeServerMessage) => listener(message);
+      ipcRenderer.on("realtime:message", handler);
+      return () => ipcRenderer.removeListener("realtime:message", handler);
+    },
+    onRealtimeDiagnostic: (listener: (message: string) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, message: string) => listener(message);
+      ipcRenderer.on("realtime:diagnostic", handler);
+      return () => ipcRenderer.removeListener("realtime:diagnostic", handler);
     }
   }
 };

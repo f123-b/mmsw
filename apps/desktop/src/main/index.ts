@@ -4,6 +4,7 @@ import { AudioManager, type AudioStartOptions } from "./audio-manager";
 import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
+import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
 import { SessionStateMachine } from "@interview-copilot/shared";
 
 let mainWindow: BrowserWindow | undefined;
@@ -13,6 +14,7 @@ const screenshotManager = new ScreenshotManager({
   onDiagnostic: (message) => broadcast("screenshot:diagnostic", message)
 });
 const session = new SessionStateMachine();
+const realtimeSession = new RealtimeSession();
 const preloadPath = join(__dirname, "../preload/index.js");
 const rendererFile = join(__dirname, "../renderer/index.html");
 
@@ -77,6 +79,14 @@ function registerIpc(): void {
   });
   ipcMain.handle("screenshot:capture", () => screenshotManager.capturePrimaryDisplay());
   ipcMain.handle("session:get-state", () => session.state);
+  ipcMain.handle("realtime:connect", (_event, options: RealtimeConnectOptions) => {
+    realtimeSession.connect(options);
+    return true;
+  });
+  ipcMain.handle("realtime:disconnect", () => {
+    realtimeSession.disconnect();
+    return true;
+  });
 }
 
 function registerShortcuts(): void {
@@ -114,6 +124,11 @@ app.whenReady().then(() => {
   audioManager.on("event", (event) => broadcast("audio:event", event));
   audioManager.on("process", (state) => broadcast("audio:process", state));
   audioManager.on("diagnostic", (message) => broadcast("audio:diagnostic", message));
+  audioManager.on("pcm-packet", (packet: Uint8Array) => realtimeSession.sendAudio(packet));
+  realtimeSession.on("state", (state) => broadcast("realtime:state", state));
+  realtimeSession.on("transcript", (snapshot) => broadcast("realtime:transcript", snapshot));
+  realtimeSession.on("message", (message) => broadcast("realtime:message", message));
+  realtimeSession.on("diagnostic", (message) => broadcast("realtime:diagnostic", message));
   session.subscribe((state) => broadcast("session:state", state));
 
   app.on("activate", () => {
@@ -124,6 +139,7 @@ app.whenReady().then(() => {
 app.on("before-quit", () => {
   globalShortcut.unregisterAll();
   audioManager.stop();
+  realtimeSession.disconnect();
   overlayManager?.destroy();
 });
 

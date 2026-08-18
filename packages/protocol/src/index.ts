@@ -92,6 +92,117 @@ export const audioSidecarEventSchema = z.discriminatedUnion("type", [
   audioDriftSchema
 ]);
 
+export const transcriptSourceSchema = z.enum(["mic", "remote"]);
+
+export const transcriptSegmentSchema = z.object({
+  id: z.string().min(1),
+  source: transcriptSourceSchema,
+  text: z.string(),
+  startMs: z.number().int().nonnegative(),
+  endMs: z.number().int().nonnegative(),
+  final: z.boolean(),
+  confidence: z.number().min(0).max(1).optional()
+});
+
+export const asrStatusSchema = z.object({
+  type: z.literal("asr_status"),
+  source: transcriptSourceSchema,
+  state: z.enum(["connecting", "listening", "stopped", "error"]),
+  message: z.string().optional()
+});
+
+export const connectionReadySchema = z.object({
+  type: z.literal("connection_ready"),
+  sessionId: z.string().min(1),
+  serverTime: z.number().int().nonnegative().optional()
+});
+
+export const heartbeatAckSchema = z.object({
+  type: z.literal("heartbeat_ack"),
+  timestamp: z.number().int().nonnegative()
+});
+
+export const asrPartialSchema = z.object({
+  type: z.literal("asr_partial"),
+  segment: transcriptSegmentSchema.extend({ final: z.literal(false) })
+});
+
+export const asrFinalSchema = z.object({
+  type: z.literal("asr_final"),
+  segment: transcriptSegmentSchema.extend({ final: z.literal(true) })
+});
+
+export const questionCandidateSchema = z.object({
+  type: z.literal("question_candidate"),
+  questionId: z.string().min(1),
+  text: z.string().min(1),
+  confidence: z.number().min(0).max(1),
+  complete: z.boolean().default(false)
+});
+
+export const questionConfirmedSchema = questionCandidateSchema.extend({
+  type: z.literal("question_confirmed"),
+  source: z.enum(["rules", "extractor"])
+});
+
+export const answerStartSchema = z.object({
+  type: z.literal("answer_start"),
+  answerId: z.string().min(1),
+  questionId: z.string().min(1),
+  mode: z.enum(["FAST", "NORMAL", "DEEP"])
+});
+
+export const answerDeltaSchema = z.object({
+  type: z.literal("answer_delta"),
+  answerId: z.string().min(1),
+  delta: z.string()
+});
+
+export const answerEndSchema = z.object({
+  type: z.literal("answer_end"),
+  answerId: z.string().min(1),
+  text: z.string()
+});
+
+export const answerCancelledSchema = z.object({
+  type: z.literal("answer_cancelled"),
+  answerId: z.string().min(1),
+  reason: z.enum(["user", "superseded", "timeout"])
+});
+
+export const runtimeErrorSchema = z.object({
+  type: z.literal("runtime_error"),
+  code: z.enum([
+    "AUDIO_DEVICE_NOT_FOUND",
+    "AUDIO_DEVICE_INVALIDATED",
+    "AUDIO_CAPTURE_FAILED",
+    "WS_CONNECT_FAILED",
+    "WS_AUTH_FAILED",
+    "ASR_FAILED",
+    "QUESTION_EXTRACTOR_FAILED",
+    "LLM_FAILED",
+    "RAG_FAILED",
+    "SCREENSHOT_FAILED"
+  ]),
+  message: z.string().min(1),
+  recoverable: z.boolean().default(true)
+});
+
+export const realtimeServerMessageSchema = z.discriminatedUnion("type", [
+  connectionReadySchema,
+  heartbeatAckSchema,
+  asrStatusSchema,
+  asrPartialSchema,
+  asrFinalSchema,
+  questionCandidateSchema,
+  questionConfirmedSchema,
+  answerStartSchema,
+  answerDeltaSchema,
+  answerEndSchema,
+  answerCancelledSchema,
+  runtimeErrorSchema
+]);
+
 export const clientControlMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("client_ready") }),
   z.object({ type: z.literal("heartbeat"), timestamp: z.number().int().nonnegative() }),
@@ -111,7 +222,15 @@ export type AudioBufferStats = z.infer<typeof audioBufferSchema>;
 export type AudioDrift = z.infer<typeof audioDriftSchema>;
 export type AudioSidecarEvent = z.infer<typeof audioSidecarEventSchema>;
 export type ClientControlMessage = z.infer<typeof clientControlMessageSchema>;
+export type TranscriptSource = z.infer<typeof transcriptSourceSchema>;
+export type TranscriptSegment = z.infer<typeof transcriptSegmentSchema>;
+export type AsrStatus = z.infer<typeof asrStatusSchema>;
+export type RealtimeServerMessage = z.infer<typeof realtimeServerMessageSchema>;
 
 export function parseAudioSidecarEvent(line: string): AudioSidecarEvent {
   return audioSidecarEventSchema.parse(JSON.parse(line));
+}
+
+export function parseRealtimeServerMessage(value: string): RealtimeServerMessage {
+  return realtimeServerMessageSchema.parse(JSON.parse(value));
 }
