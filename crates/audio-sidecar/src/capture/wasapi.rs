@@ -1,7 +1,7 @@
 use crate::mixer::{new_shared_buffer, SharedAudioBuffer};
 use crate::protocol::CaptureStats;
 use cpal::traits::DeviceTrait;
-use cpal::{Device, SampleFormat, Stream, StreamConfig};
+use cpal::{Device, Sample, SampleFormat, Stream, StreamConfig};
 use std::sync::{Arc, Mutex};
 
 pub struct CaptureHandle {
