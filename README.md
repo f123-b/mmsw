@@ -4,7 +4,7 @@
 
 ## 当前进度
 
-当前状态：`Phase 1 IMPLEMENTATION COMPLETE`，`Phase 1 CI PENDING`，`Phase 1 WINDOWS AUDIO VALIDATION PENDING`，`Phase 2 IMPLEMENTATION COMPLETE`，`Phase 3 IMPLEMENTATION COMPLETE`，`Phase 4 IMPLEMENTATION COMPLETE`，`Phase 5 IMPLEMENTATION COMPLETE`，`Phase 6 IMPLEMENTATION COMPLETE`，`Phase 7 IN PROGRESS`。
+当前状态：`Phase 1 IMPLEMENTATION COMPLETE`，`Phase 1 CI PENDING`，`Phase 1 WINDOWS AUDIO VALIDATION PENDING`，`Phase 2 IMPLEMENTATION COMPLETE`，`Phase 3 IMPLEMENTATION COMPLETE`，`Phase 4 IMPLEMENTATION COMPLETE`，`Phase 5 IMPLEMENTATION COMPLETE`，`Phase 6 IMPLEMENTATION COMPLETE`，`Phase 7 IMPLEMENTATION COMPLETE`，`Phase 8 IN PROGRESS`。
 
 已完成 Phase 1 实现：
 
@@ -50,6 +50,12 @@
 - 800-token default chunks with 120-token overlap and metadata
 - Hybrid keyword/vector retrieval with optional reranker
 
+已完成 Phase 7 实现：
+
+- Preparation Agent tool registry covering workspace, profile, skill, knowledge and web tools
+- Workspace traversal protection
+- ASK_EVERY_TIME/FULL_ACCESS approval policy for write and external operations
+
 Rust 工具链未安装时，桌面端仍可完成 TypeScript 构建与协议/状态机测试；真实 WASAPI 采集需要在 Windows 上安装 Rust 后构建 `crates/audio-sidecar`。
 
 ## 开发环境
@@ -82,7 +88,7 @@ npm run build
 npm run package:win
 ```
 
-真实 Windows 音频验证步骤见 [`docs/phase-1-validation.md`](docs/phase-1-validation.md)，Phase 1.1 收口记录见 [`docs/phase-1.1-final.md`](docs/phase-1.1-final.md)，Phase 2 记录见 [`docs/phase-2.md`](docs/phase-2.md)，Phase 3 记录见 [`docs/phase-3.md`](docs/phase-3.md)，Phase 4 记录见 [`docs/phase-4.md`](docs/phase-4.md)，Phase 5 记录见 [`docs/phase-5.md`](docs/phase-5.md)，Phase 6 记录见 [`docs/phase-6.md`](docs/phase-6.md)。在 CI 通过、人工执行 A/B/C 音频测试并完成 Rust MSVC 构建前，不将 Phase 1 标记为正式验收完成。
+真实 Windows 音频验证步骤见 [`docs/phase-1-validation.md`](docs/phase-1-validation.md)，Phase 1.1 收口记录见 [`docs/phase-1.1-final.md`](docs/phase-1.1-final.md)，Phase 2 记录见 [`docs/phase-2.md`](docs/phase-2.md)，Phase 3 记录见 [`docs/phase-3.md`](docs/phase-3.md)，Phase 4 记录见 [`docs/phase-4.md`](docs/phase-4.md)，Phase 5 记录见 [`docs/phase-5.md`](docs/phase-5.md)，Phase 6 记录见 [`docs/phase-6.md`](docs/phase-6.md)，Phase 7 记录见 [`docs/phase-7.md`](docs/phase-7.md)。在 CI 通过、人工执行 A/B/C 音频测试并完成 Rust MSVC 构建前，不将 Phase 1 标记为正式验收完成。
 
 ## 目录
 
