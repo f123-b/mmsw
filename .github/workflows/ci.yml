@@ -33,7 +33,10 @@ jobs:
         shell: pwsh
         run: |
           cargo test --manifest-path crates/audio-sidecar/Cargo.toml 2>&1 | Tee-Object rust-test.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content rust-test.log | Select-Object -Last 20 | ForEach-Object { Write-Output ("::error title=Rust test::" + $_) }
+            exit $LASTEXITCODE
+          }
 
       - name: Upload Rust test log
         if: always()
@@ -64,7 +67,10 @@ jobs:
         shell: pwsh
         run: |
           npm run package:win 2>&1 | Tee-Object package-windows.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content package-windows.log | Select-Object -Last 20 | ForEach-Object { Write-Output ("::error title=Windows package::" + $_) }
+            exit $LASTEXITCODE
+          }
 
       - name: Upload packaging log
         if: always()
