@@ -17,33 +17,31 @@ pub fn enumerate(host: &Host) -> Result<DeviceList, String> {
     let inputs = host
         .input_devices()
         .map_err(|error| error.to_string())?
-        .filter_map(|device| {
-            let device = device.ok()?;
+        .map(|device| {
             let id = device_id(&device);
-            Some(DeviceInfo {
+            DeviceInfo {
                 id: id.clone(),
                 name: device
                     .name()
                     .unwrap_or_else(|_| "Unknown microphone".to_string()),
                 kind: "microphone",
                 default: default_input.as_deref() == Some(id.as_str()),
-            })
+            }
         })
         .collect();
     let outputs = host
         .output_devices()
         .map_err(|error| error.to_string())?
-        .filter_map(|device| {
-            let device = device.ok()?;
+        .map(|device| {
             let id = device_id(&device);
-            Some(DeviceInfo {
+            DeviceInfo {
                 id: id.clone(),
                 name: device
                     .name()
                     .unwrap_or_else(|_| "Unknown output".to_string()),
                 kind: "loopback",
                 default: default_output.as_deref() == Some(id.as_str()),
-            })
+            }
         })
         .collect();
     Ok(DeviceList { inputs, outputs })
@@ -54,7 +52,6 @@ pub fn select_input(host: &Host, id: Option<&str>) -> Result<Device, String> {
         return host
             .input_devices()
             .map_err(|error| error.to_string())?
-            .flatten()
             .find(|device| device_id(device) == id)
             .ok_or_else(|| format!("microphone not found: {id}"));
     }
@@ -67,7 +64,6 @@ pub fn select_output(host: &Host, id: Option<&str>) -> Result<Device, String> {
         return host
             .output_devices()
             .map_err(|error| error.to_string())?
-            .flatten()
             .find(|device| device_id(device) == id)
             .ok_or_else(|| format!("loopback output not found: {id}"));
     }
