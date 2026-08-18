@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import type { JSX } from "react";
 import { create } from "zustand";
 import type { AudioDevices, AudioDrift, AudioSidecarEvent, ProbeResult, RealtimeServerMessage } from "@interview-copilot/protocol";
 import type { QuestionCandidate, QuestionEvent, SessionState, TranscriptSnapshot } from "@interview-copilot/shared";
+import type { Profile } from "@interview-copilot/shared";
+import type { ProviderCenterPublicConfig } from "../main/settings-store";
 import { normalizeMeter, StableAnswerStateMachine } from "@interview-copilot/shared";
 import type { OverlayMode } from "../main/overlay-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
@@ -137,7 +139,7 @@ function OverlayView(): JSX.Element {
       <section className="overlay-card">
         <div className="eyebrow">CURRENT QUESTION</div>
         <h1>{question?.text ?? "等待面试官问题"}</h1>
-        <div className="answer-placeholder">{answerText || "答案将在确认完整问题后显示"}{answerStreaming && <span className="answer-cursor">▌</span>}</div>
+        <div className="answer-surface">{answerText || "答案将在确认完整问题后显示"}{answerStreaming && <span className="answer-cursor">▌</span>}</div>
         <div className="overlay-meters"><Meter label="MIC" value={mic} accent="#8b5cf6" /><Meter label="SYSTEM" value={system} accent="#22d3ee" /></div>
       </section>
       <button className="overlay-mode" onClick={() => void toggleMode()}>
@@ -173,6 +175,20 @@ export function App(): JSX.Element {
   const isOverlay = useMemo(() => new URLSearchParams(window.location.search).get("window") === "overlay", []);
   const store = useAudioStore();
   const [page, setPage] = useState<"home" | "interview" | "preparation" | "profiles" | "knowledge" | "history" | "settings">("home");
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [profileId, setProfileId] = useState("");
+  const [providerSettings, setProviderSettings] = useState<ProviderCenterPublicConfig>();
+  const [llmModel, setLlmModel] = useState("gpt-4o-mini");
+  const [llmBaseUrl, setLlmBaseUrl] = useState("https://api.openai.com");
+  const [llmApiKey, setLlmApiKey] = useState("");
+  const [asrBaseUrl, setAsrBaseUrl] = useState("");
+  const [asrApiKey, setAsrApiKey] = useState("");
+  const [knowledgeBases, setKnowledgeBases] = useState<Array<{ id: string; name: string }>>([]);
+  const [knowledgeDocuments, setKnowledgeDocuments] = useState<Array<{ id: string; filename: string; status: string; error?: string }>>([]);
+  const [historyRecords, setHistoryRecords] = useState<Array<{ id: string; profileId: string; startedAt: number; endedAt?: number; status: string; automationMode: string }>>([]);
+  const [historyMetrics, setHistoryMetrics] = useState<{ id: string; answerRate: number; questionCount: number; answeredQuestionCount: number; averageAnswerLatencyMs?: number }>();
+  const [preparationGoal, setPreparationGoal] = useState("根据当前 Resume 和 JD 生成面试准备清单");
+  const [preparationEvents, setPreparationEvents] = useState<Array<Record<string, unknown>>>([]);
   const [devices, setDevices] = useState<AudioDevices>(DEFAULT_DEVICES);
   const [inputDeviceId, setInputDeviceId] = useState("");
   const [outputDeviceId, setOutputDeviceId] = useState("");
@@ -197,10 +213,39 @@ export function App(): JSX.Element {
       }
     };
     void loadDevices();
+    void (async () => {
+      try {
+        let storedProfiles = await window.interviewCopilot.profiles.list();
+        if (storedProfiles.length === 0) {
+          const created = await window.interviewCopilot.profiles.save({ name: "默认面试档案", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+          storedProfiles = created ? [created] : [];
+        }
+        setProfiles(storedProfiles);
+        const active = await window.interviewCopilot.profiles.active();
+        setProfileId(active?.id ?? storedProfiles[0]?.id ?? "");
+        const settings = await window.interviewCopilot.settings.get();
+        setProviderSettings(settings);
+        if (settings) {
+          setLlmModel(settings.llm.model);
+          setLlmBaseUrl(settings.llm.baseUrl);
+          setAsrBaseUrl(settings.asr.baseUrl);
+        }
+        let bases = await window.interviewCopilot.knowledge.listBases();
+        if (bases.length === 0) {
+          const created = await window.interviewCopilot.knowledge.createBase("默认知识库");
+          bases = created ? [created] : [];
+        }
+        setKnowledgeBases(bases);
+        setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(bases[0]?.id));
+        setHistoryRecords(await window.interviewCopilot.history.list());
+      } catch (error) {
+        store.setNotice(`工作区初始化失败：${String(error)}`);
+      }
+    })();
 
     const cleanups = [
       window.interviewCopilot.events.onAudio(store.applyEvent),
-      window.interviewCopilot.events.onSessionState(store.setSessionState),
+      window.interviewCopilot.events.onSessionState((state) => { store.setSessionState(state); if (state === "ENDED") void window.interviewCopilot.history.list().then(setHistoryRecords); }),
       window.interviewCopilot.events.onOverlayMode(store.setOverlayMode),
       window.interviewCopilot.events.onScreenshot(store.setScreenshot),
       window.interviewCopilot.events.onScreenshotError(store.setNotice),
@@ -210,6 +255,7 @@ export function App(): JSX.Element {
       window.interviewCopilot.events.onRealtimeMessage(store.applyRealtimeMessage),
       window.interviewCopilot.events.onRealtimeDiagnostic(store.setNotice),
       window.interviewCopilot.events.onQuestion(store.applyQuestion),
+      window.interviewCopilot.events.onPreparationEvent((event) => { if (event && typeof event === "object") setPreparationEvents((current) => [...current.slice(-30), event as Record<string, unknown>]); }),
       window.interviewCopilot.events.onShortcut((shortcut) => {
         if (shortcut === "toggle-automation") {
           const next = useAudioStore.getState().automationMode === "MANUAL" ? "AUTO" : "MANUAL";
@@ -236,14 +282,21 @@ export function App(): JSX.Element {
     store.setNotice("音频诊断已启动；它只显示电平，不会发送 PCM。正式面试请使用“开始面试”。");
   };
   const startInterview = async () => {
-    if (!realtimeUrl.trim()) {
+    const asrUrl = realtimeUrl.trim() || asrBaseUrl.trim();
+    if (!asrUrl) {
       store.setNotice("请在高级诊断中配置 ASR WebSocket 地址，或先接入你的 ASR Gateway。");
       setPage("settings");
       return;
     }
+    if (!profileId) {
+      store.setNotice("请先创建或选择一个面试档案。");
+      setPage("profiles");
+      return;
+    }
     persistDevice("interview-copilot.input-device", inputDeviceId);
     persistDevice("interview-copilot.output-device", outputDeviceId);
-    await window.interviewCopilot.interview.start({ profileId: "default", url: realtimeUrl.trim(), ticket: realtimeTicket.trim() || undefined, inputDeviceId, outputDeviceId, automationMode: store.automationMode, answerMode: "NORMAL" });
+    await window.interviewCopilot.profiles.selectActive(profileId);
+    await window.interviewCopilot.interview.start({ profileId, url: asrUrl, ticket: realtimeTicket.trim() || undefined, inputDeviceId, outputDeviceId, automationMode: store.automationMode, answerMode: "NORMAL" });
   };
   const stopAudio = async () => { await window.interviewCopilot.audio.stop(); };
   const probeAudio = async () => { await window.interviewCopilot.audio.probe({ inputDeviceId, outputDeviceId }); };
@@ -261,6 +314,46 @@ export function App(): JSX.Element {
     await window.interviewCopilot.realtime.connect({ url: realtimeUrl.trim(), ticket: realtimeTicket.trim() || undefined });
   };
   const disconnectRealtime = async () => { await window.interviewCopilot.realtime.disconnect(); };
+  const saveProviderSettings = async () => {
+    try {
+      const llm = await window.interviewCopilot.settings.update("llm", { providerName: "OpenAI-compatible", baseUrl: llmBaseUrl.trim(), model: llmModel.trim(), apiKey: llmApiKey || undefined, timeoutMs: 30_000, maxRetries: 2 });
+      const asr = await window.interviewCopilot.settings.update("asr", { providerName: "Custom WebSocket ASR Gateway", baseUrl: asrBaseUrl.trim(), apiKey: asrApiKey || undefined, timeoutMs: 15_000, maxRetries: 2 });
+      const current = await window.interviewCopilot.settings.get();
+      setProviderSettings(current);
+      setLlmApiKey("");
+      setAsrApiKey("");
+      store.setNotice(`Provider 配置已保存：LLM ${llm?.hasApiKey ? "已配置密钥" : "未配置密钥"} · ASR ${asr?.hasApiKey ? "已配置密钥" : "未配置密钥"}`);
+    } catch (error) {
+      store.setNotice(`Provider 配置保存失败：${String(error)}`);
+    }
+  };
+  const uploadKnowledge = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    const knowledgeBaseId = knowledgeBases[0]?.id;
+    if (!file || !knowledgeBaseId) return;
+    try {
+      await window.interviewCopilot.knowledge.ingest({ knowledgeBaseId, filename: file.name, mimeType: file.type || "application/octet-stream", bytes: new Uint8Array(await file.arrayBuffer()) });
+      setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId));
+      store.setNotice(`已导入知识文档：${file.name}`);
+    } catch (error) {
+      store.setNotice(`知识文档导入失败：${String(error)}`);
+    } finally {
+      event.target.value = "";
+    }
+  };
+  const attachProfileMaterial = async (kind: "resume" | "jobDescription", event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !profileId) return;
+    try {
+      const updated = await window.interviewCopilot.profiles.attachMaterial({ profileId, kind, filename: file.name, mimeType: file.type || "application/octet-stream", bytes: new Uint8Array(await file.arrayBuffer()) });
+      if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile));
+      store.setNotice(`${kind === "resume" ? "Resume" : "JD"} 已解析并保存`);
+    } catch (error) {
+      store.setNotice(`材料解析失败：${String(error)}`);
+    } finally {
+      event.target.value = "";
+    }
+  };
 
   return (
     <main className="app-shell">
@@ -282,6 +375,12 @@ export function App(): JSX.Element {
       <section className="content-shell">
         <header className="topbar"><div><div className="eyebrow">REALTIME WORKSPACE</div><h1>面试工作台</h1></div><StatusPill state={store.state} /></header>
         <div className="content-scroll">
+          {page === "settings" && <section className="panel settings-panel"><div className="panel-heading"><div><div className="eyebrow">PROVIDER CENTER</div><h3>Provider 配置</h3></div><span className="muted">API Key 仅进入系统安全存储</span></div><div className="dashboard-grid"><div><label className="device-field"><span>LLM Provider / Base URL</span><input value={llmBaseUrl} onChange={(event) => setLlmBaseUrl(event.target.value)} placeholder="https://api.openai.com" /></label><label className="device-field"><span>LLM Model</span><input value={llmModel} onChange={(event) => setLlmModel(event.target.value)} placeholder="gpt-4o-mini" /></label><label className="device-field"><span>LLM API Key</span><input value={llmApiKey} onChange={(event) => setLlmApiKey(event.target.value)} type="password" placeholder={providerSettings?.llm.hasApiKey ? "已配置，留空表示不修改" : "粘贴 API Key"} /></label></div><div><label className="device-field"><span>ASR Gateway WebSocket URL</span><input value={asrBaseUrl} onChange={(event) => setAsrBaseUrl(event.target.value)} placeholder="wss://host/api/v1/realtime/{interviewId}" /></label><label className="device-field"><span>ASR API Key</span><input value={asrApiKey} onChange={(event) => setAsrApiKey(event.target.value)} type="password" placeholder={providerSettings?.asr.hasApiKey ? "已配置，留空表示不修改" : "可选短期密钥"} /></label><p className="muted">ASR Gateway 接受 16kHz、双声道、PCM16 LE；服务端需返回标准 asr_partial / asr_final。</p></div></div><button className="primary-button" onClick={() => void saveProviderSettings()}>保存 Provider 配置</button></section>}
+          {page === "profiles" && <section className="panel profiles-panel"><div className="panel-heading"><div><div className="eyebrow">PROFILES</div><h3>面试档案</h3></div><span className="muted">SQLite 持久化</span></div><div className="profile-list">{profiles.map((profile) => <button className={`profile-row ${profile.id === profileId ? "selected" : ""}`} key={profile.id} onClick={() => { setProfileId(profile.id); void window.interviewCopilot.profiles.selectActive(profile.id); }}><span>{profile.name}</span><small>{profile.language} · {profile.skills.length} skills</small></button>)}</div><div className="hero-actions"><label className="secondary-button file-button">导入 Resume<input type="file" accept=".txt,.md,.pdf,.docx,.html" onChange={(event) => void attachProfileMaterial("resume", event)} /></label><label className="secondary-button file-button">导入 JD<input type="file" accept=".txt,.md,.pdf,.docx,.html" onChange={(event) => void attachProfileMaterial("jobDescription", event)} /></label><button className="secondary-button" onClick={async () => { const created = await window.interviewCopilot.profiles.save({ name: `面试档案 ${profiles.length + 1}`, language: "zh-CN", skills: [], knowledgeBaseIds: [] }); if (created) { setProfiles((current) => [created, ...current]); setProfileId(created.id); } }}>新建档案</button></div></section>}
+          {page === "knowledge" && <section className="panel knowledge-panel"><div className="panel-heading"><div><div className="eyebrow">KNOWLEDGE</div><h3>知识库</h3></div><span className="muted">SQLite chunks · hybrid retrieval</span></div><div className="setup-list compact"><div><span className="setup-icon">▤</span><span>{knowledgeBases[0]?.name ?? "默认知识库"}</span><strong>{knowledgeDocuments.length} 文档</strong></div></div><label className="secondary-button file-button">导入 Resume / JD / PDF / DOCX / MD / PPTX / XLSX<input type="file" accept=".txt,.md,.pdf,.docx,.pptx,.xlsx,.html,.htm" onChange={(event) => void uploadKnowledge(event)} /></label><div className="knowledge-document-list">{knowledgeDocuments.map((document) => <div className="knowledge-document" key={document.id}><span>{document.filename}</span><small className={document.status === "error" ? "error-text" : ""}>{document.status}{document.error ? ` · ${document.error}` : ""}</small></div>)}</div></section>}
+          {page === "history" && <section className="panel history-panel"><div className="panel-heading"><div><div className="eyebrow">HISTORY</div><h3>面试历史与分析</h3></div><span className="muted">本地 SQLite</span></div><div className="profile-list">{historyRecords.length === 0 && <span className="muted">完成一次面试后，这里会显示时长、问题数、回答率和延迟。</span>}{historyRecords.map((record) => <button className={`profile-row ${historyMetrics?.id === record.id ? "selected" : ""}`} key={record.id} onClick={async () => { const metrics = await window.interviewCopilot.history.analyze(record.id); if (metrics) setHistoryMetrics({ id: record.id, ...metrics }); }}><span>{new Date(record.startedAt).toLocaleString()} · {record.status}</span><small>{record.automationMode} · {record.profileId}</small></button>)}</div>{historyMetrics && <div className="setup-list compact"><div><span>问题数</span><strong>{historyMetrics.questionCount}</strong></div><div><span>已回答</span><strong>{historyMetrics.answeredQuestionCount} · {(historyMetrics.answerRate * 100).toFixed(0)}%</strong></div><div><span>平均答案延迟</span><strong>{historyMetrics.averageAnswerLatencyMs ? `${Math.round(historyMetrics.averageAnswerLatencyMs)}ms` : "—"}</strong></div></div>}</section>}
+          {page === "preparation" && <section className="panel preparation-panel"><div className="panel-heading"><div><div className="eyebrow">PREPARATION AGENT</div><h3>准备 Agent</h3></div><span className="muted">最多 40 步 · 写入需审批</span></div><label className="device-field"><span>目标</span><textarea value={preparationGoal} onChange={(event) => setPreparationGoal(event.target.value)} rows={3} /></label><button className="primary-button" onClick={async () => { setPreparationEvents([]); try { await window.interviewCopilot.preparation.start(preparationGoal); } catch (error) { store.setNotice(`Preparation 启动失败：${String(error)}`); } }}>开始准备</button><div className="agent-events">{preparationEvents.map((event, index) => { const type = String(event.type ?? "event"); const requestId = typeof event.requestId === "string" ? event.requestId : undefined; return <div className="agent-event" key={`${type}-${requestId ?? index}`}><span>{type}</span><small>{typeof event.tool === "string" ? event.tool : typeof event.summary === "string" ? event.summary : ""}</small>{type === "approval_required" && requestId && <span className="agent-actions"><button className="secondary-button" onClick={() => void window.interviewCopilot.preparation.approve(requestId)}>批准</button><button className="ghost-button" onClick={() => void window.interviewCopilot.preparation.reject(requestId)}>拒绝</button></span>}</div>; })}</div></section>}
+          {(page === "home" || page === "interview") && <>
           <section className="hero-card">
             <div><div className="eyebrow accent-text">INTERVIEW WORKSPACE</div><h2>准备好后，一键开始面试</h2><p>正式面试会启动双通道 PCM、ASR、问题确认、答案生成和历史记录；音频测试只用于诊断。</p></div>
             <div className="hero-actions"><button className="primary-button" onClick={() => void startInterview()}>开始面试</button><button className="secondary-button" onClick={() => void startAudio()}>测试音频</button><button className="secondary-button" onClick={openOverlay}>打开悬浮窗</button></div>
@@ -315,6 +414,7 @@ export function App(): JSX.Element {
           {store.screenshot && <section className="panel screenshot-panel"><div className="panel-heading"><div><div className="eyebrow">SCREENSHOT TEST</div><h3>最近截图</h3></div><span className="muted">{store.screenshot.mimeType} · {store.screenshot.size} bytes</span></div><img className="screenshot-preview" src={store.screenshot.dataUrl} alt="最近一次桌面截图" /><div className="muted screenshot-path">已保存：{store.screenshot.path}</div></section>}
 
           <section className="panel flow-panel"><div className="panel-heading"><div><div className="eyebrow">CORE PIPELINE</div><h3>实时链路</h3></div><span className="muted">Coordinator-managed</span></div><div className="pipeline"><div className="pipeline-node active"><b>01</b><span>WASAPI</span><small>双通道 PCM</small></div><div className="pipeline-line" /><div className="pipeline-node active"><b>02</b><span>ASR</span><small>MIC / SYSTEM</small></div><div className="pipeline-line" /><div className="pipeline-node"><b>03</b><span>QUESTION</span><small>聚合确认</small></div><div className="pipeline-line" /><div className="pipeline-node"><b>04</b><span>ANSWER</span><small>SSE 流式</small></div></div></section>
+          </>}
         </div>
       </section>
     </main>

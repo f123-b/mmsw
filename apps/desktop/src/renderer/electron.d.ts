@@ -8,6 +8,8 @@ import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
+import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
+import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
 
 declare global {
   interface Window {
@@ -38,6 +40,37 @@ declare global {
         stop(): Promise<void>;
         answerLatest(): Promise<void>;
       };
+      profiles: {
+        list(): Promise<Profile[]>;
+        get(profileId: string): Promise<Profile | undefined>;
+        save(input: Profile | ProfileInput): Promise<Profile | undefined>;
+        delete(profileId: string): Promise<boolean>;
+        clone(profileId: string, name: string): Promise<Profile | undefined>;
+        selectActive(profileId: string): Promise<Profile | undefined>;
+        active(): Promise<Profile | undefined>;
+        attachMaterial(input: { profileId: string; kind: "resume" | "jobDescription"; filename: string; mimeType: string; bytes: Uint8Array }): Promise<Profile | undefined>;
+      };
+      settings: {
+        get(): Promise<ProviderCenterPublicConfig | undefined>;
+        update(section: ProviderSection, input: Partial<ProviderSettings>): Promise<PublicProviderSettings | undefined>;
+      };
+      knowledge: {
+        listBases(): Promise<Array<{ id: string; name: string; createdAt: number; updatedAt: number }>>;
+        createBase(name: string): Promise<{ id: string; name: string; createdAt: number; updatedAt: number } | undefined>;
+        listDocuments(knowledgeBaseId?: string): Promise<Array<{ id: string; knowledgeBaseId: string; filename: string; mimeType: string; status: string; error?: string }>>;
+        ingest(input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array }): Promise<unknown>;
+        delete(documentId: string): Promise<boolean>;
+      };
+      history: {
+        list(): Promise<Array<{ id: string; profileId: string; startedAt: number; endedAt?: number; status: string; language: string; automationMode: string; createdAt: number }>>;
+        get(interviewId: string): Promise<unknown>;
+        analyze(interviewId: string): Promise<{ durationMs: number; questionCount: number; answeredQuestionCount: number; answerRate: number; averageFirstTokenMs?: number; averageAnswerLatencyMs?: number } | undefined>;
+      };
+      preparation: {
+        start(goal: string): Promise<boolean>;
+        approve(requestId: string): Promise<boolean>;
+        reject(requestId: string): Promise<boolean>;
+      };
       events: {
         onAudio(listener: (event: AudioSidecarEvent) => void): () => void;
         onAudioDiagnostic(listener: (message: string) => void): () => void;
@@ -53,6 +86,7 @@ declare global {
         onRealtimeMessage(listener: (message: RealtimeServerMessage) => void): () => void;
         onRealtimeDiagnostic(listener: (message: string) => void): () => void;
         onQuestion(listener: (event: QuestionEvent) => void): () => void;
+        onPreparationEvent(listener: (event: unknown) => void): () => void;
       };
     };
   }

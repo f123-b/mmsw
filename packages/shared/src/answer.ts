@@ -66,7 +66,8 @@ export class PromptBuilder {
     if (context.retrievedKnowledge.length > 0) sections.push({ name: "retrieval-context", content: context.retrievedKnowledge.join("\n---\n") });
     if (context.recentTranscript.length > 0) sections.push({ name: "interview-style", content: `最近对话：\n${context.recentTranscript.join("\n")}` });
     sections.push({ name: "question", content: question.text });
-    sections.push({ name: "output-format", content: "输出简洁的核心回答、关键点和适用时的项目结合，不要写成长篇论文。" });
+    const length = mode === "FAST" ? "60-120" : "120-250";
+    sections.push({ name: "output-format", content: `输出中文 sneak peek，控制在 ${length} 字左右：先给一句核心回答，再给 2~4 个关键点；仅在资料真实匹配时结合项目，不要写成长篇论文。` });
     return sections;
   }
 }
@@ -90,6 +91,7 @@ export class ModelRouter {
 export interface AnswerProviderRequest {
   model: string;
   sections: PromptSection[];
+  attachments?: Array<{ mimeType: string; dataUrl: string }>;
 }
 
 export interface AnswerProvider {
@@ -109,9 +111,9 @@ export class AnswerAgent {
     private readonly promptBuilder = new PromptBuilder()
   ) {}
 
-  async *stream(question: AnswerQuestion, mode: AnswerMode, contextInput: AnswerContextInput = {}, signal?: AbortSignal): AsyncGenerator<AnswerGenerationEvent> {
+  async *stream(question: AnswerQuestion, mode: AnswerMode, contextInput: AnswerContextInput = {}, signal?: AbortSignal, options: { hasScreenshot?: boolean; attachments?: Array<{ mimeType: string; dataUrl: string }> } = {}): AsyncGenerator<AnswerGenerationEvent> {
     const context = this.contextRouter.route(question.text, contextInput);
-    const selection = this.modelRouter.select(question.text, mode);
+    const selection = this.modelRouter.select(question.text, mode, options.hasScreenshot ?? false);
     if (!selection.model) throw new Error(`No model configured for ${selection.route}`);
     const provider = this.providers[selection.route];
     if (!provider) throw new Error(`No AnswerProvider configured for ${selection.route}`);
@@ -119,7 +121,7 @@ export class AnswerAgent {
     const sections = this.promptBuilder.build(question, mode, context);
     yield { type: "answer_start", answerId, questionId: question.id, mode, model: selection.model };
     let text = "";
-    for await (const delta of provider.stream({ model: selection.model, sections }, signal)) {
+    for await (const delta of provider.stream({ model: selection.model, sections, attachments: options.attachments }, signal)) {
       if (!delta) continue;
       text += delta;
       yield { type: "answer_delta", answerId, delta };

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 
 describe("global shortcuts", () => {
-  it("registers the Phase 1 actions without collisions", () => {
+  it("registers the global actions without collisions", () => {
     const accelerators = Object.values(GLOBAL_SHORTCUTS);
 
     expect(new Set(accelerators).size).toBe(accelerators.length);

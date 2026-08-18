@@ -15,8 +15,13 @@
   "dependencies": {
     "@interview-copilot/protocol": "0.1.0",
     "@interview-copilot/shared": "0.1.0",
+    "@types/sql.js": "^1.4.11",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.12.1",
+    "pdf-parse": "^2.4.5",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "sql.js": "^1.14.2",
     "zustand": "^5.0.5"
   },
   "devDependencies": {
@@ -32,16 +37,32 @@
   "build": {
     "appId": "com.interviewcopilot.desktop",
     "productName": "Interview Copilot",
-    "directories": { "output": "release" },
-    "files": ["out/**/*", "package.json"],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
     "extraResources": [
       {
         "from": "../../crates/audio-sidecar/target/release/interview-audio.exe",
         "to": "audio-sidecar/interview-audio.exe"
+      },
+      {
+        "from": "../../node_modules/sql.js/dist/sql-wasm.wasm",
+        "to": "sql.js/sql-wasm.wasm"
       }
     ],
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }]
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,

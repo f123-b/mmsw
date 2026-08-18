@@ -79,6 +79,8 @@ export class AgentToolRegistry {
     return this;
   }
 
+  approve(requestId: string): void { this.approvalPolicy.approve(requestId); }
+
   async invoke(requestId: string, name: AgentToolName, args: Record<string, unknown>, context: AgentToolContext): Promise<ToolInvocationResult> {
     const tool = this.tools.get(name);
     if (!tool) throw new Error(`Tool is not registered: ${name}`);
@@ -98,5 +100,86 @@ export class PreparationAgent {
 
   run(action: PreparationAction): Promise<ToolInvocationResult> {
     return this.registry.invoke(action.requestId, action.tool, action.args, this.context);
+  }
+}
+
+export type PreparationModelStep =
+  | { type: "tool_call"; tool: AgentToolName; args: Record<string, unknown>; rationale?: string }
+  | { type: "final"; summary: string };
+
+export interface PreparationModel {
+  next(input: { goal: string; history: Array<{ role: "model" | "tool"; content: string }> }, signal?: AbortSignal): Promise<PreparationModelStep>;
+}
+
+export type PreparationRuntimeEvent =
+  | { type: "step"; index: number; goal: string }
+  | { type: "tool_call"; index: number; requestId: string; tool: AgentToolName; args: Record<string, unknown>; rationale?: string }
+  | { type: "approval_required"; requestId: string; tool: AgentToolName; risk: ToolRisk }
+  | { type: "tool_result"; requestId: string; tool: AgentToolName; value: unknown }
+  | { type: "rejected"; requestId: string; tool: AgentToolName }
+  | { type: "completed"; summary: string };
+
+/**
+ * Runs a bounded model/tool loop for preparation tasks. Write and external
+ * actions pause on an approval gate instead of silently mutating a profile.
+ */
+export class PreparationAgentRuntime {
+  private readonly approvals = new Map<string, "approved" | "rejected">();
+  private readonly waiters = new Map<string, Array<(decision: "approved" | "rejected") => void>>();
+
+  constructor(private readonly model: PreparationModel, private readonly registry: AgentToolRegistry, private readonly context: AgentToolContext, private readonly maxSteps = 40) {}
+
+  approve(requestId: string): void { this.resolveApproval(requestId, "approved"); }
+  reject(requestId: string): void { this.resolveApproval(requestId, "rejected"); }
+
+  async *run(goal: string, signal?: AbortSignal): AsyncGenerator<PreparationRuntimeEvent> {
+    const history: Array<{ role: "model" | "tool"; content: string }> = [];
+    for (let index = 0; index < Math.max(1, Math.min(48, this.maxSteps)); index += 1) {
+      if (signal?.aborted) throw new Error("Preparation run aborted");
+      yield { type: "step", index, goal };
+      const step = await this.model.next({ goal, history }, signal);
+      if (step.type === "final") {
+        yield { type: "completed", summary: step.summary };
+        return;
+      }
+      const requestId = `prep-${Date.now()}-${index}`;
+      yield { type: "tool_call", index, requestId, tool: step.tool, args: step.args, ...(step.rationale ? { rationale: step.rationale } : {}) };
+      const invocation = await this.registry.invoke(requestId, step.tool, step.args, this.context);
+      if (invocation.status === "approval_required") {
+        yield { type: "approval_required", requestId: invocation.requestId, tool: invocation.tool, risk: invocation.risk };
+        const decision = await this.waitForApproval(requestId, signal);
+        if (decision === "rejected") {
+          yield { type: "rejected", requestId, tool: step.tool };
+          history.push({ role: "tool", content: `Tool ${step.tool} was rejected by the user.` });
+          continue;
+        }
+        this.registry.approve(requestId);
+        const approved = await this.registry.invoke(requestId, step.tool, step.args, this.context);
+        if (approved.status !== "completed") throw new Error(`Tool approval did not execute: ${step.tool}`);
+        yield { type: "tool_result", requestId, tool: step.tool, value: approved.value };
+        history.push({ role: "tool", content: JSON.stringify(approved.value) });
+      } else {
+        yield { type: "tool_result", requestId, tool: step.tool, value: invocation.value };
+        history.push({ role: "tool", content: JSON.stringify(invocation.value) });
+      }
+    }
+    throw new Error(`Preparation agent exceeded ${Math.min(48, this.maxSteps)} steps`);
+  }
+
+  private waitForApproval(requestId: string, signal?: AbortSignal): Promise<"approved" | "rejected"> {
+    const known = this.approvals.get(requestId);
+    if (known) return Promise.resolve(known);
+    return new Promise((resolve, reject) => {
+      const waiters = this.waiters.get(requestId) ?? [];
+      waiters.push(resolve);
+      this.waiters.set(requestId, waiters);
+      signal?.addEventListener("abort", () => reject(new Error("Preparation approval aborted")), { once: true });
+    });
+  }
+
+  private resolveApproval(requestId: string, decision: "approved" | "rejected"): void {
+    this.approvals.set(requestId, decision);
+    this.waiters.get(requestId)?.forEach((resolve) => resolve(decision));
+    this.waiters.delete(requestId);
   }
 }

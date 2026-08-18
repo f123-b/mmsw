@@ -204,7 +204,7 @@ export const realtimeServerMessageSchema = z.discriminatedUnion("type", [
 ]);
 
 export const clientControlMessageSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("client_ready") }),
+  z.object({ type: z.literal("client_ready"), providerName: z.string().optional(), model: z.string().optional(), apiKey: z.string().optional() }),
   z.object({ type: z.literal("heartbeat"), timestamp: z.number().int().nonnegative() }),
   z.object({ type: z.literal("answer_request"), mode: z.enum(["manual_text", "latest_remote_transcript", "screenshot"]), text: z.string().optional(), attachmentId: z.string().optional() }),
   z.object({ type: z.literal("answer_cancel"), answerId: z.string(), reason: z.enum(["user", "superseded", "timeout"]).optional() })

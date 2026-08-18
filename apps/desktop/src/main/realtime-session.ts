@@ -16,6 +16,9 @@ export type RealtimeConnectionState = "disconnected" | "connecting" | "connected
 export interface RealtimeConnectOptions {
   url: string;
   ticket?: string;
+  providerName?: string;
+  model?: string;
+  apiKey?: string;
   autoReconnect?: boolean;
 }
 
@@ -135,7 +138,7 @@ export class RealtimeSession extends EventEmitter {
     if (this.socket !== socket || this.manualStop) return;
     this.reconnectAttempt = 0;
     this.setState("connected");
-    this.sendControl({ type: "client_ready" });
+    this.sendControl({ type: "client_ready", providerName: this.options?.providerName, model: this.options?.model, apiKey: this.options?.apiKey });
     this.flushAudio();
     this.emit("connected");
   }

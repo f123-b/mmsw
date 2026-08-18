@@ -8,9 +8,13 @@ import {
   TranscriptAggregator,
   type AnswerContextInput,
   type AnswerMode,
+  type AnswerRecord,
+  type InterviewRecord,
+  type QuestionRecord,
   type QuestionCandidate,
   type QuestionEvent,
-  type SessionState
+  type SessionState,
+  type TranscriptRecord
 } from "@interview-copilot/shared";
 import type { AudioStartOptions } from "./audio-manager";
 import type { RealtimeConnectOptions, RealtimeConnectionState } from "./realtime-session";
@@ -38,6 +42,14 @@ export interface InterviewStartOptions extends Omit<RealtimeConnectOptions, "aut
   language?: string;
 }
 
+export interface InterviewHistoryPort {
+  createInterview(input: Omit<InterviewRecord, "id" | "createdAt">, now?: number): InterviewRecord;
+  endInterview(interviewId: string, status?: "ended" | "error", endedAt?: number): InterviewRecord;
+  addTranscript(input: Omit<TranscriptRecord, "id" | "createdAt">, now?: number): TranscriptRecord | undefined;
+  addQuestion(input: Omit<QuestionRecord, "id">): QuestionRecord;
+  addAnswer(input: Omit<AnswerRecord, "id">): AnswerRecord;
+}
+
 export interface InterviewCoordinatorOptions {
   audio: InterviewAudioPort;
   realtime: InterviewRealtimePort;
@@ -45,8 +57,9 @@ export interface InterviewCoordinatorOptions {
   answerAgent: AnswerAgent;
   detector?: QuestionDetector;
   aggregator?: TranscriptAggregator;
-  history?: InterviewHistoryStore;
-  contextProvider?: (question: QuestionCandidate) => AnswerContextInput | Promise<AnswerContextInput>;
+  history?: InterviewHistoryPort;
+  contextProvider?: (question: QuestionCandidate, profileId: string) => AnswerContextInput | Promise<AnswerContextInput>;
+  asrSettingsProvider?: () => { providerName: string; apiKey: string; model: string };
   now?: () => number;
 }
 
@@ -61,11 +74,12 @@ export type InterviewCoordinatorEvent =
 export class InterviewCoordinator extends EventEmitter {
   private readonly detector: QuestionDetector;
   private readonly aggregator: TranscriptAggregator;
-  private readonly history: InterviewHistoryStore;
+  private readonly history: InterviewHistoryPort;
   private readonly now: () => number;
-  private readonly contextProvider: (question: QuestionCandidate) => AnswerContextInput | Promise<AnswerContextInput>;
+  private readonly contextProvider: (question: QuestionCandidate, profileId: string) => AnswerContextInput | Promise<AnswerContextInput>;
   private activeInterviewId: string | undefined;
   private activeOptions: InterviewStartOptions | undefined;
+  private activeProfileId: string | undefined;
   private currentQuestion: QuestionCandidate | undefined;
   private answerController: AbortController | undefined;
   private answerId: string | undefined;
@@ -99,13 +113,15 @@ export class InterviewCoordinator extends EventEmitter {
     }, startedAt);
     this.activeInterviewId = record.id;
     this.activeOptions = { ...startOptions };
+    this.activeProfileId = startOptions.profileId;
     this.currentQuestion = undefined;
     this.historyQuestionIds.clear();
     this.aggregator.clear();
     this.transition("CONNECTING");
     try {
       // The real interview path deliberately omits meterOnly so PCM reaches ASR.
-      this.options.realtime.connect({ url: startOptions.url, ticket: startOptions.ticket, autoReconnect: true });
+      const asrSettings = this.options.asrSettingsProvider?.();
+      this.options.realtime.connect({ url: startOptions.url, ticket: startOptions.ticket, autoReconnect: true, ...asrSettings });
       this.options.audio.start({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true });
     } catch (error) {
       this.failInterview(String(error));
@@ -122,11 +138,13 @@ export class InterviewCoordinator extends EventEmitter {
     this.cancelAnswer(reason === "error" ? "timeout" : "user");
     this.options.audio.stop();
     this.options.realtime.disconnect();
+    if (!this.options.session.canTransition("ENDING") && this.options.session.canTransition("ERROR")) this.transition("ERROR");
     if (this.options.session.canTransition("ENDING")) this.transition("ENDING");
     this.history.endInterview(interviewId, reason === "error" ? "error" : "ended", this.now());
     if (this.options.session.canTransition("ENDED")) this.transition("ENDED");
     this.activeInterviewId = undefined;
     this.activeOptions = undefined;
+    this.activeProfileId = undefined;
     this.currentQuestion = undefined;
     this.aggregator.clear();
   }
@@ -141,7 +159,16 @@ export class InterviewCoordinator extends EventEmitter {
     else this.emitDiagnostic("No confirmed question is available");
   }
 
-  async answer(question: QuestionCandidate, mode = this.activeOptions?.answerMode ?? "NORMAL"): Promise<void> {
+  async answerScreenshot(dataUrl: string): Promise<void> {
+    const question = this.currentQuestion ?? this.detector.lastConfirmed;
+    if (!question) {
+      this.emitDiagnostic("No confirmed question is available for screenshot answer");
+      return;
+    }
+    await this.answer(question, "NORMAL", { hasScreenshot: true, attachments: [{ mimeType: "image/png", dataUrl }] });
+  }
+
+  async answer(question: QuestionCandidate, mode = this.activeOptions?.answerMode ?? "NORMAL", streamOptions: { hasScreenshot?: boolean; attachments?: Array<{ mimeType: string; dataUrl: string }> } = {}): Promise<void> {
     if (!this.running) {
       this.emitDiagnostic("Interview is not running");
       return;
@@ -153,8 +180,8 @@ export class InterviewCoordinator extends EventEmitter {
     this.answerController = controller;
     const startedAt = this.now();
     try {
-      const context = await this.contextProvider(question);
-      for await (const event of this.options.answerAgent.stream({ id: question.id, text: question.text }, mode, context, controller.signal)) {
+      const context = await this.contextProvider(question, this.activeProfileId ?? "");
+      for await (const event of this.options.answerAgent.stream({ id: question.id, text: question.text }, mode, context, controller.signal, streamOptions)) {
         if (controller.signal.aborted) return;
         if (event.type === "answer_start") {
           this.answerId = event.answerId;

@@ -9,6 +9,8 @@ import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
+import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
+import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
 
 const api = {
   audio: {
@@ -36,6 +38,37 @@ const api = {
     start: (options: InterviewStartOptions) => ipcRenderer.invoke("interview:start", options) as Promise<string>,
     stop: () => ipcRenderer.invoke("interview:stop") as Promise<void>,
     answerLatest: () => ipcRenderer.invoke("interview:answer-latest") as Promise<void>
+  },
+  profiles: {
+    list: (): Promise<Profile[]> => ipcRenderer.invoke("profiles:list"),
+    get: (profileId: string): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:get", profileId),
+    save: (input: Profile | ProfileInput): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:save", input),
+    delete: (profileId: string): Promise<boolean> => ipcRenderer.invoke("profiles:delete", profileId),
+    clone: (profileId: string, name: string): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:clone", profileId, name),
+    selectActive: (profileId: string): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:select-active", profileId),
+    active: (): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:active"),
+    attachMaterial: (input: { profileId: string; kind: "resume" | "jobDescription"; filename: string; mimeType: string; bytes: Uint8Array }): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:attach-material", input)
+  },
+  settings: {
+    get: (): Promise<ProviderCenterPublicConfig | undefined> => ipcRenderer.invoke("settings:get"),
+    update: (section: ProviderSection, input: Partial<ProviderSettings>): Promise<PublicProviderSettings | undefined> => ipcRenderer.invoke("settings:update", section, input)
+  },
+  knowledge: {
+    listBases: () => ipcRenderer.invoke("knowledge:list-bases"),
+    createBase: (name: string) => ipcRenderer.invoke("knowledge:create-base", name),
+    listDocuments: (knowledgeBaseId?: string) => ipcRenderer.invoke("knowledge:list-documents", knowledgeBaseId),
+    ingest: (input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array }) => ipcRenderer.invoke("knowledge:ingest", input),
+    delete: (documentId: string) => ipcRenderer.invoke("knowledge:delete", documentId)
+  },
+  history: {
+    list: () => ipcRenderer.invoke("history:list"),
+    get: (interviewId: string) => ipcRenderer.invoke("history:get", interviewId),
+    analyze: (interviewId: string) => ipcRenderer.invoke("history:analyze", interviewId)
+  },
+  preparation: {
+    start: (goal: string) => ipcRenderer.invoke("preparation:start", goal),
+    approve: (requestId: string) => ipcRenderer.invoke("preparation:approve", requestId),
+    reject: (requestId: string) => ipcRenderer.invoke("preparation:reject", requestId)
   },
   events: {
     onAudio: (listener: (event: AudioSidecarEvent) => void) => {
@@ -107,6 +140,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, question: QuestionEvent) => listener(question);
       ipcRenderer.on("question:event", handler);
       return () => ipcRenderer.removeListener("question:event", handler);
+    },
+    onPreparationEvent: (listener: (event: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+      ipcRenderer.on("preparation:event", handler);
+      return () => ipcRenderer.removeListener("preparation:event", handler);
     }
   }
 };

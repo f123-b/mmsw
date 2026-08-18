@@ -1,91 +1,50 @@
 # Interview Copilot
 
-这是一个独立实现的实时 AI 面试辅助桌面应用，按照《AskCc 功能等价复刻技术规格书》分阶段建设，不复用 AskCc 的专有源码、服务端代码、题库或私有数据。
+Interview Copilot 是 Windows 优先的实时 AI 面试辅助桌面应用：它从 MIC 和系统回采分别捕获音频，保持 LEFT = MIC、RIGHT = SYSTEM 的双声道 PCM16 LE 数据，经 ASR 转写、问题确认、Profile/知识库检索和流式模型回答后，把稳定答案显示在桌面悬浮窗中，并把面试记录保存到本地 SQLite。
 
-## 当前进度
+## 产品能力
 
-当前状态：`Phase 1 IMPLEMENTATION COMPLETE`，`Phase 1 CI PENDING`，`Phase 1 WINDOWS AUDIO VALIDATION PENDING`，`Phase 2 IMPLEMENTATION COMPLETE`，`Phase 3 IMPLEMENTATION COMPLETE`，`Phase 4 IMPLEMENTATION COMPLETE`，`Phase 5 IMPLEMENTATION COMPLETE`，`Phase 6 IMPLEMENTATION COMPLETE`，`Phase 7 IMPLEMENTATION COMPLETE`，`Phase 8 IMPLEMENTATION COMPLETE`，`FINAL ACCEPTANCE PENDING`。
+- 正式面试入口由 Electron Main 的 `InterviewCoordinator` 管理，Renderer 不直接编排音频、ASR、问题和回答状态。
+- 正式面试使用 `meterOnly: false`，产生 16kHz、双声道、40ms、2560-byte PCM16 LE packet；“测试音频”是独立的电平诊断路径。
+- 支持标准 WebSocket ASR Gateway：客户端发送原始 PCM，连接时可发送 provider、model 和短期密钥，服务端返回 `asr_partial` / `asr_final`，并区分 `mic` / `remote`。
+- 远端最终转写先经过连续片段聚合，再由问题检测器确认；支持隐式提问、500ms 静音确认、去重、追问 supersede，以及 AUTO/MANUAL 两种回答模式。
+- LLM 使用 OpenAI-compatible SSE；支持 FAST/NORMAL/DEEP、可取消请求、超时和有限重试。答案输出提示为中文 60–120 或 120–250 字 sneak peek，并保持旧答案直到新答案首个 delta 到达。
+- Provider Center 支持 LLM、ASR、Embedding 和可选 Reranker 配置；API Key 通过 Windows `safeStorage` 保存，不返回 Renderer、不写入日志。
+- Profiles、Resume/JD、Skill、Knowledge Base、Interview History 均使用 `%APPDATA%/InterviewCopilot/interview-copilot.sqlite`；密钥单独保存到同目录的安全存储文件。
+- Resume/JD 支持 TXT、MD、PDF、DOCX、HTML；知识库支持 TXT、MD、PDF、DOCX、HTML、PPTX、XLSX，文档会被分块保存，可选 embedding 后先取 16 个候选再收敛到 6 个上下文片段。
+- Preparation Agent 使用最多 40 步的模型/工具循环，写入和外部动作需要用户批准；事件会实时显示在 Preparation 页面。
+- `Ctrl+Alt+A` 重新回答当前问题，`Ctrl+Alt+S` 截图并请求 Vision Provider，`Ctrl+Alt+D` 显示悬浮窗，`Ctrl+Alt+P` 切换悬浮窗模式，`Ctrl+Alt+Q` 结束面试。
+- 更新包校验 SHA-256 和 RSA 签名；应用、音频、Realtime 日志分别写入 `%APPDATA%/InterviewCopilot/logs`，自动脱敏并轮转。
 
-已完成 Phase 1 实现：
+## 快速开始
 
-- Electron `main → preload → renderer` 三层隔离
-- React 主界面与透明 Overlay 窗口
-- 统一的 Zod 协议包，包含音频设备、电平、健康状态和错误事件
-- Session 状态机和全局快捷键入口
-- Rust Audio Sidecar CLI 契约与 Windows 音频后端边界
-- MIC / SYSTEM 设备选择、2 秒 Probe、检测状态和截图基础能力
-- PCM stdout 与 JSON stderr 分离、精确 2560-byte packet framing、3 秒源采样率 buffer 统计和 Sidecar 自动恢复
-- MIC / SYSTEM clock drift 观测、Overlay `Ctrl+Alt+P` 模式切换和 Primary Display 截图选择
-- 原始 PCM 保留在 Electron Main，不广播到 Main Window 或 Overlay Renderer
-- Rust Sidecar 模块化、纯函数测试、Windows CI 和 NSIS 打包配置
-
-已完成 Phase 2 实现：
-
-- Realtime WebSocket protocol and Main-process PCM streaming
-- Bounded 3-second PCM backpressure queue with oldest-packet eviction
-- Independent MIC/REMOTE Transcript stabilization and partial/final rendering
-- Realtime connection recovery with capped exponential backoff
-
-已完成 Phase 3 实现：
-
-- Remote Transcript question candidate and completeness scoring
-- 500ms silence debounce with explicit question state machine
-- 15-second duplicate suppression and supersede events
-
-已完成 Phase 4 实现：
-
-- Provider abstraction, FAST/NORMAL/DEEP answer modes and model routing
-- Context-limited prompt sections for profile, skills, retrieval and transcript
-- Stable streaming answer replacement and cancellation behavior
-
-已完成 Phase 5 实现：
-
-- Profile, Material, Resume/JD summary and Skill domain models
-- ProfileStore isolated updates
-- Top-3 Skill Router for question-specific context
-
-已完成 Phase 6 实现：
-
-- Document parser registry and SHA-keyed document cache
-- 800-token default chunks with 120-token overlap and metadata
-- Hybrid keyword/vector retrieval with optional reranker
-
-已完成 Phase 7 实现：
-
-- Preparation Agent tool registry covering workspace, profile, skill, knowledge and web tools
-- Workspace traversal protection
-- ASK_EVERY_TIME/FULL_ACCESS approval policy for write and external operations
-
-已完成 Phase 8 实现：
-
-- Interview, Transcript, Question and Answer history store
-- Interview answer-rate, transcript and latency metrics
-- Capped session recovery and signed/hash-checked update manifest policy
-
-Rust 工具链未安装时，桌面端仍可完成 TypeScript 构建与协议/状态机测试；真实 WASAPI 采集需要在 Windows 上安装 Rust 后构建 `crates/audio-sidecar`。
-
-## 开发环境
-
-- Windows 11 优先
-- Node.js 22+
-- npm 10+
-- Rust stable（构建 Audio Sidecar 时需要）
-
-安装依赖并运行：
+环境要求：Windows 11、Node.js 22+、npm 10+；构建真实 Audio Sidecar 还需要 Rust stable 和 MSVC linker。
 
 ```powershell
 npm install
 npm run dev
 ```
 
-可通过环境变量指定本地 Sidecar：
+首次打开后：
 
-```powershell
-$env:INTERVIEW_COPILOT_AUDIO_SIDECAR = "D:\\path\\to\\interview-audio.exe"
-npm run dev
+1. 在“Profiles”创建或选择档案，导入 Resume 和 JD。
+2. 在“知识库”导入项目资料；如果配置了 Embedding Provider，会保存向量并启用混合检索。
+3. 在“设置”填写 OpenAI-compatible LLM 的 Base URL、模型和 API Key，以及 ASR Gateway 的 WebSocket URL、模型和短期密钥。
+4. 返回“首页”选择 MIC / System Audio，点击“开始面试”。
+
+正常面试页面不会要求手工输入原始 WebSocket ticket；原始 URL、ticket 和协议连接只在“高级诊断”中显示。
+
+## ASR Gateway 合约
+
+Gateway 需要接受 Electron Main 发出的二进制 PCM packet：16kHz、双声道、signed PCM16 LE、每包 640 frames / 2560 bytes。服务端应返回 JSON WebSocket 消息，例如：
+
+```json
+{"type":"asr_final","segment":{"id":"remote-1","source":"remote","text":"请介绍一下你的项目？","startMs":0,"endMs":1200,"final":true,"confidence":0.95}}
 ```
 
-验证：
+回答和检索 Provider 使用 OpenAI-compatible HTTP：LLM 使用 `/v1/chat/completions` SSE，Embedding 使用 `/v1/embeddings`。
+
+## 本地验证
 
 ```powershell
 npm test
@@ -94,14 +53,18 @@ npm run build
 npm run package:win
 ```
 
-真实 Windows 音频验证步骤见 [`docs/phase-1-validation.md`](docs/phase-1-validation.md)，Phase 1.1 收口记录见 [`docs/phase-1.1-final.md`](docs/phase-1.1-final.md)，Phase 2 记录见 [`docs/phase-2.md`](docs/phase-2.md)，Phase 3 记录见 [`docs/phase-3.md`](docs/phase-3.md)，Phase 4 记录见 [`docs/phase-4.md`](docs/phase-4.md)，Phase 5 记录见 [`docs/phase-5.md`](docs/phase-5.md)，Phase 6 记录见 [`docs/phase-6.md`](docs/phase-6.md)，Phase 7 记录见 [`docs/phase-7.md`](docs/phase-7.md)，Phase 8 记录见 [`docs/phase-8.md`](docs/phase-8.md)。在 CI 通过、人工执行 A/B/C 音频测试并完成 Rust MSVC 构建前，不将 Phase 1 标记为正式验收完成。
+`npm test` 包含 PCM packet、Realtime 恢复、Coordinator 软件 E2E、SQLite CRUD、Provider SSE、文档解析、Agent 审批、更新签名和日志脱敏测试。真实 API Key/ASR Gateway 和 Windows WASAPI 设备仍需要在目标机器上手工验证；记录模板见 [`docs/final-windows-validation.md`](docs/final-windows-validation.md)。
 
 ## 目录
 
 ```text
-apps/desktop       Electron + React 桌面端
-packages/protocol  Client / Main / Sidecar 共用协议
-packages/shared    跨模块领域状态机和纯函数
-crates/audio-sidecar Rust 音频 Sidecar
-docs               阶段性架构和验收记录
+apps/desktop       Electron Main / Preload / React Renderer
+packages/protocol  音频、ASR、Realtime 共用 Zod 协议
+packages/shared    状态机、问题检测、回答、RAG、Agent、历史领域逻辑
+crates/audio-sidecar Rust WASAPI / CPAL 双通道采集 Sidecar
+docs               架构、验证和发布记录
 ```
+
+## 当前验收边界
+
+代码、TypeScript、协议、共享逻辑、软件 E2E 和 Windows NSIS 构建链已纳入仓库；最终验收仍需在真实 Windows 音频设备上确认 MIC、系统回采、设备失效恢复和真实 Provider 联调，并由 CI 的最后一轮结果确认发布包。

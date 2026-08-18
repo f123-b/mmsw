@@ -15,12 +15,15 @@ function endpoint(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
 }
 
-function buildMessages(sections: PromptSection[]): Array<{ role: "system" | "user"; content: string }> {
+function buildMessages(sections: PromptSection[], attachments: Array<{ mimeType: string; dataUrl: string }> = []): Array<{ role: "system" | "user"; content: string | Array<Record<string, unknown>> }> {
   const system = sections.filter((section) => section.name !== "question").map((section) => `[${section.name}]\n${section.content}`).join("\n\n");
   const question = sections.find((section) => section.name === "question")?.content ?? "";
+  const userContent: string | Array<Record<string, unknown>> = attachments.length === 0
+    ? question
+    : [{ type: "text", text: question }, ...attachments.map((attachment) => ({ type: "image_url", image_url: { url: attachment.dataUrl, detail: "auto", mimeType: attachment.mimeType } }))];
   return [
     { role: "system", content: system },
-    { role: "user", content: question }
+    { role: "user", content: userContent }
   ];
 }
 
@@ -115,7 +118,7 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
             "content-type": "application/json",
             ...(this.settings.apiKey ? { authorization: `Bearer ${this.settings.apiKey}` } : {})
           },
-          body: JSON.stringify({ model: request.model || this.settings.model, messages: buildMessages(request.sections), stream: true }),
+          body: JSON.stringify({ model: request.model || this.settings.model, messages: buildMessages(request.sections, request.attachments), stream: true }),
           signal: controller.signal
         });
         if (!response.ok) throw new Error(`Answer provider HTTP ${response.status}: ${await readError(response)}`);
@@ -139,6 +142,34 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
       }
     }
     throw lastError instanceof Error ? lastError : new Error("Answer provider request failed");
+  }
+}
+
+export class OpenAICompatibleEmbeddingProvider {
+  private readonly fetchImpl: FetchLike;
+
+  constructor(private readonly settings: ProviderSettings, fetchImpl?: FetchLike) {
+    this.fetchImpl = fetchImpl ?? ((input, init) => fetch(input, init));
+  }
+
+  async embed(text: string): Promise<number[]> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(1_000, this.settings.timeoutMs));
+    try {
+      const response = await this.fetchImpl(endpoint(this.settings.baseUrl, "v1/embeddings"), {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(this.settings.apiKey ? { authorization: `Bearer ${this.settings.apiKey}` } : {}) },
+        body: JSON.stringify({ model: this.settings.model, input: text }),
+        signal: controller.signal
+      });
+      if (!response.ok) throw new Error(`Embedding provider HTTP ${response.status}: ${await readError(response)}`);
+      const payload = await response.json() as { data?: Array<{ embedding?: unknown }> };
+      const embedding = payload.data?.[0]?.embedding;
+      if (!Array.isArray(embedding) || !embedding.every((value) => typeof value === "number")) throw new Error("Embedding provider returned an invalid vector");
+      return embedding as number[];
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 

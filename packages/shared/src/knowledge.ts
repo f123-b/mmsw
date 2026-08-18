@@ -78,7 +78,7 @@ export class DocumentParserRegistry implements DocumentParser {
 export const plainTextDocumentParser: DocumentParser = {
   async parse(input) {
     const text = new TextDecoder().decode(input.bytes).replace(/<[^>]+>/g, " ").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
-    return { text, sections: text.split(/\n(?=#{1,6}\s)|(?=#{1,6}\s)/).filter(Boolean).map((section) => (section.split("\n", 1)[0] ?? "").replace(/^#{1,6}\s+/, "").trim()) };
+    return { text, sections: text.split(/\n(?=#{1,6}\s)/).filter(Boolean).map((section) => (section.split("\n", 1)[0] ?? "").replace(/^#{1,6}\s+/, "").trim()) };
   }
 };
 
