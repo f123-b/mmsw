@@ -1,0 +1,177 @@
+import type { AnswerMode } from "./answer";
+
+export type InterviewStatus = "created" | "running" | "ended" | "error";
+export type HistoryQuestionStatus = "candidate" | "confirmed" | "superseded" | "answered" | "ignored";
+
+export interface InterviewRecord {
+  id: string;
+  profileId: string;
+  startedAt: number;
+  endedAt?: number;
+  status: InterviewStatus;
+  language: string;
+  automationMode: "MANUAL" | "AUTO";
+  createdAt: number;
+}
+
+export interface TranscriptRecord {
+  id: string;
+  interviewId: string;
+  source: "mic" | "remote";
+  text: string;
+  startMs: number;
+  endMs: number;
+  final: boolean;
+  confidence?: number;
+  createdAt: number;
+}
+
+export interface QuestionRecord {
+  id: string;
+  interviewId: string;
+  text: string;
+  confidence: "low" | "medium" | "high";
+  source: "rules" | "extractor";
+  detectedAt: number;
+  status: HistoryQuestionStatus;
+}
+
+export interface AnswerRecord {
+  id: string;
+  questionId: string;
+  text: string;
+  model: string;
+  mode?: AnswerMode;
+  latencyFirstToken?: number;
+  latencyTotal?: number;
+  cancelReason?: "user" | "superseded" | "timeout";
+  createdAt: number;
+}
+
+export interface InterviewSnapshot {
+  interview: InterviewRecord;
+  transcripts: TranscriptRecord[];
+  questions: QuestionRecord[];
+  answers: AnswerRecord[];
+}
+
+function id(prefix: string, now: number): string { return `${prefix}-${now}-${Math.random().toString(36).slice(2, 7)}`; }
+
+export class InterviewHistoryStore {
+  private readonly interviews = new Map<string, InterviewRecord>();
+  private readonly transcripts: TranscriptRecord[] = [];
+  private readonly questions: QuestionRecord[] = [];
+  private readonly answers: AnswerRecord[] = [];
+
+  createInterview(input: Omit<InterviewRecord, "id" | "createdAt">, now = Date.now()): InterviewRecord {
+    const interview = { ...input, id: id("interview", now), createdAt: now };
+    this.interviews.set(interview.id, interview);
+    return { ...interview };
+  }
+
+  endInterview(interviewId: string, status: "ended" | "error" = "ended", endedAt = Date.now()): InterviewRecord {
+    const interview = this.requireInterview(interviewId);
+    const next = { ...interview, status, endedAt };
+    this.interviews.set(interviewId, next);
+    return { ...next };
+  }
+
+  addTranscript(input: Omit<TranscriptRecord, "id" | "createdAt">, now = Date.now()): TranscriptRecord | undefined {
+    if (!input.final) return undefined;
+    const record = { ...input, id: id("transcript", now), createdAt: now };
+    this.transcripts.push(record);
+    return { ...record };
+  }
+
+  addQuestion(input: Omit<QuestionRecord, "id">): QuestionRecord {
+    const record = { ...input, id: id("question", input.detectedAt) };
+    this.questions.push(record);
+    return { ...record };
+  }
+
+  addAnswer(input: Omit<AnswerRecord, "id">): AnswerRecord {
+    const record = { ...input, id: id("answer", input.createdAt) };
+    this.answers.push(record);
+    return { ...record };
+  }
+
+  snapshot(interviewId: string): InterviewSnapshot {
+    return {
+      interview: { ...this.requireInterview(interviewId) },
+      transcripts: this.transcripts.filter((record) => record.interviewId === interviewId).map((record) => ({ ...record })),
+      questions: this.questions.filter((record) => record.interviewId === interviewId).map((record) => ({ ...record })),
+      answers: this.answers.filter((record) => this.questions.find((question) => question.id === record.questionId)?.interviewId === interviewId).map((record) => ({ ...record }))
+    };
+  }
+
+  listInterviews(): InterviewRecord[] { return [...this.interviews.values()].sort((left, right) => right.createdAt - left.createdAt).map((record) => ({ ...record })); }
+
+  private requireInterview(interviewId: string): InterviewRecord {
+    const interview = this.interviews.get(interviewId);
+    if (!interview) throw new Error(`Interview not found: ${interviewId}`);
+    return interview;
+  }
+}
+
+export interface InterviewMetrics {
+  durationMs: number;
+  remoteTranscriptCount: number;
+  micTranscriptCount: number;
+  remoteWordCount: number;
+  micWordCount: number;
+  questionCount: number;
+  answeredQuestionCount: number;
+  answerRate: number;
+  averageFirstTokenMs?: number;
+  averageAnswerLatencyMs?: number;
+}
+
+function wordCount(text: string): number { return text.trim().split(/\s+|(?=[\u4e00-\u9fff])|(?<=[\u4e00-\u9fff])/).filter(Boolean).length; }
+
+export function analyzeInterview(snapshot: InterviewSnapshot): InterviewMetrics {
+  const remote = snapshot.transcripts.filter((record) => record.source === "remote");
+  const mic = snapshot.transcripts.filter((record) => record.source === "mic");
+  const answered = snapshot.questions.filter((question) => question.status === "answered" || snapshot.answers.some((answer) => answer.questionId === question.id));
+  const firstTokens = snapshot.answers.map((answer) => answer.latencyFirstToken).filter((value): value is number => value !== undefined);
+  const totalLatencies = snapshot.answers.map((answer) => answer.latencyTotal).filter((value): value is number => value !== undefined);
+  return {
+    durationMs: Math.max(0, (snapshot.interview.endedAt ?? Date.now()) - snapshot.interview.startedAt),
+    remoteTranscriptCount: remote.length,
+    micTranscriptCount: mic.length,
+    remoteWordCount: remote.reduce((sum, record) => sum + wordCount(record.text), 0),
+    micWordCount: mic.reduce((sum, record) => sum + wordCount(record.text), 0),
+    questionCount: snapshot.questions.length,
+    answeredQuestionCount: answered.length,
+    answerRate: snapshot.questions.length ? answered.length / snapshot.questions.length : 0,
+    averageFirstTokenMs: firstTokens.length ? firstTokens.reduce((sum, value) => sum + value, 0) / firstTokens.length : undefined,
+    averageAnswerLatencyMs: totalLatencies.length ? totalLatencies.reduce((sum, value) => sum + value, 0) / totalLatencies.length : undefined
+  };
+}
+
+export const RECOVERY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 10_000] as const;
+
+export class SessionRecovery {
+  private attempt = 0;
+  nextDelayMs(): number { const delay = RECOVERY_DELAYS_MS[Math.min(this.attempt, RECOVERY_DELAYS_MS.length - 1)]; this.attempt += 1; return delay; }
+  reset(): void { this.attempt = 0; }
+}
+
+export interface UpdateManifest {
+  version: string;
+  url: string;
+  sha256: string;
+  signature: string;
+}
+
+function compareVersions(left: string, right: string): number {
+  const a = left.split(".").map((part) => Number(part) || 0);
+  const b = right.split(".").map((part) => Number(part) || 0);
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    if ((a[index] ?? 0) !== (b[index] ?? 0)) return (a[index] ?? 0) - (b[index] ?? 0);
+  }
+  return 0;
+}
+
+export function isSafeUpdate(currentVersion: string, manifest: UpdateManifest): boolean {
+  return Boolean(manifest.url && /^[a-f0-9]{64}$/i.test(manifest.sha256) && manifest.signature.length > 0 && compareVersions(manifest.version, currentVersion) > 0);
+}

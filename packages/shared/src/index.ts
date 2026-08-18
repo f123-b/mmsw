@@ -333,3 +333,4 @@ export * from "./answer";
 export * from "./profile";
 export * from "./knowledge";
 export * from "./agent";
+export * from "./history";
