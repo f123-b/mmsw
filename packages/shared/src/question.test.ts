@@ -33,4 +33,10 @@ describe("question scoring", () => {
     expect(scoreQuestion("为什么中断服务程序应该尽量短？", true).score).toBeGreaterThanOrEqual(0.82);
     expect(questionSimilarity("Clarke 和 Park 变换有什么区别？", "Clarke Park 变换区别")).toBeGreaterThan(0.3);
   });
+
+  it("recognizes implicit interview prompts without a question mark", () => {
+    const detector = new QuestionDetector();
+    detector.observe({ text: "请介绍一下你做过的实时音频项目", final: true, startMs: 0, endMs: 900 }, 900);
+    expect(detector.flush(1_500)[0]?.type).toBe("question_confirmed");
+  });
 });

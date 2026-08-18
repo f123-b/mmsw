@@ -5,7 +5,8 @@ import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { QuestionDetector, SessionStateMachine } from "@interview-copilot/shared";
+import { AnswerAgent, ModelRouter, OpenAICompatibleAnswerProvider, SessionStateMachine } from "@interview-copilot/shared";
+import { InterviewCoordinator, type InterviewStartOptions } from "./interview-coordinator";
 
 let mainWindow: BrowserWindow | undefined;
 let overlayManager: OverlayManager | undefined;
@@ -15,8 +16,20 @@ const screenshotManager = new ScreenshotManager({
 });
 const session = new SessionStateMachine();
 const realtimeSession = new RealtimeSession();
-const questionDetector = new QuestionDetector();
-let questionFlushTimer: NodeJS.Timeout | undefined;
+const configuredModel = process.env.INTERVIEW_COPILOT_LLM_MODEL ?? "gpt-4o-mini";
+const answerProvider = new OpenAICompatibleAnswerProvider({
+  providerName: process.env.INTERVIEW_COPILOT_LLM_PROVIDER ?? "OpenAI-compatible",
+  baseUrl: process.env.INTERVIEW_COPILOT_LLM_BASE_URL ?? "https://api.openai.com",
+  apiKey: process.env.INTERVIEW_COPILOT_LLM_API_KEY ?? "",
+  model: configuredModel,
+  timeoutMs: Number(process.env.INTERVIEW_COPILOT_LLM_TIMEOUT_MS ?? 30_000),
+  maxRetries: Number(process.env.INTERVIEW_COPILOT_LLM_MAX_RETRIES ?? 2)
+});
+const answerAgent = new AnswerAgent(
+  { fast: answerProvider, "low-latency": answerProvider, reasoning: answerProvider, vision: answerProvider },
+  new ModelRouter({ fast: configuredModel, "low-latency": configuredModel, reasoning: configuredModel, vision: configuredModel })
+);
+const interviewCoordinator = new InterviewCoordinator({ audio: audioManager, realtime: realtimeSession, session, answerAgent });
 const preloadPath = join(__dirname, "../preload/index.js");
 const rendererFile = join(__dirname, "../renderer/index.html");
 
@@ -69,7 +82,8 @@ function createMainWindow(): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle("audio:start", (_event, options: AudioStartOptions) => audioManager.start(options));
+  // This low-level entry point is diagnostics-only. Product interview start goes through the coordinator.
+  ipcMain.handle("audio:start", (_event, options: AudioStartOptions) => audioManager.start({ ...options, meterOnly: true, autoRecover: false }));
   ipcMain.handle("audio:stop", () => audioManager.stop());
   ipcMain.handle("audio:probe", (_event, options: AudioStartOptions) => audioManager.probe(options));
   ipcMain.handle("audio:list-devices", () => audioManager.listDevices());
@@ -89,11 +103,14 @@ function registerIpc(): void {
     realtimeSession.disconnect();
     return true;
   });
+  ipcMain.handle("interview:start", (_event, options: InterviewStartOptions) => interviewCoordinator.start(options));
+  ipcMain.handle("interview:stop", () => interviewCoordinator.stop("user"));
+  ipcMain.handle("interview:answer-latest", () => interviewCoordinator.answerLatest());
 }
 
 function registerShortcuts(): void {
   const shortcuts: Record<string, () => void> = {
-    [GLOBAL_SHORTCUTS.answerLatest]: () => broadcast("shortcut", "answer-latest"),
+    [GLOBAL_SHORTCUTS.answerLatest]: () => void interviewCoordinator.answerLatest(),
     [GLOBAL_SHORTCUTS.screenshotAnswer]: () => void captureScreenshot(),
     [GLOBAL_SHORTCUTS.toggleOverlay]: () => overlayManager?.toggle(),
     [GLOBAL_SHORTCUTS.toggleOverlayMode]: () => {
@@ -102,9 +119,7 @@ function registerShortcuts(): void {
     },
     [GLOBAL_SHORTCUTS.toggleAutomation]: () => broadcast("shortcut", "toggle-automation"),
     [GLOBAL_SHORTCUTS.endInterview]: () => {
-      if (session.canTransition("ENDING")) session.transition("ENDING");
-      broadcast("shortcut", "end-interview");
-      broadcast("session:state", session.state);
+      void interviewCoordinator.stop("user");
     }
   };
   for (const [accelerator, handler] of Object.entries(shortcuts)) {
@@ -126,23 +141,14 @@ app.whenReady().then(() => {
   audioManager.on("event", (event) => broadcast("audio:event", event));
   audioManager.on("process", (state) => broadcast("audio:process", state));
   audioManager.on("diagnostic", (message) => broadcast("audio:diagnostic", message));
-  audioManager.on("pcm-packet", (packet: Uint8Array) => realtimeSession.sendAudio(packet));
-  realtimeSession.on("state", (state) => broadcast("realtime:state", state));
-  realtimeSession.on("transcript", (snapshot, segment) => {
-    broadcast("realtime:transcript", snapshot);
-    if (snapshot.source !== "remote") return;
-    const events = questionDetector.observe(segment);
-    events.forEach((event) => broadcast("question:event", event));
-    if (segment.final) {
-      if (questionFlushTimer) clearTimeout(questionFlushTimer);
-      questionFlushTimer = setTimeout(() => {
-        questionFlushTimer = undefined;
-        questionDetector.flush().forEach((event) => broadcast("question:event", event));
-      }, 500);
-    }
+  interviewCoordinator.on("event", (event: { type: string; [key: string]: unknown }) => {
+    if (event.type === "session_state") broadcast("session:state", event.state);
+    if (event.type === "transcript") broadcast("realtime:transcript", event.snapshot);
+    if (event.type === "question") broadcast("question:event", event.event);
+    if (event.type === "realtime_message") broadcast("realtime:message", event.message);
+    if (event.type === "realtime_state") broadcast("realtime:state", event.state);
+    if (event.type === "diagnostic") broadcast("realtime:diagnostic", event.message);
   });
-  realtimeSession.on("message", (message) => broadcast("realtime:message", message));
-  realtimeSession.on("diagnostic", (message) => broadcast("realtime:diagnostic", message));
   session.subscribe((state) => broadcast("session:state", state));
 
   app.on("activate", () => {
@@ -152,9 +158,7 @@ app.whenReady().then(() => {
 
 app.on("before-quit", () => {
   globalShortcut.unregisterAll();
-  audioManager.stop();
-  realtimeSession.disconnect();
-  if (questionFlushTimer) clearTimeout(questionFlushTimer);
+  void interviewCoordinator.stop("user");
   overlayManager?.destroy();
 });
 

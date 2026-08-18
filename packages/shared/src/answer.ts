@@ -79,11 +79,11 @@ export interface ModelSelection {
 }
 
 export class ModelRouter {
-  constructor(private readonly models: Partial<Record<ModelRoute, string>> = {}) {}
+  constructor(private readonly models: Partial<Record<ModelRoute, string>> = {}, private readonly fallbackModel = "") {}
 
   select(question: string, mode: AnswerMode = "NORMAL", hasScreenshot = false): ModelSelection {
     const route: ModelRoute = hasScreenshot ? "vision" : mode === "FAST" ? "fast" : mode === "DEEP" || question.length > 80 ? "reasoning" : "low-latency";
-    return { route, model: this.models[route] ?? route };
+    return { route, model: this.models[route] ?? this.fallbackModel };
   }
 }
 
@@ -104,7 +104,7 @@ export type AnswerGenerationEvent =
 export class AnswerAgent {
   constructor(
     private readonly providers: Partial<Record<ModelRoute, AnswerProvider>>,
-    private readonly modelRouter = new ModelRouter(),
+    private readonly modelRouter = new ModelRouter({}, "configured-default"),
     private readonly contextRouter = new ContextRouter(),
     private readonly promptBuilder = new PromptBuilder()
   ) {}
@@ -112,6 +112,7 @@ export class AnswerAgent {
   async *stream(question: AnswerQuestion, mode: AnswerMode, contextInput: AnswerContextInput = {}, signal?: AbortSignal): AsyncGenerator<AnswerGenerationEvent> {
     const context = this.contextRouter.route(question.text, contextInput);
     const selection = this.modelRouter.select(question.text, mode);
+    if (!selection.model) throw new Error(`No model configured for ${selection.route}`);
     const provider = this.providers[selection.route];
     if (!provider) throw new Error(`No AnswerProvider configured for ${selection.route}`);
     const answerId = `answer-${Date.now()}-${question.id}`;

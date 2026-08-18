@@ -200,7 +200,7 @@ export interface QuestionDetectorOptions {
   similarityThreshold?: number;
 }
 
-const QUESTION_WORDS = /为什么|为何|怎么|如何|能不能|可不可以|什么|哪个|哪里|是否|有没有|请问|解释|介绍|区别|原理|原因|吗[？?。.!！]?|呢[？?。.!！]?/i;
+const QUESTION_WORDS = /为什么|为何|怎么|如何|能不能|可不可以|什么|哪个|哪里|是否|有没有|请问|解释|介绍|说一下|讲讲|展开|继续|优势|区别|原理|原因|怎么解决|那如果|再说说|吗[？?。.!！]?|呢[？?。.!！]?/i;
 
 function normalizeQuestionText(text: string): string {
   return text.replace(/[\s，。！？、,.!?]+/g, "").toLowerCase();
@@ -224,7 +224,7 @@ export function scoreQuestion(text: string, final: boolean): { score: number; co
   const normalized = text.trim();
   const hasQuestionWord = QUESTION_WORDS.test(normalized);
   const hasQuestionMark = /[？?]$/.test(normalized);
-  const hasEnoughContext = normalized.length >= 8;
+  const hasEnoughContext = normalized.length >= 6;
   const score = Math.min(0.98, (hasQuestionWord ? 0.5 : 0) + (hasQuestionMark ? 0.15 : 0) + (final ? 0.2 : 0) + (hasEnoughContext ? 0.15 : 0));
   const confidence: QuestionConfidence = score >= 0.88 ? "high" : score >= 0.65 ? "medium" : "low";
   return { score, confidence };
@@ -334,3 +334,5 @@ export * from "./profile";
 export * from "./knowledge";
 export * from "./agent";
 export * from "./history";
+export * from "./transcript-aggregator";
+export * from "./providers";

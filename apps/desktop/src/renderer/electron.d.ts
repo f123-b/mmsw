@@ -3,6 +3,7 @@ import type { ScreenshotResult } from "../main/screenshot-manager";
 import type { AudioDevices, AudioSidecarEvent } from "@interview-copilot/protocol";
 import type { RealtimeServerMessage } from "@interview-copilot/protocol";
 import type { RealtimeConnectOptions } from "../main/realtime-session";
+import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { OverlayMode } from "../main/overlay-manager";
@@ -31,6 +32,11 @@ declare global {
       realtime: {
         connect(options: RealtimeConnectOptions): Promise<boolean>;
         disconnect(): Promise<boolean>;
+      };
+      interview: {
+        start(options: InterviewStartOptions): Promise<string>;
+        stop(): Promise<void>;
+        answerLatest(): Promise<void>;
       };
       events: {
         onAudio(listener: (event: AudioSidecarEvent) => void): () => void;
