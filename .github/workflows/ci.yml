@@ -23,8 +23,14 @@ jobs:
       - name: Ensure Electron runtime
         shell: pwsh
         run: |
-          $nodeModules = (npm root --workspace apps/desktop).Trim()
-          node (Join-Path $nodeModules "electron/install.js")
+          $installScript = Join-Path $PWD "node_modules/electron/install.js"
+          if (-not (Test-Path -LiteralPath $installScript)) {
+            $installScript = Join-Path $PWD "apps/desktop/node_modules/electron/install.js"
+          }
+          if (-not (Test-Path -LiteralPath $installScript)) {
+            throw "Electron install script not found: $installScript"
+          }
+          node $installScript
 
       - name: Run JavaScript tests
         run: npm test
