@@ -44,4 +44,14 @@ describe("workspace safety and tool approvals", () => {
     await run;
     expect(events.map((event) => event.type)).toEqual(["step", "tool_call", "approval_required", "tool_result", "step", "completed"]);
   });
+
+  it("rejects a model tool call that is not registered instead of throwing the run", async () => {
+    const registry = new AgentToolRegistry(new ToolApprovalPolicy("FULL_ACCESS"));
+    const runtime = new PreparationAgentRuntime({
+      next: async ({ history }) => history.length === 0 ? { type: "tool_call", tool: "web_search", args: {} } : { type: "final", summary: "继续" }
+    }, registry, { workspaceRoot: "C:/workspace" }, 4);
+    const events: string[] = [];
+    for await (const event of runtime.run("查资料")) events.push(event.type);
+    expect(events).toEqual(["step", "tool_call", "rejected", "step", "completed"]);
+  });
 });

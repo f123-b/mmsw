@@ -1,7 +1,7 @@
 import type { AnswerMode } from "./answer";
 
 export type InterviewStatus = "created" | "running" | "ended" | "error";
-export type HistoryQuestionStatus = "candidate" | "confirmed" | "superseded" | "answered" | "ignored";
+export type HistoryQuestionStatus = "candidate" | "confirmed" | "answering" | "superseded" | "answered" | "ignored";
 
 export interface InterviewRecord {
   id: string;
@@ -44,6 +44,9 @@ export interface AnswerRecord {
   mode?: AnswerMode;
   latencyFirstToken?: number;
   latencyTotal?: number;
+  startedAt?: number;
+  firstTokenAt?: number;
+  finishedAt?: number;
   cancelReason?: "user" | "superseded" | "timeout";
   createdAt: number;
 }
@@ -87,6 +90,14 @@ export class InterviewHistoryStore {
     const record = { ...input, id: id("question", input.detectedAt) };
     this.questions.push(record);
     return { ...record };
+  }
+
+  updateQuestionStatus(questionId: string, status: HistoryQuestionStatus): QuestionRecord | undefined {
+    const index = this.questions.findIndex((question) => question.id === questionId);
+    if (index < 0) return undefined;
+    const next = { ...this.questions[index], status };
+    this.questions[index] = next;
+    return { ...next };
   }
 
   addAnswer(input: Omit<AnswerRecord, "id">): AnswerRecord {

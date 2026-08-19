@@ -47,6 +47,7 @@ export interface InterviewHistoryPort {
   endInterview(interviewId: string, status?: "ended" | "error", endedAt?: number): InterviewRecord;
   addTranscript(input: Omit<TranscriptRecord, "id" | "createdAt">, now?: number): TranscriptRecord | undefined;
   addQuestion(input: Omit<QuestionRecord, "id">): QuestionRecord;
+  updateQuestionStatus?(questionId: string, status: QuestionRecord["status"]): QuestionRecord | undefined;
   addAnswer(input: Omit<AnswerRecord, "id">): AnswerRecord;
 }
 
@@ -58,8 +59,8 @@ export interface InterviewCoordinatorOptions {
   detector?: QuestionDetector;
   aggregator?: TranscriptAggregator;
   history?: InterviewHistoryPort;
-  contextProvider?: (question: QuestionCandidate, profileId: string) => AnswerContextInput | Promise<AnswerContextInput>;
-  asrSettingsProvider?: () => { providerName: string; apiKey: string; model: string };
+  contextProvider?: (question: QuestionCandidate, profileId: string, recentTranscript: string[]) => AnswerContextInput | Promise<AnswerContextInput>;
+  asrSettingsProvider?: () => { providerName: string; model: string };
   now?: () => number;
 }
 
@@ -69,6 +70,8 @@ export type InterviewCoordinatorEvent =
   | { type: "question"; event: QuestionEvent }
   | { type: "realtime_message"; message: RealtimeServerMessage }
   | { type: "realtime_state"; state: RealtimeConnectionState }
+  | { type: "automation_mode"; mode: "MANUAL" | "AUTO" }
+  | { type: "answer_mode"; mode: AnswerMode }
   | { type: "diagnostic"; message: string };
 
 export class InterviewCoordinator extends EventEmitter {
@@ -76,13 +79,20 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly aggregator: TranscriptAggregator;
   private readonly history: InterviewHistoryPort;
   private readonly now: () => number;
-  private readonly contextProvider: (question: QuestionCandidate, profileId: string) => AnswerContextInput | Promise<AnswerContextInput>;
+  private readonly contextProvider: (question: QuestionCandidate, profileId: string, recentTranscript: string[]) => AnswerContextInput | Promise<AnswerContextInput>;
   private activeInterviewId: string | undefined;
   private activeOptions: InterviewStartOptions | undefined;
   private activeProfileId: string | undefined;
   private currentQuestion: QuestionCandidate | undefined;
   private answerController: AbortController | undefined;
   private answerId: string | undefined;
+  private answerQuestionId: string | undefined;
+  private answerMode: AnswerMode | undefined;
+  private answerModel: string | undefined;
+  private answerStartedAt: number | undefined;
+  private answerFirstTokenAt: number | undefined;
+  private readonly questionConfirmedAt = new Map<string, number>();
+  private readonly recentTranscript: string[] = [];
   private readonly historyQuestionIds = new Map<string, string>();
   private questionFlushTimer: NodeJS.Timeout | undefined;
 
@@ -98,6 +108,17 @@ export class InterviewCoordinator extends EventEmitter {
 
   get interviewId(): string | undefined { return this.activeInterviewId; }
   get running(): boolean { return Boolean(this.activeInterviewId); }
+  get automationMode(): "MANUAL" | "AUTO" { return this.activeOptions?.automationMode ?? "MANUAL"; }
+
+  setAutomationMode(mode: "MANUAL" | "AUTO"): void {
+    if (this.activeOptions) this.activeOptions = { ...this.activeOptions, automationMode: mode };
+    this.emitEvent({ type: "automation_mode", mode });
+  }
+
+  setAnswerMode(mode: AnswerMode): void {
+    if (this.activeOptions) this.activeOptions = { ...this.activeOptions, answerMode: mode };
+    this.emitEvent({ type: "answer_mode", mode });
+  }
 
   async start(startOptions: InterviewStartOptions): Promise<string> {
     if (!startOptions.url.trim()) throw new Error("ASR WebSocket URL is required");
@@ -116,12 +137,14 @@ export class InterviewCoordinator extends EventEmitter {
     this.activeProfileId = startOptions.profileId;
     this.currentQuestion = undefined;
     this.historyQuestionIds.clear();
+    this.questionConfirmedAt.clear();
+    this.recentTranscript.length = 0;
     this.aggregator.clear();
     this.transition("CONNECTING");
     try {
       // The real interview path deliberately omits meterOnly so PCM reaches ASR.
       const asrSettings = this.options.asrSettingsProvider?.();
-      this.options.realtime.connect({ url: startOptions.url, ticket: startOptions.ticket, autoReconnect: true, ...asrSettings });
+      this.options.realtime.connect({ url: startOptions.url, gatewayToken: startOptions.gatewayToken, autoReconnect: true, ...asrSettings });
       this.options.audio.start({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true });
     } catch (error) {
       this.failInterview(String(error));
@@ -146,6 +169,8 @@ export class InterviewCoordinator extends EventEmitter {
     this.activeOptions = undefined;
     this.activeProfileId = undefined;
     this.currentQuestion = undefined;
+    this.questionConfirmedAt.clear();
+    this.recentTranscript.length = 0;
     this.aggregator.clear();
   }
 
@@ -176,22 +201,38 @@ export class InterviewCoordinator extends EventEmitter {
     this.cancelAnswer("superseded");
     this.currentQuestion = question;
     this.detector.markAnswering(question.id);
+    this.options.history?.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "answering");
     const controller = new AbortController();
     this.answerController = controller;
     const startedAt = this.now();
     try {
-      const context = await this.contextProvider(question, this.activeProfileId ?? "");
+      const context = await this.contextProvider(question, this.activeProfileId ?? "", [...this.recentTranscript]);
       for await (const event of this.options.answerAgent.stream({ id: question.id, text: question.text }, mode, context, controller.signal, streamOptions)) {
         if (controller.signal.aborted) return;
         if (event.type === "answer_start") {
           this.answerId = event.answerId;
-          this.emit("event", { type: "realtime_message", message: { type: "answer_start", answerId: event.answerId, questionId: event.questionId, mode: event.mode } });
+          this.answerQuestionId = question.id;
+          this.answerMode = event.mode;
+          this.answerModel = event.model;
+          this.answerStartedAt = this.now();
+          this.answerFirstTokenAt = undefined;
+          this.emit("event", { type: "realtime_message", message: { type: "answer_start", answerId: event.answerId, questionId: event.questionId, mode: event.mode, model: event.model } });
         } else if (event.type === "answer_delta") {
+          this.answerFirstTokenAt ??= this.now();
           this.emit("event", { type: "realtime_message", message: { type: "answer_delta", answerId: event.answerId, delta: event.delta } });
         } else {
+          const finishedAt = this.now();
           this.emit("event", { type: "realtime_message", message: { type: "answer_end", answerId: event.answerId, text: event.text } });
-          this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: event.text, model: "configured", mode, latencyFirstToken: undefined, latencyTotal: this.now() - startedAt, createdAt: this.now() });
+          const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
+          this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: event.text, model: this.answerModel ?? "configured", mode: this.answerMode ?? mode, startedAt: this.answerStartedAt ?? startedAt, firstTokenAt: this.answerFirstTokenAt, finishedAt, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
           this.detector.markAnswered(question.id);
+          this.options.history?.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "answered");
+          this.answerId = undefined;
+          this.answerQuestionId = undefined;
+          this.answerMode = undefined;
+          this.answerModel = undefined;
+          this.answerStartedAt = undefined;
+          this.answerFirstTokenAt = undefined;
         }
       }
     } catch (error) {
@@ -217,17 +258,20 @@ export class InterviewCoordinator extends EventEmitter {
     this.options.realtime.on("transcript", (snapshot: unknown, segment: TranscriptSegment) => {
       this.emit("event", { type: "transcript", snapshot, segment });
       if (!this.activeInterviewId) return;
-      if (segment.final) this.history.addTranscript({ interviewId: this.activeInterviewId, source: segment.source, text: segment.text, startMs: segment.startMs, endMs: segment.endMs, final: true, confidence: segment.confidence });
+      if (segment.final) {
+        this.history.addTranscript({ interviewId: this.activeInterviewId, source: segment.source, text: segment.text, startMs: segment.startMs, endMs: segment.endMs, final: true, confidence: segment.confidence });
+        this.recentTranscript.push(`${segment.source === "remote" ? "面试官" : "我"}：${segment.text}`);
+        while (this.recentTranscript.length > 12) this.recentTranscript.shift();
+      }
       if (segment.source !== "remote") return;
       const utterance = this.aggregator.push(segment);
       if (!utterance) return;
-      this.detector.observe(utterance, this.now()).forEach((event) => this.emitQuestion(event));
+      this.detector.observe(utterance, this.now()).forEach((event) => this.handleQuestionEvent(event));
       if (this.questionFlushTimer) clearTimeout(this.questionFlushTimer);
       this.questionFlushTimer = setTimeout(() => {
         this.questionFlushTimer = undefined;
         this.detector.flush(this.now()).forEach((event) => {
-          this.emitQuestion(event);
-          if (event.type === "question_confirmed" && this.activeOptions?.automationMode === "AUTO") void this.answer(event.question);
+          this.handleQuestionEvent(event);
         });
       }, 500);
     });
@@ -241,17 +285,38 @@ export class InterviewCoordinator extends EventEmitter {
       if (this.activeInterviewId) {
         const stored = this.history.addQuestion({ interviewId: this.activeInterviewId, text: event.question.text, confidence: event.question.confidence, source: event.question.source, detectedAt: event.question.detectedAt, status: event.question.status });
         this.historyQuestionIds.set(event.question.id, stored.id);
+        this.questionConfirmedAt.set(event.question.id, this.now());
+      }
+      if (event.type === "question_superseded") {
+        const previousId = this.historyQuestionIds.get(event.previousQuestionId);
+        if (previousId) this.history.updateQuestionStatus?.(previousId, "superseded");
+        this.detector.markSuperseded(event.previousQuestionId);
       }
     }
     this.emitEvent({ type: "question", event });
   }
 
+  private handleQuestionEvent(event: QuestionEvent): void {
+    this.emitQuestion(event);
+    if ((event.type === "question_confirmed" || event.type === "question_superseded") && this.activeOptions?.automationMode === "AUTO") void this.answer(event.question);
+  }
+
   private cancelAnswer(reason: "user" | "superseded" | "timeout"): void {
     const answerId = this.answerId;
+    const questionId = this.answerQuestionId;
+    const now = this.now();
     this.answerController?.abort();
     this.answerController = undefined;
     this.answerId = undefined;
-    if (answerId) this.emitAnswerCancelled(answerId, reason);
+    if (answerId) {
+      this.emitAnswerCancelled(answerId, reason);
+      if (questionId) this.history.addAnswer({ questionId: this.historyQuestionIds.get(questionId) ?? questionId, text: "", model: this.answerModel ?? "unknown", mode: this.answerMode, startedAt: this.answerStartedAt, firstTokenAt: this.answerFirstTokenAt, finishedAt: now, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - (this.questionConfirmedAt.get(questionId) ?? now), latencyTotal: now - (this.questionConfirmedAt.get(questionId) ?? now), cancelReason: reason, createdAt: now });
+    }
+    this.answerQuestionId = undefined;
+    this.answerMode = undefined;
+    this.answerModel = undefined;
+    this.answerStartedAt = undefined;
+    this.answerFirstTokenAt = undefined;
   }
 
   private emitAnswerCancelled(answerId: string, reason: "user" | "superseded" | "timeout"): void {

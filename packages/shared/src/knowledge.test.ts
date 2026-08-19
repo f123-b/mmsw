@@ -32,4 +32,15 @@ describe("hybrid retrieval", () => {
     expect(results[0]?.id).toBe("1");
     expect(results[0]?.keywordScore).toBeGreaterThan(0);
   });
+
+  it("uses MMR-style diversity when nearby chunks repeat the same passage", () => {
+    const chunks = [
+      { id: "near-1", text: "中断服务程序要短，避免阻塞", metadata: { documentId: "d1", filename: "a" } },
+      { id: "near-2", text: "中断服务程序应当快速返回，避免阻塞任务", metadata: { documentId: "d1", filename: "a" } },
+      { id: "other", text: "通过消息队列把工作交给任务上下文", metadata: { documentId: "d2", filename: "b" } }
+    ];
+    const results = new HybridRetriever().search("中断 任务 消息 队列", chunks, { topK: 2 });
+    expect(results).toHaveLength(2);
+    expect(new Set(results.map((result) => result.metadata.documentId)).size).toBe(2);
+  });
 });

@@ -81,6 +81,10 @@ export class AgentToolRegistry {
 
   approve(requestId: string): void { this.approvalPolicy.approve(requestId); }
 
+  registeredTools(): AgentToolName[] { return [...this.tools.keys()]; }
+
+  has(name: AgentToolName): boolean { return this.tools.has(name); }
+
   async invoke(requestId: string, name: AgentToolName, args: Record<string, unknown>, context: AgentToolContext): Promise<ToolInvocationResult> {
     const tool = this.tools.get(name);
     if (!tool) throw new Error(`Tool is not registered: ${name}`);
@@ -144,6 +148,11 @@ export class PreparationAgentRuntime {
       }
       const requestId = `prep-${Date.now()}-${index}`;
       yield { type: "tool_call", index, requestId, tool: step.tool, args: step.args, ...(step.rationale ? { rationale: step.rationale } : {}) };
+      if (!this.registry.has(step.tool)) {
+        yield { type: "rejected", requestId, tool: step.tool };
+        history.push({ role: "tool", content: `Tool ${step.tool} is not available in this run.` });
+        continue;
+      }
       const invocation = await this.registry.invoke(requestId, step.tool, step.args, this.context);
       if (invocation.status === "approval_required") {
         yield { type: "approval_required", requestId: invocation.requestId, tool: invocation.tool, risk: invocation.risk };

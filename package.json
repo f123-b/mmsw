@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Realtime interview copilot desktop application",
   "workspaces": [
+    "apps/asr-gateway",
     "apps/desktop",
     "packages/protocol",
     "packages/shared"

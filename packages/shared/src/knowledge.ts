@@ -106,7 +106,7 @@ export interface Reranker {
 }
 
 function keywordScore(query: string, text: string): number {
-  const queryTerms = query.toLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/i).filter(Boolean);
+  const queryTerms = query.toLowerCase().match(/[a-z0-9]+|[\u4e00-\u9fff]/gi) ?? [];
   if (queryTerms.length === 0) return 0;
   const normalized = text.toLowerCase();
   return queryTerms.filter((term) => normalized.includes(term)).length / queryTerms.length;
@@ -125,6 +125,15 @@ function cosineSimilarity(left: number[], right: number[]): number {
   return leftNorm && rightNorm ? dot / Math.sqrt(leftNorm * rightNorm) : 0;
 }
 
+function textSimilarity(left: string, right: string): number {
+  const tokens = (text: string) => new Set(text.toLowerCase().match(/[a-z0-9\u4e00-\u9fff]+/gi) ?? []);
+  const a = tokens(left);
+  const b = tokens(right);
+  if (a.size === 0 && b.size === 0) return 1;
+  const intersection = [...a].filter((token) => b.has(token)).length;
+  return intersection / Math.max(1, new Set([...a, ...b]).size);
+}
+
 export interface RetrievalResult extends KnowledgeChunk {
   score: number;
   keywordScore: number;
@@ -132,9 +141,9 @@ export interface RetrievalResult extends KnowledgeChunk {
 }
 
 export class HybridRetriever {
-  search(query: string, chunks: KnowledgeChunk[], options: { topK?: number; embeddingProvider?: EmbeddingProvider; reranker?: Reranker } = {}): RetrievalResult[] {
+  search(query: string, chunks: KnowledgeChunk[], options: { topK?: number; candidateK?: number; embeddingProvider?: EmbeddingProvider; reranker?: Reranker } = {}): RetrievalResult[] {
     const queryEmbedding = options.embeddingProvider?.embed(query);
-    return chunks
+    const scored = chunks
       .map((chunk) => {
         const keywords = keywordScore(query, chunk.text);
         const vector = queryEmbedding && chunk.embedding ? Math.max(0, cosineSimilarity(queryEmbedding, chunk.embedding)) : 0;
@@ -144,6 +153,19 @@ export class HybridRetriever {
       })
       .filter((chunk) => chunk.score > 0)
       .sort((left, right) => right.score - left.score)
-      .slice(0, options.topK ?? 6);
+      .slice(0, options.candidateK ?? Math.max(16, (options.topK ?? 6) * 3));
+    const selected: RetrievalResult[] = [];
+    const topK = options.topK ?? 6;
+    while (selected.length < topK && scored.length > 0) {
+      let bestIndex = 0;
+      let bestValue = Number.NEGATIVE_INFINITY;
+      scored.forEach((candidate, index) => {
+        const redundancy = selected.reduce((maximum, previous) => Math.max(maximum, textSimilarity(candidate.text, previous.text)), 0);
+        const diversityValue = candidate.score * 0.78 - redundancy * 0.22;
+        if (diversityValue > bestValue) { bestValue = diversityValue; bestIndex = index; }
+      });
+      selected.push(scored.splice(bestIndex, 1)[0]);
+    }
+    return selected;
   }
 }

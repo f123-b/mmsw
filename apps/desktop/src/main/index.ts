@@ -1,11 +1,12 @@
 import { app, BrowserWindow, globalShortcut, ipcMain } from "electron";
-import { join } from "node:path";
+import { join, relative } from "node:path";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { AudioManager, type AudioStartOptions } from "./audio-manager";
 import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { AGENT_TOOL_NAMES, analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, HybridRetriever, ModelRouter, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, SessionStateMachine, ToolApprovalPolicy, type AnswerProvider, type PreparationModel, type PreparationModelStep, type ProviderSettings } from "@interview-copilot/shared";
+import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, generatePostInterviewAnalysis, HybridRetriever, ModelRouter, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type PreparationModel, type PreparationModelStep, type ProviderSettings } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewStartOptions } from "./interview-coordinator";
 import { openAppDatabase, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileRepository, type SqliteDatabase } from "./database";
 import { createSecretStore, MemorySecretStore, ProviderConfigStore, type ProviderSection } from "./settings-store";
@@ -82,9 +83,13 @@ async function captureScreenshot(trigger = "screenshot-answer"): Promise<void> {
     const result = await screenshotManager.capturePrimaryDisplay();
     broadcast("screenshot:captured", result);
     broadcast("shortcut", trigger);
-    if (trigger === "screenshot-answer" && interviewCoordinator?.running) void interviewCoordinator.answerScreenshot(result.dataUrl);
+    if (trigger === "screenshot-answer" && interviewCoordinator?.running) {
+      try { await interviewCoordinator.answerScreenshot(result.dataUrl); }
+      finally { await screenshotManager.cleanup(result); }
+    }
   } catch (error) {
     broadcast("screenshot:error", String(error));
+    broadcast("runtime:error", { code: "SCREENSHOT_FAILED", message: "截图失败，请重试", recoverable: true });
   }
 }
 
@@ -105,6 +110,56 @@ function createMainWindow(): void {
   });
   void loadRenderer(mainWindow);
   mainWindow.on("closed", () => { mainWindow = undefined; });
+}
+
+const MAX_AGENT_FILE_BYTES = 1_000_000;
+
+function agentWorkspace(profileId: string): string {
+  return join(app.getPath("userData"), "workspaces", profileId);
+}
+
+async function runPostAnalysis(interviewId: string): Promise<void> {
+  const snapshot = historyRepository?.snapshot(interviewId);
+  const settings = providerConfigStore?.get("llm");
+  if (!snapshot || !settings?.apiKey || !settings.model || !historyRepository) return;
+  try {
+    const analysis = await generatePostInterviewAnalysis(snapshot, answerProvider, settings.model);
+    historyRepository.saveAnalysis(interviewId, analysis);
+    broadcast("history:analysis-ready", { interviewId, analysis });
+  } catch (error) {
+    appLogger?.warn("post interview analysis failed", { interviewId, error: String(error) });
+  }
+}
+
+async function stopInterviewWithAnalysis(): Promise<void> {
+  const interviewId = coordinator().interviewId;
+  await coordinator().stop("user");
+  if (interviewId) void runPostAnalysis(interviewId);
+}
+
+function agentArg(args: Record<string, unknown>, name: string): string {
+  const value = args[name];
+  if (typeof value !== "string" || !value.trim()) throw new Error(`Missing tool argument: ${name}`);
+  return value;
+}
+
+async function listWorkspaceFiles(root: string, directory = root): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const absolute = join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...await listWorkspaceFiles(root, absolute));
+    else files.push(relative(root, absolute).replace(/\\/g, "/"));
+    if (files.length >= 500) break;
+  }
+  return files.slice(0, 500);
+}
+
+async function readWorkspaceFile(root: string, requestedPath: string): Promise<string> {
+  const absolute = workspacePath(root, requestedPath);
+  const bytes = await readFile(absolute);
+  if (bytes.byteLength > MAX_AGENT_FILE_BYTES) throw new Error("Workspace file exceeds the 1 MB tool limit");
+  return bytes.toString("utf8");
 }
 
 function registerIpc(): void {
@@ -130,8 +185,10 @@ function registerIpc(): void {
     return true;
   });
   ipcMain.handle("interview:start", (_event, options: InterviewStartOptions) => coordinator().start(options));
-  ipcMain.handle("interview:stop", () => coordinator().stop("user"));
+  ipcMain.handle("interview:stop", () => stopInterviewWithAnalysis());
   ipcMain.handle("interview:answer-latest", () => coordinator().answerLatest());
+  ipcMain.handle("interview:set-automation-mode", (_event, mode: "MANUAL" | "AUTO") => { coordinator().setAutomationMode(mode); return true; });
+  ipcMain.handle("interview:set-answer-mode", (_event, mode: "FAST" | "NORMAL" | "DEEP") => { coordinator().setAnswerMode(mode); return true; });
   ipcMain.handle("profiles:list", () => profileRepository?.list() ?? []);
   ipcMain.handle("profiles:get", (_event, profileId: string) => profileRepository?.get(profileId));
   ipcMain.handle("profiles:save", (_event, input: Parameters<SqliteProfileRepository["save"]>[0]) => profileRepository?.save(input));
@@ -158,8 +215,16 @@ function registerIpc(): void {
     const material = { rawContent: parsed.text, summary };
     return profileRepository.save({ ...profile, ...(input.kind === "resume" ? { resume: material } : { jobDescription: material }), updatedAt: Date.now() });
   });
+  ipcMain.handle("profiles:remove-material", (_event, profileId: string, kind: "resume" | "jobDescription") => {
+    if (!profileRepository) throw new Error("Profile database is still initializing");
+    const profile = profileRepository.get(profileId);
+    if (!profile) throw new Error("Profile not found");
+    return profileRepository.save({ ...profile, ...(kind === "resume" ? { resume: undefined } : { jobDescription: undefined }), updatedAt: Date.now() });
+  });
   ipcMain.handle("knowledge:list-bases", () => knowledgeRepository?.listKnowledgeBases() ?? []);
   ipcMain.handle("knowledge:create-base", (_event, name: string) => knowledgeRepository?.createKnowledgeBase(name));
+  ipcMain.handle("knowledge:rename-base", (_event, knowledgeBaseId: string, name: string) => knowledgeRepository?.renameKnowledgeBase(knowledgeBaseId, name));
+  ipcMain.handle("knowledge:delete-base", (_event, knowledgeBaseId: string) => { knowledgeRepository?.deleteKnowledgeBase(knowledgeBaseId); return true; });
   ipcMain.handle("knowledge:list-documents", (_event, knowledgeBaseId?: string) => knowledgeRepository?.listDocuments(knowledgeBaseId) ?? []);
   ipcMain.handle("knowledge:ingest", async (_event, input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array }) => {
     if (!knowledgeRepository) throw new Error("Knowledge database is still initializing");
@@ -181,37 +246,66 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("knowledge:delete", (_event, documentId: string) => { knowledgeRepository?.deleteDocument(documentId); return true; });
+  ipcMain.handle("knowledge:reindex", async (_event, documentId: string) => {
+    if (!knowledgeRepository) throw new Error("Knowledge database is still initializing");
+    const document = knowledgeRepository.getDocument(documentId);
+    if (!document) throw new Error("Knowledge document not found");
+    try {
+      const chunks = chunkText(document.text, { documentId: document.id, filename: document.filename });
+      const embeddingSettings = providerConfigStore?.get("embedding");
+      if (embeddingSettings?.apiKey && embeddingSettings.model) {
+        const embeddingProvider = new OpenAICompatibleEmbeddingProvider(embeddingSettings);
+        for (const chunk of chunks) chunk.embedding = await embeddingProvider.embed(chunk.text);
+      }
+      knowledgeRepository.replaceChunks(document.id, chunks);
+      return knowledgeRepository.saveDocument({ ...document, status: "ready", error: undefined });
+    } catch (error) {
+      return knowledgeRepository.saveDocument({ ...document, status: "error", error: String(error) });
+    }
+  });
   ipcMain.handle("history:list", () => historyRepository?.listInterviews() ?? []);
   ipcMain.handle("history:get", (_event, interviewId: string) => historyRepository?.snapshot(interviewId));
   ipcMain.handle("history:analyze", (_event, interviewId: string) => { const snapshot = historyRepository?.snapshot(interviewId); return snapshot ? analyzeInterview(snapshot) : undefined; });
-  ipcMain.handle("preparation:start", (_event, goal: string) => {
+  ipcMain.handle("history:get-analysis", (_event, interviewId: string) => historyRepository?.getAnalysis(interviewId));
+  ipcMain.handle("history:delete", (_event, interviewId: string) => { historyRepository?.deleteInterview(interviewId); return true; });
+  ipcMain.handle("preparation:start", async (_event, goal: string) => {
     if (!profileRepository) throw new Error("Profile database is still initializing");
     if (preparationRuntime) throw new Error("A preparation run is already active");
     const profile = profileRepository.active();
     if (!profile) throw new Error("Create a profile before starting preparation");
+    const workspaceRoot = agentWorkspace(profile.id);
+    await mkdir(workspaceRoot, { recursive: true });
     const registry = new AgentToolRegistry(new ToolApprovalPolicy("ASK_EVERY_TIME"))
+      .register({ name: "read_file", risk: "read", execute: async (args, context) => readWorkspaceFile(context.workspaceRoot, agentArg(args, "path")) })
+      .register({ name: "write_file", risk: "write", execute: async (args, context) => { const path = agentArg(args, "path"); const content = agentArg(args, "content"); if (Buffer.byteLength(content, "utf8") > MAX_AGENT_FILE_BYTES) throw new Error("Workspace file exceeds the 1 MB tool limit"); const absolute = workspacePath(context.workspaceRoot, path); await mkdir(join(absolute, ".."), { recursive: true }); await writeFile(absolute, content, "utf8"); return { path, bytes: Buffer.byteLength(content, "utf8") }; } })
+      .register({ name: "edit_file", risk: "write", execute: async (args, context) => { const path = agentArg(args, "path"); const find = agentArg(args, "find"); const replace = agentArg(args, "replace"); const current = await readWorkspaceFile(context.workspaceRoot, path); if (!current.includes(find)) throw new Error("Edit target was not found"); const next = current.replace(find, replace); await writeFile(workspacePath(context.workspaceRoot, path), next, "utf8"); return { path, changed: true }; } })
+      .register({ name: "list_files", risk: "read", execute: async (args, context) => { const requested = typeof args.path === "string" && args.path ? args.path : undefined; const root = requested ? workspacePath(context.workspaceRoot, requested) : context.workspaceRoot; return listWorkspaceFiles(context.workspaceRoot, root); } })
+      .register({ name: "search_files", risk: "read", execute: async (args, context) => { const query = agentArg(args, "query"); const files = await listWorkspaceFiles(context.workspaceRoot); const matches: Array<{ path: string; lines: string[] }> = []; for (const path of files) { const content = await readWorkspaceFile(context.workspaceRoot, path).catch(() => ""); const lines = content.split(/\r?\n/).map((line, index) => `${index + 1}: ${line}`).filter((line) => line.toLowerCase().includes(query.toLowerCase())).slice(0, 8); if (lines.length) matches.push({ path, lines }); if (matches.length >= 50) break; } return matches; } })
+      .register({ name: "parse_document", risk: "read", execute: async (args, context) => { const path = agentArg(args, "path"); const bytes = await readFile(workspacePath(context.workspaceRoot, path)); if (bytes.byteLength > MAX_AGENT_FILE_BYTES) throw new Error("Workspace document exceeds the 1 MB tool limit"); return parseDocument({ documentId: `agent-${Date.now()}`, filename: path, mimeType: "application/octet-stream", bytes: new Uint8Array(bytes) }); } })
       .register({ name: "get_profile", risk: "read", execute: async () => profileRepository?.get(profile.id) })
-      .register({ name: "update_profile", risk: "write", execute: async (args) => profileRepository?.save({ ...profile, ...args, id: profile.id, updatedAt: Date.now() }) })
+      .register({ name: "update_profile", risk: "write", execute: async (args) => { const current = profileRepository?.get(profile.id); if (!current) throw new Error("Profile not found"); const updates = { ...(typeof args.name === "string" ? { name: args.name } : {}), ...(typeof args.language === "string" ? { language: args.language } : {}), ...(typeof args.instructions === "string" ? { instructions: args.instructions } : {}) }; return profileRepository?.save({ ...current, ...updates, id: profile.id, updatedAt: Date.now() }); } })
       .register({ name: "create_skill", risk: "write", execute: async (args) => { const current = profileRepository?.get(profile.id); if (!current) throw new Error("Profile not found"); const skill = createSkill({ name: String(args.name ?? "新技能"), description: String(args.description ?? ""), content: String(args.content ?? ""), tags: Array.isArray(args.tags) ? args.tags.map(String) : [] }); return profileRepository?.save({ ...current, skills: [...current.skills, skill] }); } })
-      .register({ name: "retrieve_knowledge", risk: "read", execute: async (args) => { const query = String(args.query ?? goal); const chunks = knowledgeRepository?.listChunks(profile.knowledgeBaseIds) ?? []; return new HybridRetriever().search(query, chunks, { topK: 6 }).map((chunk) => chunk.text); } });
+      .register({ name: "update_skill", risk: "write", execute: async (args) => { const current = profileRepository?.get(profile.id); if (!current) throw new Error("Profile not found"); const target = current.skills.find((skill) => skill.id === String(args.skillId ?? args.id ?? "")); if (!target) throw new Error("Skill not found"); const skills = current.skills.map((skill) => skill.id === target.id ? { ...skill, ...(typeof args.name === "string" ? { name: args.name } : {}), ...(typeof args.description === "string" ? { description: args.description } : {}), ...(typeof args.content === "string" ? { content: args.content } : {}), ...(Array.isArray(args.tags) ? { tags: args.tags.map(String) } : {}) } : skill); return profileRepository?.save({ ...current, skills }); } })
+      .register({ name: "retrieve_knowledge", risk: "read", execute: async (args) => { const query = String(args.query ?? goal); const chunks = knowledgeRepository?.listChunks(profile.knowledgeBaseIds) ?? []; return new HybridRetriever().search(query, chunks, { topK: 16 }).slice(0, 6).map((chunk) => chunk.text); } });
     const model: PreparationModel = {
       next: async (input, signal): Promise<PreparationModelStep> => {
         const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings;
-        const prompt = `目标：${input.goal}\n历史：${JSON.stringify(input.history)}\n请只返回 JSON。若需要动作，格式为 {"type":"tool_call","tool":"get_profile","args":{},"rationale":"..."}；若完成，格式为 {"type":"final","summary":"..."}。可用工具：${AGENT_TOOL_NAMES.join(", ")}`;
+        const availableTools = registry.registeredTools();
+        const prompt = `目标：${input.goal}\n历史：${JSON.stringify(input.history)}\n请只返回 JSON。若需要动作，格式为 {"type":"tool_call","tool":"get_profile","args":{},"rationale":"..."}；若完成，格式为 {"type":"final","summary":"..."}。本轮实际可用工具：${availableTools.join(", ")}`;
         let text = "";
         for await (const delta of new OpenAICompatibleAnswerProvider(settings).stream({ model: settings.model, sections: [{ name: "system/base", content: "你是面试准备 Agent。所有写入或外部动作都必须由用户审批。" }, { name: "question", content: prompt }] }, signal)) text += delta;
         const jsonText = text.match(/\{[\s\S]*\}/)?.[0];
         if (!jsonText) return { type: "final", summary: text || "模型没有返回结果" };
         try {
           const parsed = JSON.parse(jsonText) as { type?: string; tool?: string; args?: Record<string, unknown>; rationale?: string; summary?: string };
-          if (parsed.type === "tool_call" && parsed.tool && AGENT_TOOL_NAMES.includes(parsed.tool as typeof AGENT_TOOL_NAMES[number])) return { type: "tool_call", tool: parsed.tool as typeof AGENT_TOOL_NAMES[number], args: parsed.args ?? {}, rationale: parsed.rationale };
+          if (parsed.type === "tool_call" && parsed.tool && availableTools.includes(parsed.tool as AgentToolName)) return { type: "tool_call", tool: parsed.tool as AgentToolName, args: parsed.args ?? {}, rationale: parsed.rationale };
           return { type: "final", summary: parsed.summary ?? text };
         } catch {
           return { type: "final", summary: text };
         }
       }
     };
-    preparationRuntime = new PreparationAgentRuntime(model, registry, { workspaceRoot: app.getPath("userData"), profileId: profile.id }, 40);
+    preparationRuntime = new PreparationAgentRuntime(model, registry, { workspaceRoot, profileId: profile.id }, 40);
     void (async () => {
       try {
         for await (const event of preparationRuntime!.run(goal)) broadcast("preparation:event", event);
@@ -230,10 +324,10 @@ function registerIpc(): void {
     if (!providerConfigStore) throw new Error("Settings are still initializing");
     const result = providerConfigStore.update(section, input);
     if (section === "llm") {
-      routingModels.fast = result.model;
-      routingModels["low-latency"] = result.model;
-      routingModels.reasoning = result.model;
-      routingModels.vision = result.model;
+      routingModels.fast = result.fastModel || result.model;
+      routingModels["low-latency"] = result.normalModel || result.model;
+      routingModels.reasoning = result.deepModel || result.model;
+      routingModels.vision = result.visionModel || result.model;
     }
     return result;
   });
@@ -250,7 +344,7 @@ function registerShortcuts(): void {
     },
     [GLOBAL_SHORTCUTS.toggleAutomation]: () => broadcast("shortcut", "toggle-automation"),
     [GLOBAL_SHORTCUTS.endInterview]: () => {
-      void coordinator().stop("user");
+      void stopInterviewWithAnalysis();
     }
   };
   for (const [accelerator, handler] of Object.entries(shortcuts)) {
@@ -275,11 +369,11 @@ app.whenReady().then(async () => {
     } catch {
       providerConfigStore = new ProviderConfigStore(database, new MemorySecretStore(), { llm: environmentLlmSettings });
     }
-    const persistedModel = providerConfigStore.get("llm").model;
-    routingModels.fast = persistedModel;
-    routingModels["low-latency"] = persistedModel;
-    routingModels.reasoning = persistedModel;
-    routingModels.vision = persistedModel;
+    const llm = providerConfigStore.get("llm");
+    routingModels.fast = llm.fastModel || llm.model;
+    routingModels["low-latency"] = llm.normalModel || llm.model;
+    routingModels.reasoning = llm.deepModel || llm.model;
+    routingModels.vision = llm.visionModel || llm.model;
   } catch (error) {
     appLogger.error("database initialization failed", { error: String(error) });
     broadcast("runtime:error", { code: "DATABASE_INIT_FAILED", message: "本地数据库初始化失败，当前会话不会保存到磁盘" });
@@ -292,8 +386,8 @@ app.whenReady().then(async () => {
     session,
     answerAgent,
     history: historyRepository,
-    asrSettingsProvider: () => { const settings = providerConfigStore?.get("asr"); return { providerName: settings?.providerName ?? "Custom WebSocket ASR Gateway", apiKey: settings?.apiKey ?? "", model: settings?.model ?? "" }; },
-    contextProvider: async (question, profileId) => {
+    asrSettingsProvider: () => { const settings = providerConfigStore?.get("asr"); return { providerName: settings?.providerName ?? "Custom WebSocket ASR Gateway", model: settings?.model ?? "" }; },
+    contextProvider: async (question, profileId, recentTranscript) => {
       const profile = profileRepository?.get(profileId);
       const chunks = knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? [];
       let retrieved = new HybridRetriever().search(question.text, chunks, { topK: 16 });
@@ -310,7 +404,8 @@ app.whenReady().then(async () => {
         profileSummary: profile?.resume?.summary,
         jobDescriptionSummary: profile?.jobDescription?.summary,
         skills: (profile?.skills ?? []).map((skill) => ({ id: skill.id, name: skill.name, content: `${skill.description}\n${skill.content}` })),
-        retrievedKnowledge: retrieved.slice(0, 6).map((chunk) => `${chunk.metadata.filename}: ${chunk.text}`)
+        retrievedKnowledge: retrieved.slice(0, 6).map((chunk) => `${chunk.metadata.filename}: ${chunk.text}`),
+        recentTranscript: recentTranscript.slice(-12)
       };
     }
   });
@@ -322,7 +417,7 @@ app.whenReady().then(async () => {
   registerIpc();
   registerShortcuts();
 
-  audioManager.on("event", (event) => broadcast("audio:event", event));
+  audioManager.on("event", (event) => { if (event.type === "audio_error") audioLogger?.error("audio error", { component: event.component, recoverable: event.recoverable }); broadcast("audio:event", event); });
   audioManager.on("process", (state) => broadcast("audio:process", state));
   audioManager.on("diagnostic", (message) => { audioLogger?.warn(message); broadcast("audio:diagnostic", message); });
   coordinator().on("event", (event: { type: string; [key: string]: unknown }) => {
@@ -331,6 +426,8 @@ app.whenReady().then(async () => {
     if (event.type === "question") broadcast("question:event", event.event);
     if (event.type === "realtime_message") broadcast("realtime:message", event.message);
     if (event.type === "realtime_state") broadcast("realtime:state", event.state);
+    if (event.type === "automation_mode") broadcast("interview:automation-mode", event.mode);
+    if (event.type === "answer_mode") broadcast("interview:answer-mode", event.mode);
     if (event.type === "diagnostic") { realtimeLogger?.warn(String(event.message)); broadcast("realtime:diagnostic", event.message); }
   });
   session.subscribe((state) => broadcast("session:state", state));

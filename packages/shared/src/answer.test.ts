@@ -31,6 +31,12 @@ describe("Answer routing and generation", () => {
     expect(router.select("解释系统设计", "DEEP").model).toBe("reasoning-v1");
     expect(router.select("识别截图中的代码", "FAST", true).route).toBe("vision");
   });
+
+  it("keeps a bounded recent transcript context for follow-up questions", () => {
+    const context = new ContextRouter().route("为什么？", { recentTranscript: Array.from({ length: 20 }, (_, index) => `对话 ${index}`) });
+    expect(context.recentTranscript.length).toBeLessThanOrEqual(12);
+    expect(context.recentTranscript.at(-1)).toBe("对话 19");
+  });
 });
 
 describe("StableAnswerStateMachine", () => {

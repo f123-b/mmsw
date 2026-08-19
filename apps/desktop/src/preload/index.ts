@@ -37,7 +37,9 @@ const api = {
   interview: {
     start: (options: InterviewStartOptions) => ipcRenderer.invoke("interview:start", options) as Promise<string>,
     stop: () => ipcRenderer.invoke("interview:stop") as Promise<void>,
-    answerLatest: () => ipcRenderer.invoke("interview:answer-latest") as Promise<void>
+    answerLatest: () => ipcRenderer.invoke("interview:answer-latest") as Promise<void>,
+    setAutomationMode: (mode: "MANUAL" | "AUTO") => ipcRenderer.invoke("interview:set-automation-mode", mode) as Promise<boolean>,
+    setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => ipcRenderer.invoke("interview:set-answer-mode", mode) as Promise<boolean>
   },
   profiles: {
     list: (): Promise<Profile[]> => ipcRenderer.invoke("profiles:list"),
@@ -47,7 +49,8 @@ const api = {
     clone: (profileId: string, name: string): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:clone", profileId, name),
     selectActive: (profileId: string): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:select-active", profileId),
     active: (): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:active"),
-    attachMaterial: (input: { profileId: string; kind: "resume" | "jobDescription"; filename: string; mimeType: string; bytes: Uint8Array }): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:attach-material", input)
+    attachMaterial: (input: { profileId: string; kind: "resume" | "jobDescription"; filename: string; mimeType: string; bytes: Uint8Array }): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:attach-material", input),
+    removeMaterial: (profileId: string, kind: "resume" | "jobDescription") => ipcRenderer.invoke("profiles:remove-material", profileId, kind)
   },
   settings: {
     get: (): Promise<ProviderCenterPublicConfig | undefined> => ipcRenderer.invoke("settings:get"),
@@ -56,14 +59,19 @@ const api = {
   knowledge: {
     listBases: () => ipcRenderer.invoke("knowledge:list-bases"),
     createBase: (name: string) => ipcRenderer.invoke("knowledge:create-base", name),
+    renameBase: (knowledgeBaseId: string, name: string) => ipcRenderer.invoke("knowledge:rename-base", knowledgeBaseId, name),
+    deleteBase: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:delete-base", knowledgeBaseId) as Promise<boolean>,
     listDocuments: (knowledgeBaseId?: string) => ipcRenderer.invoke("knowledge:list-documents", knowledgeBaseId),
     ingest: (input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array }) => ipcRenderer.invoke("knowledge:ingest", input),
-    delete: (documentId: string) => ipcRenderer.invoke("knowledge:delete", documentId)
+    delete: (documentId: string) => ipcRenderer.invoke("knowledge:delete", documentId),
+    reindex: (documentId: string) => ipcRenderer.invoke("knowledge:reindex", documentId)
   },
   history: {
     list: () => ipcRenderer.invoke("history:list"),
     get: (interviewId: string) => ipcRenderer.invoke("history:get", interviewId),
-    analyze: (interviewId: string) => ipcRenderer.invoke("history:analyze", interviewId)
+    analyze: (interviewId: string) => ipcRenderer.invoke("history:analyze", interviewId),
+    getAnalysis: (interviewId: string) => ipcRenderer.invoke("history:get-analysis", interviewId),
+    delete: (interviewId: string) => ipcRenderer.invoke("history:delete", interviewId) as Promise<boolean>
   },
   preparation: {
     start: (goal: string) => ipcRenderer.invoke("preparation:start", goal),
@@ -136,10 +144,25 @@ const api = {
       ipcRenderer.on("realtime:diagnostic", handler);
       return () => ipcRenderer.removeListener("realtime:diagnostic", handler);
     },
+    onRuntimeError: (listener: (error: { code: string; message: string; recoverable: boolean }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, error: { code: string; message: string; recoverable: boolean }) => listener(error);
+      ipcRenderer.on("runtime:error", handler);
+      return () => ipcRenderer.removeListener("runtime:error", handler);
+    },
     onQuestion: (listener: (event: QuestionEvent) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, question: QuestionEvent) => listener(question);
       ipcRenderer.on("question:event", handler);
       return () => ipcRenderer.removeListener("question:event", handler);
+    },
+    onAutomationMode: (listener: (mode: "MANUAL" | "AUTO") => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, mode: "MANUAL" | "AUTO") => listener(mode);
+      ipcRenderer.on("interview:automation-mode", handler);
+      return () => ipcRenderer.removeListener("interview:automation-mode", handler);
+    },
+    onAnswerMode: (listener: (mode: "FAST" | "NORMAL" | "DEEP") => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, mode: "FAST" | "NORMAL" | "DEEP") => listener(mode);
+      ipcRenderer.on("interview:answer-mode", handler);
+      return () => ipcRenderer.removeListener("interview:answer-mode", handler);
     },
     onPreparationEvent: (listener: (event: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);

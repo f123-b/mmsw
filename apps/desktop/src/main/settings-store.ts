@@ -95,7 +95,7 @@ export class ProviderConfigStore {
     }
     const { apiKey: _apiKey, ...safe } = next;
     this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [`provider.${section}`, JSON.stringify(safe)]);
-    this.database.flush();
+    this.database.flushNow();
     return { ...safe, hasApiKey: Boolean(next.apiKey) };
   }
 }

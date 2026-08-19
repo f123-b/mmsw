@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
-import { AnswerAgent, ModelRouter, SessionStateMachine, type AnswerProvider } from "@interview-copilot/shared";
+import { AnswerAgent, InterviewHistoryStore, ModelRouter, SessionStateMachine, type AnswerProvider } from "@interview-copilot/shared";
 import { InterviewCoordinator } from "./interview-coordinator";
 
 class FakeAudio extends EventEmitter {
@@ -56,6 +56,88 @@ describe("InterviewCoordinator software E2E", () => {
     await coordinator.stop();
     expect(coordinator.running).toBe(false);
     expect(interviewId).toMatch(/^interview-/);
+    vi.useRealTimers();
+  });
+
+  it("answers three consecutive questions in AUTO and persists answered status", async () => {
+    vi.useFakeTimers();
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    const history = new InterviewHistoryStore();
+    let clock = 1_000;
+    const provider: AnswerProvider = { stream: async function* (request) { yield `回答 ${request.sections.find((section) => section.name === "question")?.content ?? ""}`; } };
+    const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, history, now: () => clock });
+    const messages: Array<{ type: string }> = [];
+    coordinator.on("event", (event: { type: string; message?: { type: string } }) => { if (event.type === "realtime_message" && event.message) messages.push(event.message); });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "AUTO", answerMode: "NORMAL" });
+    for (const [index, text] of ["请介绍项目？", "为什么这样设计？", "如果换成 RTOS 呢？"].entries()) {
+      clock = 1_000 + index * 2_000;
+      realtime.emit("transcript", {}, { id: `r${index}`, source: "remote", text, startMs: index * 2_000, endMs: index * 2_000 + 900, final: true });
+      clock += 600;
+      vi.advanceTimersByTime(500);
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+    }
+    expect(messages.filter((message) => message.type === "answer_start")).toHaveLength(3);
+    expect(messages.filter((message) => message.type === "answer_end")).toHaveLength(3);
+    const snapshot = history.snapshot(coordinator.interviewId!);
+    expect(snapshot.questions).toHaveLength(3);
+    expect(snapshot.questions.every((question) => question.status === "answered")).toBe(true);
+    expect(snapshot.answers).toHaveLength(3);
+    expect(snapshot.answers.every((answer) => answer.model === "test-model" && answer.latencyFirstToken !== undefined && answer.latencyTotal !== undefined)).toBe(true);
+    await coordinator.stop();
+    vi.useRealTimers();
+  });
+
+  it("switches MANUAL and AUTO at runtime through the coordinator", async () => {
+    vi.useFakeTimers();
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    let clock = 1_000;
+    const provider: AnswerProvider = { stream: async function* () { yield "回答"; } };
+    const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, now: () => clock });
+    const starts: unknown[] = [];
+    coordinator.on("event", (event: { type: string; message?: unknown }) => { if (event.type === "realtime_message" && (event.message as { type?: string })?.type === "answer_start") starts.push(event.message); });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
+    realtime.emit("transcript", {}, { id: "manual", source: "remote", text: "请手动回答？", startMs: 0, endMs: 900, final: true });
+    clock = 1_600;
+    vi.advanceTimersByTime(500);
+    for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
+    expect(starts).toHaveLength(0);
+    coordinator.setAutomationMode("AUTO");
+    clock = 3_600;
+    realtime.emit("transcript", {}, { id: "auto", source: "remote", text: "那如果换成 RTOS 呢？", startMs: 2_000, endMs: 2_900, final: true });
+    clock = 4_600;
+    vi.advanceTimersByTime(500);
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+    expect(starts).toHaveLength(1);
+    await coordinator.stop();
+    vi.useRealTimers();
+  });
+
+  it("cancels an in-flight answer when a new question supersedes it", async () => {
+    vi.useFakeTimers();
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    let clock = 1_000;
+    let calls = 0;
+    const provider: AnswerProvider = { stream: (_request, signal) => (async function* () { if (calls++ === 0) { yield "旧答案"; await new Promise<never>((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true })); } else yield "新答案"; })() };
+    const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, now: () => clock });
+    const messages: Array<{ type: string; reason?: string }> = [];
+    coordinator.on("event", (event: { type: string; message?: { type: string; reason?: string } }) => { if (event.type === "realtime_message" && event.message) messages.push(event.message); });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "AUTO", answerMode: "NORMAL" });
+    realtime.emit("transcript", {}, { id: "q1", source: "remote", text: "为什么要分层？", startMs: 0, endMs: 900, final: true });
+    clock = 1_600;
+    vi.advanceTimersByTime(500);
+    for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
+    realtime.emit("transcript", {}, { id: "q2", source: "remote", text: "那如果换成 RTOS？", startMs: 2_000, endMs: 2_900, final: true });
+    clock = 3_600;
+    vi.advanceTimersByTime(500);
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+    expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({ type: "answer_cancelled", reason: "superseded" }), expect.objectContaining({ type: "answer_end" })]));
+    await coordinator.stop();
     vi.useRealTimers();
   });
 });

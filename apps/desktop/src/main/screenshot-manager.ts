@@ -1,7 +1,9 @@
 import { app, desktopCapturer, screen } from "electron";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { readdir, stat, unlink } from "node:fs/promises";
 import { selectPrimaryScreenSource, type ScreenSourceLike } from "./screen-source-selection";
+import { isScreenshotExpired } from "./screenshot-cleanup";
 
 export { selectPrimaryScreenSource } from "./screen-source-selection";
 export type { ScreenSourceLike } from "./screen-source-selection";
@@ -26,6 +28,7 @@ export class ScreenshotManager {
   constructor(private readonly options: ScreenshotManagerOptions = {}) {}
 
   async capturePrimaryDisplay(): Promise<ScreenshotResult> {
+    await this.cleanupExpired();
     const primaryDisplay = screen.getPrimaryDisplay();
     const sources = await desktopCapturer.getSources({
       types: ["screen"],
@@ -62,7 +65,7 @@ export class ScreenshotManager {
     const path = join(directory, `${Date.now()}-${source.id}.${extension}`);
     await writeFile(path, buffer);
     const size = image.getSize();
-    return {
+    const result = {
       path,
       mimeType,
       width: size.width,
@@ -70,5 +73,25 @@ export class ScreenshotManager {
       size: buffer.byteLength,
       dataUrl: `data:${mimeType};base64,${buffer.toString("base64")}`
     };
+    const timer = setTimeout(() => { void this.cleanup(result); }, 15 * 60_000);
+    timer.unref?.();
+    return result;
+  }
+
+  async cleanup(result: Pick<ScreenshotResult, "path">): Promise<void> {
+    try { await unlink(result.path); } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+      if (code !== "ENOENT") this.options.onDiagnostic?.(`Screenshot cleanup failed: ${code || "unknown"}`);
+    }
+  }
+
+  private async cleanupExpired(): Promise<void> {
+    try {
+      const directory = join(app.getPath("temp"), "interview-copilot", "screenshots");
+      for (const filename of await readdir(directory)) {
+        const path = join(directory, filename);
+        try { if (isScreenshotExpired((await stat(path)).mtimeMs, Date.now())) await unlink(path); } catch { /* a concurrent cleanup is harmless */ }
+      }
+    } catch { /* the directory may not exist on first run */ }
   }
 }

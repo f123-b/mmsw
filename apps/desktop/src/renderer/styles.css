@@ -32,3 +32,4 @@ input[type="file"] { display: none; }
 .agent-event { display: grid; grid-template-columns: 130px 1fr auto; gap: 12px; align-items: center; padding: 10px 12px; border-radius: 9px; background: rgba(6,11,29,.52); color: #a78bfa; font-size: 11px; }
 .agent-event small { color: #dce3fb; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-actions { display: flex; gap: 6px; }
+.markdown-answer { display: grid; gap: 7px; line-height: 1.65; white-space: pre-wrap; }.markdown-answer strong { color: #f0e7ff; }.markdown-answer code { padding: 2px 5px; border-radius: 4px; color: #9fe9f5; background: rgba(34,211,238,.1); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }.markdown-answer pre { margin: 4px 0; padding: 10px; overflow: auto; border-radius: 8px; color: #dbeafe; background: rgba(2,6,23,.85); font-size: 11px; }.markdown-bullet { padding-left: 4px; }

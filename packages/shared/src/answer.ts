@@ -40,18 +40,24 @@ export class ContextRouter {
       .map((skill) => ({ ...skill, relevance: skill.relevance ?? relevance(question, skill) }))
       .sort((left, right) => (right.relevance ?? 0) - (left.relevance ?? 0))
       .slice(0, 3);
+    let transcriptBudget = 2_400;
+    const recentTranscript = (input.recentTranscript ?? []).slice(-12).reverse().map((line) => line.slice(0, 500)).filter((line) => {
+      if (transcriptBudget <= 0) return false;
+      transcriptBudget -= line.length;
+      return true;
+    }).reverse();
     return {
       profileSummary: input.profileSummary,
       jobDescriptionSummary: input.jobDescriptionSummary,
       skills,
       retrievedKnowledge: (input.retrievedKnowledge ?? []).slice(0, 6),
-      recentTranscript: (input.recentTranscript ?? []).slice(-12)
+      recentTranscript
     };
   }
 }
 
 export interface PromptSection {
-  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "retrieval-context" | "question" | "output-format";
+  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "retrieval-context" | "recent-transcript" | "question" | "output-format";
   content: string;
 }
 
@@ -64,7 +70,7 @@ export class PromptBuilder {
     if (context.profileSummary || context.jobDescriptionSummary) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary].filter(Boolean).join("\n") });
     if (context.skills.length > 0) sections.push({ name: "skill-context", content: context.skills.map((skill) => `${skill.name}: ${skill.content}`).join("\n") });
     if (context.retrievedKnowledge.length > 0) sections.push({ name: "retrieval-context", content: context.retrievedKnowledge.join("\n---\n") });
-    if (context.recentTranscript.length > 0) sections.push({ name: "interview-style", content: `最近对话：\n${context.recentTranscript.join("\n")}` });
+    if (context.recentTranscript.length > 0) sections.push({ name: "recent-transcript", content: `最近必要对话：\n${context.recentTranscript.join("\n")}` });
     sections.push({ name: "question", content: question.text });
     const length = mode === "FAST" ? "60-120" : "120-250";
     sections.push({ name: "output-format", content: `输出中文 sneak peek，控制在 ${length} 字左右：先给一句核心回答，再给 2~4 个关键点；仅在资料真实匹配时结合项目，不要写成长篇论文。` });

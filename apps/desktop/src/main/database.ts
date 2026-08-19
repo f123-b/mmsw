@@ -33,20 +33,25 @@ function value<T>(input: unknown): T | undefined {
 }
 
 export class SqliteDatabase {
+  private dirty = false;
+  private flushTimer: NodeJS.Timeout | undefined;
+
   private constructor(private readonly filePath: string, private readonly database: InstanceType<SqlJsStatic["Database"]>) {}
 
   static async open(filePath: string, wasmPath = wasmCandidates().find((candidate) => existsSync(candidate))): Promise<SqliteDatabase> {
+    if (filePath !== ":memory:") await mkdir(dirname(filePath), { recursive: true });
     const SQL: SqlJsStatic = await initSqlJs(wasmPath ? { locateFile: () => wasmPath } : undefined);
     const bytes = filePath !== ":memory:" && existsSync(filePath) ? readFileSync(filePath) : undefined;
     const database = new SQL.Database(bytes);
     const store = new SqliteDatabase(filePath, database);
     store.migrate();
-    store.flush();
+    store.flushNow();
     return store;
   }
 
   run(sql: string, params: Array<string | number | Uint8Array | null> = []): void {
     this.database.run(sql, params);
+    this.markDirty();
   }
 
   all<T extends object>(sql: string, params: Array<string | number | Uint8Array | null> = []): T[] {
@@ -65,17 +70,32 @@ export class SqliteDatabase {
     return this.all<T>(sql, params)[0];
   }
 
+  markDirty(): void { this.dirty = true; }
+
   flush(): void {
-    if (this.filePath === ":memory:") return;
+    if (this.filePath === ":memory:" || !this.dirty || this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = undefined;
+      this.flushNow();
+    }, 500);
+    this.flushTimer.unref?.();
+  }
+
+  flushNow(): void {
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = undefined;
+    if (this.filePath === ":memory:" || !this.dirty) return;
     writeFileSync(this.filePath, this.database.export());
+    this.dirty = false;
   }
 
   close(): void {
-    this.flush();
+    this.flushNow();
     this.database.close();
   }
 
   private migrate(): void {
+    this.database.run("PRAGMA foreign_keys = ON");
     this.database.run("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)");
     const current = Number(this.database.exec("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations")[0]?.values[0]?.[0] ?? 0);
     const migrations: Array<[number, string]> = [
@@ -93,6 +113,14 @@ export class SqliteDatabase {
         CREATE TABLE IF NOT EXISTS knowledge_bases (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY, knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, sha256 TEXT NOT NULL, text TEXT NOT NULL, sections_json TEXT NOT NULL, status TEXT NOT NULL, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS knowledge_chunks (id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE, text TEXT NOT NULL, metadata_json TEXT NOT NULL, embedding_json TEXT, created_at INTEGER NOT NULL);
+      `],
+      [3, `
+        ALTER TABLE answers ADD COLUMN started_at INTEGER;
+        ALTER TABLE answers ADD COLUMN first_token_at INTEGER;
+        ALTER TABLE answers ADD COLUMN finished_at INTEGER;
+      `],
+      [4, `
+        CREATE TABLE IF NOT EXISTS interview_analysis (interview_id TEXT PRIMARY KEY REFERENCES interviews(id) ON DELETE CASCADE, analysis_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
       `]
     ];
     for (const [version, sql] of migrations) {
@@ -142,7 +170,8 @@ export class SqliteProfileRepository {
 
   delete(profileId: string): void {
     this.database.run("DELETE FROM profiles WHERE id = ?", [profileId]);
-    this.database.flush();
+    this.database.run("DELETE FROM app_state WHERE key = 'active_profile_id' AND value = ?", [profileId]);
+    this.database.flushNow();
   }
 
   clone(profileId: string, name: string, now = Date.now()): Profile {
@@ -155,7 +184,7 @@ export class SqliteProfileRepository {
     const profile = this.get(profileId);
     if (!profile) throw new Error(`Profile not found: ${profileId}`);
     this.database.run("INSERT INTO app_state(key, value) VALUES ('active_profile_id', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [profileId]);
-    this.database.flush();
+    this.database.flushNow();
     return profile;
   }
 
@@ -177,13 +206,13 @@ export class SqliteInterviewHistoryRepository {
   createInterview(input: Omit<InterviewRecord, "id" | "createdAt">, now = Date.now()): InterviewRecord {
     const record = { ...input, id: id("interview", now), createdAt: now };
     this.database.run("INSERT INTO interviews(id, profile_id, started_at, ended_at, status, language, automation_mode, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.profileId, record.startedAt, record.endedAt ?? null, record.status, record.language, record.automationMode, record.createdAt]);
-    this.database.flush();
+    this.database.flushNow();
     return record;
   }
 
   endInterview(interviewId: string, status: "ended" | "error" = "ended", endedAt = Date.now()): InterviewRecord {
     this.database.run("UPDATE interviews SET status = ?, ended_at = ? WHERE id = ?", [status, endedAt, interviewId]);
-    this.database.flush();
+    this.database.flushNow();
     const record = this.database.first<InterviewRecord>("SELECT id, profile_id AS profileId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews WHERE id = ?", [interviewId]);
     if (!record) throw new Error(`Interview not found: ${interviewId}`);
     return record;
@@ -193,7 +222,7 @@ export class SqliteInterviewHistoryRepository {
     if (!input.final) return undefined;
     const record = { ...input, id: id("transcript", now), createdAt: now };
     this.database.run("INSERT INTO transcripts(id, interview_id, source, text, start_ms, end_ms, final, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.interviewId, record.source, record.text, record.startMs, record.endMs, 1, record.confidence ?? null, record.createdAt]);
-    this.database.flush();
+    this.database.flushNow();
     return record;
   }
 
@@ -204,10 +233,16 @@ export class SqliteInterviewHistoryRepository {
     return record;
   }
 
+  updateQuestionStatus(questionId: string, status: QuestionRecord["status"]): QuestionRecord | undefined {
+    this.database.run("UPDATE questions SET status = ? WHERE id = ?", [status, questionId]);
+    this.database.flushNow();
+    return this.database.first<QuestionRecord>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status FROM questions WHERE id = ?", [questionId]);
+  }
+
   addAnswer(input: Omit<AnswerRecord, "id">): AnswerRecord {
     const record = { ...input, id: id("answer", input.createdAt) };
-    this.database.run("INSERT INTO answers(id, question_id, text, model, mode, latency_first_token, latency_total, cancel_reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.questionId, record.text, record.model, record.mode ?? null, record.latencyFirstToken ?? null, record.latencyTotal ?? null, record.cancelReason ?? null, record.createdAt]);
-    this.database.flush();
+    this.database.run("INSERT INTO answers(id, question_id, text, model, mode, latency_first_token, latency_total, cancel_reason, started_at, first_token_at, finished_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.questionId, record.text, record.model, record.mode ?? null, record.latencyFirstToken ?? null, record.latencyTotal ?? null, record.cancelReason ?? null, record.startedAt ?? null, record.firstTokenAt ?? null, record.finishedAt ?? null, record.createdAt]);
+    this.database.flushNow();
     return record;
   }
 
@@ -215,12 +250,27 @@ export class SqliteInterviewHistoryRepository {
     return this.database.all<InterviewRecord>("SELECT id, profile_id AS profileId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews ORDER BY created_at DESC");
   }
 
+  deleteInterview(interviewId: string): void {
+    this.database.run("DELETE FROM interviews WHERE id = ?", [interviewId]);
+    this.database.flushNow();
+  }
+
+  saveAnalysis(interviewId: string, analysis: unknown, now = Date.now()): void {
+    this.database.run("INSERT INTO interview_analysis(interview_id, analysis_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(interview_id) DO UPDATE SET analysis_json=excluded.analysis_json, updated_at=excluded.updated_at", [interviewId, JSON.stringify(analysis), now]);
+    this.database.flushNow();
+  }
+
+  getAnalysis<T = unknown>(interviewId: string): T | undefined {
+    const row = this.database.first<{ analysisJson: string }>("SELECT analysis_json AS analysisJson FROM interview_analysis WHERE interview_id = ?", [interviewId]);
+    return row ? JSON.parse(row.analysisJson) as T : undefined;
+  }
+
   snapshot(interviewId: string): InterviewSnapshot {
     const interview = this.database.first<InterviewRecord>("SELECT id, profile_id AS profileId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews WHERE id = ?", [interviewId]);
     if (!interview) throw new Error(`Interview not found: ${interviewId}`);
     const transcripts = this.database.all<TranscriptRecord>("SELECT id, interview_id AS interviewId, source, text, start_ms AS startMs, end_ms AS endMs, final, confidence, created_at AS createdAt FROM transcripts WHERE interview_id = ? ORDER BY start_ms", [interviewId]);
     const questions = this.database.all<QuestionRecord>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status FROM questions WHERE interview_id = ? ORDER BY detected_at", [interviewId]);
-    const answers = this.database.all<AnswerRecord>("SELECT a.id, a.question_id AS questionId, a.text, a.model, a.mode, a.latency_first_token AS latencyFirstToken, a.latency_total AS latencyTotal, a.cancel_reason AS cancelReason, a.created_at AS createdAt FROM answers a JOIN questions q ON q.id = a.question_id WHERE q.interview_id = ? ORDER BY a.created_at", [interviewId]);
+    const answers = this.database.all<AnswerRecord>("SELECT a.id, a.question_id AS questionId, a.text, a.model, a.mode, a.latency_first_token AS latencyFirstToken, a.latency_total AS latencyTotal, a.cancel_reason AS cancelReason, a.started_at AS startedAt, a.first_token_at AS firstTokenAt, a.finished_at AS finishedAt, a.created_at AS createdAt FROM answers a JOIN questions q ON q.id = a.question_id WHERE q.interview_id = ? ORDER BY a.created_at", [interviewId]);
     return { interview, transcripts, questions, answers };
   }
 }
@@ -238,8 +288,19 @@ export class SqliteKnowledgeRepository {
   createKnowledgeBase(name: string, now = Date.now()): KnowledgeBaseRecord {
     const record = { id: id("knowledge-base", now), name: name.trim() || "默认知识库", createdAt: now, updatedAt: now };
     this.database.run("INSERT INTO knowledge_bases(id, name, created_at, updated_at) VALUES (?, ?, ?, ?)", [record.id, record.name, record.createdAt, record.updatedAt]);
-    this.database.flush();
+    this.database.flushNow();
     return record;
+  }
+
+  renameKnowledgeBase(knowledgeBaseId: string, name: string, now = Date.now()): KnowledgeBaseRecord | undefined {
+    this.database.run("UPDATE knowledge_bases SET name = ?, updated_at = ? WHERE id = ?", [name.trim() || "默认知识库", now, knowledgeBaseId]);
+    this.database.flushNow();
+    return this.listKnowledgeBases().find((base) => base.id === knowledgeBaseId);
+  }
+
+  deleteKnowledgeBase(knowledgeBaseId: string): void {
+    this.database.run("DELETE FROM knowledge_bases WHERE id = ?", [knowledgeBaseId]);
+    this.database.flushNow();
   }
 
   ensureKnowledgeBase(name = "默认知识库"): KnowledgeBaseRecord {
@@ -258,19 +319,19 @@ export class SqliteKnowledgeRepository {
 
   deleteDocument(documentId: string): void {
     this.database.run("DELETE FROM documents WHERE id = ?", [documentId]);
-    this.database.flush();
+    this.database.flushNow();
   }
 
   saveDocument(document: { id: string; knowledgeBaseId: string; filename: string; mimeType: string; sha256: string; text: string; sections: string[]; status: "processing" | "ready" | "error"; error?: string }, now = Date.now()): KnowledgeDocumentRecord {
     this.database.run("INSERT INTO documents(id, knowledge_base_id, filename, mime_type, sha256, text, sections_json, status, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET filename=excluded.filename, mime_type=excluded.mime_type, sha256=excluded.sha256, text=excluded.text, sections_json=excluded.sections_json, status=excluded.status, error=excluded.error, updated_at=excluded.updated_at", [document.id, document.knowledgeBaseId, document.filename, document.mimeType, document.sha256, document.text, JSON.stringify(document.sections), document.status, document.error ?? null, now, now]);
-    this.database.flush();
+    this.database.flushNow();
     return this.listDocuments(document.knowledgeBaseId).find((item) => item.id === document.id) as KnowledgeDocumentRecord;
   }
 
   replaceChunks(documentId: string, chunks: KnowledgeChunk[], now = Date.now()): void {
     this.database.run("DELETE FROM knowledge_chunks WHERE document_id = ?", [documentId]);
     chunks.forEach((chunk) => this.database.run("INSERT INTO knowledge_chunks(id, document_id, text, metadata_json, embedding_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", [chunk.id, documentId, chunk.text, JSON.stringify(chunk.metadata), chunk.embedding ? JSON.stringify(chunk.embedding) : null, now]));
-    this.database.flush();
+    this.database.flushNow();
   }
 
   listChunks(knowledgeBaseIds: string[] = []): KnowledgeChunk[] {

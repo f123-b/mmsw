@@ -149,7 +149,8 @@ export const answerStartSchema = z.object({
   type: z.literal("answer_start"),
   answerId: z.string().min(1),
   questionId: z.string().min(1),
-  mode: z.enum(["FAST", "NORMAL", "DEEP"])
+  mode: z.enum(["FAST", "NORMAL", "DEEP"]),
+  model: z.string().min(1)
 });
 
 export const answerDeltaSchema = z.object({
@@ -180,8 +181,10 @@ export const runtimeErrorSchema = z.object({
     "WS_AUTH_FAILED",
     "ASR_FAILED",
     "QUESTION_EXTRACTOR_FAILED",
+    "QUESTION_FAILED",
     "LLM_FAILED",
     "RAG_FAILED",
+    "DB_FAILED",
     "SCREENSHOT_FAILED"
   ]),
   message: z.string().min(1),
@@ -204,7 +207,7 @@ export const realtimeServerMessageSchema = z.discriminatedUnion("type", [
 ]);
 
 export const clientControlMessageSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("client_ready"), providerName: z.string().optional(), model: z.string().optional(), apiKey: z.string().optional() }),
+  z.object({ type: z.literal("client_ready"), providerName: z.string().optional(), model: z.string().optional(), gatewayToken: z.string().optional() }).strict(),
   z.object({ type: z.literal("heartbeat"), timestamp: z.number().int().nonnegative() }),
   z.object({ type: z.literal("answer_request"), mode: z.enum(["manual_text", "latest_remote_transcript", "screenshot"]), text: z.string().optional(), attachmentId: z.string().optional() }),
   z.object({ type: z.literal("answer_cancel"), answerId: z.string(), reason: z.enum(["user", "superseded", "timeout"]).optional() })

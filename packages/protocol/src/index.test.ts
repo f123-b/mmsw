@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   AUDIO_PACKET_BYTES,
   audioDevicesSchema,
-  parseAudioSidecarEvent
+  parseAudioSidecarEvent,
+  clientControlMessageSchema
 } from "./index";
 
 describe("audio protocol", () => {
@@ -31,6 +32,11 @@ describe("audio protocol", () => {
       system: 0.1,
       timestamp: 1
     }))).toThrow();
+  });
+
+  it("keeps provider API keys out of the desktop gateway protocol", () => {
+    expect(clientControlMessageSchema.parse({ type: "client_ready", gatewayToken: "short-lived" })).toMatchObject({ gatewayToken: "short-lived" });
+    expect(() => clientControlMessageSchema.parse({ type: "client_ready", apiKey: "long-lived-secret" })).toThrow();
   });
 
   it("validates probe and buffer statistics", () => {

@@ -175,7 +175,7 @@ export class PcmBackpressureQueue {
 
 export type QuestionState = "IDLE" | "LISTENING" | "POSSIBLE_QUESTION" | "WAITING_COMPLETION" | "CONFIRMED" | "ANSWERING";
 export type QuestionConfidence = "low" | "medium" | "high";
-export type QuestionStatus = "candidate" | "confirmed" | "superseded" | "ignored" | "answered";
+export type QuestionStatus = "candidate" | "confirmed" | "answering" | "superseded" | "ignored" | "answered";
 
 export interface QuestionCandidate {
   id: string;
@@ -191,7 +191,8 @@ export type QuestionEvent =
   | { type: "question_candidate"; question: QuestionCandidate }
   | { type: "question_confirmed"; question: QuestionCandidate }
   | { type: "question_superseded"; previousQuestionId: string; question: QuestionCandidate }
-  | { type: "question_ignored"; question: QuestionCandidate; reason: "duplicate" | "incomplete" };
+  | { type: "question_ignored"; question: QuestionCandidate; reason: "duplicate" | "incomplete" }
+  | { type: "question_diagnostic"; text: string; questionScore: number; candidate: boolean; confirmed: boolean; ignoredReason?: "duplicate" | "incomplete"; dedupeScore?: number };
 
 export interface QuestionDetectorOptions {
   completenessThreshold?: number;
@@ -237,6 +238,7 @@ export class QuestionDetector {
   private lastInputAt = 0;
   private currentCandidate: QuestionCandidate | undefined;
   private questionCounter = 0;
+  private answeringQuestionId: string | undefined;
   private readonly confirmed: QuestionCandidate[] = [];
   private readonly completenessThreshold: number;
   private readonly silenceMs: number;
@@ -269,7 +271,7 @@ export class QuestionDetector {
     const candidate = this.makeCandidate(scored, observedAtMs);
     this.currentCandidate = candidate;
     this.stateValue = scored.score >= this.completenessThreshold ? "WAITING_COMPLETION" : "POSSIBLE_QUESTION";
-    return [{ type: "question_candidate", question: candidate }];
+    return [{ type: "question_candidate", question: candidate }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, candidate: true, confirmed: false }];
   }
 
   flush(observedAtMs = Date.now()): QuestionEvent[] {
@@ -279,33 +281,44 @@ export class QuestionDetector {
       return [];
     }
     if (observedAtMs - this.lastInputAt < this.silenceMs || candidate.score < this.completenessThreshold) {
-      return [{ type: "question_ignored", question: { ...candidate, status: "ignored" }, reason: "incomplete" }];
+      return [{ type: "question_ignored", question: { ...candidate, status: "ignored" }, reason: "incomplete" }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, candidate: true, confirmed: false, ignoredReason: "incomplete" }];
     }
-    const duplicate = this.confirmed.some((previous) => observedAtMs - previous.detectedAt < this.dedupeWindowMs && questionSimilarity(previous.text, candidate.text) >= this.similarityThreshold);
-    if (duplicate) {
+    const dedupeScore = this.confirmed.reduce((maximum, previous) => observedAtMs - previous.detectedAt < this.dedupeWindowMs ? Math.max(maximum, questionSimilarity(previous.text, candidate.text)) : maximum, 0);
+    if (dedupeScore >= this.similarityThreshold) {
       this.stateValue = "IDLE";
       this.resetBuffer();
-      return [{ type: "question_ignored", question: { ...candidate, status: "ignored" }, reason: "duplicate" }];
+      return [{ type: "question_ignored", question: { ...candidate, status: "ignored" }, reason: "duplicate" }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, candidate: true, confirmed: false, ignoredReason: "duplicate", dedupeScore }];
     }
     const confirmed = { ...candidate, status: "confirmed" as const };
     const previous = this.confirmed.at(-1);
     this.confirmed.push(confirmed);
     this.currentCandidate = confirmed;
     this.stateValue = "CONFIRMED";
-    const event: QuestionEvent = previous && previous.id !== confirmed.id
+    const event: QuestionEvent = previous && previous.id !== confirmed.id && (previous.status === "confirmed" || previous.id === this.answeringQuestionId)
       ? { type: "question_superseded", previousQuestionId: previous.id, question: confirmed }
       : { type: "question_confirmed", question: confirmed };
     this.resetBuffer(false);
-    return [event];
+    return [event, { type: "question_diagnostic", text: confirmed.text, questionScore: confirmed.score, candidate: true, confirmed: true, dedupeScore }];
   }
 
   markAnswering(questionId: string): void {
+    this.answeringQuestionId = questionId;
+    const question = this.confirmed.find((candidate) => candidate.id === questionId);
+    if (question) question.status = "answering";
     if (this.currentCandidate?.id === questionId) this.stateValue = "ANSWERING";
   }
 
   markAnswered(questionId: string): void {
     const question = this.confirmed.find((candidate) => candidate.id === questionId);
     if (question) question.status = "answered";
+    if (this.answeringQuestionId === questionId) this.answeringQuestionId = undefined;
+    if (this.currentCandidate?.id === questionId) this.stateValue = "IDLE";
+  }
+
+  markSuperseded(questionId: string): void {
+    const question = this.confirmed.find((candidate) => candidate.id === questionId);
+    if (question) question.status = "superseded";
+    if (this.answeringQuestionId === questionId) this.answeringQuestionId = undefined;
     if (this.currentCandidate?.id === questionId) this.stateValue = "IDLE";
   }
 
@@ -336,3 +349,5 @@ export * from "./agent";
 export * from "./history";
 export * from "./transcript-aggregator";
 export * from "./providers";
+export * from "./asr";
+export * from "./analysis";

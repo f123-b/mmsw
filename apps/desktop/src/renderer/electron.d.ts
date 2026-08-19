@@ -39,6 +39,8 @@ declare global {
         start(options: InterviewStartOptions): Promise<string>;
         stop(): Promise<void>;
         answerLatest(): Promise<void>;
+        setAutomationMode(mode: "MANUAL" | "AUTO"): Promise<boolean>;
+        setAnswerMode(mode: "FAST" | "NORMAL" | "DEEP"): Promise<boolean>;
       };
       profiles: {
         list(): Promise<Profile[]>;
@@ -49,6 +51,7 @@ declare global {
         selectActive(profileId: string): Promise<Profile | undefined>;
         active(): Promise<Profile | undefined>;
         attachMaterial(input: { profileId: string; kind: "resume" | "jobDescription"; filename: string; mimeType: string; bytes: Uint8Array }): Promise<Profile | undefined>;
+        removeMaterial(profileId: string, kind: "resume" | "jobDescription"): Promise<Profile | undefined>;
       };
       settings: {
         get(): Promise<ProviderCenterPublicConfig | undefined>;
@@ -57,14 +60,19 @@ declare global {
       knowledge: {
         listBases(): Promise<Array<{ id: string; name: string; createdAt: number; updatedAt: number }>>;
         createBase(name: string): Promise<{ id: string; name: string; createdAt: number; updatedAt: number } | undefined>;
+        renameBase(knowledgeBaseId: string, name: string): Promise<{ id: string; name: string; createdAt: number; updatedAt: number } | undefined>;
+        deleteBase(knowledgeBaseId: string): Promise<boolean>;
         listDocuments(knowledgeBaseId?: string): Promise<Array<{ id: string; knowledgeBaseId: string; filename: string; mimeType: string; status: string; error?: string }>>;
         ingest(input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array }): Promise<unknown>;
         delete(documentId: string): Promise<boolean>;
+        reindex(documentId: string): Promise<unknown>;
       };
       history: {
         list(): Promise<Array<{ id: string; profileId: string; startedAt: number; endedAt?: number; status: string; language: string; automationMode: string; createdAt: number }>>;
         get(interviewId: string): Promise<unknown>;
         analyze(interviewId: string): Promise<{ durationMs: number; questionCount: number; answeredQuestionCount: number; answerRate: number; averageFirstTokenMs?: number; averageAnswerLatencyMs?: number } | undefined>;
+        getAnalysis(interviewId: string): Promise<unknown>;
+        delete(interviewId: string): Promise<boolean>;
       };
       preparation: {
         start(goal: string): Promise<boolean>;
@@ -85,7 +93,10 @@ declare global {
         onRealtimeTranscript(listener: (snapshot: TranscriptSnapshot) => void): () => void;
         onRealtimeMessage(listener: (message: RealtimeServerMessage) => void): () => void;
         onRealtimeDiagnostic(listener: (message: string) => void): () => void;
+        onRuntimeError(listener: (error: { code: string; message: string; recoverable: boolean }) => void): () => void;
         onQuestion(listener: (event: QuestionEvent) => void): () => void;
+        onAutomationMode(listener: (mode: "MANUAL" | "AUTO") => void): () => void;
+        onAnswerMode(listener: (mode: "FAST" | "NORMAL" | "DEEP") => void): () => void;
         onPreparationEvent(listener: (event: unknown) => void): () => void;
       };
     };

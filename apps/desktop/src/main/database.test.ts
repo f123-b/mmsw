@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { SqliteDatabase, SqliteInterviewHistoryRepository, SqliteProfileRepository } from "./database";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { SqliteDatabase, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileRepository } from "./database";
 
 describe("SQLite persistence", () => {
   it("persists profile CRUD, clone and active selection", async () => {
@@ -34,5 +37,40 @@ describe("SQLite persistence", () => {
     } finally {
       database.close();
     }
+  });
+
+  it("reopens a real database file after debounced writes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "interview-copilot-db-"));
+    const filePath = join(directory, "reopen.sqlite");
+    try {
+      const first = await SqliteDatabase.open(filePath);
+      const profiles = new SqliteProfileRepository(first);
+      const history = new SqliteInterviewHistoryRepository(first);
+      const profile = profiles.save({ name: "磁盘 Profile", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const interview = history.createInterview({ profileId: profile.id, startedAt: 100, status: "running", language: "zh-CN", automationMode: "AUTO" }, 100);
+      const question = history.addQuestion({ interviewId: interview.id, text: "磁盘问题？", confidence: "high", source: "rules", detectedAt: 120, status: "confirmed" });
+      history.addAnswer({ questionId: question.id, text: "磁盘回答", model: "disk-model", mode: "FAST", startedAt: 130, firstTokenAt: 150, finishedAt: 180, latencyFirstToken: 30, latencyTotal: 50, createdAt: 180 });
+      first.close();
+      const second = await SqliteDatabase.open(filePath);
+      try {
+        expect(new SqliteProfileRepository(second).get(profile.id)?.name).toBe("磁盘 Profile");
+        expect(new SqliteInterviewHistoryRepository(second).snapshot(interview.id).answers[0]).toMatchObject({ model: "disk-model", startedAt: 130, firstTokenAt: 150, finishedAt: 180 });
+      } finally { second.close(); }
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("keeps multiple knowledge bases and their chunks isolated", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const knowledge = new SqliteKnowledgeRepository(database);
+      const first = knowledge.createKnowledgeBase("项目");
+      const second = knowledge.createKnowledgeBase("算法");
+      knowledge.saveDocument({ id: "doc-first", knowledgeBaseId: first.id, filename: "a.md", mimeType: "text/markdown", sha256: "a", text: "项目内容", sections: [], status: "ready" });
+      knowledge.replaceChunks("doc-first", [{ id: "chunk-first", text: "项目内容", metadata: { documentId: "doc-first", filename: "a.md" } }]);
+      knowledge.saveDocument({ id: "doc-second", knowledgeBaseId: second.id, filename: "b.md", mimeType: "text/markdown", sha256: "b", text: "算法内容", sections: [], status: "ready" });
+      knowledge.replaceChunks("doc-second", [{ id: "chunk-second", text: "算法内容", metadata: { documentId: "doc-second", filename: "b.md" } }]);
+      expect(knowledge.listChunks([first.id]).map((chunk) => chunk.text)).toEqual(["项目内容"]);
+      expect(knowledge.listChunks([second.id]).map((chunk) => chunk.text)).toEqual(["算法内容"]);
+    } finally { database.close(); }
   });
 });

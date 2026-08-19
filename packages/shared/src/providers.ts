@@ -5,6 +5,10 @@ export interface ProviderSettings {
   baseUrl: string;
   apiKey: string;
   model: string;
+  fastModel?: string;
+  normalModel?: string;
+  deepModel?: string;
+  visionModel?: string;
   timeoutMs: number;
   maxRetries: number;
 }
@@ -185,9 +189,3 @@ export interface AsrEvent {
 }
 
 /** Contract for a real ASR gateway. The desktop sends raw 16-bit stereo PCM packets. */
-export interface StreamingAsrProvider {
-  start(): Promise<void>;
-  sendPcm(packet: Uint8Array): void;
-  onEvent(listener: (event: AsrEvent) => void): () => void;
-  stop(): Promise<void>;
-}

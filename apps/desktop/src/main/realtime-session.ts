@@ -15,10 +15,9 @@ export type RealtimeConnectionState = "disconnected" | "connecting" | "connected
 
 export interface RealtimeConnectOptions {
   url: string;
-  ticket?: string;
+  gatewayToken?: string;
   providerName?: string;
   model?: string;
-  apiKey?: string;
   autoReconnect?: boolean;
 }
 
@@ -44,10 +43,10 @@ export function realtimeReconnectDelayMs(attempt: number): number {
   return RETRY_DELAYS_MS[Math.min(Math.max(0, Math.floor(attempt)), RETRY_DELAYS_MS.length - 1)];
 }
 
-function withTicket(url: string, ticket?: string): string {
-  if (!ticket) return url;
+function withGatewayToken(url: string, gatewayToken?: string): string {
+  if (!gatewayToken) return url;
   const parsed = new URL(url);
-  parsed.searchParams.set("ticket", ticket);
+  parsed.searchParams.set("ticket", gatewayToken);
   return parsed.toString();
 }
 
@@ -122,7 +121,7 @@ export class RealtimeSession extends EventEmitter {
     if (this.manualStop || !this.options) return;
     this.setState(this.reconnectAttempt === 0 ? "connecting" : "reconnecting");
     try {
-      const socket = this.socketFactory(withTicket(this.options.url, this.options.ticket));
+      const socket = this.socketFactory(withGatewayToken(this.options.url, this.options.gatewayToken));
       this.socket = socket;
       socket.binaryType = "arraybuffer";
       socket.onopen = () => this.handleOpen(socket);
@@ -138,7 +137,7 @@ export class RealtimeSession extends EventEmitter {
     if (this.socket !== socket || this.manualStop) return;
     this.reconnectAttempt = 0;
     this.setState("connected");
-    this.sendControl({ type: "client_ready", providerName: this.options?.providerName, model: this.options?.model, apiKey: this.options?.apiKey });
+    this.sendControl({ type: "client_ready", providerName: this.options?.providerName, model: this.options?.model, gatewayToken: this.options?.gatewayToken });
     this.flushAudio();
     this.emit("connected");
   }
@@ -180,6 +179,7 @@ export class RealtimeSession extends EventEmitter {
     if (socket && this.socket !== socket) return;
     this.socket = undefined;
     this.emit("diagnostic", reason);
+    if (!this.manualStop) this.emit("message", { type: "runtime_error", code: "WS_CONNECT_FAILED", message: reason, recoverable: true } satisfies RealtimeServerMessage);
     if (this.manualStop || !this.options?.autoReconnect) {
       this.setState("error");
       return;
