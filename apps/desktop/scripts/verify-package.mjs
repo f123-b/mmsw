@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { extractFile, listPackage } from "@electron/asar";
 
 const unpackedDirectory = join(process.cwd(), "apps", "desktop", "release", "win-unpacked");
@@ -12,6 +12,10 @@ const archiveRequired = ["out/main/index.js", "out/preload/index.mjs", "out/rend
 
 function normalizeArchiveEntry(entry) {
   return entry.replace(/^[\\/]+/, "").replaceAll("\\", "/");
+}
+
+function archivePathForExtraction(entry) {
+  return normalizeArchiveEntry(entry).replaceAll("/", sep);
 }
 
 for (const path of unpackedRequired) {
@@ -28,10 +32,16 @@ for (const entry of archiveRequired) {
   if (!entriesByNormalizedPath.has(normalizedEntry)) throw new Error(`Missing packaged app.asar entry: ${entry}`);
 }
 
-const bundledMain = extractFile(archive, entriesByNormalizedPath.get("out/main/index.js")).toString("utf8");
+const bundledMain = extractFile(
+  archive,
+  archivePathForExtraction(entriesByNormalizedPath.get("out/main/index.js"))
+).toString("utf8");
 if (bundledMain.includes("preload/index.js")) throw new Error("Packaged main still references preload/index.js");
 
-const rendererHtml = extractFile(archive, entriesByNormalizedPath.get("out/renderer/index.html")).toString("utf8");
+const rendererHtml = extractFile(
+  archive,
+  archivePathForExtraction(entriesByNormalizedPath.get("out/renderer/index.html"))
+).toString("utf8");
 if (!rendererHtml.includes('id="root"')) throw new Error("Packaged renderer entry does not contain the root mount point");
 
 console.log(`Verified app.asar entries: ${archiveRequired.join(", ")}`);
