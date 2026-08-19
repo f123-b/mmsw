@@ -164,14 +164,7 @@ export class DeepgramStreamingAsrProvider implements StreamingAsrProvider {
   finalize(timeoutMs = 1_000): Promise<void> {
     if (!this.socket) return Promise.resolve();
     this.finalizing = true;
-    try {
-      this.socket.send(JSON.stringify({ type: "Finalize" }));
-    } catch (error) {
-      this.handleError(error);
-      this.finishFinalize();
-      return Promise.resolve();
-    }
-    return new Promise<void>((resolve) => {
+    const promise = new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         this.finishFinalize();
         resolve();
@@ -179,6 +172,14 @@ export class DeepgramStreamingAsrProvider implements StreamingAsrProvider {
       timer.unref?.();
       this.finalizeWaiters.push({ resolve, timer });
     });
+    try {
+      this.socket.send(JSON.stringify({ type: "Finalize" }));
+    } catch (error) {
+      this.handleError(error);
+      this.finishFinalize();
+      return promise;
+    }
+    return promise;
   }
 
   close(): void {
@@ -210,10 +211,6 @@ export class DeepgramStreamingAsrProvider implements StreamingAsrProvider {
     if (message.type === "Metadata" || message.type === "KeepAlive" || message.type === "Welcome") return;
     if (message.type === "Error" || message.error) {
       this.notifyError(providerError(new Error(errorMessage(message)), this.source, "PROVIDER_ERROR", errorMessage(message)));
-      return;
-    }
-    if (message.from_finalize === true && this.finalizing) {
-      this.finishFinalize();
       return;
     }
     const alternative = message.channel?.alternatives?.[0];

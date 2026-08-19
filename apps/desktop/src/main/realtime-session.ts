@@ -52,8 +52,8 @@ export interface AsrRuntimeDiagnostics {
   language: string;
   micState: "connecting" | "listening" | "error" | "stopped";
   remoteState: "connecting" | "listening" | "error" | "stopped";
-  lastPartialLatencyMs?: number;
-  lastFinalLatencyMs?: number;
+  lastPartialObservedLatencyMs?: number;
+  lastFinalObservedLatencyMs?: number;
   reconnectCount: number;
   droppedPcmPackets: number;
 }
@@ -126,7 +126,7 @@ export class RealtimeSession extends EventEmitter {
   private directRouter: StereoAsrChannelRouter | undefined;
   private directGeneration = 0;
   private handledDirectFailureGeneration = 0;
-  private lastAudioPacketAt = 0;
+  private audioTimelineOriginAt = 0;
   private diagnostics: AsrRuntimeDiagnostics = {
     provider: "unknown",
     model: "",
@@ -164,6 +164,7 @@ export class RealtimeSession extends EventEmitter {
       reconnectCount: 0,
       droppedPcmPackets: this.audioQueue.stats.droppedPackets
     };
+    this.audioTimelineOriginAt = 0;
     this.emitDiagnostics();
     this.openSocket();
   }
@@ -181,6 +182,7 @@ export class RealtimeSession extends EventEmitter {
     this.socket?.close();
     this.socket = undefined;
     this.audioQueue.clear();
+    this.audioTimelineOriginAt = 0;
     this.stabilizer.clear();
     if (clearOptions) this.options = undefined;
     this.diagnostics = { ...this.diagnostics, micState: "stopped", remoteState: "stopped" };
@@ -189,7 +191,7 @@ export class RealtimeSession extends EventEmitter {
   }
 
   sendAudio(packet: Uint8Array): void {
-    this.lastAudioPacketAt = Date.now();
+    this.audioTimelineOriginAt ||= Date.now();
     if (this.directRouter && this.state === "connected" && this.directRouter.isReady) {
       try {
         this.directRouter.sendStereo(packet);
@@ -303,7 +305,7 @@ export class RealtimeSession extends EventEmitter {
       this.updateChannelDiagnostic(message.source, message.state === "listening" ? "listening" : message.state === "error" ? "error" : message.state === "connecting" ? "connecting" : "stopped");
     }
     if (message.type === "asr_partial" || message.type === "asr_final") {
-      this.recordAsrLatency(message.type === "asr_final");
+      this.recordAsrLatency(message.type === "asr_final", message.segment.endMs);
       const update = this.stabilizer.upsert(message.segment);
       this.emit("transcript", update.snapshot, update.segment);
     }
@@ -421,10 +423,11 @@ export class RealtimeSession extends EventEmitter {
     this.emitDiagnostics();
   }
 
-  private recordAsrLatency(final: boolean): void {
-    if (!this.lastAudioPacketAt) return;
-    const latency = Math.max(0, Date.now() - this.lastAudioPacketAt);
-    this.diagnostics = { ...this.diagnostics, ...(final ? { lastFinalLatencyMs: latency } : { lastPartialLatencyMs: latency }) };
+  private recordAsrLatency(final: boolean, segmentEndMs: number): void {
+    if (!this.audioTimelineOriginAt) return;
+    const expectedAt = this.audioTimelineOriginAt + Math.max(0, segmentEndMs);
+    const latency = Math.max(0, Date.now() - expectedAt);
+    this.diagnostics = { ...this.diagnostics, ...(final ? { lastFinalObservedLatencyMs: latency } : { lastPartialObservedLatencyMs: latency }) };
     this.emitDiagnostics();
   }
 

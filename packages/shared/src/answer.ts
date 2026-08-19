@@ -72,13 +72,13 @@ export class PromptBuilder {
     if (context.retrievedKnowledge.length > 0) sections.push({ name: "retrieval-context", content: context.retrievedKnowledge.join("\n---\n") });
     if (context.recentTranscript.length > 0) sections.push({ name: "recent-transcript", content: `最近必要对话：\n${context.recentTranscript.join("\n")}` });
     sections.push({ name: "question", content: question.text });
-    const length = mode === "FAST" ? "60-120" : "120-250";
+    const length = mode === "FAST" ? "60-120" : mode === "DEEP" ? "200-400" : "120-220";
     sections.push({ name: "output-format", content: `输出中文 sneak peek，控制在 ${length} 字左右：先给一句核心回答，再给 2~4 个关键点；仅在资料真实匹配时结合项目，不要写成长篇论文。` });
     return sections;
   }
 }
 
-export type ModelRoute = "fast" | "reasoning" | "vision" | "low-latency";
+export type ModelRoute = "fast" | "normal" | "reasoning" | "vision" | "low-latency";
 
 export interface ModelSelection {
   route: ModelRoute;
@@ -88,9 +88,13 @@ export interface ModelSelection {
 export class ModelRouter {
   constructor(private readonly models: Partial<Record<ModelRoute, string>> = {}, private readonly fallbackModel = "") {}
 
+  setModels(models: Partial<Record<ModelRoute, string>>): void {
+    Object.assign(this.models, models);
+  }
+
   select(question: string, mode: AnswerMode = "NORMAL", hasScreenshot = false): ModelSelection {
-    const route: ModelRoute = hasScreenshot ? "vision" : mode === "FAST" ? "fast" : mode === "DEEP" || question.length > 80 ? "reasoning" : "low-latency";
-    return { route, model: this.models[route] ?? this.fallbackModel };
+    const route: ModelRoute = hasScreenshot ? "vision" : mode === "FAST" ? "fast" : mode === "DEEP" ? "reasoning" : "normal";
+    return { route, model: this.models[route] ?? (route === "normal" ? this.models["low-latency"] : undefined) ?? this.fallbackModel };
   }
 }
 
@@ -98,6 +102,7 @@ export interface AnswerProviderRequest {
   model: string;
   sections: PromptSection[];
   attachments?: Array<{ mimeType: string; dataUrl: string }>;
+  thinking?: boolean;
 }
 
 export interface AnswerProvider {
@@ -121,13 +126,13 @@ export class AnswerAgent {
     const context = this.contextRouter.route(question.text, contextInput);
     const selection = this.modelRouter.select(question.text, mode, options.hasScreenshot ?? false);
     if (!selection.model) throw new Error(`No model configured for ${selection.route}`);
-    const provider = this.providers[selection.route];
+    const provider = this.providers[selection.route] ?? (selection.route === "normal" ? this.providers["low-latency"] : undefined);
     if (!provider) throw new Error(`No AnswerProvider configured for ${selection.route}`);
     const answerId = `answer-${Date.now()}-${question.id}`;
     const sections = this.promptBuilder.build(question, mode, context);
     yield { type: "answer_start", answerId, questionId: question.id, mode, model: selection.model };
     let text = "";
-    for await (const delta of provider.stream({ model: selection.model, sections, attachments: options.attachments }, signal)) {
+    for await (const delta of provider.stream({ model: selection.model, sections, attachments: options.attachments, thinking: mode === "DEEP" }, signal)) {
       if (!delta) continue;
       text += delta;
       yield { type: "answer_delta", answerId, delta };

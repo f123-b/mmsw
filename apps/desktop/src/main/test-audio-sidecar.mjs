@@ -25,7 +25,9 @@ if (has("--probe-only")) {
       process.once("SIGTERM", () => { clearInterval(keepAlive); process.exit(0); });
       return;
     }
-    emit({ type: "probe_result", mic: { ok: behavior !== "mic-fail" && behavior !== "both-fail", sampleRate: 16_000, channels: 1, peak: behavior === "mic-fail" || behavior === "both-fail" ? 0 : 0.4, callbackCount: behavior === "mic-fail" || behavior === "both-fail" ? 0 : 4, sampleCount: behavior === "mic-fail" || behavior === "both-fail" ? 0 : 640 }, system: { ok: behavior !== "system-fail" && behavior !== "both-fail", sampleRate: 16_000, channels: 2, peak: behavior === "system-fail" || behavior === "both-fail" ? 0 : 0.3, callbackCount: behavior === "system-fail" || behavior === "both-fail" ? 0 : 4, sampleCount: behavior === "system-fail" || behavior === "both-fail" ? 0 : 1_280 }, durationMs: 40, timestamp: timestamp() });
+    const micOk = behavior !== "mic-fail" && behavior !== "both-fail";
+    const systemOk = behavior !== "system-fail" && behavior !== "both-fail";
+    emit({ type: "probe_result", mic: { ok: micOk, streamOk: micOk, signalDetected: micOk, sampleRate: 16_000, channels: 1, peak: micOk ? 0.4 : 0, callbackCount: micOk ? 4 : 0, sampleCount: micOk ? 640 : 0 }, system: { ok: systemOk, streamOk: systemOk, signalDetected: systemOk, sampleRate: 16_000, channels: 2, peak: systemOk ? 0.3 : 0, callbackCount: systemOk ? 4 : 0, sampleCount: systemOk ? 1_280 : 0 }, durationMs: 40, timestamp: timestamp() });
     emit({ type: "audio_state", state: "READY", timestamp: timestamp() });
     process.exit(behavior === "nonzero-after-result" ? 7 : 0);
   }, 40);

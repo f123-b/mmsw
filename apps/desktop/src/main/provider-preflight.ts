@@ -1,8 +1,8 @@
 import WebSocket from "ws";
-import type { ProviderSettings } from "@interview-copilot/shared";
+import { providerCapabilities, providerEndpoint, type ProviderSettings } from "@interview-copilot/shared";
 import type { ProviderSection } from "./settings-store";
 
-export type ProviderCheckStatus = "unconfigured" | "testing" | "ready" | "auth_failed" | "network_failed" | "model_not_found" | "timeout";
+export type ProviderCheckStatus = "unconfigured" | "testing" | "ready" | "auth_failed" | "model_not_found" | "bad_request" | "rate_limited" | "server_error" | "invalid_response" | "network_failed" | "timeout";
 
 export interface ProviderCheckResult {
   section: ProviderSection;
@@ -47,48 +47,78 @@ export class ProviderPreflightCache {
   }
 }
 
-function endpoint(baseUrl: string, path: string): string {
-  return `${baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
-}
-
 function configured(section: ProviderSection, settings: ProviderSettings): boolean {
   if (section === "reranker" && settings.providerName === "Disabled") return true;
-  if (!settings.apiKey && section !== "asr") return false;
   if (section === "asr" && settings.providerType === "custom-gateway") return Boolean(settings.baseUrl && settings.model);
-  return Boolean(settings.baseUrl && settings.model && settings.apiKey);
+  const capabilities = providerCapabilities(settings);
+  return Boolean(settings.baseUrl && settings.model && (!capabilities.requiresApiKey || settings.apiKey));
 }
 
 function classifyHttp(status: number): ProviderCheckStatus {
   if (status === 401 || status === 403) return "auth_failed";
   if (status === 404) return "model_not_found";
+  if (status === 400 || status === 422) return "bad_request";
+  if (status === 429) return "rate_limited";
+  if (status >= 500) return "server_error";
   return "network_failed";
+}
+
+function statusMessage(status: ProviderCheckStatus, settings: ProviderSettings, body?: string): string {
+  if (status === "auth_failed") return "认证失败：API Key 无效或未授权";
+  if (status === "model_not_found") return `模型不存在：${settings.model}`;
+  if (status === "bad_request") return body ? `请求参数不兼容：${body.slice(0, 240)}` : "请求参数不兼容";
+  if (status === "rate_limited") return "Provider 限流，请稍后重试";
+  if (status === "server_error") return "Provider 服务端错误，请稍后重试";
+  return body ? `网络连接失败：${body.slice(0, 240)}` : "网络连接失败";
+}
+
+function responseErrorText(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    const error = parsed.error;
+    if (typeof error === "string") return error;
+    if (error && typeof error === "object" && typeof (error as Record<string, unknown>).message === "string") return (error as Record<string, unknown>).message as string;
+    if (typeof parsed.message === "string") return parsed.message;
+  } catch {
+    // Keep the bounded raw body for diagnostics below.
+  }
+  return body.trim() || undefined;
 }
 
 async function testHttp(section: "llm" | "embedding", settings: ProviderSettings, signal: AbortSignal): Promise<ProviderCheckResult> {
   const isLlm = section === "llm";
-  const response = await fetch(endpoint(settings.baseUrl, isLlm ? "v1/chat/completions" : "v1/embeddings"), {
+  const capabilities = providerCapabilities(settings);
+  const response = await fetch(providerEndpoint(settings, isLlm ? capabilities.chatPath : capabilities.embeddingPath), {
     method: "POST",
     headers: { "content-type": "application/json", ...(settings.apiKey ? { authorization: `Bearer ${settings.apiKey}` } : {}) },
     body: JSON.stringify(isLlm ? {
       model: settings.model,
       messages: [{ role: "system", content: "Return exactly OK." }, { role: "user", content: "ping" }],
       stream: false,
-      max_tokens: 4
+      max_tokens: 16,
+      ...(capabilities.supportsThinking ? { thinking: { type: "disabled" } } : {})
     } : { model: settings.model, input: "test" }),
     signal
   });
   if (!response.ok) {
     const status = classifyHttp(response.status);
-    return { section, configured: true, reachable: false, status, message: `${status === "auth_failed" ? "认证失败" : status === "model_not_found" ? "模型不存在" : `HTTP ${response.status}`}` };
+    return { section, configured: true, reachable: false, status, message: statusMessage(status, settings, responseErrorText(await response.text())) };
   }
-  const payload = await response.json() as Record<string, unknown>;
+  let payload: Record<string, unknown>;
+  try {
+    payload = await response.json() as Record<string, unknown>;
+  } catch (error) {
+    return { section, configured: true, reachable: false, status: "invalid_response", message: `Provider 返回格式异常：${String(error)}` };
+  }
   if (isLlm) {
     const choices = Array.isArray(payload.choices) ? payload.choices : [];
-    const content = (choices[0] as Record<string, unknown> | undefined)?.message as Record<string, unknown> | undefined;
-    if (choices.length === 0 || typeof content?.content !== "string" || !content.content.trim()) return { section, configured: true, reachable: false, status: "network_failed", message: "LLM 返回缺少有效 choices.message.content" };
+    const choice = choices[0] as Record<string, unknown> | undefined;
+    const message = choice?.message as Record<string, unknown> | undefined;
+    const content = [message?.content, message?.reasoning_content, choice?.text].find((value) => typeof value === "string" && value.trim()) as string | undefined;
+    if (choices.length === 0 || !content) return { section, configured: true, reachable: false, status: "invalid_response", message: "Provider 返回格式异常：缺少 choices 中的 content、reasoning_content 或 text" };
   } else {
     const vector = (Array.isArray(payload.data) ? payload.data[0] as Record<string, unknown> | undefined : undefined)?.embedding;
-    if (!Array.isArray(vector) || !vector.every((item) => typeof item === "number")) return { section, configured: true, reachable: false, status: "network_failed", message: "Embedding 返回非法向量" };
+    if (!Array.isArray(vector) || !vector.every((item) => typeof item === "number")) return { section, configured: true, reachable: false, status: "invalid_response", message: "Provider 返回格式异常：Embedding 返回非法向量" };
   }
   return { section, configured: true, reachable: true, status: "ready" };
 }
@@ -113,8 +143,11 @@ async function testAsr(settings: ProviderSettings, signal: AbortSignal): Promise
     try {
       socket = new WebSocket(url, settings.providerType === "custom-gateway" ? undefined : { headers: { Authorization: `Token ${settings.apiKey}` } });
       socket.once("open", () => finish({ section, configured: true, reachable: true, status: "ready" }));
-      socket.once("unexpected-response", (_request, response) => finish({ section, configured: true, reachable: false, status: classifyHttp(response.statusCode ?? 0), message: `HTTP ${response.statusCode ?? "unknown"}` }));
-      socket.once("error", () => finish({ section, configured: true, reachable: false, status: "network_failed", message: "Deepgram WebSocket 连接失败" }));
+      socket.once("unexpected-response", (_request, response) => {
+        const status = classifyHttp(response.statusCode ?? 0);
+        finish({ section, configured: true, reachable: false, status, message: statusMessage(status, settings) });
+      });
+      socket.once("error", (error) => finish({ section, configured: true, reachable: false, status: "network_failed", message: `网络连接失败：${error.message}` }));
     } catch (error) {
       finish({ section, configured: true, reachable: false, status: "network_failed", message: String(error) });
     }
@@ -122,7 +155,10 @@ async function testAsr(settings: ProviderSettings, signal: AbortSignal): Promise
 }
 
 export async function testProviderConnection(section: ProviderSection, settings: ProviderSettings): Promise<ProviderCheckResult> {
-  if (!configured(section, settings)) return { section, configured: false, reachable: false, status: "unconfigured", message: section === "llm" ? "未配置 LLM API Key" : section === "embedding" ? "未配置 Embedding API Key" : "未配置 Provider" };
+  if (!configured(section, settings)) {
+    const needsKey = providerCapabilities(settings).requiresApiKey;
+    return { section, configured: false, reachable: false, status: "unconfigured", message: needsKey ? section === "llm" ? "未配置 LLM API Key" : section === "embedding" ? "未配置 Embedding API Key" : "未配置 Provider" : "未配置 Base URL 或 Model" };
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.max(1_000, settings.timeoutMs));
   try {

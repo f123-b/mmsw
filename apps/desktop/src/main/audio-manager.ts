@@ -75,6 +75,7 @@ export class AudioManager extends EventEmitter {
     result?: ProbeResult;
     timer: NodeJS.Timeout;
   } | undefined;
+  private probeInFlight: { key: string; promise: Promise<ProbeResult> } | undefined;
   private lastProbeResult: ProbeResult | undefined;
   private lastProbeDeviceKey: string | undefined;
 
@@ -90,7 +91,7 @@ export class AudioManager extends EventEmitter {
   get runningOptions(): AudioStartOptions { return { ...this.currentOptions }; }
 
   hasValidProbe(options: Pick<AudioStartOptions, "inputDeviceId" | "outputDeviceId"> = {}): boolean {
-    return Boolean(this.lastProbeResult?.mic.ok && this.lastProbeResult.system.ok && this.lastProbeDeviceKey === this.probeDeviceKey(options));
+    return Boolean(this.lastProbeResult?.mic.streamOk && this.lastProbeResult.system.streamOk && this.lastProbeDeviceKey === this.probeDeviceKey(options));
   }
 
   async listDevices(): Promise<AudioDevices> {
@@ -151,19 +152,34 @@ export class AudioManager extends EventEmitter {
     if (this.process === process) throw new Error("AUDIO_BUSY: audio sidecar did not stop in time");
   }
 
-  async probe(options: Omit<AudioStartOptions, "meterOnly" | "probeOnly" | "autoRecover"> = {}): Promise<ProbeResult> {
+  probe(options: Omit<AudioStartOptions, "meterOnly" | "probeOnly" | "autoRecover"> = {}): Promise<ProbeResult> {
+    const key = this.probeDeviceKey(options);
+    if (this.probeInFlight) {
+      if (this.probeInFlight.key === key) return this.probeInFlight.promise;
+      return Promise.reject(new Error("AUDIO_PROBE_BUSY: another audio probe is already running"));
+    }
+    const promise = this.runProbe(options);
+    let tracked!: Promise<ProbeResult>;
+    tracked = promise.finally(() => {
+      if (this.probeInFlight?.promise === tracked) this.probeInFlight = undefined;
+    });
+    this.probeInFlight = { key, promise: tracked };
+    return tracked;
+  }
+
+  private runProbe(options: Omit<AudioStartOptions, "meterOnly" | "probeOnly" | "autoRecover">): Promise<ProbeResult> {
     // A new probe is the only operation allowed to establish a fresh validity
-    // window. Invalidate the previous success before any async stop/spawn work
-    // so a timeout, crash, or empty result can never reuse it.
+    // window. Invalidate the previous success before spawning so a timeout,
+    // crash, or empty result can never reuse it.
     this.lastProbeResult = undefined;
     this.lastProbeDeviceKey = undefined;
-    if (this.processKind === "probe") await this.stop();
-    if (this.isRunning) throw new Error(`AUDIO_BUSY: ${this.processKind ?? "audio"} sidecar is still running`);
+    if (this.isRunning) return Promise.reject(new Error(`AUDIO_BUSY: ${this.processKind ?? "audio"} sidecar is still running`));
     const result = new Promise<ProbeResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!this.pendingProbe) return;
         const pending = this.pendingProbe;
         this.pendingProbe = undefined;
+        clearTimeout(pending.timer);
         const error = new Error("AUDIO_PROBE_TIMEOUT: probe did not complete in time");
         void this.stop().finally(() => pending.reject(error));
       }, Math.max(50, Number(process.env.INTERVIEW_COPILOT_AUDIO_PROBE_TIMEOUT_MS ?? 15_000)));
@@ -257,9 +273,9 @@ export class AudioManager extends EventEmitter {
         const result = pending.result;
         if (!result) pending.reject(new Error(`${code === 0 ? "AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT" : "AUDIO_PROBE_PROCESS_CRASHED"}: probe exited with code ${code ?? "unknown"}`));
         else if (code !== 0) pending.reject(new Error(`AUDIO_PROBE_PROCESS_FAILED: probe exited with code ${code ?? "unknown"} after returning a result`));
-        else if (!result.mic.ok && !result.system.ok) pending.reject(new Error("AUDIO_PROBE_FAILED: microphone and system audio probe failed"));
-        else if (!result.mic.ok) pending.reject(new Error("AUDIO_PROBE_MIC_FAILED: microphone probe failed"));
-        else if (!result.system.ok) pending.reject(new Error("AUDIO_PROBE_SYSTEM_FAILED: system audio probe failed"));
+        else if (!result.mic.streamOk && !result.system.streamOk) pending.reject(new Error("AUDIO_PROBE_FAILED: microphone and system audio probe failed"));
+        else if (!result.mic.streamOk) pending.reject(new Error("AUDIO_PROBE_MIC_FAILED: microphone probe failed"));
+        else if (!result.system.streamOk) pending.reject(new Error("AUDIO_PROBE_SYSTEM_FAILED: system audio probe failed"));
         else {
           this.lastProbeResult = result;
           this.lastProbeDeviceKey = this.probeDeviceKey(options);

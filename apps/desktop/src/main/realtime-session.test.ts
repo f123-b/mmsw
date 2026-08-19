@@ -84,7 +84,7 @@ describe("RealtimeSession", () => {
     expect(sockets[0]?.sent).toContainEqual(new Uint8Array([1, 2]));
     expect(sockets[1]?.sent).toContainEqual(new Uint8Array([3, 4]));
     sockets[1]?.emit(JSON.stringify({ is_final: true, speech_final: true, start: 0, duration: 0.3, channel: { alternatives: [{ transcript: "为什么使用 DMA", confidence: 0.9 }] } }));
-    expect(session.asrDiagnostics.lastFinalLatencyMs).toBeDefined();
+    expect(session.asrDiagnostics.lastFinalObservedLatencyMs).toBeDefined();
     session.disconnect();
   });
 

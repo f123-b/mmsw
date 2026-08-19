@@ -130,7 +130,7 @@ fn run_probe(capture: wasapi::CaptureHandle) -> Result<(), String> {
         duration_ms: started.elapsed().as_millis() as u64,
         timestamp: timestamp(),
     });
-    if !mic.ok() || !system.ok() {
+    if !mic.stream_ok() || !system.stream_ok() {
         return Err(format!(
             "probe produced no samples: mic={} callbacks, system={} callbacks",
             mic.callback_count, system.callback_count

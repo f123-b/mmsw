@@ -49,6 +49,8 @@ export const audioStateSchema = z.object({
 
 export const probeChannelResultSchema = z.object({
   ok: z.boolean(),
+  streamOk: z.boolean(),
+  signalDetected: z.boolean(),
   sampleRate: z.number().int().nonnegative(),
   channels: z.number().int().nonnegative(),
   peak: z.number().min(0).max(1),

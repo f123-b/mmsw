@@ -16,12 +16,57 @@ export interface ProviderSettings {
   visionModel?: string;
   timeoutMs: number;
   maxRetries: number;
+  /** Explicitly override whether this provider requires an API key. */
+  requiresApiKey?: boolean;
+}
+
+export interface ProviderCapabilities {
+  requiresApiKey: boolean;
+  supportsThinking: boolean;
+  chatPath: string;
+  embeddingPath: string;
 }
 
 export type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
-function endpoint(baseUrl: string, path: string): string {
-  return `${baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
+function isDeepSeek(settings: ProviderSettings): boolean {
+  try {
+    return settings.providerName.toLowerCase().includes("deepseek") || new URL(settings.baseUrl).hostname.toLowerCase() === "api.deepseek.com";
+  } catch {
+    return settings.providerName.toLowerCase().includes("deepseek");
+  }
+}
+
+function isLocalProvider(settings: ProviderSettings): boolean {
+  try {
+    const hostname = new URL(settings.baseUrl).hostname.toLowerCase();
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "0.0.0.0";
+  } catch {
+    return false;
+  }
+}
+
+export function providerCapabilities(settings: ProviderSettings): ProviderCapabilities {
+  const deepSeek = isDeepSeek(settings);
+  const local = isLocalProvider(settings) || /ollama|lm\s*studio|vllm|local/i.test(settings.providerName);
+  return {
+    requiresApiKey: settings.requiresApiKey ?? (!local),
+    supportsThinking: deepSeek,
+    chatPath: deepSeek ? "chat/completions" : "v1/chat/completions",
+    embeddingPath: "v1/embeddings"
+  };
+}
+
+function cleanBaseUrl(baseUrl: string, settings: ProviderSettings): string {
+  let base = baseUrl.trim().replace(/\/+$/, "");
+  if (isDeepSeek(settings)) base = base.replace(/\/chat\/completions$/i, "").replace(/\/v1$/i, "");
+  return base;
+}
+
+export function providerEndpoint(settings: ProviderSettings, path: string): string {
+  const normalized = path.replace(/^\/+/, "");
+  const base = cleanBaseUrl(settings.baseUrl, settings);
+  return `${base}/${normalized}`;
 }
 
 function buildMessages(sections: PromptSection[], attachments: Array<{ mimeType: string; dataUrl: string }> = []): Array<{ role: "system" | "user"; content: string | Array<Record<string, unknown>> }> {
@@ -34,6 +79,12 @@ function buildMessages(sections: PromptSection[], attachments: Array<{ mimeType:
     { role: "system", content: system },
     { role: "user", content: userContent }
   ];
+}
+
+function thinkingForRequest(settings: ProviderSettings, request: AnswerProviderRequest): { type: "enabled" | "disabled" } | undefined {
+  const capabilities = providerCapabilities(settings);
+  if (!capabilities.supportsThinking || request.thinking === undefined) return undefined;
+  return { type: request.thinking ? "enabled" : "disabled" };
 }
 
 function extractDelta(value: unknown): string {
@@ -121,13 +172,14 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
       const abort = () => controller.abort();
       externalSignal.addEventListener("abort", abort, { once: true });
       try {
-        const response = await this.fetchImpl(endpoint(this.settings.baseUrl, "v1/chat/completions"), {
+        const thinking = thinkingForRequest(this.settings, request);
+        const response = await this.fetchImpl(providerEndpoint(this.settings, providerCapabilities(this.settings).chatPath), {
           method: "POST",
           headers: {
             "content-type": "application/json",
             ...(this.settings.apiKey ? { authorization: `Bearer ${this.settings.apiKey}` } : {})
           },
-          body: JSON.stringify({ model: request.model || this.settings.model, messages: buildMessages(request.sections, request.attachments), stream: true }),
+          body: JSON.stringify({ model: request.model || this.settings.model, messages: buildMessages(request.sections, request.attachments), ...(thinking ? { thinking } : {}), stream: true }),
           signal: controller.signal
         });
         if (!response.ok) throw new Error(`Answer provider HTTP ${response.status}: ${await readError(response)}`);
@@ -165,7 +217,7 @@ export class OpenAICompatibleEmbeddingProvider {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.max(1_000, this.settings.timeoutMs));
     try {
-      const response = await this.fetchImpl(endpoint(this.settings.baseUrl, "v1/embeddings"), {
+      const response = await this.fetchImpl(providerEndpoint(this.settings, providerCapabilities(this.settings).embeddingPath), {
         method: "POST",
         headers: { "content-type": "application/json", ...(this.settings.apiKey ? { authorization: `Bearer ${this.settings.apiKey}` } : {}) },
         body: JSON.stringify({ model: this.settings.model, input: text }),

@@ -88,4 +88,32 @@ describe("stereo ASR routing", () => {
     provider.close();
     expect(socket.sentText).toContain(JSON.stringify({ type: "CloseStream" }));
   });
+
+  it("emits a final transcript before completing Finalize when the response carries from_finalize", async () => {
+    const socket = new FakeSocket();
+    const provider = new DeepgramStreamingAsrProvider({ model: "nova-3", language: "zh-CN", apiKey: "secret" }, () => socket);
+    const segments: string[] = [];
+    const connecting = provider.connect("remote", (segment) => segments.push(segment.text));
+    socket.openSocket();
+    await connecting;
+    const finalizing = provider.finalize(500);
+    socket.emit(JSON.stringify({ from_finalize: true, is_final: true, start: 1, duration: 0.6, channel: { alternatives: [{ transcript: "最后一句问题" }] } }));
+    await finalizing;
+    expect(segments).toEqual(["最后一句问题"]);
+    provider.close();
+  });
+
+  it("does not drop a transcript-bearing speech_final response during Finalize", async () => {
+    const socket = new FakeSocket();
+    const provider = new DeepgramStreamingAsrProvider({ model: "nova-3", language: "zh-CN", apiKey: "secret" }, () => socket);
+    const segments: string[] = [];
+    const connecting = provider.connect("remote", (segment) => segments.push(segment.text));
+    socket.openSocket();
+    await connecting;
+    const finalizing = provider.finalize(500);
+    socket.emit(JSON.stringify({ speech_final: true, is_final: true, start: 2, duration: 0.3, channel: { alternatives: [{ transcript: "收尾问题" }] } }));
+    await finalizing;
+    expect(segments).toEqual(["收尾问题"]);
+    provider.close();
+  });
 });

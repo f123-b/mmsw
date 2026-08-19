@@ -139,6 +139,22 @@ describe("AudioManager probe lifecycle", () => {
     await probe;
   });
 
+  it("PROBE_REENTRY_RETURNS_THE_EXISTING_PROMISE", async () => {
+    const first = manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
+    const second = manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
+    const five = Array.from({ length: 5 }, () => manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" }));
+    expect(second).toBe(first);
+    expect(five.every((probe) => probe === first)).toBe(true);
+    await expect(Promise.all([first, second, ...five])).resolves.toHaveLength(7);
+    expect(manager.hasValidProbe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).toBe(true);
+  });
+
+  it("PROBE_REENTRY_WITH_DIFFERENT_DEVICES_IS_BUSY", async () => {
+    const first = manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
+    await expect(manager.probe({ inputDeviceId: "another-mic", outputDeviceId: "mock-system" })).rejects.toThrow("AUDIO_PROBE_BUSY");
+    await first;
+  });
+
   it("PROBE_SUCCESS_ALLOWS_FORMAL_CAPTURE", async () => {
     await manager.probe();
     await manager.start({ meterOnly: false, autoRecover: true });

@@ -27,6 +27,35 @@ describe("ProviderConfigStore", () => {
       database.close();
     }
   });
+
+  it("preserves an existing API key when only the model changes", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const secrets = new MemorySecretStore();
+      const config = new ProviderConfigStore(database, secrets);
+      config.update("llm", { providerName: "deepseek", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", apiKey: "first-key" });
+      config.update("llm", { model: "deepseek-v4-pro", apiKey: undefined });
+      expect(config.get("llm")).toMatchObject({ model: "deepseek-v4-pro", apiKey: "first-key" });
+      expect(config.getPublic().llm.hasApiKey).toBe(true);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("updates and explicitly deletes an API key", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const config = new ProviderConfigStore(database, new MemorySecretStore());
+      config.update("llm", { apiKey: "first-key" });
+      config.update("llm", { apiKey: "second-key" });
+      expect(config.get("llm").apiKey).toBe("second-key");
+      config.update("llm", { apiKey: "" });
+      expect(config.get("llm").apiKey).toBe("");
+      expect(config.getPublic().llm.hasApiKey).toBe(false);
+    } finally {
+      database.close();
+    }
+  });
 });
 
 describe("OverlaySettingsStore", () => {

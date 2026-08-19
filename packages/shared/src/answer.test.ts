@@ -27,7 +27,9 @@ describe("Answer routing and generation", () => {
   });
 
   it("routes deep and screenshot requests to different models", () => {
-    const router = new ModelRouter({ fast: "fast-v1", reasoning: "reasoning-v1", vision: "vision-v1" });
+    const router = new ModelRouter({ fast: "fast-v1", normal: "normal-v1", reasoning: "reasoning-v1", vision: "vision-v1" });
+    expect(router.select("一个很长的问题".repeat(100), "FAST")).toEqual({ route: "fast", model: "fast-v1" });
+    expect(router.select("一个很长的问题".repeat(100), "NORMAL")).toEqual({ route: "normal", model: "normal-v1" });
     expect(router.select("解释系统设计", "DEEP").model).toBe("reasoning-v1");
     expect(router.select("识别截图中的代码", "FAST", true).route).toBe("vision");
   });

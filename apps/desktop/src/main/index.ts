@@ -51,16 +51,17 @@ const environmentLlmSettings: ProviderSettings = {
 };
 let providerConfigStore: ProviderConfigStore | undefined;
 let overlaySettingsStore: OverlaySettingsStore | undefined;
-const routingModels: Partial<Record<"fast" | "low-latency" | "reasoning" | "vision", string>> = { fast: configuredModel, "low-latency": configuredModel, reasoning: configuredModel, vision: configuredModel };
+const routingModels: Partial<Record<"fast" | "normal" | "low-latency" | "reasoning" | "vision", string>> = { fast: configuredModel, normal: configuredModel, "low-latency": configuredModel, reasoning: configuredModel, vision: configuredModel };
 const answerProvider: AnswerProvider = {
   stream(request, signal) {
     const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings;
     return new OpenAICompatibleAnswerProvider(settings).stream(request, signal);
   }
 };
+const answerModelRouter = new ModelRouter(routingModels);
 const answerAgent = new AnswerAgent(
-  { fast: answerProvider, "low-latency": answerProvider, reasoning: answerProvider, vision: answerProvider },
-  new ModelRouter(routingModels)
+  { fast: answerProvider, normal: answerProvider, "low-latency": answerProvider, reasoning: answerProvider, vision: answerProvider },
+  answerModelRouter
 );
 let interviewCoordinator: InterviewCoordinator | undefined;
 let profileRepository: SqliteProfileRepository | undefined;
@@ -109,6 +110,25 @@ type RendererReadiness = {
 
 function isDevelopment(): boolean {
   return Boolean(process.env.ELECTRON_RENDERER_URL);
+}
+
+function userFacingError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const mappings: Array<[string, string]> = [
+    ["AUDIO_PROBE_TIMEOUT", "音频检测超时，请检查设备后重试"],
+    ["AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT", "音频检测程序未返回结果，请重试"],
+    ["AUDIO_PROBE_PROCESS_CRASHED", "音频检测程序异常退出"],
+    ["AUDIO_PROBE_MIC_FAILED", "麦克风输入不可用"],
+    ["AUDIO_PROBE_SYSTEM_FAILED", "系统音频回采不可用"],
+    ["AUDIO_PROBE_REQUIRED", "请先完成一次音频检测"],
+    ["ASR_AUTH_FAILED", "未配置或未授权 Deepgram API Key，请前往设置"],
+    ["ASR_CONNECT_FAILED", "ASR 连接失败，请检查 Deepgram 设置"],
+    ["LLM_NOT_CONFIGURED", "未配置 LLM API Key，请前往设置"],
+    ["LLM_CONNECT_FAILED", "LLM 连接失败，请检查测试结果和网络"],
+    ["PROFILE_NOT_FOUND", "面试档案不存在，请先选择有效档案"],
+    ["AUDIO_BUSY", "音频设备仍在处理中，请稍后重试"]
+  ];
+  return mappings.find(([code]) => raw.includes(code))?.[1] ?? "操作失败，请查看设置或重试";
 }
 
 function verifyPreload(): boolean {
@@ -287,7 +307,7 @@ async function captureScreenshot(trigger = "screenshot-answer"): Promise<void> {
       finally { await screenshotManager.cleanup(result); }
     }
   } catch (error) {
-    broadcast("screenshot:error", String(error));
+    broadcast("screenshot:error", userFacingError(error));
     broadcast("runtime:error", { code: "SCREENSHOT_FAILED", message: "截图失败，请重试", recoverable: true });
   }
 }
@@ -653,7 +673,7 @@ async function streamChat(conversationId: string, content: string): Promise<void
   } catch (error) {
     const cancelled = controller.signal.aborted || (error instanceof Error && error.name === "AbortError");
     conversationRepository.updateMessage(assistantMessage.id, answer, cancelled ? "cancelled" : "error");
-    broadcast("chat:error", { conversationId, messageId: assistantMessage.id, code: cancelled ? "CHAT_CANCELLED" : "CHAT_PROVIDER_ERROR", message: cancelled ? "已停止生成" : String(error) });
+    broadcast("chat:error", { conversationId, messageId: assistantMessage.id, code: cancelled ? "CHAT_CANCELLED" : "CHAT_PROVIDER_ERROR", message: cancelled ? "已停止生成" : userFacingError(error) });
     if (!cancelled) throw error;
   } finally { chatAbortControllers.delete(conversationId); }
 }
@@ -751,7 +771,7 @@ function registerIpc(): void {
       const code = raw.split(":", 1)[0] || "AUDIO_DEVICE_FAILED";
       const allowed = new Set(["AUDIO_BUSY", "AUDIO_DEVICE_FAILED", "AUDIO_PROBE_REQUIRED", "AUDIO_PROBE_FAILED", "AUDIO_PROBE_MIC_FAILED", "AUDIO_PROBE_SYSTEM_FAILED", "AUDIO_PROBE_PROCESS_FAILED", "AUDIO_PROBE_PROCESS_CRASHED", "AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT", "AUDIO_PROBE_TIMEOUT", "ASR_AUTH_FAILED", "ASR_CONNECT_FAILED", "LLM_NOT_CONFIGURED", "LLM_CONNECT_FAILED", "PROFILE_NOT_FOUND", "SIDECAR_NOT_FOUND", "DATABASE_ERROR"]);
       const mappedCode = allowed.has(code) ? code : raw.includes("ASR") ? "ASR_CONNECT_FAILED" : raw.includes("LLM") ? "LLM_CONNECT_FAILED" : raw.includes("database") ? "DATABASE_ERROR" : "AUDIO_DEVICE_FAILED";
-      const message = raw.includes(": ") ? raw.slice(raw.indexOf(": ") + 2) : raw;
+      const message = userFacingError(error);
       broadcast("runtime:error", { code: mappedCode, message, recoverable: mappedCode !== "PROFILE_NOT_FOUND" && mappedCode !== "SIDECAR_NOT_FOUND" });
       throw new Error(`${mappedCode}: ${message}`);
     }
@@ -907,7 +927,7 @@ function registerIpc(): void {
         for await (const event of preparationRuntime!.run(goal, preparationAbortController?.signal)) broadcast("preparation:event", event);
       } catch (error) {
         const aborted = preparationAbortController?.signal.aborted;
-        broadcast("preparation:event", { type: aborted ? "stopped" : "error", message: aborted ? "Preparation 已停止" : String(error) });
+        broadcast("preparation:event", { type: aborted ? "stopped" : "error", message: aborted ? "Preparation 已停止" : userFacingError(error) });
       } finally {
         preparationRuntime = undefined;
         preparationAbortController = undefined;
@@ -925,9 +945,11 @@ function registerIpc(): void {
     providerPreflightCache.invalidate(section);
     if (section === "llm") {
       routingModels.fast = result.fastModel || result.model;
+      routingModels.normal = result.normalModel || result.model;
       routingModels["low-latency"] = result.normalModel || result.model;
       routingModels.reasoning = result.deepModel || result.model;
       routingModels.vision = result.visionModel || result.model;
+      answerModelRouter.setModels(routingModels);
     }
     return result;
   });
@@ -992,9 +1014,11 @@ app.whenReady().then(async () => {
     overlaySettingsStore = new OverlaySettingsStore(database);
     const llm = providerConfigStore.get("llm");
     routingModels.fast = llm.fastModel || llm.model;
+    routingModels.normal = llm.normalModel || llm.model;
     routingModels["low-latency"] = llm.normalModel || llm.model;
     routingModels.reasoning = llm.deepModel || llm.model;
     routingModels.vision = llm.visionModel || llm.model;
+    answerModelRouter.setModels(routingModels);
   } catch (error) {
     appLogger.error("database initialization failed", { error: String(error) });
     broadcast("runtime:error", { code: "DATABASE_INIT_FAILED", message: "本地数据库初始化失败，当前会话不会保存到磁盘" });

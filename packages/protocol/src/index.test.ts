@@ -5,6 +5,8 @@ import {
   parseAudioSidecarEvent,
   clientControlMessageSchema
 } from "./index";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 describe("audio protocol", () => {
   it("defines the 40ms stereo PCM packet size", () => {
@@ -43,8 +45,8 @@ describe("audio protocol", () => {
   it("validates probe and buffer statistics", () => {
     expect(parseAudioSidecarEvent(JSON.stringify({
       type: "probe_result",
-      mic: { ok: true, sampleRate: 48_000, channels: 1, peak: 0.43, callbackCount: 50, sampleCount: 2_400_000 },
-      system: { ok: true, sampleRate: 48_000, channels: 2, peak: 0.61, callbackCount: 50, sampleCount: 4_800_000 },
+      mic: { ok: true, streamOk: true, signalDetected: true, sampleRate: 48_000, channels: 1, peak: 0.43, callbackCount: 50, sampleCount: 2_400_000 },
+      system: { ok: true, streamOk: true, signalDetected: true, sampleRate: 48_000, channels: 2, peak: 0.61, callbackCount: 50, sampleCount: 4_800_000 },
       durationMs: 2_000,
       timestamp: 123
     }))).toMatchObject({ type: "probe_result", mic: { callbackCount: 50 } });
@@ -56,6 +58,11 @@ describe("audio protocol", () => {
       bufferDurationMs: 64,
       timestamp: 123
     }))).toMatchObject({ type: "audio_buffer", droppedFrames: 64 });
+  });
+
+  it("parses the exact Rust probe contract fixture", () => {
+    const fixture = readFileSync(fileURLToPath(new URL("../fixtures/audio-probe-result.json", import.meta.url)), "utf8");
+    expect(parseAudioSidecarEvent(fixture)).toMatchObject({ type: "probe_result", durationMs: 2_000, mic: { streamOk: true }, system: { signalDetected: false } });
   });
 
   it("validates audio drift statistics", () => {

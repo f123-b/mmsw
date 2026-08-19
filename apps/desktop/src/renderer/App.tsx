@@ -113,7 +113,7 @@ const useAudioStore = create<AudioStore>((set) => ({
       };
     }
     if (event.type === "audio_state") return { state: event.state };
-    if (event.type === "probe_result") return { probeResult: event, probeError: undefined, state: event.mic.ok && event.system.ok ? "READY" : "FAILED" };
+    if (event.type === "probe_result") return { probeResult: event, probeError: undefined, state: event.mic.streamOk && event.system.streamOk ? "READY" : "FAILED" };
     if (event.type === "audio_buffer") return { bufferStats: event };
     if (event.type === "audio_drift") return { drift: event };
     return { state: event.recoverable ? "DEGRADED" : "FAILED", notice: event.reason, probeError: event.reason };
@@ -239,6 +239,36 @@ function tencentLabel(value: TencentValidationStatus): string {
   return value === "verified" ? "已验证" : value === "failed" ? "失败" : "未验证";
 }
 
+function userFacingError(error: unknown): string {
+  const raw = String(error);
+  const mappings: Array<[string, string]> = [
+    ["AUDIO_PROBE_BUSY", "音频检测正在进行，请等待当前检测完成"],
+    ["AUDIO_PROBE_STOPPED", "音频检测已取消"],
+    ["AUDIO_PROBE_TIMEOUT", "音频检测超时，请检查设备后重试"],
+    ["AUDIO_PROBE_MIC_FAILED", "麦克风输入不可用"],
+    ["AUDIO_PROBE_SYSTEM_FAILED", "系统音频回采不可用"],
+    ["AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT", "音频检测程序未返回结果，请重试"],
+    ["AUDIO_PROBE_PROCESS_CRASHED", "音频检测程序异常退出"],
+    ["AUDIO_PROBE_PROCESS_FAILED", "音频检测程序失败"],
+    ["AUDIO_PROBE_FAILED", "麦克风和系统音频都不可用"],
+    ["AUDIO_PROBE_REQUIRED", "请先完成一次音频检测"],
+    ["LLM_NOT_CONFIGURED", "未配置 LLM API Key，请前往设置"],
+    ["ASR_AUTH_FAILED", "未配置或未授权 Deepgram API Key，请前往设置"],
+    ["LLM_CONNECT_FAILED", "LLM 连接失败，请检查测试结果和网络"],
+    ["ASR_CONNECT_FAILED", "ASR 连接失败，请检查 Deepgram 设置"],
+    ["auth_failed", "认证失败：API Key 无效或未授权"],
+    ["model_not_found", "模型不存在，请检查 Model 名称"],
+    ["bad_request", "请求参数不兼容，请检查 Provider 配置"],
+    ["rate_limited", "Provider 限流，请稍后重试"],
+    ["server_error", "Provider 服务端错误，请稍后重试"],
+    ["invalid_response", "服务已连接，但返回格式不兼容"],
+    ["timeout", "请求超时，请检查网络后重试"],
+    ["network_failed", "网络连接失败，请检查 Base URL 和网络"]
+  ];
+  const match = mappings.find(([code]) => raw.includes(code));
+  return match?.[1] ?? (raw.includes("Error invoking remote method") ? "操作失败，请查看设置或重试" : raw.replace(/^Error:\s*/i, ""));
+}
+
 function CaptureProtectionSettings({ status, validation = { desktopShare: "unverified", windowShare: "unverified" }, onToggle, onValidate = () => undefined }: { status: CaptureProtectionState; validation?: TencentValidationState; onToggle: (enabled: boolean) => void; onValidate?: (mode: "desktopShare" | "windowShare", status: TencentValidationStatus) => void }): JSX.Element {
   const [validationState, setValidationState] = useState<TencentValidationState>(validation);
   useEffect(() => { void window.interviewCopilot.overlay.getTencentValidation().then(setValidationState).catch(() => undefined); }, []);
@@ -298,6 +328,7 @@ export function App(): JSX.Element {
   const [inputDeviceId, setInputDeviceId] = useState("");
   const [outputDeviceId, setOutputDeviceId] = useState("");
   const [probeDeviceKey, setProbeDeviceKey] = useState("");
+  const [probing, setProbing] = useState(false);
   const [realtimeUrl, setRealtimeUrl] = useState(() => storedDevice("interview-copilot.realtime-url") ?? "");
   const [realtimeTicket, setRealtimeTicket] = useState("");
   const [dialog, setDialog] = useState<DialogState | null>(null);
@@ -327,7 +358,7 @@ export function App(): JSX.Element {
         if (input) persistDevice("interview-copilot.input-device", input);
         if (output) persistDevice("interview-copilot.output-device", output);
       } catch (error) {
-        store.setNotice(`设备枚举失败：${String(error)}`);
+        store.setNotice(`设备枚举失败：${userFacingError(error)}`);
       }
     };
     if (!captureTest) void loadDevices();
@@ -385,7 +416,7 @@ export function App(): JSX.Element {
         const storedConversations = await window.interviewCopilot.chat.listConversations(active?.id ?? storedProfiles[0]?.id);
         setConversations(storedConversations);
       } catch (error) {
-        store.setNotice(`工作区初始化失败：${String(error)}`);
+        store.setNotice(`工作区初始化失败：${userFacingError(error)}`);
       }
     })();
 
@@ -464,6 +495,7 @@ export function App(): JSX.Element {
     try {
       const asrUrl = realtimeUrl.trim() || asrBaseUrl.trim();
       if (!profileId) throw new Error("PROFILE_NOT_FOUND: 请先创建或选择一个面试档案。");
+      if (!currentProbeReady) throw new Error("AUDIO_PROBE_REQUIRED: 请先完成一次音频检测。");
       const preflight = await window.interviewCopilot.settings.preflight(true);
       if (!preflight.llm.configured) throw new Error("LLM_NOT_CONFIGURED: 未配置 LLM API Key");
       if (!preflight.llm.reachable) throw new Error(`LLM_CONNECT_FAILED: ${preflight.llm.message ?? preflight.llm.status}`);
@@ -473,23 +505,17 @@ export function App(): JSX.Element {
       if (!inputDeviceId || !outputDeviceId) throw new Error("AUDIO_DEVICE_FAILED: 未选择可用的音频设备");
       persistDevice("interview-copilot.input-device", inputDeviceId);
       persistDevice("interview-copilot.output-device", outputDeviceId);
-      store.clearProbe();
-      setProbeDeviceKey("");
-      const probe = await window.interviewCopilot.audio.probe({ inputDeviceId, outputDeviceId });
-      store.applyEvent(probe);
-      setProbeDeviceKey(`${inputDeviceId}::${outputDeviceId}`);
-      if (!probe.mic.ok) throw new Error("AUDIO_PROBE_MIC_FAILED: 未检测到有效输入");
-      if (!probe.system.ok) throw new Error("AUDIO_PROBE_SYSTEM_FAILED: 未检测到系统音频");
       await window.interviewCopilot.profiles.selectActive(profileId);
       await window.interviewCopilot.interview.start({ profileId, url: asrProviderType === "custom-gateway" ? asrUrl : undefined, gatewayToken: asrProviderType === "custom-gateway" ? realtimeTicket.trim() || undefined : undefined, language: selectedProfile?.language, inputDeviceId, outputDeviceId, automationMode: store.automationMode, answerMode, providerType: asrProviderType });
       setSetupOpen(false);
     } catch (error) {
-      const message = String(error);
-      store.setNotice(message.includes("LLM_NOT_CONFIGURED") ? "未配置 LLM API Key · 请前往设置" : message.includes("ASR_AUTH_FAILED") ? "未配置 Deepgram API Key · 请前往设置" : `面试启动失败：${message}`);
+      store.setNotice(`面试启动失败：${userFacingError(error)}`);
     }
   };
   const stopAudio = async () => { await window.interviewCopilot.audio.stop(); };
   const probeAudio = async () => {
+    if (probing) return;
+    setProbing(true);
     store.clearProbe();
     setProbeDeviceKey("");
     try {
@@ -497,7 +523,8 @@ export function App(): JSX.Element {
       store.applyEvent(result);
       setProbeDeviceKey(`${inputDeviceId}::${outputDeviceId}`);
     }
-    catch (error) { store.setNotice(`Audio Probe 失败：${String(error)}`); }
+    catch (error) { store.setNotice(`音频检测失败：${userFacingError(error)}`); }
+    finally { setProbing(false); }
   };
   const openOverlay = async () => { await window.interviewCopilot.overlay.show(); };
   const toggleCaptureProtection = async (enabled: boolean) => {
@@ -505,16 +532,16 @@ export function App(): JSX.Element {
       const next = await window.interviewCopilot.overlay.setCaptureProtection(enabled);
       if (next) setCaptureProtection(next);
     } catch (error) {
-      setCaptureProtection((current) => ({ ...current, lastError: String(error), osFlagApplied: false }));
+      setCaptureProtection((current) => ({ ...current, lastError: userFacingError(error), osFlagApplied: false }));
     }
   };
   const validateTencent = async (mode: "desktopShare" | "windowShare", status: TencentValidationStatus) => {
     try { setTencentValidation(await window.interviewCopilot.overlay.setTencentValidation(mode, status)); }
-    catch (error) { store.setNotice(`腾讯会议验证记录失败：${String(error)}`); }
+    catch (error) { store.setNotice(`腾讯会议验证记录失败：${userFacingError(error)}`); }
   };
   const captureScreenshot = async () => {
     try { store.setScreenshot(await window.interviewCopilot.screenshot.capture()); }
-    catch (error) { store.setNotice(`截图失败：${String(error)}`); }
+    catch (error) { store.setNotice(`截图失败：${userFacingError(error)}`); }
   };
   const toggleAutomation = async () => {
     const next = store.automationMode === "AUTO" ? "MANUAL" : "AUTO";
@@ -529,7 +556,7 @@ export function App(): JSX.Element {
     await window.interviewCopilot.realtime.connect({ url: realtimeUrl.trim(), gatewayToken: realtimeTicket.trim() || undefined });
   };
   const disconnectRealtime = async () => { await window.interviewCopilot.realtime.disconnect(); };
-  const currentProbeReady = Boolean(store.probeResult?.mic.ok && store.probeResult.system.ok && probeDeviceKey === `${inputDeviceId}::${outputDeviceId}`);
+  const currentProbeReady = Boolean(store.probeResult?.mic.streamOk && store.probeResult.system.streamOk && probeDeviceKey === `${inputDeviceId}::${outputDeviceId}`);
   const saveProviderSettings = async () => {
     try {
       const llm = await window.interviewCopilot.settings.update("llm", { providerName: llmProviderName.trim() || "OpenAI-compatible", baseUrl: llmBaseUrl.trim(), model: llmModel.trim(), fastModel: fastModel.trim() || undefined, normalModel: normalModel.trim() || undefined, deepModel: deepModel.trim() || undefined, visionModel: visionModel.trim() || undefined, apiKey: llmApiKey || undefined, timeoutMs: 30_000, maxRetries: 2 });
@@ -542,7 +569,7 @@ export function App(): JSX.Element {
       setEmbeddingApiKey("");
       store.setNotice(`Provider 配置已保存：LLM ${llm?.hasApiKey ? "已配置密钥" : "未配置密钥"} · ASR ${asr?.hasApiKey ? "已配置密钥" : "未配置密钥"}`);
     } catch (error) {
-      store.setNotice(`Provider 配置保存失败：${String(error)}`);
+      store.setNotice(`Provider 配置保存失败：${userFacingError(error)}`);
     }
   };
   const uploadKnowledge = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -553,7 +580,7 @@ export function App(): JSX.Element {
       setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId));
       store.setNotice(`已导入知识文档：${file.name}`);
     } catch (error) {
-      store.setNotice(`知识文档导入失败：${String(error)}`);
+      store.setNotice(`知识文档导入失败：${userFacingError(error)}`);
     } finally {
       event.target.value = "";
     }
@@ -566,7 +593,7 @@ export function App(): JSX.Element {
       if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile));
       store.setNotice(`${kind === "resume" ? "Resume" : "JD"} 已解析并保存`);
     } catch (error) {
-      store.setNotice(`材料解析失败：${String(error)}`);
+      store.setNotice(`材料解析失败：${userFacingError(error)}`);
     } finally {
       event.target.value = "";
     }
@@ -608,7 +635,7 @@ export function App(): JSX.Element {
       await window.interviewCopilot.chat.sendMessage(conversationId, content);
     } catch (error) {
       setChatSending(false);
-      store.setNotice(`聊天发送失败：${String(error)}`);
+      store.setNotice(`聊天发送失败：${userFacingError(error)}`);
     }
   };
   const createProject = async () => {
@@ -617,7 +644,7 @@ export function App(): JSX.Element {
     try {
       const project = await window.interviewCopilot.projects.create({ name: value.trim(), profileId });
       if (project) { setProjects((current) => [project, ...current]); setSelectedProjectId(project.id); store.setNotice(`项目“${project.name}”已创建`); }
-    } catch (error) { store.setNotice(`项目创建失败：${String(error)}`); }
+    } catch (error) { store.setNotice(`项目创建失败：${userFacingError(error)}`); }
   };
   const renameProject = async (projectId: string, currentName: string) => { const name = await requestDialog({ kind: "form", title: "重命名项目", label: "项目名称", defaultValue: currentName, required: true, confirmLabel: "保存" }); if (typeof name !== "string") return; const updated = await window.interviewCopilot.projects.rename(projectId, name); if (updated) setProjects((current) => current.map((project) => project.id === updated.id ? updated : project)); };
   const deleteProject = async (projectId: string, currentName: string) => { const confirmed = await requestDialog({ kind: "confirm", title: `删除 ${currentName}？`, description: "项目会被删除，对话内容仍保留。", confirmLabel: "删除" }); if (confirmed !== true) return; await window.interviewCopilot.projects.delete(projectId); setProjects((current) => current.filter((project) => project.id !== projectId)); if (selectedProjectId === projectId) beginNewConversation(); };
@@ -633,20 +660,20 @@ export function App(): JSX.Element {
       setProviderSettings(await window.interviewCopilot.settings.get());
       const result = await window.interviewCopilot.settings.testConnection(section);
       setProviderTests((current) => ({ ...current, [section]: result.status === "ready" ? "正常" : `${result.status}${result.message ? ` · ${result.message}` : ""}` }));
-    } catch (error) { setProviderTests((current) => ({ ...current, [section]: `网络失败 · ${String(error)}` })); }
+    } catch (error) { setProviderTests((current) => ({ ...current, [section]: userFacingError(error) })); }
   };
   const clearProviderKey = async (section: "llm" | "asr" | "embedding") => { await window.interviewCopilot.settings.update(section, { apiKey: "" }); const current = await window.interviewCopilot.settings.get(); setProviderSettings(current); store.setNotice(`${section.toUpperCase()} API Key 已删除`); };
   const modernPageContent = (() => {
     if (page === "home") return chatMessages.length > 0 ? <section className="conversation-view"><div className="page-heading"><div><span className="page-kicker">CONVERSATION</span><h1>{conversations.find((conversation) => conversation.id === activeConversationId)?.title ?? "新对话"}</h1></div><span className="conversation-status">{chatSending ? "AI 正在生成…" : "已保存到本地"}</span></div><div className="chat-message-list">{chatMessages.map((message) => <article className={`chat-message ${message.role}`} key={message.id}><span className="chat-message-avatar">{message.role === "user" ? "你" : "AI"}</span><div className="chat-message-body"><div className="chat-message-role">{message.role === "user" ? "你" : "Interview Copilot"}{message.status === "streaming" && <span className="streaming-label">正在生成…</span>}</div>{message.role === "assistant" ? <MarkdownAnswer text={message.content || "正在生成…"} /> : <p>{message.content}</p>}</div></article>)}</div>{chatSending && activeConversationId && <button className="outline-pill stop-generation" onClick={() => void window.interviewCopilot.chat.cancel(activeConversationId)}>停止生成</button>}</section> : <WelcomeScreen onPrepare={startPreparation} onPolish={polishResume} onLanguage={selectLanguage} onRefresh={beginNewConversation} />;
     if (page === "interview") return <section className="simple-page"><div className="page-heading"><div><span className="page-kicker">INTERVIEW</span><h1>开始面试</h1></div><button className="dark-pill" onClick={() => setSetupOpen(true)}>开始面试 <span>↗</span></button></div><div className="interview-placeholder"><h2>准备好开始了吗？</h2><p>选择档案和音频设备后，Interview Copilot 会启动实时转录与回答辅助。</p><button className="outline-pill" onClick={() => setSetupOpen(true)}>打开面试设置</button></div></section>;
-    if (page === "preparation") return <section className="simple-page preparation-page"><div className="page-heading"><div><span className="page-kicker">PREPARATION AGENT</span><h1>面试准备</h1></div><span className="page-note">最多 40 步 · 写入需审批</span></div><label className="clean-field"><span>准备目标</span><textarea value={preparationGoal} onChange={(event) => setPreparationGoal(event.target.value)} rows={4} /></label><div className="detail-actions"><button className="dark-pill" disabled={preparationRunning} onClick={async () => { setPreparationEvents([]); setPreparationRunning(true); try { await window.interviewCopilot.preparation.start(preparationGoal); } catch (error) { setPreparationRunning(false); store.setNotice(`Preparation 启动失败：${String(error)}`); } }}>{preparationRunning ? "准备中…" : "开始准备"}</button>{preparationRunning && <button className="outline-pill" onClick={() => void window.interviewCopilot.preparation.stop()}>停止</button>}</div><div className="preparation-events">{preparationEvents.map((event, index) => <div className={`event-row event-${String(event.type ?? "event")}`} key={`${String(event.type)}-${index}`}><strong>{String(event.type ?? "event")}</strong><span>{typeof event.summary === "string" ? event.summary : typeof event.message === "string" ? event.message : typeof event.tool === "string" ? `${event.tool}${event.rationale ? ` · ${String(event.rationale)}` : ""}` : event.risk ? `风险：${String(event.risk)}` : ""}</span>{event.type === "approval_required" && typeof event.requestId === "string" && <span className="approval-actions"><button className="dark-pill" onClick={() => void window.interviewCopilot.preparation.approve(String(event.requestId))}>允许</button><button className="outline-pill" onClick={() => void window.interviewCopilot.preparation.reject(String(event.requestId))}>拒绝</button></span>}</div>)}</div></section>;
+    if (page === "preparation") return <section className="simple-page preparation-page"><div className="page-heading"><div><span className="page-kicker">PREPARATION AGENT</span><h1>面试准备</h1></div><span className="page-note">最多 40 步 · 写入需审批</span></div><label className="clean-field"><span>准备目标</span><textarea value={preparationGoal} onChange={(event) => setPreparationGoal(event.target.value)} rows={4} /></label><div className="detail-actions"><button className="dark-pill" disabled={preparationRunning} onClick={async () => { setPreparationEvents([]); setPreparationRunning(true); try { await window.interviewCopilot.preparation.start(preparationGoal); } catch (error) { setPreparationRunning(false); store.setNotice(`Preparation 启动失败：${userFacingError(error)}`); } }}>{preparationRunning ? "准备中…" : "开始准备"}</button>{preparationRunning && <button className="outline-pill" onClick={() => void window.interviewCopilot.preparation.stop()}>停止</button>}</div><div className="preparation-events">{preparationEvents.map((event, index) => <div className={`event-row event-${String(event.type ?? "event")}`} key={`${String(event.type)}-${index}`}><strong>{String(event.type ?? "event")}</strong><span>{typeof event.summary === "string" ? event.summary : typeof event.message === "string" ? event.message : typeof event.tool === "string" ? `${event.tool}${event.rationale ? ` · ${String(event.rationale)}` : ""}` : event.risk ? `风险：${String(event.risk)}` : ""}</span>{event.type === "approval_required" && typeof event.requestId === "string" && <span className="approval-actions"><button className="dark-pill" onClick={() => void window.interviewCopilot.preparation.approve(String(event.requestId))}>允许</button><button className="outline-pill" onClick={() => void window.interviewCopilot.preparation.reject(String(event.requestId))}>拒绝</button></span>}</div>)}</div></section>;
     if (page === "profiles") return <section className="simple-page"><div className="page-heading"><div><span className="page-kicker">PROFILES</span><h1>档案</h1></div><button className="dark-pill" onClick={async () => { const created = await window.interviewCopilot.profiles.save({ name: `面试档案 ${profiles.length + 1}`, language: "zh-CN", skills: [], knowledgeBaseIds: knowledgeBases[0] ? [knowledgeBases[0].id] : [] }); if (created) { setProfiles((current) => [created, ...current]); setProfileId(created.id); } }}>新建档案</button></div><div className="profile-layout"><div className="clean-list">{profiles.map((profile) => <button className={`clean-list-row ${profile.id === profileId ? "selected" : ""}`} key={profile.id} onClick={() => { setProfileId(profile.id); void window.interviewCopilot.profiles.selectActive(profile.id); }}><span>{profile.name}</span><small>{profile.language} · {profile.skills.length} skills</small></button>)}</div>{selectedProfile && <div className="detail-sheet"><h2>{selectedProfile.name}</h2><p className="page-note">{selectedProfile.language} · 当前档案</p><label className="clean-field"><span>Resume</span><label className="upload-row">{selectedProfile.resume?.summary ?? "未上传 Resume"}<input type="file" accept=".txt,.md,.pdf,.docx" onChange={(event) => void attachProfileMaterial("resume", event)} /></label>{selectedProfile.resume && <button className="text-button danger-text" onClick={() => void removeProfileMaterial("resume")}>移除 Resume</button>}</label><label className="clean-field"><span>职位描述</span><label className="upload-row">{selectedProfile.jobDescription?.summary ?? "未上传 JD"}<input type="file" accept=".txt,.md,.pdf,.docx" onChange={(event) => void attachProfileMaterial("jobDescription", event)} /></label>{selectedProfile.jobDescription && <button className="text-button danger-text" onClick={() => void removeProfileMaterial("jobDescription")}>移除 JD</button>}</label><div className="detail-actions"><button className="outline-pill" onClick={() => void editInstructions()}>编辑 Instructions</button><button className="outline-pill" onClick={() => void addSkill()}>新增 Skill</button><button className="outline-pill" onClick={() => void cloneProfile()}>克隆</button><button className="outline-pill" onClick={() => void renameProfile()}>重命名</button><button className="outline-pill danger-outline" onClick={() => void deleteProfile()}>删除</button></div><div className="profile-subsection"><h3>Skills</h3>{selectedProfile.skills.length === 0 && <p className="page-note">尚未添加 Skill</p>}{selectedProfile.skills.map((skill) => <div className="skill-row" key={skill.id}><span><strong>{skill.name}</strong><small>{skill.content.slice(0, 80)}</small></span><span><button className="text-button" onClick={() => void editSkill(skill.id)}>编辑</button><button className="text-button danger-text" onClick={() => void deleteSkill(skill.id)}>删除</button></span></div>)}</div><div className="profile-subsection"><h3>关联知识库</h3>{knowledgeBases.map((base) => <label className="check-row" key={base.id}><input type="checkbox" checked={selectedProfile.knowledgeBaseIds.includes(base.id)} onChange={() => void toggleKnowledgeBase(base.id, selectedProfile.knowledgeBaseIds.includes(base.id))} />{base.name}</label>)}</div></div>}</div></section>;
     if (page === "knowledge") return <section className="simple-page"><div className="page-heading"><div><span className="page-kicker">KNOWLEDGE</span><h1>知识库</h1></div><button className="dark-pill" onClick={async () => { const name = await requestDialog({ kind: "form", title: "新建知识库", label: "知识库名称", defaultValue: "新知识库", required: true, confirmLabel: "创建" }); if (typeof name === "string" && name.trim()) { const created = await window.interviewCopilot.knowledge.createBase(name.trim()); if (created) { setKnowledgeBases((current) => [created, ...current]); setKnowledgeBaseId(created.id); } } }}>新建知识库</button></div><div className="clean-list knowledge-list">{knowledgeBases.map((base) => <div className={`clean-list-row ${base.id === knowledgeBaseId ? "selected" : ""}`} key={base.id}><button className="row-main-button" onClick={() => setKnowledgeBaseId(base.id)}><span>{base.name}</span><small>{base.id === knowledgeBaseId ? `${knowledgeDocuments.length} 个文档` : "查看文档"}</small></button><span className="row-actions"><button className="text-button" onClick={async () => { const name = await requestDialog({ kind: "form", title: "重命名知识库", label: "名称", defaultValue: base.name, required: true, confirmLabel: "保存" }); if (typeof name === "string") { const updated = await window.interviewCopilot.knowledge.renameBase(base.id, name); if (updated) setKnowledgeBases((current) => current.map((item) => item.id === updated.id ? updated : item)); } }}>重命名</button><button className="text-button danger-text" onClick={async () => { const confirmed = await requestDialog({ kind: "confirm", title: `删除 ${base.name}？`, description: "知识库和其中的文档会一起删除。", confirmLabel: "删除" }); if (confirmed === true) { await window.interviewCopilot.knowledge.deleteBase(base.id); const next = await window.interviewCopilot.knowledge.listBases(); setKnowledgeBases(next); setKnowledgeBaseId(next[0]?.id ?? ""); } }}>删除</button></span></div>)}</div><label className="upload-document">＋ 导入 PDF / DOCX / TXT / MD<input type="file" accept=".txt,.md,.pdf,.docx" onChange={(event) => void uploadKnowledge(event)} /></label><div className="clean-list document-list">{knowledgeDocuments.map((document) => <div className="clean-list-row" key={document.id}><span>{document.filename}</span><span className="row-actions"><small>{document.status}{document.error ? ` · ${document.error}` : ""}</small><button className="text-button" onClick={() => void window.interviewCopilot.knowledge.reindex(document.id).then(() => window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)).then(setKnowledgeDocuments)}>重建索引</button><button className="text-button danger-text" onClick={() => void window.interviewCopilot.knowledge.delete(document.id).then(() => window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)).then(setKnowledgeDocuments)}>删除</button></span></div>)}</div></section>;
     if (page === "history") return <section className="simple-page"><div className="page-heading"><div><span className="page-kicker">HISTORY</span><h1>面试记录</h1></div><input className="inline-search" value={historySearch} onChange={(event) => setHistorySearch(event.target.value)} placeholder="搜索记录" /></div><div className="history-layout"><div className="clean-list">{historyRecords.filter((record) => `${record.profileId} ${record.status}`.toLowerCase().includes(historySearch.toLowerCase())).map((record) => <button className="clean-list-row" key={record.id} onClick={async () => { const [metrics, detail] = await Promise.all([window.interviewCopilot.history.analyze(record.id), window.interviewCopilot.history.get(record.id)]); if (metrics) setHistoryMetrics({ id: record.id, ...metrics }); if (detail) setHistoryDetail(detail as typeof historyDetail); }}><span>{new Date(record.startedAt).toLocaleString()}</span><small>{record.status} · {record.profileId}</small></button>)}{historyRecords.length === 0 && <p className="page-note">完成一次面试后，记录会显示在这里。</p>}</div>{historyDetail && <div className="detail-sheet"><h2>面试详情</h2><p className="page-note">{historyDetail.interview.profileId} · {historyDetail.interview.automationMode}</p><div className="detail-metrics"><span>问题数 <strong>{historyMetrics?.questionCount ?? historyDetail.questions.length}</strong></span><span>已回答 <strong>{historyMetrics?.answeredQuestionCount ?? historyDetail.answers.length}</strong></span><span>回答率 <strong>{historyMetrics ? `${Math.round(historyMetrics.answerRate * 100)}%` : "—"}</strong></span></div><div className="transcript-detail">{historyDetail.transcripts.map((item) => <p key={item.id}><b>{item.source === "remote" ? "REMOTE" : "MIC"}</b>{item.text}</p>)}</div></div>}</div></section>;
     return <section className="simple-page settings-page"><div className="page-heading"><div><span className="page-kicker">SETTINGS</span><h1>设置</h1></div><button className="dark-pill" onClick={() => void saveProviderSettings()}>保存设置</button></div><div className="settings-columns"><div><h2>LLM Provider</h2><label className="clean-field"><span>Provider Name</span><input value={llmProviderName} onChange={(event) => setLlmProviderName(event.target.value)} /></label><label className="clean-field"><span>Base URL</span><input value={llmBaseUrl} onChange={(event) => setLlmBaseUrl(event.target.value)} /></label><label className="clean-field"><span>API Key {providerSettings?.llm.hasApiKey && <em className="configured-label">已配置 · 仅输入修改</em>}</span><input type="password" value={llmApiKey} onChange={(event) => setLlmApiKey(event.target.value)} placeholder={providerSettings?.llm.hasApiKey ? "••••••••••••" : "输入 API Key"} /></label><div className="model-grid"><label className="clean-field"><span>默认 Model</span><input value={llmModel} onChange={(event) => setLlmModel(event.target.value)} /></label><label className="clean-field"><span>FAST Model</span><input value={fastModel} onChange={(event) => setFastModel(event.target.value)} /></label><label className="clean-field"><span>NORMAL Model</span><input value={normalModel} onChange={(event) => setNormalModel(event.target.value)} /></label><label className="clean-field"><span>DEEP Model</span><input value={deepModel} onChange={(event) => setDeepModel(event.target.value)} /></label><label className="clean-field"><span>Vision Model</span><input value={visionModel} onChange={(event) => setVisionModel(event.target.value)} /></label></div><div className="provider-actions"><button className="outline-pill" onClick={() => void testProvider("llm")}>测试连接</button><span className="provider-status">{providerTests.llm ?? (providerSettings?.llm.hasApiKey ? "已配置 · 未测试" : "未配置")}</span></div><h2 className="settings-section-gap">Embedding</h2><label className="clean-field"><span>Base URL</span><input value={embeddingBaseUrl} onChange={(event) => setEmbeddingBaseUrl(event.target.value)} /></label><label className="clean-field"><span>API Key {providerSettings?.embedding.hasApiKey && <em className="configured-label">已配置 · 仅输入修改</em>}</span><input type="password" value={embeddingApiKey} onChange={(event) => setEmbeddingApiKey(event.target.value)} placeholder={providerSettings?.embedding.hasApiKey ? "••••••••••••" : "可选，未配置时使用 Keyword Retrieval"} /></label><label className="clean-field"><span>Embedding Model</span><input value={embeddingModel} onChange={(event) => setEmbeddingModel(event.target.value)} /></label><div className="provider-actions"><button className="outline-pill" onClick={() => void testProvider("embedding")}>测试连接</button><span className="provider-status">{providerTests.embedding ?? (providerSettings?.embedding.hasApiKey ? "已配置 · 未测试" : "Keyword Retrieval")}</span></div></div><div><h2>ASR Provider</h2><label className="clean-field"><span>Provider</span><select value={asrProviderType} onChange={(event) => setAsrProviderType(event.target.value as typeof asrProviderType)}><option value="deepgram">Deepgram Direct</option><option value="custom-gateway">Custom Gateway</option></select></label><label className="clean-field"><span>{asrProviderType === "deepgram" ? "Deepgram API Key" : "Token / Ticket（可选）"} {providerSettings?.asr.hasApiKey && <em className="configured-label">已配置</em>}</span><input type="password" value={asrApiKey} onChange={(event) => setAsrApiKey(event.target.value)} placeholder={providerSettings?.asr.hasApiKey ? "••••••••••••" : "输入 API Key"} /></label><label className="clean-field"><span>{asrProviderType === "deepgram" ? "WebSocket URL" : "Gateway WebSocket URL"}</span><input value={asrBaseUrl} onChange={(event) => setAsrBaseUrl(event.target.value)} /></label><label className="clean-field"><span>Model</span><input value={asrModel} onChange={(event) => setAsrModel(event.target.value)} /></label><label className="clean-field"><span>Language</span><select value={asrLanguage} onChange={(event) => setAsrLanguage(event.target.value as typeof asrLanguage)}><option value="zh-CN">zh-CN</option><option value="en-US">en-US</option><option value="multi">multi</option></select></label><div className="provider-actions"><button className="outline-pill" onClick={() => void testProvider("asr")}>测试连接</button><span className="provider-status">{providerTests.asr ?? (providerSettings?.asr.hasApiKey ? "已配置 · 未测试" : "未配置")}</span></div><h2 className="settings-section-gap">回答模式</h2><label className="clean-field"><span>默认模式</span><select value={answerMode} onChange={(event) => setAnswerMode(event.target.value as typeof answerMode)}><option value="FAST">FAST · 快速</option><option value="NORMAL">NORMAL · 平衡</option><option value="DEEP">DEEP · 深度</option></select></label><div className="rag-status"><strong>RAG Mode</strong><span>{providerSettings?.embedding.hasApiKey ? "Hybrid · Vector + Keyword" : "Keyword Retrieval"}</span></div><details className="advanced-settings"><summary>高级诊断</summary><p>设备列表、Audio Probe 和 Realtime 状态在开始面试设置中显示。</p></details></div></div></section>;
   })();
 
-  if (isOverlay) return <OverlayRoot mic={store.mic} system={store.system} state={store.state} overlayMode={store.overlayMode} automationMode={store.automationMode} answerMode={store.answerMode} question={store.question} answerText={store.answerText} answerStreaming={store.answerStreaming} remoteTranscript={store.remoteTranscript} micTranscript={store.micTranscript} captureProtectionEnabled={captureProtection.requested} captureProtectionSupported={captureProtection.supported} captureProtectionOsFlagApplied={captureProtection.osFlagApplied} captureProtectionDisplayVerified={captureProtection.displayCaptureVerified} captureProtectionLastError={captureProtection.lastError} captureTest={captureTest} onToggleCaptureProtection={() => void toggleCaptureProtection(!captureProtection.requested)} onToggleMode={() => void window.interviewCopilot.overlay.setMode(store.overlayMode === "interactive" ? "passive" : "interactive")} onToggleAutomation={toggleAutomation} onAnswerQuestion={(text) => window.interviewCopilot.interview.answerQuestion(text).catch((error) => { store.setNotice(`发送问题失败：${String(error)}`); throw error; })} onAnswerLatest={() => window.interviewCopilot.interview.answerLatest().catch((error) => { store.setNotice(`回答最新问题失败：${String(error)}`); throw error; })} onAnswerScreenshot={() => window.interviewCopilot.interview.answerScreenshot().catch((error) => { store.setNotice(`SCREENSHOT_FAILED：${String(error)}`); throw error; })} />;
+  if (isOverlay) return <OverlayRoot mic={store.mic} system={store.system} state={store.state} overlayMode={store.overlayMode} automationMode={store.automationMode} answerMode={store.answerMode} question={store.question} answerText={store.answerText} answerStreaming={store.answerStreaming} remoteTranscript={store.remoteTranscript} micTranscript={store.micTranscript} captureProtectionEnabled={captureProtection.requested} captureProtectionSupported={captureProtection.supported} captureProtectionOsFlagApplied={captureProtection.osFlagApplied} captureProtectionDisplayVerified={captureProtection.displayCaptureVerified} captureProtectionLastError={captureProtection.lastError} captureTest={captureTest} onToggleCaptureProtection={() => void toggleCaptureProtection(!captureProtection.requested)} onToggleMode={() => void window.interviewCopilot.overlay.setMode(store.overlayMode === "interactive" ? "passive" : "interactive")} onToggleAutomation={toggleAutomation} onAnswerQuestion={(text) => window.interviewCopilot.interview.answerQuestion(text).catch((error) => { store.setNotice(`发送问题失败：${userFacingError(error)}`); throw error; })} onAnswerLatest={() => window.interviewCopilot.interview.answerLatest().catch((error) => { store.setNotice(`回答最新问题失败：${userFacingError(error)}`); throw error; })} onAnswerScreenshot={() => window.interviewCopilot.interview.answerScreenshot().catch((error) => { store.setNotice(`截图失败：${userFacingError(error)}`); throw error; })} />;
 
   return (
     <main className="app-shell modern-shell">
@@ -658,7 +685,7 @@ export function App(): JSX.Element {
         {store.notice && <button className="notice-toast" onClick={() => store.setNotice(undefined)}>{store.notice} <span>×</span></button>}
       </section>
       {dialog && <AppDialog dialog={dialog} onConfirm={(value) => closeDialog(dialog.kind === "confirm" ? true : value)} onCancel={() => closeDialog(undefined)} />}
-      {setupOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSetupOpen(false); }}><section className="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title"><header><div><span className="page-kicker">INTERVIEW SETUP</span><h2 id="setup-title">开始面试</h2></div><button onClick={() => setSetupOpen(false)} aria-label="关闭">×</button></header><label className="clean-field"><span>面试档案</span><select value={profileId} onChange={(event) => setProfileId(event.target.value)}>{profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name}</option>)}</select></label><label className="clean-field"><span>回答模式</span><select value={answerMode} onChange={(event) => setAnswerMode(event.target.value as typeof answerMode)}><option value="FAST">FAST · 快速</option><option value="NORMAL">NORMAL · 平衡</option><option value="DEEP">DEEP · 深度</option></select></label><label className="clean-field"><span>自动回答</span><select value={store.automationMode} onChange={(event) => void window.interviewCopilot.interview.setAutomationMode(event.target.value as "AUTO" | "MANUAL")}><option value="AUTO">AUTO · 听到问题后自动回答</option><option value="MANUAL">MANUAL · 手动触发回答</option></select></label><label className="clean-field"><span>麦克风输入</span><select value={inputDeviceId} onChange={(event) => { setInputDeviceId(event.target.value); setProbeDeviceKey(""); store.clearProbe(); persistDevice("interview-copilot.input-device", event.target.value); }}>{devices.inputs.length === 0 && <option value="">没有检测到输入设备</option>}{devices.inputs.map((device) => <option value={device.id} key={device.id}>{device.name}</option>)}</select></label><label className="clean-field"><span>系统音频 / Loopback</span><select value={outputDeviceId} onChange={(event) => { setOutputDeviceId(event.target.value); setProbeDeviceKey(""); store.clearProbe(); persistDevice("interview-copilot.output-device", event.target.value); }}>{devices.outputs.length === 0 && <option value="">没有检测到系统音频设备</option>}{devices.outputs.map((device) => <option value={device.id} key={device.id}>{device.name}</option>)}</select></label><div className="probe-summary"><span>MIC {store.probeResult ? <b className={store.probeResult.mic.ok ? "probe-ok" : "probe-fail"}>{store.probeResult.mic.ok ? "✓ Ready" : "✕ 未检测到有效输入"}</b> : <small>{store.probeError ? `✕ ${store.probeError}` : "未测试"}</small>}</span><span>SYSTEM {store.probeResult ? <b className={store.probeResult.system.ok ? "probe-ok" : "probe-fail"}>{store.probeResult.system.ok ? "✓ Ready" : "✕ 未检测到系统音频"}</b> : <small>{store.probeError ? `✕ ${store.probeError}` : "未测试"}</small>}</span><button className="outline-pill" onClick={() => void probeAudio()}>测试音频</button></div><div className="setup-preflight"><span>LLM · {providerSettings?.llm.hasApiKey ? "✓ 已配置" : "✕ 未配置"}</span><span>ASR · {providerSettings?.asr.hasApiKey || asrProviderType === "custom-gateway" ? "✓ 已配置" : "✕ 未配置"}</span><span>Profile · {selectedProfile ? "✓" : "✕"}</span></div><footer><button className="outline-pill" onClick={() => setSetupOpen(false)}>取消</button><button className="dark-pill" disabled={!currentProbeReady} onClick={() => void startInterview()}>开始面试</button></footer></section></div>}
+      {setupOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSetupOpen(false); }}><section className="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title"><header><div><span className="page-kicker">INTERVIEW SETUP</span><h2 id="setup-title">开始面试</h2></div><button onClick={() => setSetupOpen(false)} aria-label="关闭">×</button></header><label className="clean-field"><span>面试档案</span><select value={profileId} onChange={(event) => setProfileId(event.target.value)}>{profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name}</option>)}</select></label><label className="clean-field"><span>回答模式</span><select value={answerMode} onChange={(event) => setAnswerMode(event.target.value as typeof answerMode)}><option value="FAST">FAST · 快速</option><option value="NORMAL">NORMAL · 平衡</option><option value="DEEP">DEEP · 深度</option></select></label><label className="clean-field"><span>自动回答</span><select value={store.automationMode} onChange={(event) => void window.interviewCopilot.interview.setAutomationMode(event.target.value as "AUTO" | "MANUAL")}><option value="AUTO">AUTO · 听到问题后自动回答</option><option value="MANUAL">MANUAL · 手动触发回答</option></select></label><label className="clean-field"><span>麦克风输入</span><select value={inputDeviceId} onChange={(event) => { setInputDeviceId(event.target.value); setProbeDeviceKey(""); store.clearProbe(); persistDevice("interview-copilot.input-device", event.target.value); }}>{devices.inputs.length === 0 && <option value="">没有检测到输入设备</option>}{devices.inputs.map((device) => <option value={device.id} key={device.id}>{device.name}</option>)}</select></label><label className="clean-field"><span>系统音频 / Loopback</span><select value={outputDeviceId} onChange={(event) => { setOutputDeviceId(event.target.value); setProbeDeviceKey(""); store.clearProbe(); persistDevice("interview-copilot.output-device", event.target.value); }}>{devices.outputs.length === 0 && <option value="">没有检测到系统音频设备</option>}{devices.outputs.map((device) => <option value={device.id} key={device.id}>{device.name}</option>)}</select></label><div className="probe-summary"><span>MIC {store.probeResult ? <b className={store.probeResult.mic.streamOk ? "probe-ok" : "probe-fail"}>{store.probeResult.mic.streamOk ? (store.probeResult.mic.signalDetected ? "✓ 就绪 · 检测到声音" : "✓ 就绪 · 等待声音") : "✕ 音频流不可用"}</b> : <small>{store.probeError ? `✕ ${store.probeError}` : "未测试"}</small>}</span><span>SYSTEM {store.probeResult ? <b className={store.probeResult.system.streamOk ? "probe-ok" : "probe-fail"}>{store.probeResult.system.streamOk ? (store.probeResult.system.signalDetected ? "✓ 就绪 · 检测到声音" : "✓ 就绪 · 等待声音") : "✕ 系统音频流不可用"}</b> : <small>{store.probeError ? `✕ ${store.probeError}` : "未测试"}</small>}</span><button className="outline-pill" disabled={probing} onClick={() => void probeAudio()}>{probing ? "测试中…" : "测试音频"}</button></div><div className="setup-preflight"><span>LLM · {providerSettings?.llm.hasApiKey ? "✓ 已配置" : "✕ 未配置"}</span><span>ASR · {providerSettings?.asr.hasApiKey || asrProviderType === "custom-gateway" ? "✓ 已配置" : "✕ 未配置"}</span><span>Profile · {selectedProfile ? "✓" : "✕"}</span></div><footer><button className="outline-pill" onClick={() => setSetupOpen(false)}>取消</button><button className="dark-pill" disabled={!currentProbeReady || probing} onClick={() => void startInterview()}>开始面试</button></footer></section></div>}
     </main>
   );
 

@@ -1,0 +1,25 @@
+{
+  "type": "probe_result",
+  "mic": {
+    "ok": true,
+    "streamOk": true,
+    "signalDetected": true,
+    "sampleRate": 48000,
+    "channels": 1,
+    "peak": 0.4300000071525574,
+    "callbackCount": 50,
+    "sampleCount": 2400000
+  },
+  "system": {
+    "ok": true,
+    "streamOk": true,
+    "signalDetected": false,
+    "sampleRate": 48000,
+    "channels": 2,
+    "peak": 0.0,
+    "callbackCount": 50,
+    "sampleCount": 4800000
+  },
+  "durationMs": 2000,
+  "timestamp": 123
+}

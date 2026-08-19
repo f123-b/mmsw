@@ -29,6 +29,32 @@ describe("OpenAICompatibleAnswerProvider", () => {
     expect(JSON.parse(String(request?.body)).model).toBe("configured-model");
   });
 
+  it("uses the DeepSeek chat endpoint and disables thinking for low-latency modes", async () => {
+    let requestUrl = "";
+    let requestBody: Record<string, unknown> | undefined;
+    const provider = new OpenAICompatibleAnswerProvider({ providerName: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "secret", model: "deepseek-v4-flash", timeoutMs: 5_000, maxRetries: 0 }, async (input, init) => {
+      requestUrl = String(input);
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return streamResponse(["data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\n", "data: [DONE]\n\n"]);
+    });
+    const deltas: string[] = [];
+    for await (const delta of provider.stream({ model: "deepseek-v4-flash", thinking: false, sections: [{ name: "question", content: "ping" }] })) deltas.push(delta);
+    expect(requestUrl).toBe("https://api.deepseek.com/chat/completions");
+    expect(requestBody?.thinking).toEqual({ type: "disabled" });
+    expect(deltas.join("")).toBe("OK");
+  });
+
+  it("ignores reasoning-only SSE deltas instead of exposing chain of thought", async () => {
+    const provider = new OpenAICompatibleAnswerProvider({ providerName: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "secret", model: "deepseek-v4-flash", timeoutMs: 5_000, maxRetries: 0 }, async () => streamResponse([
+      "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"内部推理\"}}]}\n\n",
+      "data: {\"choices\":[{\"delta\":{\"content\":\"最终回答\"}}]}\n\n",
+      "data: [DONE]\n\n"
+    ]));
+    const deltas: string[] = [];
+    for await (const delta of provider.stream({ model: "deepseek-v4-flash", thinking: true, sections: [{ name: "question", content: "ping" }] })) deltas.push(delta);
+    expect(deltas).toEqual(["最终回答"]);
+  });
+
   it("loads an OpenAI-compatible embedding vector", async () => {
     const provider = new OpenAICompatibleEmbeddingProvider({ providerName: "test", baseUrl: "https://embed.test", apiKey: "secret", model: "embed-v1", timeoutMs: 5_000, maxRetries: 0 }, async () => new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }), { status: 200 }));
     await expect(provider.embed("实时音频")).resolves.toEqual([0.1, 0.2, 0.3]);
