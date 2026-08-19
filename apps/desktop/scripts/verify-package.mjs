@@ -10,14 +10,22 @@ const unpackedRequired = [
 ];
 const archiveRequired = ["out/main/index.js", "out/preload/index.mjs", "out/renderer/index.html"];
 
+function normalizeArchiveEntry(entry) {
+  return entry.replace(/^[\\/]+/, "").replaceAll("\\", "/");
+}
+
 for (const path of unpackedRequired) {
   if (!existsSync(path)) throw new Error(`Missing packaged runtime dependency: ${path}`);
 }
 if (!existsSync(archive)) throw new Error(`Missing packaged archive: ${archive}`);
 
-const entries = new Set(listPackage(archive, { isPack: false }));
+const archiveEntries = listPackage(archive, { isPack: false });
+console.log("First packaged app.asar entries returned by listPackage():");
+archiveEntries.slice(0, 20).forEach((entry, index) => console.log(`${index + 1}. ${entry}`));
+const entries = new Set(archiveEntries.map(normalizeArchiveEntry));
 for (const entry of archiveRequired) {
-  if (!entries.has(entry)) throw new Error(`Missing packaged app.asar entry: ${entry}`);
+  const normalizedEntry = normalizeArchiveEntry(entry);
+  if (!entries.has(normalizedEntry)) throw new Error(`Missing packaged app.asar entry: ${entry}`);
 }
 
 const bundledMain = extractFile(archive, "out/main/index.js").toString("utf8");
