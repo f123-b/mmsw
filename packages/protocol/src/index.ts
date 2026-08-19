@@ -111,6 +111,9 @@ export const asrStatusSchema = z.object({
   message: z.string().optional()
 });
 
+export const asrProviderTypeSchema = z.enum(["deepgram", "custom-gateway"]);
+export const asrLanguageSchema = z.enum(["zh-CN", "en-US", "multi"]);
+
 export const connectionReadySchema = z.object({
   type: z.literal("connection_ready"),
   sessionId: z.string().min(1),
@@ -207,7 +210,7 @@ export const realtimeServerMessageSchema = z.discriminatedUnion("type", [
 ]);
 
 export const clientControlMessageSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("client_ready"), providerName: z.string().optional(), model: z.string().optional(), gatewayToken: z.string().optional() }).strict(),
+  z.object({ type: z.literal("client_ready"), providerName: z.string().optional(), model: z.string().optional(), language: asrLanguageSchema.optional() }).strict(),
   z.object({ type: z.literal("heartbeat"), timestamp: z.number().int().nonnegative() }),
   z.object({ type: z.literal("answer_request"), mode: z.enum(["manual_text", "latest_remote_transcript", "screenshot"]), text: z.string().optional(), attachmentId: z.string().optional() }),
   z.object({ type: z.literal("answer_cancel"), answerId: z.string(), reason: z.enum(["user", "superseded", "timeout"]).optional() })
@@ -228,6 +231,8 @@ export type ClientControlMessage = z.infer<typeof clientControlMessageSchema>;
 export type TranscriptSource = z.infer<typeof transcriptSourceSchema>;
 export type TranscriptSegment = z.infer<typeof transcriptSegmentSchema>;
 export type AsrStatus = z.infer<typeof asrStatusSchema>;
+export type AsrProviderType = z.infer<typeof asrProviderTypeSchema>;
+export type AsrLanguage = z.infer<typeof asrLanguageSchema>;
 export type RealtimeServerMessage = z.infer<typeof realtimeServerMessageSchema>;
 
 export function parseAudioSidecarEvent(line: string): AudioSidecarEvent {

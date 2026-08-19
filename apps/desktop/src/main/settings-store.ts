@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { ProviderSettings } from "@interview-copilot/shared";
+import type { AsrLanguage, AsrProviderType, ProviderSettings } from "@interview-copilot/shared";
 import { APP_DATA_DIRECTORY, type SqliteDatabase } from "./database";
 
 export type ProviderSection = "llm" | "asr" | "embedding" | "reranker";
@@ -63,7 +63,7 @@ export class SafeStorageSecretStore implements SecretStore {
 
 const DEFAULTS: Record<ProviderSection, ProviderSettings> = {
   llm: { providerName: "OpenAI-compatible", baseUrl: "https://api.openai.com", apiKey: "", model: "gpt-4o-mini", timeoutMs: 30_000, maxRetries: 2 },
-  asr: { providerName: "Custom WebSocket ASR Gateway", baseUrl: "", apiKey: "", model: "", timeoutMs: 15_000, maxRetries: 2 },
+  asr: { providerName: "Deepgram", providerType: "deepgram", baseUrl: "wss://api.deepgram.com/v1/listen", apiKey: "", model: "nova-3", language: "zh-CN", timeoutMs: 15_000, maxRetries: 2 },
   embedding: { providerName: "OpenAI-compatible", baseUrl: "https://api.openai.com", apiKey: "", model: "text-embedding-3-small", timeoutMs: 15_000, maxRetries: 2 },
   reranker: { providerName: "Disabled", baseUrl: "", apiKey: "", model: "", timeoutMs: 10_000, maxRetries: 1 }
 };
@@ -74,7 +74,11 @@ export class ProviderConfigStore {
   get(section: ProviderSection): ProviderSettings {
     const stored = this.database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", [`provider.${section}`]);
     const configured = stored ? JSON.parse(stored.value) as Partial<ProviderSettings> : {};
-    return { ...DEFAULTS[section], ...this.defaults[section], ...configured, apiKey: this.secrets.get(`provider.${section}.apiKey`) ?? "" };
+    const merged = { ...DEFAULTS[section], ...this.defaults[section], ...configured, apiKey: this.secrets.get(`provider.${section}.apiKey`) ?? "" };
+    if (section !== "asr") return merged;
+    const providerType = (merged.providerType ?? (merged.providerName.toLowerCase().includes("custom") ? "custom-gateway" : "deepgram")) as AsrProviderType;
+    const language = merged.language ? merged.language as AsrLanguage : undefined;
+    return { ...merged, providerType, language };
   }
 
   getPublic(): ProviderCenterPublicConfig {

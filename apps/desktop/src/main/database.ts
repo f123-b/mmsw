@@ -222,7 +222,7 @@ export class SqliteInterviewHistoryRepository {
     if (!input.final) return undefined;
     const record = { ...input, id: id("transcript", now), createdAt: now };
     this.database.run("INSERT INTO transcripts(id, interview_id, source, text, start_ms, end_ms, final, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.interviewId, record.source, record.text, record.startMs, record.endMs, 1, record.confidence ?? null, record.createdAt]);
-    this.database.flushNow();
+    this.database.flush();
     return record;
   }
 

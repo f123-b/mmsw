@@ -16,4 +16,15 @@ describe("ProviderConfigStore", () => {
       database.close();
     }
   });
+
+  it("defaults ASR to Deepgram Direct with one model and Chinese language", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const config = new ProviderConfigStore(database, new MemorySecretStore());
+      expect(config.get("asr")).toMatchObject({ providerType: "deepgram", providerName: "Deepgram", model: "nova-3", language: "zh-CN" });
+      expect(config.getPublic().asr).not.toHaveProperty("apiKey");
+    } finally {
+      database.close();
+    }
+  });
 });

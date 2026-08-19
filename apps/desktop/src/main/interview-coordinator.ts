@@ -9,6 +9,7 @@ import {
   type AnswerContextInput,
   type AnswerMode,
   type AnswerRecord,
+  type AsrLanguage,
   type InterviewRecord,
   type QuestionRecord,
   type QuestionCandidate,
@@ -27,13 +28,14 @@ export interface InterviewAudioPort {
 
 export interface InterviewRealtimePort {
   connect(options: RealtimeConnectOptions): void;
+  finalize?(timeoutMs?: number): Promise<void>;
   disconnect(): void;
   sendAudio(packet: Uint8Array): void;
   sendControl(message: ClientControlMessage): void;
   on(event: "state" | "transcript" | "message" | "diagnostic", listener: (...args: any[]) => void): this;
 }
 
-export interface InterviewStartOptions extends Omit<RealtimeConnectOptions, "autoReconnect"> {
+export interface InterviewStartOptions extends Omit<RealtimeConnectOptions, "autoReconnect" | "language"> {
   profileId: string;
   inputDeviceId?: string;
   outputDeviceId?: string;
@@ -60,7 +62,7 @@ export interface InterviewCoordinatorOptions {
   aggregator?: TranscriptAggregator;
   history?: InterviewHistoryPort;
   contextProvider?: (question: QuestionCandidate, profileId: string, recentTranscript: string[]) => AnswerContextInput | Promise<AnswerContextInput>;
-  asrSettingsProvider?: () => { providerName: string; model: string };
+  asrSettingsProvider?: (profileId: string) => Pick<RealtimeConnectOptions, "providerType" | "providerName" | "model" | "language" | "url">;
   now?: () => number;
 }
 
@@ -121,7 +123,10 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   async start(startOptions: InterviewStartOptions): Promise<string> {
-    if (!startOptions.url.trim()) throw new Error("ASR WebSocket URL is required");
+    const asrSettings = this.options.asrSettingsProvider?.(startOptions.profileId);
+    const providerType = asrSettings?.providerType ?? startOptions.providerType ?? "custom-gateway";
+    const connectUrl = startOptions.url ?? asrSettings?.url ?? "";
+    if (providerType === "custom-gateway" && !connectUrl.trim()) throw new Error("Custom ASR Gateway URL is required");
     if (this.running) await this.stop("user");
     this.transition("CREATING");
     const startedAt = this.now();
@@ -143,8 +148,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.transition("CONNECTING");
     try {
       // The real interview path deliberately omits meterOnly so PCM reaches ASR.
-      const asrSettings = this.options.asrSettingsProvider?.();
-      this.options.realtime.connect({ url: startOptions.url, gatewayToken: startOptions.gatewayToken, autoReconnect: true, ...asrSettings });
+      this.options.realtime.connect({ ...startOptions, ...asrSettings, providerType, url: connectUrl, language: asrSettings?.language ?? (startOptions.language as AsrLanguage | undefined), autoReconnect: true });
       this.options.audio.start({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true });
     } catch (error) {
       this.failInterview(String(error));
@@ -160,6 +164,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.questionFlushTimer = undefined;
     this.cancelAnswer(reason === "error" ? "timeout" : "user");
     this.options.audio.stop();
+    try { await this.options.realtime.finalize?.(1_000); } catch (error) { this.emitDiagnostic(`ASR finalize failed: ${String(error)}`); }
     this.options.realtime.disconnect();
     if (!this.options.session.canTransition("ENDING") && this.options.session.canTransition("ERROR")) this.transition("ERROR");
     if (this.options.session.canTransition("ENDING")) this.transition("ENDING");

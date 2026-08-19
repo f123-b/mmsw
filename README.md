@@ -6,7 +6,8 @@ Interview Copilot 是 Windows 优先的实时 AI 面试辅助桌面应用：它�
 
 - 正式面试入口由 Electron Main 的 `InterviewCoordinator` 管理，Renderer 不直接编排音频、ASR、问题和回答状态。
 - 正式面试使用 `meterOnly: false`，产生 16kHz、双声道、40ms、2560-byte PCM16 LE packet；“测试音频”是独立的电平诊断路径。
-- 内置 `apps/asr-gateway`：Gateway 将 LEFT/RIGHT PCM 拆分为 MIC/SYSTEM 两个单声道流，并提供 Deepgram Listen WebSocket Adapter；客户端协议只发送短期 Gateway token，长期 ASR Provider API Key 只留在受信 Gateway 环境变量中。
+- 默认 ASR 是 Electron Main 内置的 Deepgram Direct：Main 从 Windows `safeStorage` 读取 API Key，拆分 LEFT/RIGHT PCM 后直接建立 MIC/SYSTEM 两个 Deepgram Listen WebSocket；安装后的用户不需要 Node、npm 或手工启动 Gateway。
+- `apps/asr-gateway` 作为 Advanced Custom Gateway 保留，默认只监听 `127.0.0.1`，只通过 WebSocket URL 的短期 `ticket` 校验连接；长期 Deepgram API Key 不进入 Desktop Renderer 或 Realtime 协议。
 - 远端最终转写先经过连续片段聚合，再由问题检测器确认；支持隐式提问、500ms 静音确认、去重、追问 supersede，以及 AUTO/MANUAL 两种回答模式。
 - LLM 使用 OpenAI-compatible SSE；支持 FAST/NORMAL/DEEP、可取消请求、超时和有限重试。答案输出提示为中文 60–120 或 120–250 字 sneak peek，并保持旧答案直到新答案首个 delta 到达。
 - Provider Center 支持 LLM、ASR、Embedding 和可选 Reranker 配置；API Key 通过 Windows `safeStorage` 保存，不返回 Renderer、不写入日志。
@@ -18,7 +19,7 @@ Interview Copilot 是 Windows 优先的实时 AI 面试辅助桌面应用：它�
 
 ## 快速开始
 
-环境要求：Windows 11、Node.js 22+、npm 10+；构建真实 Audio Sidecar 还需要 Rust stable 和 MSVC linker。
+开发环境要求：Windows 11、Node.js 22+、npm 10+；构建真实 Audio Sidecar 还需要 Rust stable 和 MSVC linker。最终用户只需安装 Windows EXE。
 
 ```powershell
 npm install
@@ -29,22 +30,23 @@ npm run dev
 
 1. 在“Profiles”创建或选择档案，导入 Resume 和 JD。
 2. 在“知识库”导入项目资料；如果配置了 Embedding Provider，会保存向量并启用混合检索。
-3. 在“设置”填写 OpenAI-compatible LLM 的 Base URL、模型和 API Key，以及 ASR Gateway 的 WebSocket URL、模型和短期 Gateway token。ASR API Key 不会从 Desktop 发送给 Gateway。
+3. 在“设置”选择 `ASR Provider → Deepgram Direct`，填写 Deepgram API Key、模型（默认 `nova-3`）和语言（默认 `中文（简体）`）；API Key 只保存到系统安全存储。只有使用自定义 Gateway 时，才在 Advanced 中填写 Gateway URL 和短期 token。
 4. 返回“首页”选择 MIC / System Audio，点击“开始面试”。
 
-正常面试页面不会要求手工输入原始 WebSocket ticket；原始 URL、ticket 和协议连接只在“高级诊断”中显示。
+正常面试页面不要求用户手工配置 Node/npm 或启动服务；Direct 连接由 Electron Main 自动建立。Custom Gateway 的 URL 和 ticket 仅在高级设置中使用。
 
 ## ASR Gateway 合约与真实 Provider
 
-启动项目内置 Deepgram Gateway（需要真实 Deepgram API Key；未提供时保留 `REQUIRES_REAL_ASR_API_KEY_VALIDATION`）：
+如果必须使用 Advanced Custom Gateway（需要真实 Deepgram API Key；未提供时保留 `REQUIRES_REAL_DEEPGRAM_VALIDATION`），可在开发机上启动：
 
 ```powershell
 $env:DEEPGRAM_API_KEY = "..."
 $env:INTERVIEW_COPILOT_GATEWAY_TOKEN = "短期网关 token"
+$env:INTERVIEW_COPILOT_ASR_HOST = "127.0.0.1"
 npm --workspace apps/asr-gateway run dev
 ```
 
-然后把 Desktop 的 Gateway URL 配为 `ws://127.0.0.1:8787`。Gateway 使用官方 Deepgram Listen 参数：`linear16`、16kHz、单声道和 interim results；Desktop 只接收项目 Realtime 协议的 `asr_partial` / `asr_final`。
+然后在设置中选择 `Custom Gateway` 并把 URL 配为 `ws://127.0.0.1:8787`。Gateway 使用官方 Deepgram Listen 参数，并从 Desktop 的 `client_ready` 接收 model/language；Desktop 只接收项目 Realtime 协议的 `asr_partial` / `asr_final`。
 
 自定义受信 Gateway 需要接受 Electron Main 发出的二进制 PCM packet：16kHz、双声道、signed PCM16 LE、每包 640 frames / 2560 bytes，并返回 JSON WebSocket 消息，例如：
 

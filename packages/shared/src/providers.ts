@@ -1,10 +1,15 @@
 import type { AnswerProvider, AnswerProviderRequest, PromptSection } from "./answer";
 
+export type AsrProviderType = "deepgram" | "custom-gateway";
+export type AsrLanguage = "zh-CN" | "en-US" | "multi";
+
 export interface ProviderSettings {
   providerName: string;
   baseUrl: string;
   apiKey: string;
   model: string;
+  providerType?: AsrProviderType;
+  language?: AsrLanguage;
   fastModel?: string;
   normalModel?: string;
   deepModel?: string;

@@ -4,6 +4,7 @@ import type { ScreenshotResult } from "../main/screenshot-manager";
 import type { AudioDevices, AudioSidecarEvent } from "@interview-copilot/protocol";
 import type { RealtimeServerMessage } from "@interview-copilot/protocol";
 import type { RealtimeConnectOptions } from "../main/realtime-session";
+import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
@@ -124,11 +125,16 @@ const api = {
       ipcRenderer.on("screenshot:diagnostic", handler);
       return () => ipcRenderer.removeListener("screenshot:diagnostic", handler);
     },
-    onRealtimeState: (listener: (state: string) => void) => {
+      onRealtimeState: (listener: (state: string) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, state: string) => listener(state);
       ipcRenderer.on("realtime:state", handler);
       return () => ipcRenderer.removeListener("realtime:state", handler);
-    },
+      },
+      onRealtimeDiagnostics: (listener: (diagnostics: AsrRuntimeDiagnostics) => void) => {
+        const handler = (_event: Electron.IpcRendererEvent, diagnostics: AsrRuntimeDiagnostics) => listener(diagnostics);
+        ipcRenderer.on("realtime:diagnostics", handler);
+        return () => ipcRenderer.removeListener("realtime:diagnostics", handler);
+      },
     onRealtimeTranscript: (listener: (snapshot: TranscriptSnapshot) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, snapshot: TranscriptSnapshot) => listener(snapshot);
       ipcRenderer.on("realtime:transcript", handler);

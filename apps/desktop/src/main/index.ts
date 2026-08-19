@@ -20,7 +20,7 @@ const screenshotManager = new ScreenshotManager({
   onDiagnostic: (message) => broadcast("screenshot:diagnostic", message)
 });
 const session = new SessionStateMachine();
-const realtimeSession = new RealtimeSession();
+const realtimeSession = new RealtimeSession(undefined, () => providerConfigStore?.get("asr"));
 const configuredModel = process.env.INTERVIEW_COPILOT_LLM_MODEL ?? "gpt-4o-mini";
 const environmentLlmSettings: ProviderSettings = {
   providerName: process.env.INTERVIEW_COPILOT_LLM_PROVIDER ?? "OpenAI-compatible",
@@ -386,7 +386,18 @@ app.whenReady().then(async () => {
     session,
     answerAgent,
     history: historyRepository,
-    asrSettingsProvider: () => { const settings = providerConfigStore?.get("asr"); return { providerName: settings?.providerName ?? "Custom WebSocket ASR Gateway", model: settings?.model ?? "" }; },
+    asrSettingsProvider: (profileId) => {
+      const settings = providerConfigStore?.get("asr");
+      const profileLanguage = profileRepository?.get(profileId)?.language;
+      const language = settings?.language || (profileLanguage === "en-US" ? "en-US" : profileLanguage === "multi" ? "multi" : "zh-CN");
+      return {
+        providerType: settings?.providerType ?? "deepgram",
+        providerName: settings?.providerName ?? "Deepgram",
+        model: settings?.model ?? "nova-3",
+        language,
+        url: settings?.baseUrl
+      };
+    },
     contextProvider: async (question, profileId, recentTranscript) => {
       const profile = profileRepository?.get(profileId);
       const chunks = knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? [];
@@ -420,6 +431,8 @@ app.whenReady().then(async () => {
   audioManager.on("event", (event) => { if (event.type === "audio_error") audioLogger?.error("audio error", { component: event.component, recoverable: event.recoverable }); broadcast("audio:event", event); });
   audioManager.on("process", (state) => broadcast("audio:process", state));
   audioManager.on("diagnostic", (message) => { audioLogger?.warn(message); broadcast("audio:diagnostic", message); });
+  realtimeSession.on("diagnostics", (diagnostics) => broadcast("realtime:diagnostics", diagnostics));
+  realtimeSession.on("runtime-error", (error) => broadcast("runtime:error", error));
   coordinator().on("event", (event: { type: string; [key: string]: unknown }) => {
     if (event.type === "session_state") broadcast("session:state", event.state);
     if (event.type === "transcript") broadcast("realtime:transcript", event.snapshot);

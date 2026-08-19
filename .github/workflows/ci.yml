@@ -29,6 +29,9 @@ jobs:
       - name: Build desktop
         run: npm run build
 
+      - name: Rust format check
+        run: cargo fmt --check --manifest-path crates/audio-sidecar/Cargo.toml
+
       - name: Rust tests
         shell: pwsh
         run: |
@@ -71,6 +74,22 @@ jobs:
             Get-Content package-windows.log | Select-Object -Last 20 | ForEach-Object { Write-Output ("::error title=Windows package::" + $_) }
             exit $LASTEXITCODE
           }
+
+      - name: Verify packaged runtime content
+        shell: pwsh
+        run: |
+          $unpacked = Join-Path $PWD "apps/desktop/release/win-unpacked"
+          $required = @(
+            (Join-Path $unpacked "resources/audio-sidecar/interview-audio.exe"),
+            (Join-Path $unpacked "resources/sql.js/sql-wasm.wasm")
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              Write-Error "Missing packaged runtime dependency: $path"
+              exit 1
+            }
+          }
+          Write-Output "Verified packaged runtime dependencies: $($required -join ', ')"
 
       - name: Upload packaging log
         if: always()

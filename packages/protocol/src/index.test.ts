@@ -35,7 +35,8 @@ describe("audio protocol", () => {
   });
 
   it("keeps provider API keys out of the desktop gateway protocol", () => {
-    expect(clientControlMessageSchema.parse({ type: "client_ready", gatewayToken: "short-lived" })).toMatchObject({ gatewayToken: "short-lived" });
+    expect(clientControlMessageSchema.parse({ type: "client_ready", providerName: "Custom Gateway", model: "nova-3", language: "zh-CN" })).toMatchObject({ model: "nova-3", language: "zh-CN" });
+    expect(() => clientControlMessageSchema.parse({ type: "client_ready", gatewayToken: "short-lived" })).toThrow();
     expect(() => clientControlMessageSchema.parse({ type: "client_ready", apiKey: "long-lived-secret" })).toThrow();
   });
 
