@@ -20,6 +20,12 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
+      - name: Full dependency security audit
+        run: npm audit --audit-level=high
+
+      - name: Runtime dependency security audit
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Ensure Electron runtime
         shell: pwsh
         run: |
@@ -64,6 +70,14 @@ jobs:
       - name: Mock Provider Electron functional E2E
         shell: pwsh
         run: npm run functional:e2e
+
+      - name: Probe failure Electron E2E
+        shell: pwsh
+        run: npm run probe-failure:e2e
+
+      - name: Shutdown process Electron E2E
+        shell: pwsh
+        run: npm run shutdown-process:e2e
 
       - name: Rust format check
         run: cargo fmt --check --manifest-path crates/audio-sidecar/Cargo.toml

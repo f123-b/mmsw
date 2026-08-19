@@ -152,6 +152,11 @@ export class AudioManager extends EventEmitter {
   }
 
   async probe(options: Omit<AudioStartOptions, "meterOnly" | "probeOnly" | "autoRecover"> = {}): Promise<ProbeResult> {
+    // A new probe is the only operation allowed to establish a fresh validity
+    // window. Invalidate the previous success before any async stop/spawn work
+    // so a timeout, crash, or empty result can never reuse it.
+    this.lastProbeResult = undefined;
+    this.lastProbeDeviceKey = undefined;
     if (this.processKind === "probe") await this.stop();
     if (this.isRunning) throw new Error(`AUDIO_BUSY: ${this.processKind ?? "audio"} sidecar is still running`);
     const result = new Promise<ProbeResult>((resolve, reject) => {
@@ -250,7 +255,7 @@ export class AudioManager extends EventEmitter {
         this.pendingProbe = undefined;
         clearTimeout(pending.timer);
         const result = pending.result;
-        if (!result) pending.reject(new Error(`AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT: probe exited with code ${code ?? "unknown"}`));
+        if (!result) pending.reject(new Error(`${code === 0 ? "AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT" : "AUDIO_PROBE_PROCESS_CRASHED"}: probe exited with code ${code ?? "unknown"}`));
         else if (code !== 0) pending.reject(new Error(`AUDIO_PROBE_PROCESS_FAILED: probe exited with code ${code ?? "unknown"} after returning a result`));
         else if (!result.mic.ok && !result.system.ok) pending.reject(new Error("AUDIO_PROBE_FAILED: microphone and system audio probe failed"));
         else if (!result.mic.ok) pending.reject(new Error("AUDIO_PROBE_MIC_FAILED: microphone probe failed"));

@@ -16,7 +16,15 @@ if (has("--probe-only")) {
       process.exit(0);
       return;
     }
-    if (behavior === "timeout") return;
+    if (behavior === "crash") {
+      process.exit(9);
+      return;
+    }
+    if (behavior === "timeout") {
+      const keepAlive = setInterval(() => undefined, 1_000);
+      process.once("SIGTERM", () => { clearInterval(keepAlive); process.exit(0); });
+      return;
+    }
     emit({ type: "probe_result", mic: { ok: behavior !== "mic-fail" && behavior !== "both-fail", sampleRate: 16_000, channels: 1, peak: behavior === "mic-fail" || behavior === "both-fail" ? 0 : 0.4, callbackCount: behavior === "mic-fail" || behavior === "both-fail" ? 0 : 4, sampleCount: behavior === "mic-fail" || behavior === "both-fail" ? 0 : 640 }, system: { ok: behavior !== "system-fail" && behavior !== "both-fail", sampleRate: 16_000, channels: 2, peak: behavior === "system-fail" || behavior === "both-fail" ? 0 : 0.3, callbackCount: behavior === "system-fail" || behavior === "both-fail" ? 0 : 4, sampleCount: behavior === "system-fail" || behavior === "both-fail" ? 0 : 1_280 }, durationMs: 40, timestamp: timestamp() });
     emit({ type: "audio_state", state: "READY", timestamp: timestamp() });
     process.exit(behavior === "nonzero-after-result" ? 7 : 0);

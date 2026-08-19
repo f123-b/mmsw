@@ -176,6 +176,22 @@ describe("InterviewCoordinator software E2E", () => {
     await coordinator.stop();
   });
 
+  it.each(["FAST", "NORMAL", "DEEP"] as const)("SCREENSHOT_ANSWER_%s", async (mode) => {
+    let requestedMode = "";
+    let hasAttachment = false;
+    const provider: AnswerProvider = { stream: async function* (request) {
+      requestedMode = request.sections.find((section) => section.name === "interview-style")?.content ?? "";
+      hasAttachment = Boolean(request.attachments?.some((attachment) => attachment.dataUrl.startsWith("data:image/")));
+      yield "截图回答";
+    } };
+    const coordinator = new InterviewCoordinator({ audio: new FakeAudio(), realtime: new FakeRealtime(), session: new SessionStateMachine(), answerAgent: new AnswerAgent({ vision: provider }, new ModelRouter({ vision: "vision-model" })) });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", answerMode: mode });
+    await coordinator.answerScreenshot("data:image/png;base64,mock");
+    expect(requestedMode).toContain(`回答模式：${mode}`);
+    expect(hasAttachment).toBe(true);
+    await coordinator.stop();
+  });
+
   it("SCREENSHOT_WITH_CURRENT_QUESTION", async () => {
     let requestedQuestion = "";
     let hasAttachment = false;

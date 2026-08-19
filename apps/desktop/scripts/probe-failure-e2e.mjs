@@ -14,8 +14,10 @@ const behaviors = [
   ["mic-fail", "AUDIO_PROBE_MIC_FAILED"],
   ["system-fail", "AUDIO_PROBE_SYSTEM_FAILED"],
   ["both-fail", "AUDIO_PROBE_FAILED"],
+  ["timeout", "AUDIO_PROBE_TIMEOUT"],
   ["nonzero-after-result", "AUDIO_PROBE_PROCESS_FAILED"],
-  ["exit-without-result", "AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT"]
+  ["exit-without-result", "AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT"],
+  ["crash", "AUDIO_PROBE_PROCESS_CRASHED"]
 ];
 
 if (!existsSync(electronExecutable) || !existsSync(audioSidecar)) throw new Error("Probe E2E dependencies are missing");
@@ -72,7 +74,7 @@ for (const [index, [behavior, expectedCode]] of behaviors.entries()) {
   await mkdir(userData, { recursive: true });
   const child = spawn(electronExecutable, [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`, desktopDirectory], {
     cwd: desktopDirectory,
-    env: { ...process.env, INTERVIEW_COPILOT_AUDIO_SIDECAR: audioSidecar, INTERVIEW_COPILOT_NODE_EXECUTABLE: process.execPath, INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR: behavior, INTERVIEW_COPILOT_TEST_DATA_PATH: userData, INTERVIEW_COPILOT_LLM_BASE_URL: `http://127.0.0.1:${llmPort}`, INTERVIEW_COPILOT_LLM_API_KEY: "mock-key", INTERVIEW_COPILOT_LLM_MODEL: "mock-model" },
+    env: { ...process.env, INTERVIEW_COPILOT_AUDIO_SIDECAR: audioSidecar, INTERVIEW_COPILOT_NODE_EXECUTABLE: process.execPath, INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR: behavior, ...(behavior === "timeout" ? { INTERVIEW_COPILOT_AUDIO_PROBE_TIMEOUT_MS: "300" } : {}), INTERVIEW_COPILOT_TEST_DATA_PATH: userData, INTERVIEW_COPILOT_LLM_BASE_URL: `http://127.0.0.1:${llmPort}`, INTERVIEW_COPILOT_LLM_API_KEY: "mock-key", INTERVIEW_COPILOT_LLM_MODEL: "mock-model" },
     stdio: "ignore",
     windowsHide: true
   });

@@ -15,6 +15,7 @@
     "visual:smoke": "npm run build && node scripts/visual-smoke.mjs",
     "functional:e2e": "npm run build && node scripts/functional-e2e.mjs",
     "probe-failure:e2e": "npm run build && node scripts/probe-failure-e2e.mjs",
+    "shutdown-process:e2e": "npm run build && node scripts/shutdown-e2e.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run --passWithNoTests"
   },
@@ -36,7 +37,7 @@
     "@types/react-dom": "^19.1.2",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.4.1",
-    "electron": "37.2.0",
+    "electron": "43.4.1",
     "electron-builder": "^26.15.3",
     "electron-vite": "^4.0.0",
     "typescript": "^5.8.3",
@@ -45,6 +46,7 @@
   "build": {
     "appId": "com.interviewcopilot.desktop",
     "productName": "Interview Copilot",
+    "electronDist": "../../node_modules/electron/dist",
     "directories": {
       "output": "release"
     },

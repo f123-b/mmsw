@@ -58,15 +58,6 @@ impl CaptureStats {
     }
 }
 
-#[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct ProbeResult {
-    pub mic: CaptureStats,
-    pub system: CaptureStats,
-    pub duration_ms: u64,
-    pub timestamp: u128,
-}
-
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DriftMetrics {

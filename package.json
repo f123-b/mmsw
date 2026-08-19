@@ -18,6 +18,8 @@
     "capture-helper:build": "npm --workspace apps/desktop run build:capture-helper",
     "visual:smoke": "npm --workspace apps/desktop run visual:smoke",
     "functional:e2e": "npm --workspace apps/desktop run functional:e2e",
+    "probe-failure:e2e": "npm --workspace apps/desktop run probe-failure:e2e",
+    "shutdown-process:e2e": "npm --workspace apps/desktop run shutdown-process:e2e",
     "verify:package": "node apps/desktop/scripts/verify-package.mjs",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
@@ -27,6 +29,6 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "electron": "37.2.0"
+    "electron": "43.4.1"
   }
 }

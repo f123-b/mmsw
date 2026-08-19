@@ -330,7 +330,7 @@ export function App(): JSX.Element {
         store.setNotice(`设备枚举失败：${String(error)}`);
       }
     };
-    void loadDevices();
+    if (!captureTest) void loadDevices();
     void (async () => {
       try {
         let storedProfiles = await window.interviewCopilot.profiles.list();
@@ -473,6 +473,8 @@ export function App(): JSX.Element {
       if (!inputDeviceId || !outputDeviceId) throw new Error("AUDIO_DEVICE_FAILED: 未选择可用的音频设备");
       persistDevice("interview-copilot.input-device", inputDeviceId);
       persistDevice("interview-copilot.output-device", outputDeviceId);
+      store.clearProbe();
+      setProbeDeviceKey("");
       const probe = await window.interviewCopilot.audio.probe({ inputDeviceId, outputDeviceId });
       store.applyEvent(probe);
       setProbeDeviceKey(`${inputDeviceId}::${outputDeviceId}`);
@@ -488,6 +490,8 @@ export function App(): JSX.Element {
   };
   const stopAudio = async () => { await window.interviewCopilot.audio.stop(); };
   const probeAudio = async () => {
+    store.clearProbe();
+    setProbeDeviceKey("");
     try {
       const result = await window.interviewCopilot.audio.probe({ inputDeviceId, outputDeviceId });
       store.applyEvent(result);

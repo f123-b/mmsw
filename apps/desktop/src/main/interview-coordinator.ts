@@ -225,7 +225,8 @@ export class InterviewCoordinator extends EventEmitter {
       };
       this.emitQuestion({ type: "question_confirmed", question });
     }
-    await this.answer(question, "NORMAL", { hasScreenshot: true, attachments: [{ mimeType: "image/png", dataUrl }] });
+    const mode = this.activeOptions?.answerMode ?? "NORMAL";
+    await this.answer(question, mode, { hasScreenshot: true, attachments: [{ mimeType: "image/png", dataUrl }] });
   }
 
   async answerQuestionText(text: string): Promise<void> {
