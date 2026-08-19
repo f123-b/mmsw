@@ -12,6 +12,8 @@ import type { OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
 import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
 import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
+import type { ConversationMessageRecord, ConversationRecord, ProjectRecord } from "../main/database";
+import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 
 const api = {
   diagnostics: {
@@ -45,6 +47,14 @@ const api = {
     setAutomationMode: (mode: "MANUAL" | "AUTO") => ipcRenderer.invoke("interview:set-automation-mode", mode) as Promise<boolean>,
     setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => ipcRenderer.invoke("interview:set-answer-mode", mode) as Promise<boolean>
   },
+  chat: {
+    createConversation: (input: { profileId?: string; projectId?: string; title?: string }): Promise<ConversationRecord> => ipcRenderer.invoke("chat:create-conversation", input),
+    listConversations: (profileId?: string): Promise<ConversationRecord[]> => ipcRenderer.invoke("chat:list-conversations", profileId),
+    getConversation: (conversationId: string): Promise<{ conversation: ConversationRecord; messages: ConversationMessageRecord[] } | undefined> => ipcRenderer.invoke("chat:get-conversation", conversationId),
+    sendMessage: (conversationId: string, content: string): Promise<boolean> => ipcRenderer.invoke("chat:send-message", { conversationId, content }),
+    cancel: (conversationId: string): Promise<boolean> => ipcRenderer.invoke("chat:cancel", conversationId),
+    deleteConversation: (conversationId: string): Promise<boolean> => ipcRenderer.invoke("chat:delete-conversation", conversationId)
+  },
   profiles: {
     list: (): Promise<Profile[]> => ipcRenderer.invoke("profiles:list"),
     get: (profileId: string): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:get", profileId),
@@ -58,7 +68,15 @@ const api = {
   },
   settings: {
     get: (): Promise<ProviderCenterPublicConfig | undefined> => ipcRenderer.invoke("settings:get"),
-    update: (section: ProviderSection, input: Partial<ProviderSettings>): Promise<PublicProviderSettings | undefined> => ipcRenderer.invoke("settings:update", section, input)
+    update: (section: ProviderSection, input: Partial<ProviderSettings>): Promise<PublicProviderSettings | undefined> => ipcRenderer.invoke("settings:update", section, input),
+    testConnection: (section: ProviderSection): Promise<ProviderCheckResult> => ipcRenderer.invoke("settings:test-connection", section),
+    preflight: (checkReachability?: boolean): Promise<ProviderPreflightResult> => ipcRenderer.invoke("settings:preflight", checkReachability)
+  },
+  projects: {
+    list: (): Promise<ProjectRecord[]> => ipcRenderer.invoke("projects:list"),
+    create: (input: { name: string; profileId?: string }): Promise<ProjectRecord | undefined> => ipcRenderer.invoke("projects:create", input),
+    rename: (projectId: string, name: string): Promise<ProjectRecord | undefined> => ipcRenderer.invoke("projects:rename", projectId, name),
+    delete: (projectId: string): Promise<boolean> => ipcRenderer.invoke("projects:delete", projectId)
   },
   knowledge: {
     listBases: () => ipcRenderer.invoke("knowledge:list-bases"),
@@ -80,7 +98,8 @@ const api = {
   preparation: {
     start: (goal: string) => ipcRenderer.invoke("preparation:start", goal),
     approve: (requestId: string) => ipcRenderer.invoke("preparation:approve", requestId),
-    reject: (requestId: string) => ipcRenderer.invoke("preparation:reject", requestId)
+    reject: (requestId: string) => ipcRenderer.invoke("preparation:reject", requestId),
+    stop: () => ipcRenderer.invoke("preparation:stop")
   },
   events: {
     onAudio: (listener: (event: AudioSidecarEvent) => void) => {
@@ -177,6 +196,26 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
       ipcRenderer.on("preparation:event", handler);
       return () => ipcRenderer.removeListener("preparation:event", handler);
+    },
+    onChatMessageStart: (listener: (event: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+      ipcRenderer.on("chat:message-start", handler);
+      return () => ipcRenderer.removeListener("chat:message-start", handler);
+    },
+    onChatMessageDelta: (listener: (event: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+      ipcRenderer.on("chat:message-delta", handler);
+      return () => ipcRenderer.removeListener("chat:message-delta", handler);
+    },
+    onChatMessageEnd: (listener: (event: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+      ipcRenderer.on("chat:message-end", handler);
+      return () => ipcRenderer.removeListener("chat:message-end", handler);
+    },
+    onChatError: (listener: (event: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+      ipcRenderer.on("chat:error", handler);
+      return () => ipcRenderer.removeListener("chat:error", handler);
     }
   }
 };

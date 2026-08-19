@@ -121,6 +121,13 @@ export class SqliteDatabase {
       `],
       [4, `
         CREATE TABLE IF NOT EXISTS interview_analysis (interview_id TEXT PRIMARY KEY REFERENCES interviews(id) ON DELETE CASCADE, analysis_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
+      `],
+      [5, `
+        CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id) ON DELETE SET NULL, profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL, title TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS conversation_messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL, model TEXT, created_at INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS conversations_updated_at_idx ON conversations(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS conversation_messages_conversation_idx ON conversation_messages(conversation_id, created_at);
       `]
     ];
     for (const [version, sql] of migrations) {
@@ -197,6 +204,113 @@ export class SqliteProfileRepository {
     const skills = this.database.all<{ id: string; name: string; description: string; content: string; tags_json: string }>("SELECT id, name, description, content, tags_json FROM skills WHERE profile_id = ? ORDER BY name", [row.id]).map((skill) => ({ id: skill.id, name: skill.name, description: skill.description, content: skill.content, tags: JSON.parse(skill.tags_json) as string[] }));
     const knowledgeBaseIds = this.database.all<{ knowledge_base_id: string }>("SELECT knowledge_base_id FROM profile_knowledge WHERE profile_id = ?", [row.id]).map((item) => item.knowledge_base_id);
     return { id: row.id, name: row.name, language: row.language, resume: row.resume_json ? JSON.parse(row.resume_json) : undefined, jobDescription: row.job_description_json ? JSON.parse(row.job_description_json) : undefined, instructions: value<string>(row.instructions), skills, knowledgeBaseIds, createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+}
+
+export interface ProjectRecord {
+  id: string;
+  name: string;
+  profileId?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ConversationRecord {
+  id: string;
+  projectId?: string;
+  profileId?: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ConversationMessageRecord {
+  id: string;
+  conversationId: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  status: "pending" | "streaming" | "completed" | "error" | "cancelled";
+  model?: string;
+  createdAt: number;
+}
+
+export class SqliteProjectRepository {
+  constructor(private readonly database: SqliteDatabase) {}
+
+  list(): ProjectRecord[] {
+    return this.database.all<ProjectRecord>("SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt FROM projects ORDER BY updated_at DESC");
+  }
+
+  get(projectId: string): ProjectRecord | undefined {
+    return this.database.first<ProjectRecord>("SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt FROM projects WHERE id = ?", [projectId]);
+  }
+
+  create(name: string, profileId?: string, now = Date.now()): ProjectRecord {
+    const project = { id: id("project", now), name: name.trim() || "新面试项目", ...(profileId ? { profileId } : {}), createdAt: now, updatedAt: now };
+    this.database.run("INSERT INTO projects(id, name, profile_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", [project.id, project.name, project.profileId ?? null, now, now]);
+    this.database.flushNow();
+    return project;
+  }
+
+  rename(projectId: string, name: string, now = Date.now()): ProjectRecord | undefined {
+    this.database.run("UPDATE projects SET name = ?, updated_at = ? WHERE id = ?", [name.trim() || "新面试项目", now, projectId]);
+    this.database.flushNow();
+    return this.get(projectId);
+  }
+
+  delete(projectId: string): void {
+    this.database.run("DELETE FROM projects WHERE id = ?", [projectId]);
+    this.database.flushNow();
+  }
+}
+
+export class SqliteConversationRepository {
+  constructor(private readonly database: SqliteDatabase) {}
+
+  list(profileId?: string): ConversationRecord[] {
+    const sql = "SELECT id, project_id AS projectId, profile_id AS profileId, title, created_at AS createdAt, updated_at AS updatedAt FROM conversations";
+    return profileId
+      ? this.database.all<ConversationRecord>(`${sql} WHERE profile_id = ? ORDER BY updated_at DESC`, [profileId])
+      : this.database.all<ConversationRecord>(`${sql} ORDER BY updated_at DESC`);
+  }
+
+  get(conversationId: string): { conversation: ConversationRecord; messages: ConversationMessageRecord[] } | undefined {
+    const conversation = this.database.first<ConversationRecord>("SELECT id, project_id AS projectId, profile_id AS profileId, title, created_at AS createdAt, updated_at AS updatedAt FROM conversations WHERE id = ?", [conversationId]);
+    if (!conversation) return undefined;
+    const messages = this.database.all<ConversationMessageRecord>("SELECT id, conversation_id AS conversationId, role, content, status, model, created_at AS createdAt FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, id", [conversationId]);
+    return { conversation, messages: messages.map((message) => ({ ...message, role: message.role as ConversationMessageRecord["role"], status: message.status as ConversationMessageRecord["status"], ...(message.model ? { model: message.model } : {}) })) };
+  }
+
+  create(profileId?: string, projectId?: string, title = "新对话", now = Date.now()): ConversationRecord {
+    const conversation = { id: id("conversation", now), ...(projectId ? { projectId } : {}), ...(profileId ? { profileId } : {}), title: title.trim() || "新对话", createdAt: now, updatedAt: now };
+    this.database.run("INSERT INTO conversations(id, project_id, profile_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", [conversation.id, conversation.projectId ?? null, conversation.profileId ?? null, conversation.title, now, now]);
+    this.database.flushNow();
+    return conversation;
+  }
+
+  rename(conversationId: string, title: string, now = Date.now()): void {
+    this.database.run("UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?", [title.trim() || "新对话", now, conversationId]);
+    this.database.flushNow();
+  }
+
+  addMessage(input: { conversationId: string; role: ConversationMessageRecord["role"]; content: string; status: ConversationMessageRecord["status"]; model?: string }, now = Date.now()): ConversationMessageRecord {
+    const message = { id: id("message", now), ...input, createdAt: now };
+    this.database.run("INSERT INTO conversation_messages(id, conversation_id, role, content, status, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [message.id, message.conversationId, message.role, message.content, message.status, message.model ?? null, now]);
+    this.database.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, input.conversationId]);
+    this.database.flushNow();
+    return message;
+  }
+
+  updateMessage(messageId: string, content: string, status: ConversationMessageRecord["status"], now = Date.now()): void {
+    this.database.run("UPDATE conversation_messages SET content = ?, status = ? WHERE id = ?", [content, status, messageId]);
+    const message = this.database.first<{ conversationId: string }>("SELECT conversation_id AS conversationId FROM conversation_messages WHERE id = ?", [messageId]);
+    if (message) this.database.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, message.conversationId]);
+    this.database.flushNow();
+  }
+
+  delete(conversationId: string): void {
+    this.database.run("DELETE FROM conversations WHERE id = ?", [conversationId]);
+    this.database.flushNow();
   }
 }
 

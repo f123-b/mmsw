@@ -47,7 +47,12 @@ function sidecarPath(): string {
   const configured = process.env.INTERVIEW_COPILOT_AUDIO_SIDECAR;
   if (configured) return configured;
   const binaryName = process.platform === "win32" ? "interview-audio.exe" : "interview-audio";
-  return join(process.resourcesPath, "audio-sidecar", binaryName);
+  const candidates = [
+    join(process.resourcesPath, "audio-sidecar", binaryName),
+    join(process.cwd(), "crates", "audio-sidecar", "target", "release", binaryName),
+    join(__dirname, "../../../../crates", "audio-sidecar", "target", "release", binaryName)
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
 }
 
 export class AudioManager extends EventEmitter {

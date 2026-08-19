@@ -11,6 +11,8 @@ import type { OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
 import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
 import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
+import type { ConversationMessageRecord, ConversationRecord, ProjectRecord } from "../main/database";
+import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 
 declare global {
   interface Window {
@@ -46,6 +48,14 @@ declare global {
         setAutomationMode(mode: "MANUAL" | "AUTO"): Promise<boolean>;
         setAnswerMode(mode: "FAST" | "NORMAL" | "DEEP"): Promise<boolean>;
       };
+      chat: {
+        createConversation(input: { profileId?: string; projectId?: string; title?: string }): Promise<ConversationRecord>;
+        listConversations(profileId?: string): Promise<ConversationRecord[]>;
+        getConversation(conversationId: string): Promise<{ conversation: ConversationRecord; messages: ConversationMessageRecord[] } | undefined>;
+        sendMessage(conversationId: string, content: string): Promise<boolean>;
+        cancel(conversationId: string): Promise<boolean>;
+        deleteConversation(conversationId: string): Promise<boolean>;
+      };
       profiles: {
         list(): Promise<Profile[]>;
         get(profileId: string): Promise<Profile | undefined>;
@@ -60,6 +70,14 @@ declare global {
       settings: {
         get(): Promise<ProviderCenterPublicConfig | undefined>;
         update(section: ProviderSection, input: Partial<ProviderSettings>): Promise<PublicProviderSettings | undefined>;
+        testConnection(section: ProviderSection): Promise<ProviderCheckResult>;
+        preflight(checkReachability?: boolean): Promise<ProviderPreflightResult>;
+      };
+      projects: {
+        list(): Promise<ProjectRecord[]>;
+        create(input: { name: string; profileId?: string }): Promise<ProjectRecord | undefined>;
+        rename(projectId: string, name: string): Promise<ProjectRecord | undefined>;
+        delete(projectId: string): Promise<boolean>;
       };
       knowledge: {
         listBases(): Promise<Array<{ id: string; name: string; createdAt: number; updatedAt: number }>>;
@@ -82,6 +100,7 @@ declare global {
         start(goal: string): Promise<boolean>;
         approve(requestId: string): Promise<boolean>;
         reject(requestId: string): Promise<boolean>;
+        stop(): Promise<boolean>;
       };
       events: {
         onAudio(listener: (event: AudioSidecarEvent) => void): () => void;
@@ -103,6 +122,10 @@ declare global {
         onAutomationMode(listener: (mode: "MANUAL" | "AUTO") => void): () => void;
         onAnswerMode(listener: (mode: "FAST" | "NORMAL" | "DEEP") => void): () => void;
         onPreparationEvent(listener: (event: unknown) => void): () => void;
+        onChatMessageStart(listener: (event: unknown) => void): () => void;
+        onChatMessageDelta(listener: (event: unknown) => void): () => void;
+        onChatMessageEnd(listener: (event: unknown) => void): () => void;
+        onChatError(listener: (event: unknown) => void): () => void;
       };
     };
   }

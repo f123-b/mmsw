@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
 import type { ClientControlMessage, RealtimeServerMessage, TranscriptSegment } from "@interview-copilot/protocol";
 import {
   AnswerAgent,
@@ -21,6 +22,7 @@ import type { AudioStartOptions } from "./audio-manager";
 import type { RealtimeConnectOptions, RealtimeConnectionState } from "./realtime-session";
 
 export interface InterviewAudioPort {
+  readonly configuredPath?: string;
   start(options: AudioStartOptions): void;
   stop(): void;
   on(event: "pcm-packet" | "event" | "diagnostic", listener: (...args: any[]) => void): this;
@@ -123,6 +125,7 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   async start(startOptions: InterviewStartOptions): Promise<string> {
+    if (this.options.audio.configuredPath && !existsSync(this.options.audio.configuredPath)) throw new Error(`SIDECAR_NOT_FOUND: Audio Sidecar not found: ${this.options.audio.configuredPath}`);
     const asrSettings = this.options.asrSettingsProvider?.(startOptions.profileId);
     const providerType = asrSettings?.providerType ?? startOptions.providerType ?? "custom-gateway";
     const connectUrl = startOptions.url ?? asrSettings?.url ?? "";

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SqliteDatabase, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileRepository } from "./database";
+import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectRepository } from "./database";
 
 describe("SQLite persistence", () => {
   it("persists profile CRUD, clone and active selection", async () => {
@@ -71,6 +71,25 @@ describe("SQLite persistence", () => {
       knowledge.replaceChunks("doc-second", [{ id: "chunk-second", text: "算法内容", metadata: { documentId: "doc-second", filename: "b.md" } }]);
       expect(knowledge.listChunks([first.id]).map((chunk) => chunk.text)).toEqual(["项目内容"]);
       expect(knowledge.listChunks([second.id]).map((chunk) => chunk.text)).toEqual(["算法内容"]);
+    } finally { database.close(); }
+  });
+
+  it("persists projects and streaming chat messages", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const projects = new SqliteProjectRepository(database);
+      const conversations = new SqliteConversationRepository(database);
+      const profile = new SqliteProfileRepository(database).save({ name: "测试 Profile", language: "zh-CN", skills: [], knowledgeBaseIds: [] }, 9);
+      const project = projects.create("嵌入式项目", profile.id, 10);
+      const conversation = conversations.create(profile.id, project.id, "简历分析", 11);
+      const message = conversations.addMessage({ conversationId: conversation.id, role: "assistant", content: "正在生成", status: "streaming", model: "mock" }, 12);
+      conversations.updateMessage(message.id, "已完成", "completed", 13);
+      expect(projects.list()[0]).toMatchObject({ id: project.id, name: "嵌入式项目", profileId: profile.id });
+      expect(conversations.get(conversation.id)?.messages[0]).toMatchObject({ content: "已完成", status: "completed", model: "mock" });
+      projects.rename(project.id, "新项目", 14);
+      expect(projects.get(project.id)?.name).toBe("新项目");
+      projects.delete(project.id);
+      expect(projects.get(project.id)).toBeUndefined();
     } finally { database.close(); }
   });
 });

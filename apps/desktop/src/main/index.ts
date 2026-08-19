@@ -9,8 +9,9 @@ import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
 import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, generatePostInterviewAnalysis, HybridRetriever, ModelRouter, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type PreparationModel, type PreparationModelStep, type ProviderSettings } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewStartOptions } from "./interview-coordinator";
-import { openAppDatabase, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileRepository, type SqliteDatabase } from "./database";
+import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectRepository, type SqliteDatabase } from "./database";
 import { createSecretStore, MemorySecretStore, ProviderConfigStore, type ProviderSection } from "./settings-store";
+import { runProviderPreflight, testProviderConnection } from "./provider-preflight";
 import { parseDocument } from "./document-parsers";
 import { SafeLogger } from "./logger";
 
@@ -47,7 +48,11 @@ let interviewCoordinator: InterviewCoordinator | undefined;
 let profileRepository: SqliteProfileRepository | undefined;
 let knowledgeRepository: SqliteKnowledgeRepository | undefined;
 let historyRepository: SqliteInterviewHistoryRepository | undefined;
+let projectRepository: SqliteProjectRepository | undefined;
+let conversationRepository: SqliteConversationRepository | undefined;
 let preparationRuntime: PreparationAgentRuntime | undefined;
+let preparationAbortController: AbortController | undefined;
+const chatAbortControllers = new Map<string, AbortController>();
 let appLogger: SafeLogger | undefined;
 let audioLogger: SafeLogger | undefined;
 let realtimeLogger: SafeLogger | undefined;
@@ -339,6 +344,56 @@ async function stopInterviewWithAnalysis(): Promise<void> {
   if (interviewId) void runPostAnalysis(interviewId);
 }
 
+function chatContext(profileId?: string, userMessage = ""): string {
+  const profile = profileId ? profileRepository?.get(profileId) : profileRepository?.active();
+  if (!profile) return "当前没有可用 Profile。请明确告诉用户先创建 Profile。";
+  const chunks = knowledgeRepository?.listChunks(profile.knowledgeBaseIds) ?? [];
+  const retrieved = new HybridRetriever().search(userMessage, chunks, { topK: 8 }).slice(0, 5);
+  return [
+    `当前 Profile：${profile.name}（语言：${profile.language}）`,
+    profile.resume ? `Resume：${profile.resume.rawContent.slice(0, 12_000)}` : "Resume：未上传",
+    profile.jobDescription ? `JD：${profile.jobDescription.rawContent.slice(0, 8_000)}` : "JD：未上传",
+    profile.instructions ? `Instructions：${profile.instructions}` : "",
+    profile.skills.length ? `Skills：${profile.skills.map((skill) => `${skill.name}: ${skill.description}\n${skill.content}`).join("\n\n")}` : "",
+    retrieved.length ? `相关知识（${providerConfigStore?.get("embedding")?.apiKey ? "Hybrid Retrieval" : "Keyword Retrieval"}）：\n${retrieved.map((chunk) => `${chunk.metadata.filename}: ${chunk.text}`).join("\n\n")}` : "相关知识：无"
+  ].filter(Boolean).join("\n\n");
+}
+
+async function streamChat(conversationId: string, content: string): Promise<void> {
+  if (!conversationRepository) throw new Error("Chat database is still initializing");
+  const conversation = conversationRepository.get(conversationId);
+  if (!conversation) throw new Error("Conversation not found");
+  const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings;
+  if (!settings.apiKey) {
+    broadcast("chat:error", { conversationId, code: "LLM_NOT_CONFIGURED", message: "未配置 LLM API Key" });
+    throw new Error("未配置 LLM API Key");
+  }
+  const userMessage = conversationRepository.addMessage({ conversationId, role: "user", content, status: "completed" });
+  const assistantMessage = conversationRepository.addMessage({ conversationId, role: "assistant", content: "", status: "streaming", model: settings.model });
+  broadcast("chat:message-start", { conversationId, userMessage, assistantMessage });
+  const controller = new AbortController();
+  chatAbortControllers.set(conversationId, controller);
+  let answer = "";
+  try {
+    const prompt = `${chatContext(conversation.conversation.profileId, content)}\n\n用户问题：${content}`;
+    for await (const delta of new OpenAICompatibleAnswerProvider(settings).stream({ model: settings.model, sections: [
+      { name: "system/base", content: "你是 Interview Copilot 面试助手。只根据提供的 Profile、Resume、JD 和知识回答；如果资料不足，请明确说明，不要编造经历。" },
+      { name: "question", content: prompt }
+    ] }, controller.signal)) {
+      answer += delta;
+      conversationRepository.updateMessage(assistantMessage.id, answer, "streaming");
+      broadcast("chat:message-delta", { conversationId, messageId: assistantMessage.id, delta, text: answer });
+    }
+    conversationRepository.updateMessage(assistantMessage.id, answer, "completed");
+    broadcast("chat:message-end", { conversationId, message: { ...assistantMessage, content: answer, status: "completed" } });
+  } catch (error) {
+    const cancelled = controller.signal.aborted || (error instanceof Error && error.name === "AbortError");
+    conversationRepository.updateMessage(assistantMessage.id, answer, cancelled ? "cancelled" : "error");
+    broadcast("chat:error", { conversationId, messageId: assistantMessage.id, code: cancelled ? "CHAT_CANCELLED" : "CHAT_PROVIDER_ERROR", message: cancelled ? "已停止生成" : String(error) });
+    if (!cancelled) throw error;
+  } finally { chatAbortControllers.delete(conversationId); }
+}
+
 function agentArg(args: Record<string, unknown>, name: string): string {
   const value = args[name];
   if (typeof value !== "string" || !value.trim()) throw new Error(`Missing tool argument: ${name}`);
@@ -386,11 +441,42 @@ function registerIpc(): void {
     realtimeSession.disconnect();
     return true;
   });
-  ipcMain.handle("interview:start", (_event, options: InterviewStartOptions) => coordinator().start(options));
+  ipcMain.handle("interview:start", async (_event, options: InterviewStartOptions) => {
+    try {
+      if (!profileRepository?.get(options.profileId)) throw new Error("PROFILE_NOT_FOUND: 面试档案不存在");
+      const llm = providerConfigStore?.get("llm") ?? environmentLlmSettings;
+      if (!llm.apiKey) throw new Error("LLM_NOT_CONFIGURED: 未配置 LLM API Key");
+      const asr = providerConfigStore?.get("asr");
+      if ((options.providerType ?? asr?.providerType ?? "deepgram") === "deepgram" && !asr?.apiKey) throw new Error("ASR_AUTH_FAILED: 未配置 Deepgram API Key");
+      return await coordinator().start(options);
+    } catch (error) {
+      const raw = String(error);
+      const code = raw.split(":", 1)[0] || "AUDIO_DEVICE_FAILED";
+      const allowed = new Set(["AUDIO_DEVICE_FAILED", "ASR_AUTH_FAILED", "ASR_CONNECT_FAILED", "LLM_NOT_CONFIGURED", "PROFILE_NOT_FOUND", "SIDECAR_NOT_FOUND", "DATABASE_ERROR"]);
+      const mappedCode = allowed.has(code) ? code : raw.includes("ASR") ? "ASR_CONNECT_FAILED" : raw.includes("database") ? "DATABASE_ERROR" : "AUDIO_DEVICE_FAILED";
+      const message = raw.includes(": ") ? raw.slice(raw.indexOf(": ") + 2) : raw;
+      broadcast("runtime:error", { code: mappedCode, message, recoverable: mappedCode !== "PROFILE_NOT_FOUND" && mappedCode !== "SIDECAR_NOT_FOUND" });
+      throw new Error(`${mappedCode}: ${message}`);
+    }
+  });
   ipcMain.handle("interview:stop", () => stopInterviewWithAnalysis());
   ipcMain.handle("interview:answer-latest", () => coordinator().answerLatest());
   ipcMain.handle("interview:set-automation-mode", (_event, mode: "MANUAL" | "AUTO") => { coordinator().setAutomationMode(mode); return true; });
   ipcMain.handle("interview:set-answer-mode", (_event, mode: "FAST" | "NORMAL" | "DEEP") => { coordinator().setAnswerMode(mode); return true; });
+  ipcMain.handle("chat:create-conversation", (_event, input: { profileId?: string; projectId?: string; title?: string }) => {
+    if (!conversationRepository) throw new Error("Chat database is still initializing");
+    return conversationRepository.create(input.profileId, input.projectId, input.title);
+  });
+  ipcMain.handle("chat:list-conversations", (_event, profileId?: string) => conversationRepository?.list(profileId) ?? []);
+  ipcMain.handle("chat:get-conversation", (_event, conversationId: string) => conversationRepository?.get(conversationId));
+  ipcMain.handle("chat:send-message", async (_event, input: { conversationId: string; content: string }) => {
+    const content = input.content.trim();
+    if (!content) throw new Error("聊天内容不能为空");
+    await streamChat(input.conversationId, content);
+    return true;
+  });
+  ipcMain.handle("chat:cancel", (_event, conversationId: string) => { chatAbortControllers.get(conversationId)?.abort(); return true; });
+  ipcMain.handle("chat:delete-conversation", (_event, conversationId: string) => { conversationRepository?.delete(conversationId); return true; });
   ipcMain.handle("profiles:list", () => profileRepository?.list() ?? []);
   ipcMain.handle("profiles:get", (_event, profileId: string) => profileRepository?.get(profileId));
   ipcMain.handle("profiles:save", (_event, input: Parameters<SqliteProfileRepository["save"]>[0]) => profileRepository?.save(input));
@@ -473,6 +559,7 @@ function registerIpc(): void {
   ipcMain.handle("preparation:start", async (_event, goal: string) => {
     if (!profileRepository) throw new Error("Profile database is still initializing");
     if (preparationRuntime) throw new Error("A preparation run is already active");
+    if (!(providerConfigStore?.get("llm") ?? environmentLlmSettings).apiKey) throw new Error("LLM_NOT_CONFIGURED: Preparation Agent 需要 LLM Provider");
     const profile = profileRepository.active();
     if (!profile) throw new Error("Create a profile before starting preparation");
     const workspaceRoot = agentWorkspace(profile.id);
@@ -508,19 +595,23 @@ function registerIpc(): void {
       }
     };
     preparationRuntime = new PreparationAgentRuntime(model, registry, { workspaceRoot, profileId: profile.id }, 40);
+    preparationAbortController = new AbortController();
     void (async () => {
       try {
-        for await (const event of preparationRuntime!.run(goal)) broadcast("preparation:event", event);
+        for await (const event of preparationRuntime!.run(goal, preparationAbortController?.signal)) broadcast("preparation:event", event);
       } catch (error) {
-        broadcast("preparation:event", { type: "error", message: String(error) });
+        const aborted = preparationAbortController?.signal.aborted;
+        broadcast("preparation:event", { type: aborted ? "stopped" : "error", message: aborted ? "Preparation 已停止" : String(error) });
       } finally {
         preparationRuntime = undefined;
+        preparationAbortController = undefined;
       }
     })();
     return true;
   });
   ipcMain.handle("preparation:approve", (_event, requestId: string) => { preparationRuntime?.approve(requestId); return true; });
   ipcMain.handle("preparation:reject", (_event, requestId: string) => { preparationRuntime?.reject(requestId); return true; });
+  ipcMain.handle("preparation:stop", () => { preparationAbortController?.abort(); return true; });
   ipcMain.handle("settings:get", () => providerConfigStore?.getPublic());
   ipcMain.handle("settings:update", (_event, section: ProviderSection, input: Partial<ProviderSettings>) => {
     if (!providerConfigStore) throw new Error("Settings are still initializing");
@@ -533,6 +624,18 @@ function registerIpc(): void {
     }
     return result;
   });
+  ipcMain.handle("settings:test-connection", async (_event, section: ProviderSection) => {
+    if (!providerConfigStore) throw new Error("Settings are still initializing");
+    return testProviderConnection(section, providerConfigStore.get(section));
+  });
+  ipcMain.handle("settings:preflight", (_event, checkReachability = false) => {
+    if (!providerConfigStore) throw new Error("Settings are still initializing");
+    return runProviderPreflight({ llm: providerConfigStore.get("llm"), asr: providerConfigStore.get("asr"), embedding: providerConfigStore.get("embedding") }, Boolean(checkReachability));
+  });
+  ipcMain.handle("projects:list", () => projectRepository?.list() ?? []);
+  ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string }) => projectRepository?.create(input.name, input.profileId));
+  ipcMain.handle("projects:rename", (_event, projectId: string, name: string) => projectRepository?.rename(projectId, name));
+  ipcMain.handle("projects:delete", (_event, projectId: string) => { projectRepository?.delete(projectId); return true; });
 }
 
 function registerShortcuts(): void {
@@ -567,6 +670,8 @@ app.whenReady().then(async () => {
     database = await openAppDatabase(app.getPath("appData"));
     profileRepository = new SqliteProfileRepository(database);
     knowledgeRepository = new SqliteKnowledgeRepository(database);
+    projectRepository = new SqliteProjectRepository(database);
+    conversationRepository = new SqliteConversationRepository(database);
     try {
       providerConfigStore = new ProviderConfigStore(database, await createSecretStore(app.getPath("appData")), { llm: environmentLlmSettings });
     } catch {
@@ -657,6 +762,8 @@ app.whenReady().then(async () => {
 
 app.on("before-quit", () => {
   globalShortcut.unregisterAll();
+  preparationAbortController?.abort();
+  chatAbortControllers.forEach((controller) => controller.abort());
   void interviewCoordinator?.stop("user");
   database?.close();
   overlayManager?.destroy();

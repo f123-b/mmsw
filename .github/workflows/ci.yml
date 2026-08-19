@@ -32,6 +32,10 @@ jobs:
       - name: Production renderer smoke test
         run: node apps/desktop/scripts/production-smoke.mjs
 
+      - name: Mock Provider Electron functional E2E
+        shell: pwsh
+        run: npm run functional:e2e
+
       - name: Rust format check
         run: cargo fmt --check --manifest-path crates/audio-sidecar/Cargo.toml
 
@@ -107,6 +111,6 @@ jobs:
       - name: Upload Windows installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: InterviewCopilot-Windows-Installer
+          name: InterviewCopilot-windows-installer
           path: apps/desktop/release/*.exe
           if-no-files-found: error

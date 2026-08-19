@@ -4,18 +4,26 @@ import type { AppPage } from "../app/routes";
 interface SidebarProps {
   page: AppPage;
   profileName?: string;
+  projects: Array<{ id: string; name: string }>;
+  conversations: Array<{ id: string; title: string }>;
   onNavigate: (page: AppPage) => void;
   onNewConversation: () => void;
+  onOpenConversation: (conversationId: string) => void;
+  onOpenProject: (projectId: string) => void;
+  onRenameProject: (projectId: string, currentName: string) => void;
+  onDeleteProject: (projectId: string, currentName: string) => void;
 }
 
 const items: Array<{ page: AppPage; label: string; icon: string }> = [
   { page: "home", label: "新对话", icon: "＋" },
+  { page: "interview", label: "开始面试", icon: "◉" },
+  { page: "preparation", label: "面试准备", icon: "✦" },
   { page: "history", label: "面试记录", icon: "◷" },
   { page: "profiles", label: "档案", icon: "▱" },
   { page: "knowledge", label: "知识库", icon: "▤" }
 ];
 
-export function Sidebar({ page, profileName, onNavigate, onNewConversation }: SidebarProps): JSX.Element {
+export function Sidebar({ page, profileName, projects, conversations, onNavigate, onNewConversation, onOpenConversation, onOpenProject, onRenameProject, onDeleteProject }: SidebarProps): JSX.Element {
   return (
     <aside className="sidebar">
       <button className="sidebar-brand" onClick={onNewConversation} aria-label="新对话">
@@ -31,10 +39,9 @@ export function Sidebar({ page, profileName, onNavigate, onNewConversation }: Si
         ))}
       </nav>
       <div className="sidebar-section-label">项目</div>
-      <div className="sidebar-empty">还没有项目</div>
+      {projects.length === 0 ? <div className="sidebar-empty">还没有项目</div> : projects.slice(0, 6).map((project) => <div className="sidebar-project-row" key={project.id}><button className="sidebar-conversation" onClick={() => onOpenProject(project.id)}><span>▸</span><span className="sidebar-conversation-title">{project.name}</span></button><button className="sidebar-project-action" title="重命名项目" onClick={() => onRenameProject(project.id, project.name)}>✎</button><button className="sidebar-project-action danger-text" title="删除项目" onClick={() => onDeleteProject(project.id, project.name)}>×</button></div>)}
       <div className="sidebar-section-label conversation-label">对话</div>
-      <button className="sidebar-conversation" onClick={() => onNavigate("preparation")}><span>•</span>选择面试语言</button>
-      <button className="sidebar-conversation" onClick={() => onNavigate("preparation")}><span>•</span>快速开始面试准备</button>
+      {conversations.length === 0 ? <div className="sidebar-empty">还没有对话</div> : conversations.slice(0, 8).map((conversation) => <button className="sidebar-conversation" key={conversation.id} onClick={() => onOpenConversation(conversation.id)}><span>•</span><span className="sidebar-conversation-title">{conversation.title}</span></button>)}
       <div className="sidebar-bottom">
         <button className="help-row" onClick={() => onNavigate("settings")}><span className="help-icon">?</span><span>快捷帮助</span></button>
         <button className="profile-row-bottom" onClick={() => onNavigate("profiles")}>
