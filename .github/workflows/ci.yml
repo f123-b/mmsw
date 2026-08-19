@@ -20,6 +20,12 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
+      - name: Ensure Electron runtime
+        shell: pwsh
+        run: |
+          $nodeModules = (npm root --workspace apps/desktop).Trim()
+          node (Join-Path $nodeModules "electron/install.js")
+
       - name: Run JavaScript tests
         run: npm test
 

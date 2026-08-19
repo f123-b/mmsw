@@ -124,7 +124,7 @@ await command("Log.enable");
 
 const evidence = [];
 try {
-  await waitFor(() => document.documentElement.dataset.appReady === "true");
+  await waitFor(() => document.documentElement?.dataset.appReady === "true");
   await clickText("快捷帮助");
   await waitFor(() => Boolean(document.querySelector('.settings-page')));
   await screenshot("01-settings.png");
