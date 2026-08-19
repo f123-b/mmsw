@@ -15,6 +15,9 @@ import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSectio
 declare global {
   interface Window {
     interviewCopilot: {
+      diagnostics: {
+        markRendererReady(): void;
+      };
       audio: {
         start(options?: AudioStartOptions): Promise<void>;
         stop(): Promise<void>;

@@ -14,6 +14,9 @@ import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot
 import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
 
 const api = {
+  diagnostics: {
+    markRendererReady: () => ipcRenderer.send("diagnostics:renderer-ready")
+  },
   audio: {
     start: (options?: AudioStartOptions) => ipcRenderer.invoke("audio:start", options),
     stop: () => ipcRenderer.invoke("audio:stop"),

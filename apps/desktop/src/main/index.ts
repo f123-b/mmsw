@@ -1,5 +1,6 @@
 import { app, BrowserWindow, globalShortcut, ipcMain } from "electron";
 import { join, relative } from "node:path";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { AudioManager, type AudioStartOptions } from "./audio-manager";
 import { OverlayManager, type OverlayMode } from "./overlay-manager";
@@ -51,19 +52,87 @@ let appLogger: SafeLogger | undefined;
 let audioLogger: SafeLogger | undefined;
 let realtimeLogger: SafeLogger | undefined;
 let database: SqliteDatabase | undefined;
-const preloadPath = join(__dirname, "../preload/index.js");
+const preloadPath = join(__dirname, "../preload/index.mjs");
 const rendererFile = join(__dirname, "../renderer/index.html");
+const productionSmokeRequested = process.argv.includes("--production-smoke");
+let mainRendererLoad: Promise<void> | undefined;
+const rendererAppReadyWindows = new Set<number>();
+const rendererAppReadyWaiters = new Map<number, Set<() => void>>();
+
+type RendererReadiness = {
+  bridgeAvailable: boolean;
+  rootChildren: number;
+  appReady: boolean;
+};
 
 function isDevelopment(): boolean {
   return Boolean(process.env.ELECTRON_RENDERER_URL);
 }
 
-async function loadRenderer(window: BrowserWindow, overlay = false): Promise<void> {
-  if (isDevelopment()) {
-    const url = process.env.ELECTRON_RENDERER_URL ?? "http://localhost:5173";
-    await window.loadURL(`${url}${overlay ? "?window=overlay" : ""}`);
+function verifyPreload(): boolean {
+  const exists = existsSync(preloadPath);
+  if (exists) {
+    appLogger?.info("PRELOAD_OK", { preloadPath, exists });
   } else {
-    await window.loadFile(rendererFile, overlay ? { search: "window=overlay" } : undefined);
+    appLogger?.error("PRELOAD_NOT_FOUND", { preloadPath, exists });
+    broadcast("runtime:error", { code: "PRELOAD_NOT_FOUND", message: "Preload Bridge 未找到，请重新安装或查看日志", recoverable: false });
+  }
+  return exists;
+}
+
+function attachRendererDiagnostics(window: BrowserWindow, windowName: "main" | "overlay"): void {
+  window.webContents.on("did-start-loading", () => {
+    appLogger?.info("RENDERER_LOAD_STARTED", { window: windowName });
+  });
+  window.webContents.on("did-finish-load", () => {
+    appLogger?.info("RENDERER_DID_FINISH_LOAD", { window: windowName });
+  });
+  window.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    appLogger?.error("RENDERER_DID_FAIL_LOAD", { window: windowName, errorCode, errorDescription, validatedURL, isMainFrame });
+  });
+  window.webContents.on("render-process-gone", (_event, details) => {
+    appLogger?.error("RENDER_PROCESS_GONE", { window: windowName, reason: details.reason, exitCode: details.exitCode });
+  });
+  window.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    const fields = { window: windowName, level, message, line, sourceId };
+    if (level >= 2) appLogger?.error("RENDERER_CONSOLE_ERROR", fields);
+    else appLogger?.info("RENDERER_CONSOLE_MESSAGE", fields);
+    if (/Unable to load preload|preload.*(?:ENOENT|not found)|interviewCopilot.*undefined|Cannot read properties of undefined.*events/i.test(message)) {
+      appLogger?.error("RENDERER_PRELOAD_BRIDGE_ERROR", fields);
+    }
+  });
+}
+
+async function readRendererReadiness(window: BrowserWindow): Promise<RendererReadiness> {
+  return await window.webContents.executeJavaScript(`new Promise((resolve) => setTimeout(() => resolve({
+    bridgeAvailable: Boolean(window.interviewCopilot),
+    rootChildren: document.querySelector("#root")?.children.length ?? 0,
+    appReady: document.documentElement.dataset.appReady === "true"
+  }), 0))`, true) as RendererReadiness;
+}
+
+async function loadRenderer(window: BrowserWindow, overlay = false): Promise<void> {
+  const windowName = overlay ? "overlay" : "main";
+  attachRendererDiagnostics(window, windowName);
+  appLogger?.info("RENDERER_LOAD_STARTED", { window: windowName });
+  try {
+    if (isDevelopment()) {
+      const url = process.env.ELECTRON_RENDERER_URL ?? "http://localhost:5173";
+      await window.loadURL(`${url}${overlay ? "?window=overlay" : ""}`);
+    } else {
+      await window.loadFile(rendererFile, overlay ? { search: "window=overlay" } : undefined);
+    }
+    if (!overlay) {
+      const readiness = await readRendererReadiness(window);
+      if (readiness.bridgeAvailable && readiness.rootChildren > 0) {
+        appLogger?.info("RENDERER_APP_READY", { window: windowName, ...readiness });
+      } else {
+        appLogger?.error("RENDERER_APP_NOT_READY", { window: windowName, ...readiness });
+        if (!readiness.bridgeAvailable) appLogger?.error("PRELOAD_BRIDGE_UNAVAILABLE", { window: windowName });
+      }
+    }
+  } catch (error) {
+    appLogger?.error("RENDERER_LOAD_FAILED", { window: windowName, error: String(error) });
   }
 }
 
@@ -71,6 +140,41 @@ function broadcast(channel: string, payload: unknown): void {
   for (const window of [mainWindow, overlayManager?.currentWindow]) {
     if (window && !window.isDestroyed()) window.webContents.send(channel, payload);
   }
+}
+
+function rendererWindowName(window: BrowserWindow | null): "main" | "overlay" | "unknown" {
+  if (window && window === mainWindow) return "main";
+  if (window && window === overlayManager?.currentWindow) return "overlay";
+  return "unknown";
+}
+
+ipcMain.on("diagnostics:renderer-ready", (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const webContentsId = event.sender.id;
+  rendererAppReadyWindows.add(webContentsId);
+  appLogger?.info("RENDERER_APP_READY_SIGNAL", { window: rendererWindowName(window), webContentsId });
+  const waiters = rendererAppReadyWaiters.get(webContentsId);
+  rendererAppReadyWaiters.delete(webContentsId);
+  waiters?.forEach((resolve) => resolve());
+});
+
+async function waitForRendererReady(window: BrowserWindow): Promise<boolean> {
+  const webContentsId = window.webContents.id;
+  if (rendererAppReadyWindows.has(webContentsId)) return true;
+  return await new Promise<boolean>((resolve) => {
+    const waiters = rendererAppReadyWaiters.get(webContentsId) ?? new Set<() => void>();
+    const finish = () => {
+      clearTimeout(timeout);
+      waiters.delete(finish);
+      resolve(true);
+    };
+    const timeout = setTimeout(() => {
+      waiters.delete(finish);
+      resolve(false);
+    }, 15_000);
+    waiters.add(finish);
+    rendererAppReadyWaiters.set(webContentsId, waiters);
+  });
 }
 
 function coordinator(): InterviewCoordinator {
@@ -93,7 +197,8 @@ async function captureScreenshot(trigger = "screenshot-answer"): Promise<void> {
   }
 }
 
-function createMainWindow(): void {
+function createMainWindow(): BrowserWindow {
+  verifyPreload();
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 760,
@@ -105,11 +210,50 @@ function createMainWindow(): void {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: false
     }
   });
-  void loadRenderer(mainWindow);
+  mainRendererLoad = loadRenderer(mainWindow);
   mainWindow.on("closed", () => { mainWindow = undefined; });
+  return mainWindow;
+}
+
+async function waitForRendererLoad(window: BrowserWindow): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = setTimeout(finish, 15_000);
+    window.webContents.once("did-finish-load", finish);
+    window.webContents.once("did-fail-load", finish);
+    if (!window.webContents.isLoading()) finish();
+  });
+}
+
+async function runProductionSmoke(main: BrowserWindow): Promise<void> {
+  await mainRendererLoad;
+  const unavailable: RendererReadiness = { bridgeAvailable: false, rootChildren: 0, appReady: false };
+  const mainReadiness = await readRendererReadiness(main).catch((error) => {
+    appLogger?.error("PRODUCTION_SMOKE_MAIN_FAILED", { error: String(error) });
+    return unavailable;
+  });
+  const overlay = overlayManager?.show();
+  let overlayReadiness = unavailable;
+  if (overlay) {
+    overlay.show();
+    await waitForRendererLoad(overlay);
+    const overlayReady = await waitForRendererReady(overlay);
+    overlayReadiness = { bridgeAvailable: overlayReady, rootChildren: overlayReady ? 1 : 0, appReady: overlayReady };
+  }
+  const ok = mainReadiness.bridgeAvailable && mainReadiness.rootChildren > 0 && Boolean(overlay) && overlayReadiness.bridgeAvailable && overlayReadiness.rootChildren > 0;
+  const result = { ok, main: mainReadiness, overlay: overlayReadiness };
+  appLogger?.info("PRODUCTION_SMOKE_RESULT", result);
+  process.stdout.write(`PRODUCTION_SMOKE_RESULT ${JSON.stringify(result)}\n`);
+  app.exit(ok ? 0 : 1);
 }
 
 const MAX_AGENT_FILE_BYTES = 1_000_000;
@@ -167,7 +311,7 @@ function registerIpc(): void {
   ipcMain.handle("audio:start", (_event, options: AudioStartOptions) => audioManager.start({ ...options, meterOnly: true, autoRecover: false }));
   ipcMain.handle("audio:stop", () => audioManager.stop());
   ipcMain.handle("audio:probe", (_event, options: AudioStartOptions) => audioManager.probe(options));
-  ipcMain.handle("audio:list-devices", () => audioManager.listDevices());
+  ipcMain.handle("audio:list-devices", () => productionSmokeRequested ? { inputs: [], outputs: [] } : audioManager.listDevices());
   ipcMain.handle("overlay:show", () => { overlayManager?.show(); return true; });
   ipcMain.handle("overlay:toggle", () => { overlayManager?.toggle(); return true; });
   ipcMain.handle("overlay:set-mode", (_event, mode: OverlayMode) => {
@@ -420,7 +564,7 @@ app.whenReady().then(async () => {
       };
     }
   });
-  createMainWindow();
+  const createdMainWindow = createMainWindow();
   overlayManager = new OverlayManager({
     preloadPath,
     loadRenderer: (window) => loadRenderer(window, true)
@@ -448,6 +592,8 @@ app.whenReady().then(async () => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
   });
+
+  if (productionSmokeRequested) await runProductionSmoke(createdMainWindow);
 });
 
 app.on("before-quit", () => {

@@ -13,6 +13,8 @@
     "dev": "npm --workspace apps/desktop run dev",
     "build": "npm --workspace apps/desktop run build",
     "package:win": "npm --workspace apps/desktop run package:win",
+    "smoke:production": "npm --workspace apps/desktop run smoke:production",
+    "verify:package": "node apps/desktop/scripts/verify-package.mjs",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "format:check": "npm run format:check --workspaces --if-present"

@@ -9,6 +9,7 @@
     "build": "electron-vite build",
     "build:sidecar": "cargo build --release --manifest-path ../../crates/audio-sidecar/Cargo.toml",
     "package:win": "npm run build:sidecar && npm run build && electron-builder --win",
+    "smoke:production": "npm run build && node scripts/production-smoke.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run --passWithNoTests"
   },

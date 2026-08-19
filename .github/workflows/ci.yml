@@ -18,7 +18,7 @@ jobs:
           cache: npm
 
       - name: Install JavaScript dependencies
-        run: npm ci --ignore-scripts
+        run: npm ci
 
       - name: Run JavaScript tests
         run: npm test
@@ -28,6 +28,9 @@ jobs:
 
       - name: Build desktop
         run: npm run build
+
+      - name: Production renderer smoke test
+        run: node apps/desktop/scripts/production-smoke.mjs
 
       - name: Rust format check
         run: cargo fmt --check --manifest-path crates/audio-sidecar/Cargo.toml
@@ -78,18 +81,20 @@ jobs:
       - name: Verify packaged runtime content
         shell: pwsh
         run: |
+          node apps/desktop/scripts/verify-package.mjs
+
+      - name: Packaged renderer smoke test
+        shell: pwsh
+        run: |
           $unpacked = Join-Path $PWD "apps/desktop/release/win-unpacked"
-          $required = @(
-            (Join-Path $unpacked "resources/audio-sidecar/interview-audio.exe"),
-            (Join-Path $unpacked "resources/sql.js/sql-wasm.wasm")
-          )
-          foreach ($path in $required) {
-            if (-not (Test-Path -LiteralPath $path)) {
-              Write-Error "Missing packaged runtime dependency: $path"
-              exit 1
-            }
+          $electron = Join-Path $unpacked "Interview Copilot.exe"
+          if (-not (Test-Path -LiteralPath $electron)) {
+            Write-Error "Packaged Electron executable not found: $electron"
+            exit 1
           }
-          Write-Output "Verified packaged runtime dependencies: $($required -join ', ')"
+          $env:ELECTRON_EXECUTABLE = $electron
+          $env:ELECTRON_PACKAGED = "true"
+          node apps/desktop/scripts/production-smoke.mjs
 
       - name: Upload packaging log
         if: always()

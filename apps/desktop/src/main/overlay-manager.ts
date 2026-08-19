@@ -43,10 +43,10 @@ export class OverlayManager {
       show: false,
       focusable: true,
       webPreferences: {
-        preload: this.options.preloadPath ?? join(__dirname, "../preload/index.js"),
+        preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"),
         contextIsolation: true,
         nodeIntegration: false,
-        sandbox: true
+        sandbox: false
       }
     });
     this.window.setAlwaysOnTop(true, "screen-saver");
