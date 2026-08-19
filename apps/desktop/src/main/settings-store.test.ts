@@ -55,7 +55,7 @@ describe("OverlaySettingsStore", () => {
     } finally { database.close(); }
   });
 
-  it("defaults automation to AUTO and persists the last user choice", async () => {
+  it("AUTOMATION_DEFAULT_AUTO", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
       const settings = new OverlaySettingsStore(database);
@@ -64,6 +64,33 @@ describe("OverlaySettingsStore", () => {
       expect(settings.getAutomationMode()).toBe("MANUAL");
       settings.setAutomationMode("AUTO");
       expect(settings.getAutomationMode()).toBe("AUTO");
+    } finally { database.close(); }
+  });
+
+  it("AUTOMATION_PERSIST_MANUAL", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      settings.setAutomationMode("MANUAL");
+      expect(settings.getAutomationMode()).toBe("MANUAL");
+    } finally { database.close(); }
+  });
+
+  it("AUTOMATION_RESTART_RESTORES_MANUAL", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      new OverlaySettingsStore(database).setAutomationMode("MANUAL");
+      expect(new OverlaySettingsStore(database).getAutomationMode()).toBe("MANUAL");
+    } finally { database.close(); }
+  });
+
+  it("AUTOMATION_RESTART_RESTORES_AUTO", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      settings.setAutomationMode("MANUAL");
+      settings.setAutomationMode("AUTO");
+      expect(new OverlaySettingsStore(database).getAutomationMode()).toBe("AUTO");
     } finally { database.close(); }
   });
 });

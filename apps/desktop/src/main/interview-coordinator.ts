@@ -27,6 +27,7 @@ export interface InterviewAudioPort {
   start(options: AudioStartOptions): void | Promise<void>;
   stop(): void | Promise<void>;
   waitForIdle?(timeoutMs?: number): Promise<void>;
+  hasValidProbe?(options: Pick<AudioStartOptions, "inputDeviceId" | "outputDeviceId">): boolean;
   on(event: "pcm-packet" | "event" | "diagnostic", listener: (...args: any[]) => void): this;
 }
 
@@ -43,7 +44,7 @@ export interface InterviewStartOptions extends Omit<RealtimeConnectOptions, "aut
   profileId: string;
   inputDeviceId?: string;
   outputDeviceId?: string;
-  automationMode: "MANUAL" | "AUTO";
+  automationMode?: "MANUAL" | "AUTO";
   answerMode: AnswerMode;
   language?: string;
 }
@@ -68,6 +69,7 @@ export interface InterviewCoordinatorOptions {
   contextProvider?: (question: QuestionCandidate, profileId: string, recentTranscript: string[]) => AnswerContextInput | Promise<AnswerContextInput>;
   asrSettingsProvider?: (profileId: string) => Pick<RealtimeConnectOptions, "providerType" | "providerName" | "model" | "language" | "url">;
   now?: () => number;
+  initialAutomationMode?: "MANUAL" | "AUTO";
 }
 
 export type InterviewCoordinatorEvent =
@@ -86,6 +88,7 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly history: InterviewHistoryPort;
   private readonly now: () => number;
   private readonly contextProvider: (question: QuestionCandidate, profileId: string, recentTranscript: string[]) => AnswerContextInput | Promise<AnswerContextInput>;
+  private defaultAutomationMode: "MANUAL" | "AUTO";
   private activeInterviewId: string | undefined;
   private activeOptions: InterviewStartOptions | undefined;
   private activeProfileId: string | undefined;
@@ -110,14 +113,16 @@ export class InterviewCoordinator extends EventEmitter {
     this.history = options.history ?? new InterviewHistoryStore();
     this.now = options.now ?? (() => Date.now());
     this.contextProvider = options.contextProvider ?? (() => ({}));
+    this.defaultAutomationMode = options.initialAutomationMode ?? "AUTO";
     this.bindPorts();
   }
 
   get interviewId(): string | undefined { return this.activeInterviewId; }
   get running(): boolean { return Boolean(this.activeInterviewId); }
-  get automationMode(): "MANUAL" | "AUTO" { return this.activeOptions?.automationMode ?? "AUTO"; }
+  get automationMode(): "MANUAL" | "AUTO" { return this.activeOptions?.automationMode ?? this.defaultAutomationMode; }
 
   setAutomationMode(mode: "MANUAL" | "AUTO"): void {
+    this.defaultAutomationMode = mode;
     if (this.activeOptions) this.activeOptions = { ...this.activeOptions, automationMode: mode };
     this.emitEvent({ type: "automation_mode", mode });
   }
@@ -136,6 +141,8 @@ export class InterviewCoordinator extends EventEmitter {
     if (this.running) await this.stop("user");
     await this.options.audio.waitForIdle?.();
     if (this.options.audio.isRunning) throw new Error("AUDIO_BUSY: audio sidecar is still running");
+    if (this.options.audio.hasValidProbe && !this.options.audio.hasValidProbe({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId })) throw new Error("AUDIO_PROBE_REQUIRED: a successful mic and system probe is required before formal capture");
+    const automationMode = startOptions.automationMode ?? this.defaultAutomationMode;
     this.transition("CREATING");
     const startedAt = this.now();
     const record = this.history.createInterview({
@@ -143,11 +150,12 @@ export class InterviewCoordinator extends EventEmitter {
       startedAt,
       status: "running",
       language: startOptions.language ?? "zh-CN",
-      automationMode: startOptions.automationMode
+      automationMode
     }, startedAt);
     this.activeInterviewId = record.id;
-    this.activeOptions = { ...startOptions };
+    this.activeOptions = { ...startOptions, automationMode };
     this.activeProfileId = startOptions.profileId;
+    this.detector.reset();
     this.currentQuestion = undefined;
     this.historyQuestionIds.clear();
     this.questionConfirmedAt.clear();
@@ -173,9 +181,9 @@ export class InterviewCoordinator extends EventEmitter {
     if (this.questionFlushTimer) clearTimeout(this.questionFlushTimer);
     this.questionFlushTimer = undefined;
     this.cancelAnswer(reason === "error" ? "timeout" : "user");
-    await Promise.resolve(this.options.audio.stop());
+    try { await Promise.resolve(this.options.audio.stop()); } catch (error) { this.emitDiagnostic(`Audio stop failed: ${String(error)}`); }
     try { await this.options.realtime.finalize?.(1_000); } catch (error) { this.emitDiagnostic(`ASR finalize failed: ${String(error)}`); }
-    this.options.realtime.disconnect();
+    try { this.options.realtime.disconnect(); } catch (error) { this.emitDiagnostic(`ASR disconnect failed: ${String(error)}`); }
     if (!this.options.session.canTransition("ENDING") && this.options.session.canTransition("ERROR")) this.transition("ERROR");
     if (this.options.session.canTransition("ENDING")) this.transition("ENDING");
     this.history.endInterview(interviewId, reason === "error" ? "error" : "ended", this.now());
@@ -200,10 +208,22 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   async answerScreenshot(dataUrl: string): Promise<void> {
-    const question = this.currentQuestion ?? this.detector.lastConfirmed;
-    if (!question) {
-      this.emitDiagnostic("No confirmed question is available for screenshot answer");
+    if (!this.running) {
+      this.emitDiagnostic("Interview is not running");
       return;
+    }
+    let question = this.currentQuestion ?? this.detector.lastConfirmed;
+    if (!question) {
+      question = {
+        id: `screenshot-question-${this.now()}`,
+        text: "请分析截图中的题目、代码或内容，并给出适合面试场景的回答。",
+        confidence: "high",
+        score: 1,
+        source: "extractor",
+        detectedAt: this.now(),
+        status: "confirmed"
+      };
+      this.emitQuestion({ type: "question_confirmed", question });
     }
     await this.answer(question, "NORMAL", { hasScreenshot: true, attachments: [{ mimeType: "image/png", dataUrl }] });
   }

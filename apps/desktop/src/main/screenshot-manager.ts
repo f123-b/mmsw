@@ -24,13 +24,25 @@ export interface ScreenshotManagerOptions {
   onDiagnostic?: (message: string) => void;
   getOverlayWindow?: () => { isDestroyed(): boolean; isVisible(): boolean; hide(): void; showInactive(): void } | undefined;
   shouldUseInternalFallback?: (result: ScreenshotResult) => boolean | Promise<boolean>;
+  captureRendererFallback?: () => Promise<ScreenshotResult>;
 }
 
 export class ScreenshotManager {
   constructor(private readonly options: ScreenshotManagerOptions = {}) {}
 
   async capturePrimaryDisplay(): Promise<ScreenshotResult> {
-    const result = await this.capturePrimaryDisplayDirect();
+    let result: ScreenshotResult;
+    try {
+      result = await Promise.race([
+        this.capturePrimaryDisplayDirect(),
+        new Promise<ScreenshotResult>((_resolve, reject) => setTimeout(() => reject(new Error("Display capture timed out")), 2_000))
+      ]);
+    } catch (error) {
+      const fallback = this.options.captureRendererFallback;
+      if (!fallback) throw error;
+      this.options.onDiagnostic?.(`DISPLAY_CAPTURE_UNAVAILABLE_USING_RENDERER_TEST_SOURCE: ${String(error)}`);
+      result = await fallback();
+    }
     if (await this.options.shouldUseInternalFallback?.(result)) {
       await this.cleanup(result);
       return await this.captureWithInternalFallback();

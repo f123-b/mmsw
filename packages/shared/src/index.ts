@@ -256,6 +256,13 @@ export class QuestionDetector {
   get state(): QuestionState { return this.stateValue; }
   get lastConfirmed(): QuestionCandidate | undefined { return this.confirmed.at(-1); }
 
+  reset(): void {
+    this.stateValue = "IDLE";
+    this.answeringQuestionId = undefined;
+    this.confirmed.length = 0;
+    this.resetBuffer();
+  }
+
   observe(input: { text: string; final: boolean; startMs: number; endMs: number }, observedAtMs = Date.now()): QuestionEvent[] {
     const text = input.text.trim();
     if (!text) return [];

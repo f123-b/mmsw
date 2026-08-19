@@ -11,14 +11,15 @@ const emit = (value) => process.stderr.write(`${JSON.stringify(value)}\n`);
 if (has("--probe-only")) {
   emit({ type: "audio_state", state: "STARTING", timestamp: timestamp() });
   setTimeout(() => {
-    if (process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR === "exit-without-result") {
+    const behavior = process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR;
+    if (behavior === "exit-without-result") {
       process.exit(0);
       return;
     }
-    if (process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR === "timeout") return;
-    emit({ type: "probe_result", mic: { ok: true, sampleRate: 16_000, channels: 1, peak: 0.4, callbackCount: 4, sampleCount: 640 }, system: { ok: true, sampleRate: 16_000, channels: 2, peak: 0.3, callbackCount: 4, sampleCount: 1_280 }, durationMs: 40, timestamp: timestamp() });
+    if (behavior === "timeout") return;
+    emit({ type: "probe_result", mic: { ok: behavior !== "mic-fail" && behavior !== "both-fail", sampleRate: 16_000, channels: 1, peak: behavior === "mic-fail" || behavior === "both-fail" ? 0 : 0.4, callbackCount: behavior === "mic-fail" || behavior === "both-fail" ? 0 : 4, sampleCount: behavior === "mic-fail" || behavior === "both-fail" ? 0 : 640 }, system: { ok: behavior !== "system-fail" && behavior !== "both-fail", sampleRate: 16_000, channels: 2, peak: behavior === "system-fail" || behavior === "both-fail" ? 0 : 0.3, callbackCount: behavior === "system-fail" || behavior === "both-fail" ? 0 : 4, sampleCount: behavior === "system-fail" || behavior === "both-fail" ? 0 : 1_280 }, durationMs: 40, timestamp: timestamp() });
     emit({ type: "audio_state", state: "READY", timestamp: timestamp() });
-    process.exit(0);
+    process.exit(behavior === "nonzero-after-result" ? 7 : 0);
   }, 40);
 } else {
   emit({ type: "audio_state", state: "READY", timestamp: timestamp() });

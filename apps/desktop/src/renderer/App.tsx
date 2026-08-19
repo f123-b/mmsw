@@ -65,6 +65,7 @@ interface AudioStore {
   setSessionState: (state: SessionState) => void;
   setAutomationMode: (mode: "MANUAL" | "AUTO") => void;
   setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => void;
+  clearProbe: () => void;
   setScreenshot: (screenshot: ScreenshotResult) => void;
   setNotice: (notice?: string) => void;
   setRealtimeState: (state: string) => void;
@@ -121,6 +122,7 @@ const useAudioStore = create<AudioStore>((set) => ({
   setSessionState: (sessionState) => set({ sessionState }),
   setAutomationMode: (automationMode) => set({ automationMode }),
   setAnswerMode: (answerMode) => set({ answerMode }),
+  clearProbe: () => set({ probeResult: undefined, probeError: undefined, state: "STOPPED" }),
   setScreenshot: (screenshot) => set({ screenshot }),
   setNotice: (notice) => set({ notice }),
   setRealtimeState: (realtimeState) => set({ realtimeState }),
@@ -295,6 +297,7 @@ export function App(): JSX.Element {
   const [devices, setDevices] = useState<AudioDevices>(DEFAULT_DEVICES);
   const [inputDeviceId, setInputDeviceId] = useState("");
   const [outputDeviceId, setOutputDeviceId] = useState("");
+  const [probeDeviceKey, setProbeDeviceKey] = useState("");
   const [realtimeUrl, setRealtimeUrl] = useState(() => storedDevice("interview-copilot.realtime-url") ?? "");
   const [realtimeTicket, setRealtimeTicket] = useState("");
   const [dialog, setDialog] = useState<DialogState | null>(null);
@@ -470,7 +473,11 @@ export function App(): JSX.Element {
       if (!inputDeviceId || !outputDeviceId) throw new Error("AUDIO_DEVICE_FAILED: 未选择可用的音频设备");
       persistDevice("interview-copilot.input-device", inputDeviceId);
       persistDevice("interview-copilot.output-device", outputDeviceId);
-      await window.interviewCopilot.audio.probe({ inputDeviceId, outputDeviceId });
+      const probe = await window.interviewCopilot.audio.probe({ inputDeviceId, outputDeviceId });
+      store.applyEvent(probe);
+      setProbeDeviceKey(`${inputDeviceId}::${outputDeviceId}`);
+      if (!probe.mic.ok) throw new Error("AUDIO_PROBE_MIC_FAILED: 未检测到有效输入");
+      if (!probe.system.ok) throw new Error("AUDIO_PROBE_SYSTEM_FAILED: 未检测到系统音频");
       await window.interviewCopilot.profiles.selectActive(profileId);
       await window.interviewCopilot.interview.start({ profileId, url: asrProviderType === "custom-gateway" ? asrUrl : undefined, gatewayToken: asrProviderType === "custom-gateway" ? realtimeTicket.trim() || undefined : undefined, language: selectedProfile?.language, inputDeviceId, outputDeviceId, automationMode: store.automationMode, answerMode, providerType: asrProviderType });
       setSetupOpen(false);
@@ -481,7 +488,11 @@ export function App(): JSX.Element {
   };
   const stopAudio = async () => { await window.interviewCopilot.audio.stop(); };
   const probeAudio = async () => {
-    try { await window.interviewCopilot.audio.probe({ inputDeviceId, outputDeviceId }); }
+    try {
+      const result = await window.interviewCopilot.audio.probe({ inputDeviceId, outputDeviceId });
+      store.applyEvent(result);
+      setProbeDeviceKey(`${inputDeviceId}::${outputDeviceId}`);
+    }
     catch (error) { store.setNotice(`Audio Probe 失败：${String(error)}`); }
   };
   const openOverlay = async () => { await window.interviewCopilot.overlay.show(); };
@@ -514,6 +525,7 @@ export function App(): JSX.Element {
     await window.interviewCopilot.realtime.connect({ url: realtimeUrl.trim(), gatewayToken: realtimeTicket.trim() || undefined });
   };
   const disconnectRealtime = async () => { await window.interviewCopilot.realtime.disconnect(); };
+  const currentProbeReady = Boolean(store.probeResult?.mic.ok && store.probeResult.system.ok && probeDeviceKey === `${inputDeviceId}::${outputDeviceId}`);
   const saveProviderSettings = async () => {
     try {
       const llm = await window.interviewCopilot.settings.update("llm", { providerName: llmProviderName.trim() || "OpenAI-compatible", baseUrl: llmBaseUrl.trim(), model: llmModel.trim(), fastModel: fastModel.trim() || undefined, normalModel: normalModel.trim() || undefined, deepModel: deepModel.trim() || undefined, visionModel: visionModel.trim() || undefined, apiKey: llmApiKey || undefined, timeoutMs: 30_000, maxRetries: 2 });
@@ -642,7 +654,7 @@ export function App(): JSX.Element {
         {store.notice && <button className="notice-toast" onClick={() => store.setNotice(undefined)}>{store.notice} <span>×</span></button>}
       </section>
       {dialog && <AppDialog dialog={dialog} onConfirm={(value) => closeDialog(dialog.kind === "confirm" ? true : value)} onCancel={() => closeDialog(undefined)} />}
-      {setupOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSetupOpen(false); }}><section className="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title"><header><div><span className="page-kicker">INTERVIEW SETUP</span><h2 id="setup-title">开始面试</h2></div><button onClick={() => setSetupOpen(false)} aria-label="关闭">×</button></header><label className="clean-field"><span>面试档案</span><select value={profileId} onChange={(event) => setProfileId(event.target.value)}>{profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name}</option>)}</select></label><label className="clean-field"><span>回答模式</span><select value={answerMode} onChange={(event) => setAnswerMode(event.target.value as typeof answerMode)}><option value="FAST">FAST · 快速</option><option value="NORMAL">NORMAL · 平衡</option><option value="DEEP">DEEP · 深度</option></select></label><label className="clean-field"><span>自动回答</span><select value={store.automationMode} onChange={(event) => void window.interviewCopilot.interview.setAutomationMode(event.target.value as "AUTO" | "MANUAL")}><option value="AUTO">AUTO · 听到问题后自动回答</option><option value="MANUAL">MANUAL · 手动触发回答</option></select></label><label className="clean-field"><span>麦克风输入</span><select value={inputDeviceId} onChange={(event) => { setInputDeviceId(event.target.value); persistDevice("interview-copilot.input-device", event.target.value); }}>{devices.inputs.length === 0 && <option value="">没有检测到输入设备</option>}{devices.inputs.map((device) => <option value={device.id} key={device.id}>{device.name}</option>)}</select></label><label className="clean-field"><span>系统音频 / Loopback</span><select value={outputDeviceId} onChange={(event) => { setOutputDeviceId(event.target.value); persistDevice("interview-copilot.output-device", event.target.value); }}>{devices.outputs.length === 0 && <option value="">没有检测到系统音频设备</option>}{devices.outputs.map((device) => <option value={device.id} key={device.id}>{device.name}</option>)}</select></label><div className="probe-summary"><span>MIC {store.probeResult ? <b className={store.probeResult.mic.ok ? "probe-ok" : "probe-fail"}>{store.probeResult.mic.ok ? "✓ Ready" : "✕ No signal"}</b> : <small>{store.probeError ? `✕ ${store.probeError}` : "未测试"}</small>}</span><span>SYSTEM {store.probeResult ? <b className={store.probeResult.system.ok ? "probe-ok" : "probe-fail"}>{store.probeResult.system.ok ? "✓ Ready" : "✕ No system audio"}</b> : <small>{store.probeError ? `✕ ${store.probeError}` : "未测试"}</small>}</span><button className="outline-pill" onClick={() => void probeAudio()}>测试音频</button></div><div className="setup-preflight"><span>LLM · {providerSettings?.llm.hasApiKey ? "✓ 已配置" : "✕ 未配置"}</span><span>ASR · {providerSettings?.asr.hasApiKey || asrProviderType === "custom-gateway" ? "✓ 已配置" : "✕ 未配置"}</span><span>Profile · {selectedProfile ? "✓" : "✕"}</span></div><footer><button className="outline-pill" onClick={() => setSetupOpen(false)}>取消</button><button className="dark-pill" onClick={() => void startInterview()}>开始面试</button></footer></section></div>}
+      {setupOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSetupOpen(false); }}><section className="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title"><header><div><span className="page-kicker">INTERVIEW SETUP</span><h2 id="setup-title">开始面试</h2></div><button onClick={() => setSetupOpen(false)} aria-label="关闭">×</button></header><label className="clean-field"><span>面试档案</span><select value={profileId} onChange={(event) => setProfileId(event.target.value)}>{profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name}</option>)}</select></label><label className="clean-field"><span>回答模式</span><select value={answerMode} onChange={(event) => setAnswerMode(event.target.value as typeof answerMode)}><option value="FAST">FAST · 快速</option><option value="NORMAL">NORMAL · 平衡</option><option value="DEEP">DEEP · 深度</option></select></label><label className="clean-field"><span>自动回答</span><select value={store.automationMode} onChange={(event) => void window.interviewCopilot.interview.setAutomationMode(event.target.value as "AUTO" | "MANUAL")}><option value="AUTO">AUTO · 听到问题后自动回答</option><option value="MANUAL">MANUAL · 手动触发回答</option></select></label><label className="clean-field"><span>麦克风输入</span><select value={inputDeviceId} onChange={(event) => { setInputDeviceId(event.target.value); setProbeDeviceKey(""); store.clearProbe(); persistDevice("interview-copilot.input-device", event.target.value); }}>{devices.inputs.length === 0 && <option value="">没有检测到输入设备</option>}{devices.inputs.map((device) => <option value={device.id} key={device.id}>{device.name}</option>)}</select></label><label className="clean-field"><span>系统音频 / Loopback</span><select value={outputDeviceId} onChange={(event) => { setOutputDeviceId(event.target.value); setProbeDeviceKey(""); store.clearProbe(); persistDevice("interview-copilot.output-device", event.target.value); }}>{devices.outputs.length === 0 && <option value="">没有检测到系统音频设备</option>}{devices.outputs.map((device) => <option value={device.id} key={device.id}>{device.name}</option>)}</select></label><div className="probe-summary"><span>MIC {store.probeResult ? <b className={store.probeResult.mic.ok ? "probe-ok" : "probe-fail"}>{store.probeResult.mic.ok ? "✓ Ready" : "✕ 未检测到有效输入"}</b> : <small>{store.probeError ? `✕ ${store.probeError}` : "未测试"}</small>}</span><span>SYSTEM {store.probeResult ? <b className={store.probeResult.system.ok ? "probe-ok" : "probe-fail"}>{store.probeResult.system.ok ? "✓ Ready" : "✕ 未检测到系统音频"}</b> : <small>{store.probeError ? `✕ ${store.probeError}` : "未测试"}</small>}</span><button className="outline-pill" onClick={() => void probeAudio()}>测试音频</button></div><div className="setup-preflight"><span>LLM · {providerSettings?.llm.hasApiKey ? "✓ 已配置" : "✕ 未配置"}</span><span>ASR · {providerSettings?.asr.hasApiKey || asrProviderType === "custom-gateway" ? "✓ 已配置" : "✕ 未配置"}</span><span>Profile · {selectedProfile ? "✓" : "✕"}</span></div><footer><button className="outline-pill" onClick={() => setSetupOpen(false)}>取消</button><button className="dark-pill" disabled={!currentProbeReady} onClick={() => void startInterview()}>开始面试</button></footer></section></div>}
     </main>
   );
 

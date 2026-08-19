@@ -17,6 +17,7 @@ import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnect
 import { parseDocument } from "./document-parsers";
 import { SafeLogger } from "./logger";
 import { buildConversationHistory } from "./chat-context";
+import { ShutdownController } from "./shutdown-controller";
 
 let mainWindow: BrowserWindow | undefined;
 let overlayManager: OverlayManager | undefined;
@@ -24,7 +25,18 @@ const audioManager = new AudioManager();
 const screenshotManager = new ScreenshotManager({
   onDiagnostic: (message) => broadcast("screenshot:diagnostic", message),
   getOverlayWindow: () => overlayManager?.currentWindow,
-  shouldUseInternalFallback: (result) => captureTestRequested && captureContainsTestMarker(result.dataUrl)
+  shouldUseInternalFallback: (result) => captureTestRequested && captureContainsTestMarker(result.dataUrl),
+  captureRendererFallback: async () => {
+    if (!captureTestRequested || !mainWindow || mainWindow.isDestroyed()) throw new Error("Renderer screenshot fallback is only available in capture-test mode");
+    const image = await mainWindow.capturePage();
+    const png = image.toPNG();
+    const size = image.getSize();
+    const directory = join(app.getPath("temp"), "interview-copilot", "screenshots");
+    await mkdir(directory, { recursive: true });
+    const path = join(directory, `${Date.now()}-renderer-test.png`);
+    await writeFile(path, png);
+    return { path, mimeType: "image/png" as const, width: size.width, height: size.height, size: png.byteLength, dataUrl: `data:image/png;base64,${png.toString("base64")}` };
+  }
 });
 const session = new SessionStateMachine();
 const realtimeSession = new RealtimeSession(undefined, () => providerConfigStore?.get("asr"));
@@ -59,6 +71,7 @@ let conversationRepository: SqliteConversationRepository | undefined;
 let preparationRuntime: PreparationAgentRuntime | undefined;
 let preparationAbortController: AbortController | undefined;
 const chatAbortControllers = new Map<string, AbortController>();
+const chatStreamPromises = new Set<Promise<void>>();
 const providerPreflightCache = new ProviderPreflightCache();
 let appLogger: SafeLogger | undefined;
 let audioLogger: SafeLogger | undefined;
@@ -73,6 +86,20 @@ const productionSmokeRequested = process.argv.includes("--production-smoke") || 
 let mainRendererLoad: Promise<void> | undefined;
 const rendererAppReadyWindows = new Set<number>();
 const rendererAppReadyWaiters = new Map<number, Set<() => void>>();
+const shutdownController = new ShutdownController([
+  { name: "unregister-shortcuts", run: () => globalShortcut.unregisterAll() },
+  { name: "abort-preparation", run: () => preparationAbortController?.abort() },
+  { name: "abort-chat", run: () => chatAbortControllers.forEach((controller) => controller.abort()) },
+  { name: "wait-chat", run: async () => { await Promise.allSettled([...chatStreamPromises]); } },
+  { name: "stop-interview", run: async () => { await interviewCoordinator?.stop("user"); } },
+  { name: "stop-audio", run: async () => { await audioManager.stop(); } },
+  { name: "finalize-realtime", run: async () => { if (!interviewCoordinator?.running) await realtimeSession.finalize?.(1_000); } },
+  { name: "disconnect-realtime", run: () => realtimeSession.disconnect() },
+  { name: "flush-database", run: () => database?.flushNow() },
+  { name: "close-database", run: () => database?.close() },
+  { name: "destroy-overlay", run: () => overlayManager?.destroy() },
+  { name: "destroy-windows", run: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy(); } }
+]);
 
 type RendererReadiness = {
   bridgeAvailable: boolean;
@@ -722,7 +749,7 @@ function registerIpc(): void {
     } catch (error) {
       const raw = String(error);
       const code = raw.split(":", 1)[0] || "AUDIO_DEVICE_FAILED";
-      const allowed = new Set(["AUDIO_BUSY", "AUDIO_DEVICE_FAILED", "ASR_AUTH_FAILED", "ASR_CONNECT_FAILED", "LLM_NOT_CONFIGURED", "LLM_CONNECT_FAILED", "PROFILE_NOT_FOUND", "SIDECAR_NOT_FOUND", "DATABASE_ERROR"]);
+      const allowed = new Set(["AUDIO_BUSY", "AUDIO_DEVICE_FAILED", "AUDIO_PROBE_REQUIRED", "AUDIO_PROBE_FAILED", "AUDIO_PROBE_MIC_FAILED", "AUDIO_PROBE_SYSTEM_FAILED", "AUDIO_PROBE_PROCESS_FAILED", "ASR_AUTH_FAILED", "ASR_CONNECT_FAILED", "LLM_NOT_CONFIGURED", "LLM_CONNECT_FAILED", "PROFILE_NOT_FOUND", "SIDECAR_NOT_FOUND", "DATABASE_ERROR"]);
       const mappedCode = allowed.has(code) ? code : raw.includes("ASR") ? "ASR_CONNECT_FAILED" : raw.includes("LLM") ? "LLM_CONNECT_FAILED" : raw.includes("database") ? "DATABASE_ERROR" : "AUDIO_DEVICE_FAILED";
       const message = raw.includes(": ") ? raw.slice(raw.indexOf(": ") + 2) : raw;
       broadcast("runtime:error", { code: mappedCode, message, recoverable: mappedCode !== "PROFILE_NOT_FOUND" && mappedCode !== "SIDECAR_NOT_FOUND" });
@@ -745,8 +772,14 @@ function registerIpc(): void {
   ipcMain.handle("chat:send-message", async (_event, input: { conversationId: string; content: string }) => {
     const content = input.content.trim();
     if (!content) throw new Error("聊天内容不能为空");
-    await streamChat(input.conversationId, content);
-    return true;
+    const stream = streamChat(input.conversationId, content);
+    chatStreamPromises.add(stream);
+    try {
+      await stream;
+      return true;
+    } finally {
+      chatStreamPromises.delete(stream);
+    }
   });
   ipcMain.handle("chat:cancel", (_event, conversationId: string) => { chatAbortControllers.get(conversationId)?.abort(); return true; });
   ipcMain.handle("chat:delete-conversation", (_event, conversationId: string) => { conversationRepository?.delete(conversationId); return true; });
@@ -939,19 +972,20 @@ function registerShortcuts(): void {
 
 app.whenReady().then(async () => {
   if (!isDevelopment()) Menu.setApplicationMenu(null);
-  const logsDirectory = join(app.getPath("appData"), "InterviewCopilot", "logs");
+  const appDataPath = process.env.INTERVIEW_COPILOT_TEST_DATA_PATH ?? app.getPath("appData");
+  const logsDirectory = join(appDataPath, "InterviewCopilot", "logs");
   appLogger = new SafeLogger(logsDirectory, "app");
   audioLogger = new SafeLogger(logsDirectory, "audio");
   realtimeLogger = new SafeLogger(logsDirectory, "realtime");
   appLogger.info("application starting");
   try {
-    database = await openAppDatabase(app.getPath("appData"));
+    database = await openAppDatabase(appDataPath);
     profileRepository = new SqliteProfileRepository(database);
     knowledgeRepository = new SqliteKnowledgeRepository(database);
     projectRepository = new SqliteProjectRepository(database);
     conversationRepository = new SqliteConversationRepository(database);
     try {
-      providerConfigStore = new ProviderConfigStore(database, await createSecretStore(app.getPath("appData")), { llm: environmentLlmSettings });
+      providerConfigStore = new ProviderConfigStore(database, await createSecretStore(appDataPath), { llm: environmentLlmSettings });
     } catch {
       providerConfigStore = new ProviderConfigStore(database, new MemorySecretStore(), { llm: environmentLlmSettings });
     }
@@ -973,6 +1007,7 @@ app.whenReady().then(async () => {
     session,
     answerAgent,
     history: historyRepository,
+    initialAutomationMode: overlaySettingsStore?.getAutomationMode() ?? "AUTO",
     asrSettingsProvider: (profileId) => {
       const settings = providerConfigStore?.get("asr");
       const profileLanguage = profileRepository?.get(profileId)?.language;
@@ -1057,13 +1092,11 @@ app.whenReady().then(async () => {
   } else if (productionSmokeRequested) await runProductionSmoke(createdMainWindow);
 });
 
-app.on("before-quit", () => {
-  globalShortcut.unregisterAll();
-  preparationAbortController?.abort();
-  chatAbortControllers.forEach((controller) => controller.abort());
-  void interviewCoordinator?.stop("user");
-  database?.close();
-  overlayManager?.destroy();
+app.on("before-quit", (event) => {
+  if (shutdownController.isComplete) return;
+  event.preventDefault();
+  if (shutdownController.inProgress) return;
+  void shutdownController.run().finally(() => app.exit(0));
 });
 
 app.on("window-all-closed", () => {

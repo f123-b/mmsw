@@ -75,6 +75,8 @@ export class AudioManager extends EventEmitter {
     result?: ProbeResult;
     timer: NodeJS.Timeout;
   } | undefined;
+  private lastProbeResult: ProbeResult | undefined;
+  private lastProbeDeviceKey: string | undefined;
 
   get configuredPath(): string {
     return sidecarPath();
@@ -86,6 +88,10 @@ export class AudioManager extends EventEmitter {
 
   get runningKind(): AudioProcessKind | undefined { return this.processKind; }
   get runningOptions(): AudioStartOptions { return { ...this.currentOptions }; }
+
+  hasValidProbe(options: Pick<AudioStartOptions, "inputDeviceId" | "outputDeviceId"> = {}): boolean {
+    return Boolean(this.lastProbeResult?.mic.ok && this.lastProbeResult.system.ok && this.lastProbeDeviceKey === this.probeDeviceKey(options));
+  }
 
   async listDevices(): Promise<AudioDevices> {
     const executable = this.requireSidecar();
@@ -101,6 +107,7 @@ export class AudioManager extends EventEmitter {
   async start(options: AudioStartOptions = {}): Promise<void> {
     if (this.isRunning) throw new Error(`AUDIO_BUSY: ${this.processKind ?? "audio"} sidecar is still running`);
     if (this.pendingProbe) throw new Error("AUDIO_BUSY: audio probe is still settling");
+    if (!options.meterOnly && !options.probeOnly && !this.hasValidProbe(options)) throw new Error("AUDIO_PROBE_REQUIRED: a successful mic and system probe is required before formal capture");
     this.clearRecoveryTimer();
     this.clearStableReadyTimer();
     this.manualStop = false;
@@ -242,8 +249,17 @@ export class AudioManager extends EventEmitter {
         const pending = this.pendingProbe;
         this.pendingProbe = undefined;
         clearTimeout(pending.timer);
-        if (pending.result) pending.resolve(pending.result);
-        else pending.reject(new Error(`AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT: probe exited with code ${code ?? "unknown"}`));
+        const result = pending.result;
+        if (!result) pending.reject(new Error(`AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT: probe exited with code ${code ?? "unknown"}`));
+        else if (code !== 0) pending.reject(new Error(`AUDIO_PROBE_PROCESS_FAILED: probe exited with code ${code ?? "unknown"} after returning a result`));
+        else if (!result.mic.ok && !result.system.ok) pending.reject(new Error("AUDIO_PROBE_FAILED: microphone and system audio probe failed"));
+        else if (!result.mic.ok) pending.reject(new Error("AUDIO_PROBE_MIC_FAILED: microphone probe failed"));
+        else if (!result.system.ok) pending.reject(new Error("AUDIO_PROBE_SYSTEM_FAILED: system audio probe failed"));
+        else {
+          this.lastProbeResult = result;
+          this.lastProbeDeviceKey = this.probeDeviceKey(options);
+          pending.resolve(result);
+        }
       }
       if (!wasExpected && options.autoRecover !== false) {
         this.emitEvent({ type: "audio_state", state: "DEGRADED", timestamp: Date.now() });
@@ -325,7 +341,11 @@ export class AudioManager extends EventEmitter {
   }
 
   private emitEvent(event: AudioSidecarEvent): void {
-    if (event.type === "probe_result" && this.pendingProbe) this.pendingProbe.result = event;
+    if (event.type === "probe_result" && this.pendingProbe) {
+      this.pendingProbe.result = event;
+      this.lastProbeResult = undefined;
+      this.lastProbeDeviceKey = undefined;
+    }
     if (event.type === "audio_state" && event.state === "READY") {
       this.clearStableReadyTimer();
       const readyProcess = this.process;
@@ -359,5 +379,9 @@ export class AudioManager extends EventEmitter {
         else reject(new Error(errorOutput.trim() || `Audio Sidecar exited with code ${code}`));
       });
     });
+  }
+
+  private probeDeviceKey(options: Pick<AudioStartOptions, "inputDeviceId" | "outputDeviceId">): string {
+    return `${options.inputDeviceId ?? ""}::${options.outputDeviceId ?? ""}`;
   }
 }

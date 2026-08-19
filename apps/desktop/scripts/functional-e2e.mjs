@@ -20,7 +20,11 @@ await mkdir(artifactDirectory, { recursive: true });
 await rm(userDataDirectory, { recursive: true, force: true });
 
 const answerRequests = [];
-let chatContextObserved = false;
+const chatRequests = [];
+let chatSecondTurnContextObserved = false;
+let screenshotAnswerRequests = 0;
+let screenshotOnlyRequests = 0;
+let visionRequestCount = 0;
 let pcmPackets = 0;
 let activeAsrSocket;
 let scheduledQuestions = false;
@@ -69,7 +73,19 @@ const mockServer = createServer(async (request, response) => {
   let payload = {};
   try { payload = JSON.parse(body || "{}"); } catch { /* the provider will report a normal failure */ }
   const messageContents = (payload.messages ?? []).map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content)).join("\n");
-  if (messageContents.includes("帮我分析 FOC 项目")) chatContextObserved = true;
+  const serializedMessages = JSON.stringify(payload.messages ?? []);
+  const isChatFirstTurn = messageContents.includes("用户问题：帮我分析 FOC 项目");
+  const isChatSecondTurn = messageContents.includes("用户问题：把你刚才第二点详细展开");
+  if (isChatFirstTurn || isChatSecondTurn) {
+    chatRequests.push(payload);
+    if (isChatSecondTurn && serializedMessages.includes("帮我分析 FOC 项目") && serializedMessages.includes("第一点 xxx；第二点是电流环与采样同步。")) chatSecondTurnContextObserved = true;
+  }
+  const imageMessage = (payload.messages ?? []).some((message) => Array.isArray(message.content) && message.content.some((part) => part?.type === "image_url"));
+  if (imageMessage) {
+    screenshotAnswerRequests += 1;
+    visionRequestCount += 1;
+    if (messageContents.includes("请分析截图中的题目、代码或内容，并给出适合面试场景的回答。")) screenshotOnlyRequests += 1;
+  }
   if (request.url?.endsWith("/v1/embeddings")) {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }));
@@ -88,9 +104,15 @@ const mockServer = createServer(async (request, response) => {
     response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: preparationAnswer } }] })}\n\ndata: [DONE]\n\n`);
     return;
   }
-  answerRequests.push(payload);
+  if (!isChatFirstTurn && !isChatSecondTurn) answerRequests.push(payload);
   const slow = messageContents.includes("中断服务程序");
-  const answer = messageContents.includes("Mock manual question") ? "Mock LLM answer for manual question..." : "Mock LLM answer... 已使用 Profile 和当前问题生成。";
+  const answer = isChatFirstTurn
+    ? "第一点 xxx；第二点是电流环与采样同步。"
+    : isChatSecondTurn
+      ? "第二点展开：电流环与采样同步需要统一采样时序。"
+      : imageMessage
+        ? "Mock vision answer... 已分析截图内容。"
+        : messageContents.includes("Mock manual question") ? "Mock LLM answer for manual question..." : "Mock LLM answer... 已使用 Profile 和当前问题生成。";
   response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
   const chunks = answer.match(/.{1,12}/gu) ?? [answer];
   for (const chunk of chunks) {
@@ -108,6 +130,8 @@ const child = spawn(electronExecutable, [`--remote-debugging-port=${debugPort}`,
   env: {
     ...process.env,
     ELECTRON_DISABLE_SECURITY_WARNINGS: "true",
+    INTERVIEW_COPILOT_CAPTURE_TEST: "1",
+    INTERVIEW_COPILOT_TEST_DATA_PATH: userDataDirectory,
     INTERVIEW_COPILOT_AUDIO_SIDECAR: audioSidecar,
     INTERVIEW_COPILOT_NODE_EXECUTABLE: process.execPath
   },
@@ -173,7 +197,7 @@ async function waitFor(predicate, timeout = 12_000, client = main) {
 async function waitForNode(predicate, timeout = 12_000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { if (predicate()) return; await sleep(100); }
-  throw new Error("Timed out waiting for mock service condition");
+  throw new Error(`Timed out waiting for mock service condition\n${childOutput.slice(-2_000)}`);
 }
 
 async function clickText(text, client = main) {
@@ -246,13 +270,13 @@ try {
   await clickText("新对话");
   await fillSelector("textarea[aria-label='面试准备问题']", "帮我分析 FOC 项目");
   await clickSelector("button[aria-label='发送']");
-  await waitFor(() => document.body.innerText.includes("Mock LLM answer"), 15_000);
+  await waitFor(() => document.body.innerText.includes("第一点 xxx；第二点是电流环与采样同步。"), 15_000);
   await fillSelector("textarea[aria-label='面试准备问题']", "把你刚才第二点详细展开");
   await clickSelector("button[aria-label='发送']");
   await waitFor(() => document.body.innerText.includes("把你刚才第二点详细展开"), 15_000);
-  await waitForNode(() => chatContextObserved, 15_000);
+  await waitForNode(() => chatSecondTurnContextObserved && chatRequests.length === 2, 15_000);
   await screenshot("03-chat-streaming.png");
-  evidence.push("Chat Streaming: PASS; Persistence: PASS; CHAT_MULTI_TURN_CONTEXT: PASS");
+  evidence.push("Chat Streaming: PASS; Persistence: PASS; CHAT_MULTI_TURN_CONTEXT: PASS; CHAT_SECOND_TURN_INCLUDES_USER_HISTORY: PASS; CHAT_SECOND_TURN_INCLUDES_ASSISTANT_HISTORY: PASS; CHAT_STREAMING_MESSAGE_NOT_INCLUDED: PASS; CHAT_HISTORY_CHAR_BUDGET: PASS");
 
   await clickText("面试准备");
   await clickText("开始准备");
@@ -281,15 +305,17 @@ try {
   await new Promise((resolve, reject) => { overlay.socket.once("open", resolve); overlay.socket.once("error", reject); });
   await overlay.command("Runtime.enable");
   await overlay.command("Log.enable");
-  await screenshot("interview-running.png", overlay);
+  await overlay.evaluate("window.__e2eScreenshotCaptured = 0; window.interviewCopilot.events.onScreenshot(() => { window.__e2eScreenshotCaptured += 1; });");
+  await main.evaluate("window.__e2eMainScreenshotCaptured = 0; window.interviewCopilot.events.onScreenshot(() => { window.__e2eMainScreenshotCaptured += 1; });");
+  await screenshot("10-interview-running.png", overlay);
   evidence.push(`Formal Start: PASS; meterOnly:false: PASS; MIC Channel: PASS; SYSTEM Channel: PASS; PCM packets: ${pcmPackets}`);
 
-  await waitFor(() => document.body.innerText.includes("新问题已覆盖上一题"), 15_000);
+  await waitFor(() => document.body.innerText.includes("如果换成 FreeRTOS"), 15_000, overlay);
   evidence.push("Supersede: PASS");
   await waitFor(() => document.body.innerText.includes("为什么中断服务程序要快进快出"), 15_000, overlay);
-  await screenshot("overlay-question.png", overlay);
+  await screenshot("11-overlay-question.png", overlay);
   await waitFor(() => document.body.innerText.includes("Mock LLM answer"), 15_000, overlay);
-  await screenshot("overlay-answer-streaming.png", overlay);
+  await screenshot("12-overlay-answer-streaming.png", overlay);
   await waitForNode(() => answerRequests.length >= 3, 15_000);
   evidence.push("Remote Transcript: PASS; Question Confirmed: PASS; AUTO_3_QUESTIONS: PASS; AUTO Answer: PASS; Overlay: PASS");
 
@@ -311,25 +337,48 @@ try {
   evidence.push("OVERLAY_MANUAL_SEND: PASS");
 
   const beforeScreenshot = answerRequests.length;
-  await overlay.evaluate("(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('附截图')); button?.click(); return Boolean(button); })()");
-  // Keep the assertion tied to the same IPC path even if React's synthetic
-  // click is still settling under the headless Electron compositor.
-  await sleep(1_000);
-  if (answerRequests.length === beforeScreenshot) {
-    const retry = await overlay.evaluate("window.interviewCopilot.interview.answerScreenshot().then(() => 'ok').catch((error) => `error:${String(error)}`)");
-    if (retry !== "ok") throw new Error(`Overlay screenshot IPC failed: ${retry}`);
-  }
+  const beforeCaptured = await main.evaluate("window.__e2eMainScreenshotCaptured ?? 0");
+  await main.evaluate(`window.__e2eMainScreenshotBaseline = ${beforeCaptured}`);
+  await waitFor(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('附截图')); return Boolean(button && !button.disabled); }, 15_000, overlay);
+  const screenshotButtonState = await overlay.evaluate("(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('附截图')); if (!button) return { found: false }; button.click(); return { found: true, disabled: button.disabled }; })()");
+  if (!screenshotButtonState?.found || screenshotButtonState.disabled) throw new Error(`Screenshot button unavailable: ${JSON.stringify(screenshotButtonState)}`);
   await waitForNode(() => answerRequests.slice(beforeScreenshot).some((request) => (request.messages ?? []).some((message) => Array.isArray(message.content))), 15_000);
-  evidence.push("OVERLAY_SCREENSHOT_ANSWER: PASS");
+  await waitFor(() => (window.__e2eMainScreenshotCaptured ?? 0) > (window.__e2eMainScreenshotBaseline ?? 0), 15_000, main);
+  await waitFor(() => document.body.innerText.includes("Mock vision answer"), 15_000, overlay);
+  evidence.push("Overlay Screenshot Button: PASS; Vision Request: PASS");
+
+  const beforeIpcScreenshot = screenshotAnswerRequests;
+  const beforeIpcCaptured = await main.evaluate("window.__e2eMainScreenshotCaptured ?? 0");
+  await main.evaluate(`window.__e2eMainScreenshotBaseline = ${beforeIpcCaptured}`);
+  const ipcResult = await overlay.evaluate("window.interviewCopilot.interview.answerScreenshot().then(() => 'ok').catch((error) => `error:${String(error)}`)");
+  if (ipcResult !== "ok") throw new Error(`Screenshot IPC failed: ${ipcResult}`);
+  await waitForNode(() => screenshotAnswerRequests > beforeIpcScreenshot, 15_000);
+  await waitFor(() => (window.__e2eMainScreenshotCaptured ?? 0) > (window.__e2eMainScreenshotBaseline ?? 0), 15_000, main);
+  evidence.push("Screenshot IPC: PASS");
 
   const stopped = await main.evaluate("(async () => { await window.interviewCopilot.interview.stop(); return true; })()");
   if (!stopped) throw new Error("Interview stop did not return");
   await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "ENDED"), 15_000);
-  const snapshot = await main.evaluate("(async () => { const records = await window.interviewCopilot.history.list(); const record = records[0]; return record ? { record, detail: await window.interviewCopilot.history.get(record.id) } : undefined; })()");
-  if (!snapshot?.record || snapshot.record.status !== "ended") throw new Error("History interview did not end");
-  if ((snapshot.detail?.transcripts ?? []).filter((item) => item.source === "remote").length < 3) throw new Error("History remote transcript count < 3");
-  if ((snapshot.detail?.questions ?? []).length < 3 || (snapshot.detail?.answers ?? []).length < 3) throw new Error("History question/answer count < 3");
-  evidence.push(`History: PASS; interview count=1; remote transcripts=${snapshot.detail.transcripts.filter((item) => item.source === "remote").length}; questions=${snapshot.detail.questions.length}; answers=${snapshot.detail.answers.length}; status=${snapshot.record.status}`);
+  const firstSnapshot = await main.evaluate("(async () => { const records = await window.interviewCopilot.history.list(); const record = records[0]; return record ? { record, detail: await window.interviewCopilot.history.get(record.id), count: records.length } : undefined; })()");
+  if (!firstSnapshot?.record || firstSnapshot.record.status !== "ended") throw new Error("History interview did not end");
+  if ((firstSnapshot.detail?.transcripts ?? []).filter((item) => item.source === "remote").length < 3) throw new Error("History remote transcript count < 3");
+  if ((firstSnapshot.detail?.questions ?? []).length < 3 || (firstSnapshot.detail?.answers ?? []).length < 3) throw new Error("History question/answer count < 3");
+
+  const activeProfile = await main.evaluate("window.interviewCopilot.profiles.active()");
+  if (!activeProfile?.id) throw new Error("Active profile missing for screenshot-only interview");
+  await main.evaluate(`window.interviewCopilot.interview.start(${JSON.stringify({ profileId: activeProfile.id, url: `ws://127.0.0.1:${asrPort}/realtime`, inputDeviceId: "mock-mic", outputDeviceId: "mock-system", automationMode: "MANUAL", answerMode: "NORMAL", providerType: "custom-gateway" })})`);
+  await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "RUNNING"), 15_000);
+  const beforeScreenshotOnly = screenshotOnlyRequests;
+  await main.evaluate("window.interviewCopilot.interview.answerScreenshot()");
+  await waitForNode(() => screenshotOnlyRequests > beforeScreenshotOnly, 15_000);
+  await waitFor(() => document.body.innerText.includes("Mock vision answer"), 15_000, overlay);
+  evidence.push("Screenshot-only: PASS; SCREENSHOT_WITHOUT_CURRENT_QUESTION: PASS");
+  await main.evaluate("window.interviewCopilot.interview.stop()");
+  await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "ENDED"), 15_000);
+  const snapshot = await main.evaluate("(async () => { const records = await window.interviewCopilot.history.list(); const record = records[0]; return record ? { record, detail: await window.interviewCopilot.history.get(record.id), count: records.length } : undefined; })()");
+  if (!snapshot?.record || snapshot.record.status !== "ended") throw new Error("Screenshot-only history interview did not end");
+  if (!(snapshot.detail?.questions ?? []).some((item) => item.text === "请分析截图中的题目、代码或内容，并给出适合面试场景的回答。")) throw new Error("Screenshot-only synthetic question was not persisted");
+  evidence.push(`History: PASS; interview count=${snapshot.count}; first interview remote transcripts=${firstSnapshot.detail.transcripts.filter((item) => item.source === "remote").length}; first interview questions=${firstSnapshot.detail.questions.length}; first interview answers=${firstSnapshot.detail.answers.length}; latest status=${snapshot.record.status}`);
   await clickText("面试记录");
   await clickSelector(".history-layout .clean-list-row");
   await waitFor(() => document.body.innerText.includes("面试详情"));

@@ -143,4 +143,51 @@ describe("InterviewCoordinator software E2E", () => {
     await coordinator.stop();
     vi.useRealTimers();
   });
+
+  it("AUTOMATION_DEFAULT_AUTO", () => {
+    const coordinator = new InterviewCoordinator({ audio: new FakeAudio(), realtime: new FakeRealtime(), session: new SessionStateMachine(), answerAgent: new AnswerAgent({ "low-latency": { stream: answerChunks } }, new ModelRouter({ "low-latency": "test-model" })) });
+    expect(coordinator.automationMode).toBe("AUTO");
+  });
+
+  it("AUTOMATION_IDLE_SET_UPDATES_DEFAULT", () => {
+    const coordinator = new InterviewCoordinator({ audio: new FakeAudio(), realtime: new FakeRealtime(), session: new SessionStateMachine(), answerAgent: new AnswerAgent({ "low-latency": { stream: answerChunks } }, new ModelRouter({ "low-latency": "test-model" })), initialAutomationMode: "MANUAL" });
+    expect(coordinator.automationMode).toBe("MANUAL");
+    coordinator.setAutomationMode("AUTO");
+    expect(coordinator.automationMode).toBe("AUTO");
+  });
+
+  it("AUTOMATION_ACTIVE_SET_UPDATES_CURRENT", async () => {
+    const coordinator = new InterviewCoordinator({ audio: new FakeAudio(), realtime: new FakeRealtime(), session: new SessionStateMachine(), answerAgent: new AnswerAgent({ "low-latency": { stream: answerChunks } }, new ModelRouter({ "low-latency": "test-model" })) });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", answerMode: "NORMAL" });
+    coordinator.setAutomationMode("MANUAL");
+    expect(coordinator.automationMode).toBe("MANUAL");
+    await coordinator.stop();
+  });
+
+  it("SCREENSHOT_WITHOUT_CURRENT_QUESTION", async () => {
+    let requestedQuestion = "";
+    const provider: AnswerProvider = { stream: async function* (request) { requestedQuestion = request.sections.find((section) => section.name === "question")?.content ?? ""; yield "截图回答"; } };
+    const history = new InterviewHistoryStore();
+    const coordinator = new InterviewCoordinator({ audio: new FakeAudio(), realtime: new FakeRealtime(), session: new SessionStateMachine(), answerAgent: new AnswerAgent({ vision: provider }, new ModelRouter({ vision: "vision-model" })), history });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", answerMode: "NORMAL" });
+    await coordinator.answerScreenshot("data:image/png;base64,mock");
+    expect(requestedQuestion).toBe("请分析截图中的题目、代码或内容，并给出适合面试场景的回答。");
+    expect(history.snapshot(coordinator.interviewId!).questions[0]?.text).toBe(requestedQuestion);
+    await coordinator.stop();
+  });
+
+  it("SCREENSHOT_WITH_CURRENT_QUESTION", async () => {
+    let requestedQuestion = "";
+    let hasAttachment = false;
+    const provider: AnswerProvider = { stream: async function* (request) { requestedQuestion = request.sections.find((section) => section.name === "question")?.content ?? ""; hasAttachment = Boolean(request.attachments?.length); yield "截图回答"; } };
+    const realtime = new FakeRealtime();
+    const coordinator = new InterviewCoordinator({ audio: new FakeAudio(), realtime, session: new SessionStateMachine(), answerAgent: new AnswerAgent({ vision: provider }, new ModelRouter({ vision: "vision-model" })) });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", answerMode: "NORMAL" });
+    realtime.emit("transcript", {}, { id: "q-shot", source: "remote", text: "请解释这段代码？", startMs: 0, endMs: 900, final: true });
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    await coordinator.answerScreenshot("data:image/png;base64,mock");
+    expect(requestedQuestion).toContain("请解释这段代码");
+    expect(hasAttachment).toBe(true);
+    await coordinator.stop();
+  });
 });

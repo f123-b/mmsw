@@ -59,6 +59,35 @@ describe("AudioManager probe lifecycle", () => {
     await expect(manager.probe()).rejects.toThrow("AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT");
   });
 
+  it("PROBE_MIC_FAILED_BLOCKS_START", async () => {
+    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "mic-fail";
+    await expect(manager.probe()).rejects.toThrow("AUDIO_PROBE_MIC_FAILED");
+    await expect(manager.start({ meterOnly: false })).rejects.toThrow("AUDIO_PROBE_REQUIRED");
+  });
+
+  it("PROBE_SYSTEM_FAILED_BLOCKS_START", async () => {
+    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "system-fail";
+    await expect(manager.probe()).rejects.toThrow("AUDIO_PROBE_SYSTEM_FAILED");
+    await expect(manager.start({ meterOnly: false })).rejects.toThrow("AUDIO_PROBE_REQUIRED");
+  });
+
+  it("PROBE_BOTH_FAILED_BLOCKS_START", async () => {
+    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "both-fail";
+    await expect(manager.probe()).rejects.toThrow("AUDIO_PROBE_FAILED");
+    await expect(manager.start({ meterOnly: false })).rejects.toThrow("AUDIO_PROBE_REQUIRED");
+  });
+
+  it("PROBE_EXIT_NONZERO_AFTER_RESULT", async () => {
+    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "nonzero-after-result";
+    await expect(manager.probe()).rejects.toThrow("AUDIO_PROBE_PROCESS_FAILED");
+    await expect(manager.start({ meterOnly: false })).rejects.toThrow("AUDIO_PROBE_REQUIRED");
+  });
+
+  it("PROBE_DEVICE_CHANGE_INVALIDATES_RESULT", async () => {
+    await manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
+    await expect(manager.start({ inputDeviceId: "another-mic", outputDeviceId: "mock-system", meterOnly: false })).rejects.toThrow("AUDIO_PROBE_REQUIRED");
+  });
+
   it("INTERVIEW_START_WHILE_PROBE_RUNNING", async () => {
     const probe = manager.probe();
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -66,7 +95,7 @@ describe("AudioManager probe lifecycle", () => {
     await probe;
   });
 
-  it("FORMAL_CAPTURE_STARTS_AFTER_PROBE", async () => {
+  it("PROBE_SUCCESS_ALLOWS_FORMAL_CAPTURE", async () => {
     await manager.probe();
     await manager.start({ meterOnly: false, autoRecover: true });
     expect(manager.runningOptions).toMatchObject({ meterOnly: false, autoRecover: true });

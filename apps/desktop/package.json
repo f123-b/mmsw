@@ -14,6 +14,7 @@
     "capture-protection:smoke": "npm run build:capture-helper && npm run build && node scripts/capture-protection-smoke.mjs",
     "visual:smoke": "npm run build && node scripts/visual-smoke.mjs",
     "functional:e2e": "npm run build && node scripts/functional-e2e.mjs",
+    "probe-failure:e2e": "npm run build && node scripts/probe-failure-e2e.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run --passWithNoTests"
   },
