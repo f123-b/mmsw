@@ -22,16 +22,16 @@ if (!existsSync(archive)) throw new Error(`Missing packaged archive: ${archive}`
 const archiveEntries = listPackage(archive, { isPack: false });
 console.log("First packaged app.asar entries returned by listPackage():");
 archiveEntries.slice(0, 20).forEach((entry, index) => console.log(`${index + 1}. ${entry}`));
-const entries = new Set(archiveEntries.map(normalizeArchiveEntry));
+const entriesByNormalizedPath = new Map(archiveEntries.map((entry) => [normalizeArchiveEntry(entry), entry]));
 for (const entry of archiveRequired) {
   const normalizedEntry = normalizeArchiveEntry(entry);
-  if (!entries.has(normalizedEntry)) throw new Error(`Missing packaged app.asar entry: ${entry}`);
+  if (!entriesByNormalizedPath.has(normalizedEntry)) throw new Error(`Missing packaged app.asar entry: ${entry}`);
 }
 
-const bundledMain = extractFile(archive, "out/main/index.js").toString("utf8");
+const bundledMain = extractFile(archive, entriesByNormalizedPath.get("out/main/index.js")).toString("utf8");
 if (bundledMain.includes("preload/index.js")) throw new Error("Packaged main still references preload/index.js");
 
-const rendererHtml = extractFile(archive, "out/renderer/index.html").toString("utf8");
+const rendererHtml = extractFile(archive, entriesByNormalizedPath.get("out/renderer/index.html")).toString("utf8");
 if (!rendererHtml.includes('id="root"')) throw new Error("Packaged renderer entry does not contain the root mount point");
 
 console.log(`Verified app.asar entries: ${archiveRequired.join(", ")}`);
