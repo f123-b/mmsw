@@ -39,4 +39,13 @@ describe("question scoring", () => {
     detector.observe({ text: "请介绍一下你做过的实时音频项目", final: true, startMs: 0, endMs: 900 }, 900);
     expect(detector.flush(1_500)[0]?.type).toBe("question_confirmed");
   });
+
+  it("keeps wall-clock silence separate from ASR audio timeline", () => {
+    const detector = new QuestionDetector();
+    detector.observe({ text: "为什么使用 DMA？", final: true, startMs: 0, endMs: 900 }, 10_000);
+    expect(detector.flush(10_400)[0]?.type).toBe("question_ignored");
+    expect(detector.flush(10_600)[0]?.type).toBe("question_confirmed");
+    detector.observe({ text: "如果换成 FreeRTOS 呢？", final: true, startMs: 2_000, endMs: 2_900 }, 10_700);
+    expect(detector.flush(11_300)[0]?.type).toBe("question_superseded");
+  });
 });

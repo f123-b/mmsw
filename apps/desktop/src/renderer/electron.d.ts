@@ -23,7 +23,7 @@ declare global {
       audio: {
         start(options?: AudioStartOptions): Promise<void>;
         stop(): Promise<void>;
-        probe(options?: Pick<AudioStartOptions, "inputDeviceId" | "outputDeviceId">): Promise<void>;
+        probe(options?: Pick<AudioStartOptions, "inputDeviceId" | "outputDeviceId">): Promise<import("@interview-copilot/protocol").ProbeResult>;
         listDevices(): Promise<AudioDevices>;
       };
       overlay: {
@@ -50,6 +50,9 @@ declare global {
         start(options: InterviewStartOptions): Promise<string>;
         stop(): Promise<void>;
         answerLatest(): Promise<void>;
+        answerQuestion(text: string): Promise<void>;
+        answerScreenshot(): Promise<void>;
+        getState(): Promise<{ running: boolean; interviewId?: string; automationMode: "MANUAL" | "AUTO" }>;
         setAutomationMode(mode: "MANUAL" | "AUTO"): Promise<boolean>;
         setAnswerMode(mode: "FAST" | "NORMAL" | "DEEP"): Promise<boolean>;
       };

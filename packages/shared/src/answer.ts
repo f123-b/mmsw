@@ -57,7 +57,7 @@ export class ContextRouter {
 }
 
 export interface PromptSection {
-  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "retrieval-context" | "recent-transcript" | "question" | "output-format";
+  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "retrieval-context" | "recent-transcript" | "conversation-history" | "question" | "output-format";
   content: string;
 }
 

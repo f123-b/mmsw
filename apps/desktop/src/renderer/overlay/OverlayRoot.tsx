@@ -7,6 +7,7 @@ interface OverlayRootProps {
   system: number;
   state: string;
   overlayMode: OverlayMode;
+  automationMode: "MANUAL" | "AUTO";
   answerMode: "FAST" | "NORMAL" | "DEEP";
   question?: { text: string };
   answerText: string;
@@ -14,6 +15,10 @@ interface OverlayRootProps {
   remoteTranscript: TranscriptSnapshot;
   micTranscript: TranscriptSnapshot;
   onToggleMode: () => void;
+  onToggleAutomation: () => Promise<void> | void;
+  onAnswerQuestion: (text: string) => Promise<void>;
+  onAnswerLatest: () => Promise<void>;
+  onAnswerScreenshot: () => Promise<void>;
   captureProtectionEnabled?: boolean;
   captureProtectionSupported?: boolean;
   captureProtectionOsFlagApplied?: boolean;
@@ -64,9 +69,10 @@ function TranscriptPanel({ label, snapshot }: { label: string; snapshot: Transcr
   return <div className="overlay-transcript-content"><div className="overlay-panel-label">{label}</div>{segments.length === 0 && !snapshot.partial ? <p className="overlay-muted">等待转录...</p> : segments.map((segment) => <p key={segment.id}>{segment.text}</p>)}{snapshot.partial && <p className="partial-line">{snapshot.partial.text}</p>}</div>;
 }
 
-export function OverlayRoot({ mic, system, state, overlayMode, answerMode, question, answerText, answerStreaming, remoteTranscript, micTranscript, onToggleMode, captureProtectionEnabled, captureProtectionSupported, captureProtectionOsFlagApplied, captureProtectionDisplayVerified, captureProtectionLastError, onToggleCaptureProtection, captureTest }: OverlayRootProps): JSX.Element {
+export function OverlayRoot({ mic, system, state, overlayMode, automationMode, answerMode, question, answerText, answerStreaming, remoteTranscript, micTranscript, onToggleMode, onToggleAutomation, onAnswerQuestion, onAnswerLatest, onAnswerScreenshot, captureProtectionEnabled, captureProtectionSupported, captureProtectionOsFlagApplied, captureProtectionDisplayVerified, captureProtectionLastError, onToggleCaptureProtection, captureTest }: OverlayRootProps): JSX.Element {
   const [positions, movePanel] = usePanelPositions();
   const [answerDraft, setAnswerDraft] = useState("");
+  const [answerSending, setAnswerSending] = useState(false);
   const [runtimeProtection, setRuntimeProtection] = useState<{ requested: boolean; osFlagApplied: boolean; displayCaptureVerified: boolean | null; lastError?: string }>();
   useEffect(() => {
     let disposed = false;
@@ -81,20 +87,35 @@ export function OverlayRoot({ mic, system, state, overlayMode, answerMode, quest
   const effectiveDisplayVerified = runtimeProtection?.displayCaptureVerified ?? captureProtectionDisplayVerified;
   const effectiveLastError = runtimeProtection?.lastError ?? captureProtectionLastError;
   const protectionTone = !effectiveProtectionEnabled ? "off" : effectiveDisplayVerified === true ? "verified" : effectiveOsFlagApplied === false || effectiveLastError ? "failed" : "requested";
+  const submitAnswer = async () => {
+    if (answerSending) return;
+    const text = answerDraft.trim();
+    setAnswerSending(true);
+    try {
+      if (text) await onAnswerQuestion(text);
+      else await onAnswerLatest();
+      setAnswerDraft("");
+    } finally { setAnswerSending(false); }
+  };
+  const submitScreenshot = async () => {
+    if (answerSending) return;
+    setAnswerSending(true);
+    try { await onAnswerScreenshot(); } finally { setAnswerSending(false); }
+  };
   return (
     <main className="overlay-root">
       {captureTest && <div className="capture-test-marker">CAPTURE_PROTECTION_TEST_MARKER_7F32</div>}
       <DraggablePanel panel="toolbar" position={positions.toolbar} onMove={movePanel} className="toolbar-panel">
-        <div className="floating-toolbar"><strong>Interview Copilot</strong><span className="toolbar-divider" /><span className="toolbar-status"><i />{state}</span><span className="toolbar-chip">麦克风 {Math.round(mic * 100)}%</span><span className="toolbar-chip">回答 {answerMode}</span><button className={`toolbar-protection ${protectionTone}`} title={!effectiveProtectionSupported ? "当前平台不支持 Windows Capture Protection" : effectiveLastError ? "Windows protection flag 失败" : effectiveDisplayVerified === true ? "Display Capture Verified" : effectiveProtectionEnabled ? "Windows protection on · external capture untested" : "Windows protection off"} disabled={!effectiveProtectionSupported} onClick={onToggleCaptureProtection}>◈</button><button onClick={onToggleMode}>{overlayMode === "interactive" ? "AUTO" : "PASSIVE"}</button><span className="toolbar-live">●</span></div>
+        <div className="floating-toolbar"><strong>Interview Copilot</strong><span className="toolbar-divider" /><span className="toolbar-status"><i />{state}</span><span className="toolbar-chip">麦克风 {Math.round(mic * 100)}%</span><span className="toolbar-chip">回答 {answerMode}</span><button className="toolbar-automation" onClick={() => void onToggleAutomation()} title="切换回答模式">回答 {automationMode}</button><button className={`toolbar-protection ${protectionTone}`} title={!effectiveProtectionSupported ? "当前平台不支持 Windows Capture Protection" : effectiveLastError ? "Windows protection flag 失败" : effectiveDisplayVerified === true ? "Display Capture Verified" : effectiveProtectionEnabled ? "Windows protection on · external capture untested" : "Windows protection off"} disabled={!effectiveProtectionSupported} onClick={onToggleCaptureProtection}>◈</button><button onClick={onToggleMode}>{overlayMode === "interactive" ? "Interactive" : "Passive"}</button><span className="toolbar-live">●</span></div>
       </DraggablePanel>
       <DraggablePanel panel="transcript" position={positions.transcript} onMove={movePanel} className="transcript-panel">
-        <section className="overlay-panel-card"><header><strong>转录会显示在这里</strong><button aria-label="关闭转录">×</button></header><TranscriptPanel label="面试官" snapshot={remoteTranscript} /><TranscriptPanel label="我的语音" snapshot={micTranscript} /></section>
+        <section className="overlay-panel-card"><header><strong>转录会显示在这里</strong></header><TranscriptPanel label="面试官" snapshot={remoteTranscript} /><TranscriptPanel label="我的语音" snapshot={micTranscript} /></section>
       </DraggablePanel>
       <DraggablePanel panel="answer" position={positions.answer} onMove={movePanel} className="answer-panel">
-        <section className="overlay-panel-card"><header><strong>回答</strong><span className="answer-ready">● 自动回答已就绪</span></header><p className="answer-intro">你也可以输入问题，不输入文字发送最新问题，或附截图发送。</p><div className="overlay-question"><small>QUESTION</small><strong>{question?.text ?? "等待面试官问题"}</strong></div><div className="overlay-answer-body">{answerLines.length ? answerLines.map((line, index) => <p key={`${line}-${index}`}>{line}</p>) : <><strong>核心回答</strong><p>回答将在确认完整问题后显示。</p><p>• 自动整理关键观点<br />• 保持回答简洁可扫读</p></>}{answerStreaming && <span className="answer-cursor">▌</span>}</div><div className="overlay-answer-composer"><input value={answerDraft} onChange={(event) => setAnswerDraft(event.target.value)} placeholder="输入问题，或留空发送最新面试官问题..." /><div><button>⊕ 附截图</button><button className="auto-answer">◉ 自动回答</button><button className="overlay-send" onClick={() => setAnswerDraft("")}>↑</button></div></div></section>
+        <section className="overlay-panel-card"><header><strong>回答</strong><span className="answer-ready">{automationMode === "AUTO" ? "● 自动回答已开启" : "○ 手动回答模式"}</span></header><p className="answer-intro">你也可以输入问题，不输入文字发送最新问题，或附截图发送。</p><div className="overlay-question"><small>QUESTION</small><strong>{question?.text ?? "等待面试官问题"}</strong></div><div className="overlay-answer-body">{answerLines.length ? answerLines.map((line, index) => <p key={`${line}-${index}`}>{line}</p>) : <><strong>核心回答</strong><p>回答将在确认完整问题后显示。</p><p>• 自动整理关键观点<br />• 保持回答简洁可扫读</p></>}{answerStreaming && <span className="answer-cursor">▌</span>}</div><div className="overlay-answer-composer"><input value={answerDraft} onChange={(event) => setAnswerDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void submitAnswer(); }} placeholder="输入问题，或留空发送最新面试官问题..." disabled={answerSending} /><div><button onClick={() => void submitScreenshot()} disabled={answerSending}>⊕ 附截图</button><button className="auto-answer" onClick={() => void onToggleAutomation()} disabled={answerSending}>◉ {automationMode === "AUTO" ? "切换手动" : "自动回答"}</button><button className="overlay-send" onClick={() => void submitAnswer()} disabled={answerSending}>↑</button></div></div></section>
       </DraggablePanel>
       <DraggablePanel panel="shortcuts" position={positions.shortcuts} onMove={movePanel} className="shortcut-panel">
-        <section className="shortcut-card"><header><strong>键盘快捷方式</strong><button aria-label="关闭快捷键">×</button></header><div><span>回答问题</span><kbd>Ctrl Alt A</kbd><span>截图并回答</span><kbd>Ctrl Alt S</kbd><span>隐藏 / 显示悬浮窗</span><kbd>Ctrl Alt D</kbd><span>隐藏 / 显示快捷键</span><kbd>Ctrl Alt K</kbd><span>结束回答</span><kbd>Ctrl Alt Q</kbd><span>切换自动回答</span><kbd>Ctrl Alt X</kbd><span>发送面试官转录</span><kbd>Ctrl Alt 1–8</kbd><span>滚动回答面板</span><kbd>Ctrl Alt ↑ / ↓</kbd></div></section>
+        <section className="shortcut-card"><header><strong>键盘快捷方式</strong></header><div><span>回答最新问题</span><kbd>Ctrl Alt A</kbd><span>截图并回答</span><kbd>Ctrl Alt S</kbd><span>隐藏 / 显示悬浮窗</span><kbd>Ctrl Alt D</kbd><span>切换悬浮窗模式</span><kbd>Ctrl Alt P</kbd><span>切换自动回答</span><kbd>Ctrl Alt X</kbd><span>结束面试</span><kbd>Ctrl Alt Q</kbd></div></section>
       </DraggablePanel>
     </main>
   );

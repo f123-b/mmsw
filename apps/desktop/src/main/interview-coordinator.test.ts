@@ -120,11 +120,12 @@ describe("InterviewCoordinator software E2E", () => {
     vi.useFakeTimers();
     const audio = new FakeAudio();
     const realtime = new FakeRealtime();
+    const history = new InterviewHistoryStore();
     let clock = 1_000;
     let calls = 0;
     const provider: AnswerProvider = { stream: (_request, signal) => (async function* () { if (calls++ === 0) { yield "旧答案"; await new Promise<never>((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true })); } else yield "新答案"; })() };
     const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
-    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, now: () => clock });
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, history, now: () => clock });
     const messages: Array<{ type: string; reason?: string }> = [];
     coordinator.on("event", (event: { type: string; message?: { type: string; reason?: string } }) => { if (event.type === "realtime_message" && event.message) messages.push(event.message); });
     await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "AUTO", answerMode: "NORMAL" });
@@ -137,6 +138,8 @@ describe("InterviewCoordinator software E2E", () => {
     vi.advanceTimersByTime(500);
     for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
     expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({ type: "answer_cancelled", reason: "superseded" }), expect.objectContaining({ type: "answer_end" })]));
+    const snapshot = history.snapshot(coordinator.interviewId!);
+    expect(snapshot.answers.find((answer) => answer.cancelReason === "superseded")?.text).toBe("旧答案");
     await coordinator.stop();
     vi.useRealTimers();
   });

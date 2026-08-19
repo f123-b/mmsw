@@ -13,9 +13,10 @@ import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkil
 import { InterviewCoordinator, type InterviewStartOptions } from "./interview-coordinator";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectRepository, type SqliteDatabase } from "./database";
 import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type ProviderSection } from "./settings-store";
-import { runProviderPreflight, testProviderConnection } from "./provider-preflight";
+import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnection } from "./provider-preflight";
 import { parseDocument } from "./document-parsers";
 import { SafeLogger } from "./logger";
+import { buildConversationHistory } from "./chat-context";
 
 let mainWindow: BrowserWindow | undefined;
 let overlayManager: OverlayManager | undefined;
@@ -58,6 +59,7 @@ let conversationRepository: SqliteConversationRepository | undefined;
 let preparationRuntime: PreparationAgentRuntime | undefined;
 let preparationAbortController: AbortController | undefined;
 const chatAbortControllers = new Map<string, AbortController>();
+const providerPreflightCache = new ProviderPreflightCache();
 let appLogger: SafeLogger | undefined;
 let audioLogger: SafeLogger | undefined;
 let realtimeLogger: SafeLogger | undefined;
@@ -260,6 +262,16 @@ async function captureScreenshot(trigger = "screenshot-answer"): Promise<void> {
   } catch (error) {
     broadcast("screenshot:error", String(error));
     broadcast("runtime:error", { code: "SCREENSHOT_FAILED", message: "截图失败，请重试", recoverable: true });
+  }
+}
+
+async function answerCapturedScreenshot(): Promise<void> {
+  const result = await screenshotManager.capturePrimaryDisplay();
+  try {
+    broadcast("screenshot:captured", result);
+    await coordinator().answerScreenshot(result.dataUrl);
+  } finally {
+    await screenshotManager.cleanup(result);
   }
 }
 
@@ -585,11 +597,13 @@ async function streamChat(conversationId: string, content: string): Promise<void
   if (!conversationRepository) throw new Error("Chat database is still initializing");
   const conversation = conversationRepository.get(conversationId);
   if (!conversation) throw new Error("Conversation not found");
+  if (chatAbortControllers.has(conversationId)) throw new Error("CHAT_BUSY: 当前对话仍在生成中");
   const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings;
   if (!settings.apiKey) {
     broadcast("chat:error", { conversationId, code: "LLM_NOT_CONFIGURED", message: "未配置 LLM API Key" });
     throw new Error("未配置 LLM API Key");
   }
+  const history = buildConversationHistory(conversation.messages);
   const userMessage = conversationRepository.addMessage({ conversationId, role: "user", content, status: "completed" });
   const assistantMessage = conversationRepository.addMessage({ conversationId, role: "assistant", content: "", status: "streaming", model: settings.model });
   broadcast("chat:message-start", { conversationId, userMessage, assistantMessage });
@@ -600,6 +614,7 @@ async function streamChat(conversationId: string, content: string): Promise<void
     const prompt = `${chatContext(conversation.conversation.profileId, content)}\n\n用户问题：${content}`;
     for await (const delta of new OpenAICompatibleAnswerProvider(settings).stream({ model: settings.model, sections: [
       { name: "system/base", content: "你是 Interview Copilot 面试助手。只根据提供的 Profile、Resume、JD 和知识回答；如果资料不足，请明确说明，不要编造经历。" },
+      ...(history ? [{ name: "conversation-history" as const, content: history }] : []),
       { name: "question", content: prompt }
     ] }, controller.signal)) {
       answer += delta;
@@ -698,12 +713,17 @@ function registerIpc(): void {
       if (!llm.apiKey) throw new Error("LLM_NOT_CONFIGURED: 未配置 LLM API Key");
       const asr = providerConfigStore?.get("asr");
       if ((options.providerType ?? asr?.providerType ?? "deepgram") === "deepgram" && !asr?.apiKey) throw new Error("ASR_AUTH_FAILED: 未配置 Deepgram API Key");
-      return await coordinator().start(options);
+      const preflight = await runProviderPreflight({ llm, asr: asr ?? { providerName: "ASR", providerType: "custom-gateway", baseUrl: options.url ?? "", apiKey: "", model: options.model ?? "", timeoutMs: 10_000, maxRetries: 0 }, embedding: providerConfigStore?.get("embedding") ?? { providerName: "Embedding", baseUrl: "", apiKey: "", model: "", timeoutMs: 10_000, maxRetries: 0 } }, true, providerPreflightCache);
+      if (!preflight.llm.reachable) throw new Error(`LLM_CONNECT_FAILED: ${preflight.llm.message ?? preflight.llm.status}`);
+      if (!preflight.asr.reachable) throw new Error(`ASR_CONNECT_FAILED: ${preflight.asr.message ?? preflight.asr.status}`);
+      const interviewId = await coordinator().start(options);
+      overlayManager?.show();
+      return interviewId;
     } catch (error) {
       const raw = String(error);
       const code = raw.split(":", 1)[0] || "AUDIO_DEVICE_FAILED";
-      const allowed = new Set(["AUDIO_DEVICE_FAILED", "ASR_AUTH_FAILED", "ASR_CONNECT_FAILED", "LLM_NOT_CONFIGURED", "PROFILE_NOT_FOUND", "SIDECAR_NOT_FOUND", "DATABASE_ERROR"]);
-      const mappedCode = allowed.has(code) ? code : raw.includes("ASR") ? "ASR_CONNECT_FAILED" : raw.includes("database") ? "DATABASE_ERROR" : "AUDIO_DEVICE_FAILED";
+      const allowed = new Set(["AUDIO_BUSY", "AUDIO_DEVICE_FAILED", "ASR_AUTH_FAILED", "ASR_CONNECT_FAILED", "LLM_NOT_CONFIGURED", "LLM_CONNECT_FAILED", "PROFILE_NOT_FOUND", "SIDECAR_NOT_FOUND", "DATABASE_ERROR"]);
+      const mappedCode = allowed.has(code) ? code : raw.includes("ASR") ? "ASR_CONNECT_FAILED" : raw.includes("LLM") ? "LLM_CONNECT_FAILED" : raw.includes("database") ? "DATABASE_ERROR" : "AUDIO_DEVICE_FAILED";
       const message = raw.includes(": ") ? raw.slice(raw.indexOf(": ") + 2) : raw;
       broadcast("runtime:error", { code: mappedCode, message, recoverable: mappedCode !== "PROFILE_NOT_FOUND" && mappedCode !== "SIDECAR_NOT_FOUND" });
       throw new Error(`${mappedCode}: ${message}`);
@@ -711,7 +731,10 @@ function registerIpc(): void {
   });
   ipcMain.handle("interview:stop", () => stopInterviewWithAnalysis());
   ipcMain.handle("interview:answer-latest", () => coordinator().answerLatest());
-  ipcMain.handle("interview:set-automation-mode", (_event, mode: "MANUAL" | "AUTO") => { coordinator().setAutomationMode(mode); return true; });
+  ipcMain.handle("interview:answer-question", (_event, input: { text: string }) => coordinator().answerQuestionText(input.text));
+  ipcMain.handle("interview:answer-screenshot", () => answerCapturedScreenshot());
+  ipcMain.handle("interview:get-state", () => ({ running: coordinator().running, interviewId: coordinator().interviewId, automationMode: coordinator().automationMode }));
+  ipcMain.handle("interview:set-automation-mode", (_event, mode: "MANUAL" | "AUTO") => { const next = mode === "MANUAL" ? "MANUAL" : "AUTO"; overlaySettingsStore?.setAutomationMode(next); coordinator().setAutomationMode(next); return true; });
   ipcMain.handle("interview:set-answer-mode", (_event, mode: "FAST" | "NORMAL" | "DEEP") => { coordinator().setAnswerMode(mode); return true; });
   ipcMain.handle("chat:create-conversation", (_event, input: { profileId?: string; projectId?: string; title?: string }) => {
     if (!conversationRepository) throw new Error("Chat database is still initializing");
@@ -866,6 +889,7 @@ function registerIpc(): void {
   ipcMain.handle("settings:update", (_event, section: ProviderSection, input: Partial<ProviderSettings>) => {
     if (!providerConfigStore) throw new Error("Settings are still initializing");
     const result = providerConfigStore.update(section, input);
+    providerPreflightCache.invalidate(section);
     if (section === "llm") {
       routingModels.fast = result.fastModel || result.model;
       routingModels["low-latency"] = result.normalModel || result.model;
@@ -876,11 +900,11 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:test-connection", async (_event, section: ProviderSection) => {
     if (!providerConfigStore) throw new Error("Settings are still initializing");
-    return testProviderConnection(section, providerConfigStore.get(section));
+    return testCachedProviderConnection(section, providerConfigStore.get(section), providerPreflightCache);
   });
   ipcMain.handle("settings:preflight", (_event, checkReachability = false) => {
     if (!providerConfigStore) throw new Error("Settings are still initializing");
-    return runProviderPreflight({ llm: providerConfigStore.get("llm"), asr: providerConfigStore.get("asr"), embedding: providerConfigStore.get("embedding") }, Boolean(checkReachability));
+    return runProviderPreflight({ llm: providerConfigStore.get("llm"), asr: providerConfigStore.get("asr"), embedding: providerConfigStore.get("embedding") }, Boolean(checkReachability), providerPreflightCache);
   });
   ipcMain.handle("projects:list", () => projectRepository?.list() ?? []);
   ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string }) => projectRepository?.create(input.name, input.profileId));
@@ -897,7 +921,11 @@ function registerShortcuts(): void {
       const mode = overlayManager?.toggleMode();
       if (mode) broadcast("overlay:mode", mode);
     },
-    [GLOBAL_SHORTCUTS.toggleAutomation]: () => broadcast("shortcut", "toggle-automation"),
+    [GLOBAL_SHORTCUTS.toggleAutomation]: () => {
+      const next = coordinator().automationMode === "AUTO" ? "MANUAL" : "AUTO";
+      overlaySettingsStore?.setAutomationMode(next);
+      coordinator().setAutomationMode(next);
+    },
     [GLOBAL_SHORTCUTS.endInterview]: () => {
       void stopInterviewWithAnalysis();
     }

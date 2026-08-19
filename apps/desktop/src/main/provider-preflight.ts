@@ -18,6 +18,35 @@ export interface ProviderPreflightResult {
   embedding: ProviderCheckResult & { optional: boolean };
 }
 
+type CachedProviderCheck = { expiresAt: number; result: ProviderCheckResult };
+
+export class ProviderPreflightCache {
+  private readonly values = new Map<string, CachedProviderCheck>();
+  constructor(private readonly ttlMs = 5 * 60_000) {}
+
+  get(section: ProviderSection, settings: ProviderSettings): ProviderCheckResult | undefined {
+    const value = this.values.get(this.key(section, settings));
+    if (!value || value.expiresAt <= Date.now()) {
+      if (value) this.values.delete(this.key(section, settings));
+      return undefined;
+    }
+    return { ...value.result };
+  }
+
+  set(section: ProviderSection, settings: ProviderSettings, result: ProviderCheckResult): void {
+    this.values.set(this.key(section, settings), { expiresAt: Date.now() + this.ttlMs, result: { ...result } });
+  }
+
+  invalidate(section?: ProviderSection): void {
+    if (!section) { this.values.clear(); return; }
+    for (const key of this.values.keys()) if (key.startsWith(`${section}:`)) this.values.delete(key);
+  }
+
+  private key(section: ProviderSection, settings: ProviderSettings): string {
+    return `${section}:${JSON.stringify({ ...settings, apiKey: settings.apiKey ? "configured" : "" })}`;
+  }
+}
+
 function endpoint(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
 }
@@ -56,7 +85,7 @@ async function testHttp(section: "llm" | "embedding", settings: ProviderSettings
   if (isLlm) {
     const choices = Array.isArray(payload.choices) ? payload.choices : [];
     const content = (choices[0] as Record<string, unknown> | undefined)?.message as Record<string, unknown> | undefined;
-    if (typeof content?.content !== "string" && choices.length === 0) return { section, configured: true, reachable: false, status: "network_failed", message: "LLM 返回缺少 choices" };
+    if (choices.length === 0 || typeof content?.content !== "string" || !content.content.trim()) return { section, configured: true, reachable: false, status: "network_failed", message: "LLM 返回缺少有效 choices.message.content" };
   } else {
     const vector = (Array.isArray(payload.data) ? payload.data[0] as Record<string, unknown> | undefined : undefined)?.embedding;
     if (!Array.isArray(vector) || !vector.every((item) => typeof item === "number")) return { section, configured: true, reachable: false, status: "network_failed", message: "Embedding 返回非法向量" };
@@ -66,15 +95,14 @@ async function testHttp(section: "llm" | "embedding", settings: ProviderSettings
 
 async function testAsr(settings: ProviderSettings, signal: AbortSignal): Promise<ProviderCheckResult> {
   const section: ProviderSection = "asr";
-  if (settings.providerType === "custom-gateway") {
-    return { section, configured: Boolean(settings.baseUrl && settings.model), reachable: false, status: "network_failed", message: "Custom Gateway 需要通过实际会话验证" };
-  }
-  if (!configured(section, settings)) return { section, configured: false, reachable: false, status: "unconfigured", message: "未配置 Deepgram API Key" };
+  if (!configured(section, settings)) return { section, configured: false, reachable: false, status: "unconfigured", message: settings.providerType === "custom-gateway" ? "未配置 Custom Gateway" : "未配置 Deepgram API Key" };
   const url = new URL(settings.baseUrl || "wss://api.deepgram.com/v1/listen");
-  url.searchParams.set("model", settings.model);
-  url.searchParams.set("language", settings.language ?? "zh-CN");
-  url.searchParams.set("encoding", "linear16");
-  url.searchParams.set("sample_rate", "16000");
+  if (settings.providerType !== "custom-gateway") {
+    url.searchParams.set("model", settings.model);
+    url.searchParams.set("language", settings.language ?? "zh-CN");
+    url.searchParams.set("encoding", "linear16");
+    url.searchParams.set("sample_rate", "16000");
+  }
   return await new Promise<ProviderCheckResult>((resolve) => {
     let settled = false;
     const finish = (result: ProviderCheckResult) => { if (settled) return; settled = true; clearTimeout(timer); socket?.close(); resolve(result); };
@@ -83,7 +111,7 @@ async function testAsr(settings: ProviderSettings, signal: AbortSignal): Promise
     const abort = () => finish({ section, configured: true, reachable: false, status: "timeout", message: "测试已取消" });
     signal.addEventListener("abort", abort, { once: true });
     try {
-      socket = new WebSocket(url, { headers: { Authorization: `Token ${settings.apiKey}` } });
+      socket = new WebSocket(url, settings.providerType === "custom-gateway" ? undefined : { headers: { Authorization: `Token ${settings.apiKey}` } });
       socket.once("open", () => finish({ section, configured: true, reachable: true, status: "ready" }));
       socket.once("unexpected-response", (_request, response) => finish({ section, configured: true, reachable: false, status: classifyHttp(response.statusCode ?? 0), message: `HTTP ${response.statusCode ?? "unknown"}` }));
       socket.once("error", () => finish({ section, configured: true, reachable: false, status: "network_failed", message: "Deepgram WebSocket 连接失败" }));
@@ -106,13 +134,29 @@ export async function testProviderConnection(section: ProviderSection, settings:
   } finally { clearTimeout(timer); }
 }
 
-export async function runProviderPreflight(settings: { llm: ProviderSettings; asr: ProviderSettings; embedding: ProviderSettings }, checkReachability = false): Promise<ProviderPreflightResult> {
+export async function testCachedProviderConnection(section: ProviderSection, settings: ProviderSettings, cache: ProviderPreflightCache): Promise<ProviderCheckResult> {
+  const cached = cache.get(section, settings);
+  if (cached) return cached;
+  const result = await testProviderConnection(section, settings);
+  if (result.reachable || result.status === "auth_failed" || result.status === "model_not_found") cache.set(section, settings, result);
+  return result;
+}
+
+export async function runProviderPreflight(settings: { llm: ProviderSettings; asr: ProviderSettings; embedding: ProviderSettings }, checkReachability = false, cache?: ProviderPreflightCache): Promise<ProviderPreflightResult> {
   if (!checkReachability) {
     const llm = configured("llm", settings.llm) ? { section: "llm" as const, configured: true, reachable: false, status: "testing" as const } : { section: "llm" as const, configured: false, reachable: false, status: "unconfigured" as const, message: "未配置 LLM API Key" };
     const asr = configured("asr", settings.asr) ? { section: "asr" as const, configured: true, reachable: false, status: "testing" as const } : { section: "asr" as const, configured: false, reachable: false, status: "unconfigured" as const, message: "未配置 Deepgram API Key" };
     const embedding = configured("embedding", settings.embedding) ? { section: "embedding" as const, configured: true, reachable: false, status: "testing" as const, optional: true } : { section: "embedding" as const, configured: false, reachable: false, status: "unconfigured" as const, message: "未配置 Embedding API Key", optional: true };
     return { llm, asr, embedding };
   }
-  const [llm, asr, embedding] = await Promise.all([testProviderConnection("llm", settings.llm), testProviderConnection("asr", settings.asr), testProviderConnection("embedding", settings.embedding)]);
+  const test = (section: ProviderSection, value: ProviderSettings) => cache ? testCachedProviderConnection(section, value, cache) : testProviderConnection(section, value);
+  const [llm, asr] = await Promise.all([test("llm", settings.llm), test("asr", settings.asr)]);
+  const cachedEmbedding = cache?.get("embedding", settings.embedding);
+  const embedding = cachedEmbedding ?? (configured("embedding", settings.embedding)
+    ? { section: "embedding" as const, configured: true, reachable: false, status: "testing" as const, message: "Embedding 将在后台探测" }
+    : { section: "embedding" as const, configured: false, reachable: false, status: "unconfigured" as const, message: "未配置 Embedding API Key" });
+  if (!cachedEmbedding && embedding.configured) {
+    void test("embedding", settings.embedding).catch(() => undefined);
+  }
   return { llm, asr, embedding: { ...embedding, optional: true } };
 }

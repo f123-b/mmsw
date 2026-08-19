@@ -235,7 +235,8 @@ export class QuestionDetector {
   private stateValue: QuestionState = "IDLE";
   private currentText = "";
   private currentStartMs = 0;
-  private lastInputAt = 0;
+  private lastObservedAtMs = 0;
+  private lastAudioEndMs = 0;
   private currentCandidate: QuestionCandidate | undefined;
   private questionCounter = 0;
   private answeringQuestionId: string | undefined;
@@ -258,13 +259,14 @@ export class QuestionDetector {
   observe(input: { text: string; final: boolean; startMs: number; endMs: number }, observedAtMs = Date.now()): QuestionEvent[] {
     const text = input.text.trim();
     if (!text) return [];
-    if (!this.currentText || input.startMs > this.lastInputAt + this.silenceMs) {
+    if (!this.currentText || input.startMs > this.lastAudioEndMs + this.silenceMs) {
       this.currentText = text;
       this.currentStartMs = input.startMs;
     } else {
       this.currentText = input.final ? text : text;
     }
-    this.lastInputAt = Math.max(observedAtMs, input.endMs);
+    this.lastObservedAtMs = observedAtMs;
+    this.lastAudioEndMs = input.endMs;
     this.stateValue = "LISTENING";
     const scored = scoreQuestion(this.currentText, input.final);
     if (!QUESTION_WORDS.test(this.currentText) && !/[？?]$/.test(this.currentText)) return [];
@@ -280,7 +282,7 @@ export class QuestionDetector {
       this.stateValue = "IDLE";
       return [];
     }
-    if (observedAtMs - this.lastInputAt < this.silenceMs || candidate.score < this.completenessThreshold) {
+    if (observedAtMs - this.lastObservedAtMs < this.silenceMs || candidate.score < this.completenessThreshold) {
       return [{ type: "question_ignored", question: { ...candidate, status: "ignored" }, reason: "incomplete" }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, candidate: true, confirmed: false, ignoredReason: "incomplete" }];
     }
     const dedupeScore = this.confirmed.reduce((maximum, previous) => observedAtMs - previous.detectedAt < this.dedupeWindowMs ? Math.max(maximum, questionSimilarity(previous.text, candidate.text)) : maximum, 0);
@@ -337,7 +339,8 @@ export class QuestionDetector {
   private resetBuffer(clearCandidate = true): void {
     this.currentText = "";
     this.currentStartMs = 0;
-    this.lastInputAt = 0;
+    this.lastObservedAtMs = 0;
+    this.lastAudioEndMs = 0;
     if (clearCandidate) this.currentCandidate = undefined;
   }
 }

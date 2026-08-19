@@ -50,6 +50,9 @@ const api = {
     start: (options: InterviewStartOptions) => ipcRenderer.invoke("interview:start", options) as Promise<string>,
     stop: () => ipcRenderer.invoke("interview:stop") as Promise<void>,
     answerLatest: () => ipcRenderer.invoke("interview:answer-latest") as Promise<void>,
+    answerQuestion: (text: string) => ipcRenderer.invoke("interview:answer-question", { text }) as Promise<void>,
+    answerScreenshot: () => ipcRenderer.invoke("interview:answer-screenshot") as Promise<void>,
+    getState: () => ipcRenderer.invoke("interview:get-state") as Promise<{ running: boolean; interviewId?: string; automationMode: "MANUAL" | "AUTO" }>,
     setAutomationMode: (mode: "MANUAL" | "AUTO") => ipcRenderer.invoke("interview:set-automation-mode", mode) as Promise<boolean>,
     setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => ipcRenderer.invoke("interview:set-answer-mode", mode) as Promise<boolean>
   },

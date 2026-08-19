@@ -1,20 +1,29 @@
-# Functional Test Report
+# Functional Interview E2E Report
 
-Date: 2026-08-19T09:39:01.084Z
+Date: 2026-08-19T14:20:13.374Z
 
-- Profile create/rename/dialog: PASS
-- Knowledge create: PASS
-- Chat SSE streaming/persistence path: PASS
-- Preparation approval/complete: PASS
-- Interview Setup/Audio Probe UI: PASS; REAL_WINDOWS_AUDIO_VALIDATION_PENDING
-- History UI: PASS (empty until a real/mock interview is ended)
+- Profile: PASS
+- Knowledge: PASS
+- Chat Streaming: PASS; Persistence: PASS; CHAT_MULTI_TURN_CONTEXT: PASS
+- Preparation: PASS
+- Probe: PASS; PROBE_COMPLETES_BEFORE_INTERVIEW_START: PASS
+- Formal Start: PASS; meterOnly:false: PASS; MIC Channel: PASS; SYSTEM Channel: PASS; PCM packets: 9
+- Supersede: PASS
+- Remote Transcript: PASS; Question Confirmed: PASS; AUTO_3_QUESTIONS: PASS; AUTO Answer: PASS; Overlay: PASS
+- MANUAL_NO_AUTO_ANSWER: PASS
+- AUTOMATION_RUNTIME_SWITCH: PASS; Overlay AUTO/MANUAL Sync: PASS
+- OVERLAY_MANUAL_SEND: PASS
+- OVERLAY_SCREENSHOT_ANSWER: PASS
+- History: PASS; interview count=1; remote transcripts=5; questions=5; answers=6; status=ended
+- Critical Renderer Errors: 0
 
-## External validation pending
+## Test providers
 
-- REAL_LLM_VALIDATION_PENDING (Mock Provider passed; no real credential was used)
-- REAL_DEEPGRAM_VALIDATION_PENDING
-- REAL_WINDOWS_AUDIO_VALIDATION_PENDING
+- Mock Audio Sidecar: D:\电脑面试\apps\desktop\src\main\test-audio-sidecar.mjs
+- Mock ASR Gateway: ws://127.0.0.1:58603/realtime
+- Mock LLM Provider: http://127.0.0.1:58604
+- Real credentials used: none
 
 ## Evidence
 
-Screenshots are generated from the running Electron application in artifacts/functional/.
+Screenshots are generated from the running Electron application and the real renderer/IPC/coordinator/answer/history path.

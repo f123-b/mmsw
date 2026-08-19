@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { reconnectDelayMs, RecoveryBackoff } from "./audio-manager";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { AudioManager, reconnectDelayMs, RecoveryBackoff } from "./audio-manager";
+
+const sidecar = join(dirname(fileURLToPath(import.meta.url)), "test-audio-sidecar.mjs");
+let manager: AudioManager;
 
 describe("AudioManager recovery backoff", () => {
   it("uses the documented capped exponential retry sequence", () => {
@@ -13,5 +18,57 @@ describe("AudioManager recovery backoff", () => {
     expect(backoff.nextDelayMs()).toBe(4_000);
     backoff.reset();
     expect(backoff.nextDelayMs()).toBe(1_000);
+  });
+});
+
+describe("AudioManager probe lifecycle", () => {
+  beforeEach(() => {
+    process.env.INTERVIEW_COPILOT_AUDIO_SIDECAR = sidecar;
+    process.env.INTERVIEW_COPILOT_NODE_EXECUTABLE = process.execPath;
+    delete process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR;
+    delete process.env.INTERVIEW_COPILOT_AUDIO_PROBE_TIMEOUT_MS;
+    manager = new AudioManager();
+  });
+
+  afterEach(async () => {
+    await manager.stop();
+    delete process.env.INTERVIEW_COPILOT_AUDIO_SIDECAR;
+    delete process.env.INTERVIEW_COPILOT_NODE_EXECUTABLE;
+    delete process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR;
+    delete process.env.INTERVIEW_COPILOT_AUDIO_PROBE_TIMEOUT_MS;
+  });
+
+  it("PROBE_COMPLETES_BEFORE_INTERVIEW_START", async () => {
+    const result = await manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
+    expect(result.mic.ok && result.system.ok).toBe(true);
+    expect(manager.isRunning).toBe(false);
+    await manager.start({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system", meterOnly: false, autoRecover: true });
+    expect(manager.runningKind).toBe("capture");
+    expect(manager.runningOptions.meterOnly).toBe(false);
+  });
+
+  it("PROBE_TIMEOUT", async () => {
+    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "timeout";
+    process.env.INTERVIEW_COPILOT_AUDIO_PROBE_TIMEOUT_MS = "100";
+    await expect(manager.probe()).rejects.toThrow("AUDIO_PROBE_TIMEOUT");
+    expect(manager.isRunning).toBe(false);
+  });
+
+  it("PROBE_PROCESS_EXIT_WITHOUT_RESULT", async () => {
+    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "exit-without-result";
+    await expect(manager.probe()).rejects.toThrow("AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT");
+  });
+
+  it("INTERVIEW_START_WHILE_PROBE_RUNNING", async () => {
+    const probe = manager.probe();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await expect(manager.start({ meterOnly: false })).rejects.toThrow("AUDIO_BUSY");
+    await probe;
+  });
+
+  it("FORMAL_CAPTURE_STARTS_AFTER_PROBE", async () => {
+    await manager.probe();
+    await manager.start({ meterOnly: false, autoRecover: true });
+    expect(manager.runningOptions).toMatchObject({ meterOnly: false, autoRecover: true });
   });
 });

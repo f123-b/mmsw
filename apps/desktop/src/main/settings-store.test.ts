@@ -54,4 +54,16 @@ describe("OverlaySettingsStore", () => {
       expect(settings.getTencentValidation()).toEqual({ desktopShare: "verified", windowShare: "failed" });
     } finally { database.close(); }
   });
+
+  it("defaults automation to AUTO and persists the last user choice", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      expect(settings.getAutomationMode()).toBe("AUTO");
+      settings.setAutomationMode("MANUAL");
+      expect(settings.getAutomationMode()).toBe("MANUAL");
+      settings.setAutomationMode("AUTO");
+      expect(settings.getAutomationMode()).toBe("AUTO");
+    } finally { database.close(); }
+  });
 });

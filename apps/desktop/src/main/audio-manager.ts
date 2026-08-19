@@ -7,11 +7,13 @@ import {
   audioDevicesSchema,
   parseAudioSidecarEvent,
   type AudioDevices,
-  type AudioSidecarEvent
+  type AudioSidecarEvent,
+  type ProbeResult
 } from "@interview-copilot/protocol";
 import { PcmPacketAssembler } from "./pcm-packet-assembler";
 
 export type AudioProcessState = "stopped" | "running";
+export type AudioProcessKind = "probe" | "meter" | "capture";
 
 export interface AudioStartOptions {
   inputDeviceId?: string;
@@ -57,6 +59,9 @@ function sidecarPath(): string {
 
 export class AudioManager extends EventEmitter {
   private process: ChildProcessByStdio<null, Readable, Readable> | undefined;
+  private processKind: AudioProcessKind | undefined;
+  private processExitPromise: Promise<void> | undefined;
+  private resolveProcessExit: (() => void) | undefined;
   private stderrBuffer = "";
   private retryTimer: NodeJS.Timeout | undefined;
   private stableReadyTimer: NodeJS.Timeout | undefined;
@@ -64,18 +69,28 @@ export class AudioManager extends EventEmitter {
   private readonly pcmAssembler = new PcmPacketAssembler();
   private manualStop = true;
   private currentOptions: AudioStartOptions = {};
+  private pendingProbe: {
+    resolve: (result: ProbeResult) => void;
+    reject: (error: Error) => void;
+    result?: ProbeResult;
+    timer: NodeJS.Timeout;
+  } | undefined;
 
   get configuredPath(): string {
     return sidecarPath();
   }
 
   get isRunning(): boolean {
-    return Boolean(this.process && !this.process.killed);
+    return Boolean(this.process);
   }
+
+  get runningKind(): AudioProcessKind | undefined { return this.processKind; }
+  get runningOptions(): AudioStartOptions { return { ...this.currentOptions }; }
 
   async listDevices(): Promise<AudioDevices> {
     const executable = this.requireSidecar();
-    const child = spawn(executable, ["--list-devices", "--json"], {
+    const command = this.sidecarCommand(executable, ["--list-devices", "--json"]);
+    const child = spawn(command.command, command.args, {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -83,33 +98,87 @@ export class AudioManager extends EventEmitter {
     return audioDevicesSchema.parse(JSON.parse(stdout));
   }
 
-  start(options: AudioStartOptions = {}): void {
-    if (this.isRunning) return;
+  async start(options: AudioStartOptions = {}): Promise<void> {
+    if (this.isRunning) throw new Error(`AUDIO_BUSY: ${this.processKind ?? "audio"} sidecar is still running`);
+    if (this.pendingProbe) throw new Error("AUDIO_BUSY: audio probe is still settling");
     this.clearRecoveryTimer();
     this.clearStableReadyTimer();
     this.manualStop = false;
     this.recoveryBackoff.reset();
     this.currentOptions = { ...options, autoRecover: options.autoRecover ?? true };
-    this.spawnSidecar(this.currentOptions);
+    this.spawnSidecar(this.currentOptions, options.probeOnly ? "probe" : options.meterOnly ? "meter" : "capture");
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.manualStop = true;
     this.clearRecoveryTimer();
     this.clearStableReadyTimer();
     this.recoveryBackoff.reset();
     this.pcmAssembler.reset();
+    const pendingProbe = this.pendingProbe;
+    this.pendingProbe = undefined;
+    if (pendingProbe) {
+      clearTimeout(pendingProbe.timer);
+      pendingProbe.reject(new Error("AUDIO_PROBE_STOPPED: audio probe was stopped before completion"));
+    }
     const child = this.process;
-    this.process = undefined;
+    const exit = this.processExitPromise;
     if (child && !child.killed) child.kill();
-    this.emit("process", "stopped" as AudioProcessState);
+    if (child && exit) await Promise.race([exit, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
+    if (!this.process) return;
+    if (this.process === child) {
+      this.process = undefined;
+      this.processKind = undefined;
+      this.processExitPromise = undefined;
+      this.resolveProcessExit?.();
+      this.resolveProcessExit = undefined;
+      this.emit("process", "stopped" as AudioProcessState);
+    }
   }
 
-  probe(options: Omit<AudioStartOptions, "meterOnly" | "probeOnly" | "autoRecover"> = {}): void {
-    this.start({ ...options, probeOnly: true, autoRecover: false });
+  async waitForIdle(timeoutMs = 10_000): Promise<void> {
+    if (!this.process) return;
+    const process = this.process;
+    const exit = this.processExitPromise;
+    if (exit) await Promise.race([exit, new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))]);
+    if (this.process === process) throw new Error("AUDIO_BUSY: audio sidecar did not stop in time");
   }
 
-  private spawnSidecar(options: AudioStartOptions): void {
+  async probe(options: Omit<AudioStartOptions, "meterOnly" | "probeOnly" | "autoRecover"> = {}): Promise<ProbeResult> {
+    if (this.processKind === "probe") await this.stop();
+    if (this.isRunning) throw new Error(`AUDIO_BUSY: ${this.processKind ?? "audio"} sidecar is still running`);
+    const result = new Promise<ProbeResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (!this.pendingProbe) return;
+        const pending = this.pendingProbe;
+        this.pendingProbe = undefined;
+        const error = new Error("AUDIO_PROBE_TIMEOUT: probe did not complete in time");
+        void this.stop().finally(() => pending.reject(error));
+      }, Math.max(50, Number(process.env.INTERVIEW_COPILOT_AUDIO_PROBE_TIMEOUT_MS ?? 15_000)));
+      this.pendingProbe = { resolve, reject, timer };
+    });
+    try {
+      this.clearRecoveryTimer();
+      this.clearStableReadyTimer();
+      this.manualStop = false;
+      this.recoveryBackoff.reset();
+      this.currentOptions = { ...options, probeOnly: true, autoRecover: false };
+      // `pendingProbe` is intentionally installed before spawning so that a
+      // very fast sidecar cannot race past the result handler. Calling the
+      // public start() here would reject that pending operation as AUDIO_BUSY.
+      this.spawnSidecar(this.currentOptions, "probe");
+    } catch (error) {
+      const pending = this.pendingProbe;
+      this.pendingProbe = undefined;
+      if (pending) {
+        clearTimeout(pending.timer);
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    return result;
+  }
+
+  private spawnSidecar(options: AudioStartOptions, kind: AudioProcessKind): void {
     const executable = this.configuredPath;
     if (!existsSync(executable)) {
       this.manualStop = true;
@@ -121,7 +190,7 @@ export class AudioManager extends EventEmitter {
         timestamp: Date.now()
       });
       this.emitEvent({ type: "audio_state", state: "FAILED", timestamp: Date.now() });
-      return;
+      throw new Error(`SIDECAR_NOT_FOUND: Audio Sidecar not found: ${executable}`);
     }
 
     const args = [
@@ -132,11 +201,14 @@ export class AudioManager extends EventEmitter {
     ];
     this.stderrBuffer = "";
     this.pcmAssembler.reset();
-    this.process = spawn(executable, args, {
+    const command = this.sidecarCommand(executable, args);
+    this.process = spawn(command.command, command.args, {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"]
     });
     const child = this.process;
+    this.processKind = kind;
+    this.processExitPromise = new Promise<void>((resolve) => { this.resolveProcessExit = resolve; });
     this.emit("process", "running" as AudioProcessState);
 
     child.stdout.on("data", (chunk: Buffer) => {
@@ -153,14 +225,26 @@ export class AudioManager extends EventEmitter {
         recoverable: true,
         timestamp: Date.now()
       });
-      this.scheduleRecovery();
+      if (this.pendingProbe) this.rejectPendingProbe(new Error(`AUDIO_PROBE_PROCESS_CRASHED: ${error.message}`));
+      if (kind !== "probe") this.scheduleRecovery();
     });
     child.on("close", (code) => {
       const wasExpected = this.manualStop || Boolean(options.probeOnly);
       this.clearStableReadyTimer();
       this.pcmAssembler.reset();
       if (this.process === child) this.process = undefined;
+      if (this.processKind === kind) this.processKind = undefined;
+      this.resolveProcessExit?.();
+      this.resolveProcessExit = undefined;
+      this.processExitPromise = undefined;
       this.emit("process", "stopped" as AudioProcessState);
+      if (kind === "probe" && this.pendingProbe) {
+        const pending = this.pendingProbe;
+        this.pendingProbe = undefined;
+        clearTimeout(pending.timer);
+        if (pending.result) pending.resolve(pending.result);
+        else pending.reject(new Error(`AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT: probe exited with code ${code ?? "unknown"}`));
+      }
       if (!wasExpected && options.autoRecover !== false) {
         this.emitEvent({ type: "audio_state", state: "DEGRADED", timestamp: Date.now() });
         if (code !== 0) {
@@ -202,7 +286,7 @@ export class AudioManager extends EventEmitter {
     } catch (error) {
       this.emit("diagnostic", `Audio recovery device enumeration failed: ${String(error)}`);
     }
-    if (!this.manualStop) this.spawnSidecar(this.currentOptions);
+    if (!this.manualStop) this.spawnSidecar(this.currentOptions, this.currentOptions.meterOnly ? "meter" : "capture");
   }
 
   private clearRecoveryTimer(): void {
@@ -221,6 +305,11 @@ export class AudioManager extends EventEmitter {
     return executable;
   }
 
+  private sidecarCommand(executable: string, args: string[]): { command: string; args: string[] } {
+    if (/\.(?:mjs|js)$/i.test(executable)) return { command: process.env.INTERVIEW_COPILOT_NODE_EXECUTABLE ?? "node", args: [executable, ...args] };
+    return { command: executable, args };
+  }
+
   private consumeStderr(chunk: string): void {
     this.stderrBuffer += chunk;
     const lines = this.stderrBuffer.split(/\r?\n/);
@@ -236,6 +325,7 @@ export class AudioManager extends EventEmitter {
   }
 
   private emitEvent(event: AudioSidecarEvent): void {
+    if (event.type === "probe_result" && this.pendingProbe) this.pendingProbe.result = event;
     if (event.type === "audio_state" && event.state === "READY") {
       this.clearStableReadyTimer();
       const readyProcess = this.process;
@@ -247,6 +337,14 @@ export class AudioManager extends EventEmitter {
       }, STABLE_READY_MS);
     }
     this.emit("event", event);
+  }
+
+  private rejectPendingProbe(error: Error): void {
+    const pending = this.pendingProbe;
+    if (!pending) return;
+    this.pendingProbe = undefined;
+    clearTimeout(pending.timer);
+    pending.reject(error);
   }
 
   private collectStdout(child: ChildProcessByStdio<null, Readable, Readable>): Promise<string> {

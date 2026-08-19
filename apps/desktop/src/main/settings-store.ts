@@ -109,6 +109,7 @@ export interface OverlayCaptureProtectionSettings {
 }
 
 export type TencentValidationStatus = "unverified" | "verified" | "failed";
+export type AutomationMode = "AUTO" | "MANUAL";
 
 export interface TencentValidationState {
   desktopShare: TencentValidationStatus;
@@ -118,6 +119,7 @@ export interface TencentValidationState {
 export class OverlaySettingsStore {
   private static readonly key = "overlay.captureProtection";
   private static readonly tencentValidationKey = "overlay.tencentValidation";
+  private static readonly automationModeKey = "interview.automationMode";
 
   constructor(private readonly database: SqliteDatabase) {}
 
@@ -136,6 +138,18 @@ export class OverlaySettingsStore {
     this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.key, JSON.stringify(value)]);
     this.database.flushNow();
     return { captureProtection: value };
+  }
+
+  getAutomationMode(): AutomationMode {
+    const stored = this.database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", [OverlaySettingsStore.automationModeKey]);
+    return stored?.value === '"MANUAL"' ? "MANUAL" : "AUTO";
+  }
+
+  setAutomationMode(mode: AutomationMode): AutomationMode {
+    const value = mode === "MANUAL" ? "MANUAL" : "AUTO";
+    this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.automationModeKey, JSON.stringify(value)]);
+    this.database.flushNow();
+    return value;
   }
 
   getTencentValidation(): TencentValidationState {
