@@ -10,7 +10,7 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(scriptDirectory, "..", "..", "..");
 const desktopDirectory = join(repositoryRoot, "apps", "desktop");
 const outputDirectory = join(desktopDirectory, "out");
-const artifactDirectory = process.env.INTERVIEW_COPILOT_CAPTURE_ARTIFACT_DIR ?? join(repositoryRoot, "artifacts", "capture-protection");
+const artifactDirectory = process.env.INTERVIEW_COPILOT_CAPTURE_ARTIFACT_DIR ?? join(repositoryRoot, "artifacts", "capture-protection-v2");
 const electronExecutable = process.env.ELECTRON_EXECUTABLE ?? (process.platform === "win32" ? join(repositoryRoot, "node_modules", "electron", "dist", "electron.exe") : join(repositoryRoot, "node_modules", "electron", "dist", "electron"));
 const packaged = process.env.ELECTRON_PACKAGED === "true";
 

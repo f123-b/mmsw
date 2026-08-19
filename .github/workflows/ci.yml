@@ -41,6 +41,23 @@ jobs:
       - name: Build desktop
         run: npm run build
 
+      - name: Build independent capture helper
+        run: npm run capture-helper:build
+
+      - name: Rust format check for capture helper
+        run: cargo fmt --check --manifest-path tools/capture-helper/Cargo.toml
+
+      - name: External capture protection smoke
+        run: npm run capture-protection:smoke
+
+      - name: Upload capture protection v2 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-protection-v2-${{ github.run_id }}
+          path: artifacts/capture-protection-v2
+          if-no-files-found: ignore
+
       - name: Production renderer smoke test
         run: node apps/desktop/scripts/production-smoke.mjs
 
@@ -98,6 +115,23 @@ jobs:
         shell: pwsh
         run: |
           node apps/desktop/scripts/verify-package.mjs
+
+      - name: Packaged external capture protection smoke
+        shell: pwsh
+        run: |
+          $unpacked = Join-Path $PWD "apps/desktop/release/win-unpacked"
+          $electron = Join-Path $unpacked "Interview Copilot.exe"
+          $env:ELECTRON_EXECUTABLE = $electron
+          $env:ELECTRON_PACKAGED = "true"
+          npm run capture-protection:smoke
+
+      - name: Upload packaged capture protection artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-protection-v2-packaged-${{ github.run_id }}
+          path: artifacts/capture-protection-v2
+          if-no-files-found: ignore
 
       - name: Packaged renderer smoke test
         shell: pwsh

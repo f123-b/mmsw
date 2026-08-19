@@ -1,0 +1,11 @@
+[package]
+name = "capture-helper"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "capture-helper"
+path = "src/main.rs"
+
+[dependencies]
+windows-capture = "2.0.1"

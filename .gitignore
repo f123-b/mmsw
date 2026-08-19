@@ -16,6 +16,8 @@ target/
 apps/desktop/.data/
 .functional-e2e-user-data/
 artifacts/functional/functional-failure.png
+artifacts/capture-protection-v2/manual-*.png
+artifacts/capture-protection-v2/modern-manual*.png
 apps/desktop/release/
 apps/desktop/release-alt/
 release-final/

@@ -9,6 +9,7 @@ import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, OverlayMode } from "../main/overlay-manager";
+import type { TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
 import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
 import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
@@ -31,7 +32,9 @@ const api = {
     setMode: (mode: OverlayMode) => ipcRenderer.invoke("overlay:set-mode", mode),
     getCaptureProtection: (): Promise<CaptureProtectionState> => ipcRenderer.invoke("overlay:get-capture-protection"),
     setCaptureProtection: (enabled: boolean): Promise<CaptureProtectionState | undefined> => ipcRenderer.invoke("overlay:set-capture-protection", enabled),
-    getCapabilities: (): Promise<CaptureProtectionCapabilities> => ipcRenderer.invoke("overlay:get-capabilities")
+    getCapabilities: (): Promise<CaptureProtectionCapabilities> => ipcRenderer.invoke("overlay:get-capabilities"),
+    getTencentValidation: (): Promise<TencentValidationState> => ipcRenderer.invoke("overlay:get-tencent-validation"),
+    setTencentValidation: (mode: "desktopShare" | "windowShare", status: TencentValidationStatus): Promise<TencentValidationState> => ipcRenderer.invoke("overlay:set-tencent-validation", mode, status)
   },
   screenshot: {
     capture: (): Promise<ScreenshotResult> => ipcRenderer.invoke("screenshot:capture")

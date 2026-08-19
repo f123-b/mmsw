@@ -4,7 +4,7 @@ import { create } from "zustand";
 import type { AudioDevices, AudioDrift, AudioSidecarEvent, ProbeResult, RealtimeServerMessage } from "@interview-copilot/protocol";
 import type { QuestionCandidate, QuestionEvent, SessionState, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { Profile } from "@interview-copilot/shared";
-import type { ProviderCenterPublicConfig } from "../main/settings-store";
+import type { ProviderCenterPublicConfig, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import { normalizeMeter, StableAnswerStateMachine } from "@interview-copilot/shared";
 import type { CaptureProtectionState, OverlayMode } from "../main/overlay-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
@@ -229,9 +229,20 @@ function persistDevice(key: string, value: string): void {
   try { localStorage.setItem(key, value); } catch { /* localStorage can be unavailable in hardened environments */ }
 }
 
-function CaptureProtectionSettings({ status, onToggle }: { status: CaptureProtectionState; onToggle: (enabled: boolean) => void }): JSX.Element {
-  const label = !status.supported ? "不支持" : status.error ? "启用失败" : status.enabled ? "已启用" : "已关闭";
-  return <section className="capture-protection-settings"><div className="settings-subheading"><div><h2>共享保护 <small>Capture Protection</small></h2><p>在受支持的 Windows 屏幕捕获方式中隐藏面试悬浮窗。</p></div><label className="switch-control"><input type="checkbox" checked={status.enabled} disabled={!status.supported} onChange={(event) => onToggle(event.target.checked)} /><span /></label></div><div className="capture-protection-meta"><strong className={!status.supported ? "unsupported" : status.error ? "failed" : status.enabled ? "enabled" : "disabled"}>{label}</strong><span>{status.platform}</span></div><p className="capture-protection-warning">不同会议软件、录屏方式和 Windows 版本行为可能不同，无法保证所有捕获方式都排除。</p>{status.error && <p className="capture-protection-error">共享保护启用失败：悬浮窗仍可正常使用。</p>}</section>;
+function verificationLabel(value: boolean | null): string {
+  return value === true ? "PASS" : value === false ? "FAIL" : "未测试";
+}
+
+function tencentLabel(value: TencentValidationStatus): string {
+  return value === "verified" ? "已验证" : value === "failed" ? "失败" : "未验证";
+}
+
+function CaptureProtectionSettings({ status, validation = { desktopShare: "unverified", windowShare: "unverified" }, onToggle, onValidate = () => undefined }: { status: CaptureProtectionState; validation?: TencentValidationState; onToggle: (enabled: boolean) => void; onValidate?: (mode: "desktopShare" | "windowShare", status: TencentValidationStatus) => void }): JSX.Element {
+  const [validationState, setValidationState] = useState<TencentValidationState>(validation);
+  useEffect(() => { void window.interviewCopilot.overlay.getTencentValidation().then(setValidationState).catch(() => undefined); }, []);
+  const recordValidation = (mode: "desktopShare" | "windowShare", nextStatus: TencentValidationStatus) => { setValidationState((current) => ({ ...current, [mode]: nextStatus })); onValidate(mode, nextStatus); };
+  const windowsLabel = !status.supported ? "当前平台不支持 Windows Capture Protection" : status.lastError ? "Windows protection flag 失败" : status.requested && status.osFlagApplied ? "Windows protection enabled" : "Windows protection disabled";
+  return <section className="capture-protection-settings"><div className="settings-subheading"><div><h2>共享保护 <small>Capture Protection</small></h2><p>在受支持的 Windows 屏幕捕获方式中隐藏面试悬浮窗。</p></div><label className="switch-control"><input type="checkbox" checked={status.requested} disabled={!status.supported} onChange={(event) => onToggle(event.target.checked)} /><span /></label></div><div className="capture-protection-meta"><strong className={!status.supported ? "unsupported" : status.lastError ? "failed" : status.requested && status.osFlagApplied ? "enabled" : "disabled"}>{windowsLabel}</strong><span>{status.platform}</span></div><div className="capture-protection-layers"><div><span>Windows protection</span><strong>{windowsLabel}</strong></div><div><span>Automatic capture validation · Window</span><strong>{verificationLabel(status.windowCaptureVerified)}</strong></div><div><span>Automatic capture validation · Display</span><strong>{verificationLabel(status.displayCaptureVerified)}</strong></div><div><span>Tencent Meeting · Desktop Share</span><strong>{tencentLabel(validationState.desktopShare)}</strong></div><div><span>Tencent Meeting · Window Share</span><strong>{tencentLabel(validationState.windowShare)}</strong></div></div><button className="outline-pill tencent-validation-button" onClick={() => recordValidation("desktopShare", "unverified")}>开始腾讯会议共享验证</button><div className="tencent-validation-panel"><h3>腾讯会议共享保护验证</h3><p>请在腾讯会议中分别验证“共享整个桌面”和“共享窗口”；预览不能替代另一台设备上的远端观察。</p><div className="test-marker-label">TEST MARKER · 仅在验证模式 / INTERVIEW_COPILOT_CAPTURE_TEST=1 显示</div><div className="tencent-validation-row"><span>腾讯会议共享整个桌面：{tencentLabel(validationState.desktopShare)}</span><button className="text-button" onClick={() => recordValidation("desktopShare", "verified")}>远端看不到</button><button className="text-button danger-text" onClick={() => recordValidation("desktopShare", "failed")}>远端可以看到</button></div><div className="tencent-validation-row"><span>腾讯会议共享窗口：{tencentLabel(validationState.windowShare)}</span><button className="text-button" onClick={() => recordValidation("windowShare", "verified")}>远端看不到</button><button className="text-button danger-text" onClick={() => recordValidation("windowShare", "failed")}>远端可以看到</button></div></div><p className="capture-protection-warning">不同会议软件、录屏方式和 Windows 版本行为可能不同，无法保证所有捕获方式都排除。</p>{status.lastError && <p className="capture-protection-error">共享保护启用失败：Windows 标志未确认，悬浮窗仍可正常使用。</p>}</section>;
 }
 
 export function App(): JSX.Element {
@@ -269,7 +280,8 @@ export function App(): JSX.Element {
   const [embeddingModel, setEmbeddingModel] = useState("text-embedding-3-small");
   const [embeddingApiKey, setEmbeddingApiKey] = useState("");
   const [providerTests, setProviderTests] = useState<Record<string, string>>({});
-  const [captureProtection, setCaptureProtection] = useState<CaptureProtectionState>({ platform: "win32", supported: false, enabled: true, applied: false });
+  const [captureProtection, setCaptureProtection] = useState<CaptureProtectionState>({ platform: "win32", supported: false, requested: true, osFlagApplied: false, enabled: true, applied: false, externalCaptureVerified: null, displayCaptureVerified: null, windowCaptureVerified: null });
+  const [tencentValidation, setTencentValidation] = useState<TencentValidationState>({ desktopShare: "unverified", windowShare: "unverified" });
   const [knowledgeBases, setKnowledgeBases] = useState<Array<{ id: string; name: string }>>([]);
   const [knowledgeBaseId, setKnowledgeBaseId] = useState("");
   const [knowledgeDocuments, setKnowledgeDocuments] = useState<Array<{ id: string; filename: string; status: string; error?: string }>>([]);
@@ -344,8 +356,9 @@ export function App(): JSX.Element {
           setEmbeddingBaseUrl(settings.embedding.baseUrl);
           setEmbeddingModel(settings.embedding.model);
         }
-        const [captureCapabilities, captureState] = await Promise.all([window.interviewCopilot.overlay.getCapabilities(), window.interviewCopilot.overlay.getCaptureProtection()]);
+        const [captureCapabilities, captureState, validation] = await Promise.all([window.interviewCopilot.overlay.getCapabilities(), window.interviewCopilot.overlay.getCaptureProtection(), window.interviewCopilot.overlay.getTencentValidation()]);
         setCaptureProtection({ ...captureState, platform: captureCapabilities.platform, supported: captureCapabilities.captureProtectionSupported });
+        setTencentValidation(validation);
         let bases = await window.interviewCopilot.knowledge.listBases();
         if (bases.length === 0) {
           const created = await window.interviewCopilot.knowledge.createBase("默认知识库");
@@ -471,8 +484,12 @@ export function App(): JSX.Element {
       const next = await window.interviewCopilot.overlay.setCaptureProtection(enabled);
       if (next) setCaptureProtection(next);
     } catch (error) {
-      setCaptureProtection((current) => ({ ...current, error: String(error), applied: false }));
+      setCaptureProtection((current) => ({ ...current, lastError: String(error), osFlagApplied: false }));
     }
+  };
+  const validateTencent = async (mode: "desktopShare" | "windowShare", status: TencentValidationStatus) => {
+    try { setTencentValidation(await window.interviewCopilot.overlay.setTencentValidation(mode, status)); }
+    catch (error) { store.setNotice(`腾讯会议验证记录失败：${String(error)}`); }
   };
   const captureScreenshot = async () => {
     try { store.setScreenshot(await window.interviewCopilot.screenshot.capture()); }

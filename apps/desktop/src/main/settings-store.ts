@@ -108,8 +108,16 @@ export interface OverlayCaptureProtectionSettings {
   captureProtection: boolean;
 }
 
+export type TencentValidationStatus = "unverified" | "verified" | "failed";
+
+export interface TencentValidationState {
+  desktopShare: TencentValidationStatus;
+  windowShare: TencentValidationStatus;
+}
+
 export class OverlaySettingsStore {
   private static readonly key = "overlay.captureProtection";
+  private static readonly tencentValidationKey = "overlay.tencentValidation";
 
   constructor(private readonly database: SqliteDatabase) {}
 
@@ -128,6 +136,26 @@ export class OverlaySettingsStore {
     this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.key, JSON.stringify(value)]);
     this.database.flushNow();
     return { captureProtection: value };
+  }
+
+  getTencentValidation(): TencentValidationState {
+    const fallback: TencentValidationState = { desktopShare: "unverified", windowShare: "unverified" };
+    const stored = this.database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", [OverlaySettingsStore.tencentValidationKey]);
+    if (!stored) return fallback;
+    try {
+      const value = JSON.parse(stored.value) as Partial<TencentValidationState>;
+      return {
+        desktopShare: value.desktopShare === "verified" || value.desktopShare === "failed" ? value.desktopShare : "unverified",
+        windowShare: value.windowShare === "verified" || value.windowShare === "failed" ? value.windowShare : "unverified"
+      };
+    } catch { return fallback; }
+  }
+
+  setTencentValidation(mode: "desktopShare" | "windowShare", status: TencentValidationStatus): TencentValidationState {
+    const next = { ...this.getTencentValidation(), [mode]: status };
+    this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.tencentValidationKey, JSON.stringify(next)]);
+    this.database.flushNow();
+    return next;
   }
 }
 

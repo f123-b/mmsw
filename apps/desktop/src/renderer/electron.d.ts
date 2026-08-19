@@ -10,7 +10,7 @@ import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
 import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
-import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
+import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { ConversationMessageRecord, ConversationRecord, ProjectRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 
@@ -33,6 +33,8 @@ declare global {
         getCaptureProtection(): Promise<CaptureProtectionState>;
         setCaptureProtection(enabled: boolean): Promise<CaptureProtectionState | undefined>;
         getCapabilities(): Promise<CaptureProtectionCapabilities>;
+        getTencentValidation(): Promise<TencentValidationState>;
+        setTencentValidation(mode: "desktopShare" | "windowShare", status: TencentValidationStatus): Promise<TencentValidationState>;
       };
       screenshot: {
         capture(): Promise<ScreenshotResult>;

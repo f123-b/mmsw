@@ -43,4 +43,15 @@ describe("OverlaySettingsStore", () => {
       database.close();
     }
   });
+
+  it("persists Tencent desktop and window validation independently", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      expect(settings.getTencentValidation()).toEqual({ desktopShare: "unverified", windowShare: "unverified" });
+      settings.setTencentValidation("desktopShare", "verified");
+      settings.setTencentValidation("windowShare", "failed");
+      expect(settings.getTencentValidation()).toEqual({ desktopShare: "verified", windowShare: "failed" });
+    } finally { database.close(); }
+  });
 });

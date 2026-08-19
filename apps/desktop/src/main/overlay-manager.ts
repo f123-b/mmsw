@@ -28,8 +28,13 @@ export class OverlayManager {
     this.captureProtectionState = {
       platform: this.capabilities.platform,
       supported: this.capabilities.captureProtectionSupported,
+      requested: this.captureProtectionEnabled,
+      osFlagApplied: false,
       enabled: this.captureProtectionEnabled,
-      applied: false
+      applied: false,
+      externalCaptureVerified: null,
+      displayCaptureVerified: null,
+      windowCaptureVerified: null
     };
   }
 
@@ -90,7 +95,12 @@ export class OverlayManager {
     });
     this.window.setAlwaysOnTop(true, "screen-saver");
     void this.options.loadRenderer(this.window);
-    this.window.once("ready-to-show", () => this.window?.showInactive());
+    this.window.once("ready-to-show", () => {
+      // Chromium may only expose the final native HWND after the first compositor frame.
+      // Re-apply and re-check here so packaged and dev windows use the same native handle.
+      this.applyCaptureProtection();
+      this.window?.showInactive();
+    });
     this.window.on("closed", () => { this.window = undefined; });
     this.applyMode();
     this.applyCaptureProtection();
@@ -123,6 +133,22 @@ export class OverlayManager {
 
   applyCaptureProtection(): void {
     this.captureProtectionState = applyCaptureProtection(this.currentWindow, this.captureProtectionEnabled, this.capabilities, this.options.onCaptureProtectionDiagnostic);
+    const window = this.currentWindow;
+    if (window) window.webContents.send("overlay:capture-protection", this.captureProtectionState);
+  }
+
+  recordExternalCaptureVerification(mode: "window" | "display", verified: boolean, fields: Record<string, unknown> = {}): void {
+    this.captureProtectionState = {
+      ...this.captureProtectionState,
+      externalCaptureVerified: verified,
+      ...(mode === "window" ? { windowCaptureVerified: verified } : { displayCaptureVerified: verified })
+    };
+    this.options.onCaptureProtectionDiagnostic?.(
+      verified
+        ? `CAPTURE_PROTECTION_EXTERNAL_${mode === "window" ? "WINDOW" : "DISPLAY"}_PASS`
+        : `CAPTURE_PROTECTION_EXTERNAL_${mode === "window" ? "WINDOW" : "DISPLAY"}_FAIL`,
+      { mode, verified, ...fields }
+    );
     const window = this.currentWindow;
     if (window) window.webContents.send("overlay:capture-protection", this.captureProtectionState);
   }

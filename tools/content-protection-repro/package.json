@@ -1,0 +1,6 @@
+{
+  "name": "content-protection-repro",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs"
+}

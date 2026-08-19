@@ -6,6 +6,7 @@ const unpackedDirectory = process.env.ELECTRON_PACKAGE_DIR ?? join(process.cwd()
 const archive = join(unpackedDirectory, "resources", "app.asar");
 const unpackedRequired = [
   join(unpackedDirectory, "resources", "audio-sidecar", "interview-audio.exe"),
+  join(unpackedDirectory, "resources", "capture-helper", "capture-helper.exe"),
   join(unpackedDirectory, "resources", "sql.js", "sql-wasm.wasm")
 ];
 const archiveRequired = ["out/main/index.js", "out/preload/index.mjs", "out/renderer/index.html"];

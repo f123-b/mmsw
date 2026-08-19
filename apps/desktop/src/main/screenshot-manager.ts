@@ -22,12 +22,23 @@ export interface ScreenshotResult {
 
 export interface ScreenshotManagerOptions {
   onDiagnostic?: (message: string) => void;
+  getOverlayWindow?: () => { isDestroyed(): boolean; isVisible(): boolean; hide(): void; showInactive(): void } | undefined;
+  shouldUseInternalFallback?: (result: ScreenshotResult) => boolean | Promise<boolean>;
 }
 
 export class ScreenshotManager {
   constructor(private readonly options: ScreenshotManagerOptions = {}) {}
 
   async capturePrimaryDisplay(): Promise<ScreenshotResult> {
+    const result = await this.capturePrimaryDisplayDirect();
+    if (await this.options.shouldUseInternalFallback?.(result)) {
+      await this.cleanup(result);
+      return await this.captureWithInternalFallback();
+    }
+    return result;
+  }
+
+  private async capturePrimaryDisplayDirect(): Promise<ScreenshotResult> {
     await this.cleanupExpired();
     const primaryDisplay = screen.getPrimaryDisplay();
     const sources = await desktopCapturer.getSources({
@@ -43,6 +54,21 @@ export class ScreenshotManager {
     }
 
     return this.saveSource(source);
+  }
+
+  private async captureWithInternalFallback(): Promise<ScreenshotResult> {
+    const overlay = this.options.getOverlayWindow?.();
+    if (!overlay || overlay.isDestroyed() || !overlay.isVisible()) return await this.capturePrimaryDisplayDirect();
+    const started = Date.now();
+    overlay.hide();
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 80));
+      this.options.onDiagnostic?.("INTERNAL_SCREENSHOT_FALLBACK_ACTIVE");
+      return await this.capturePrimaryDisplayDirect();
+    } finally {
+      overlay.showInactive();
+      if (Date.now() - started > 200) this.options.onDiagnostic?.("INTERNAL_SCREENSHOT_FALLBACK_SLOW");
+    }
   }
 
   async captureWindow(sourceId: string): Promise<ScreenshotResult> {

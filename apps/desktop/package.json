@@ -8,9 +8,10 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "build:sidecar": "cargo build --release --manifest-path ../../crates/audio-sidecar/Cargo.toml",
-    "package:win": "npm run build:sidecar && npm run build && electron-builder --win",
+    "build:capture-helper": "cargo build --release --manifest-path ../../tools/capture-helper/Cargo.toml",
+    "package:win": "npm run build:sidecar && npm run build:capture-helper && npm run build && electron-builder --win",
     "smoke:production": "npm run build && node scripts/production-smoke.mjs",
-    "capture-protection:smoke": "npm run build && node scripts/capture-protection-smoke.mjs",
+    "capture-protection:smoke": "npm run build:capture-helper && npm run build && node scripts/capture-protection-smoke.mjs",
     "visual:smoke": "npm run build && node scripts/visual-smoke.mjs",
     "functional:e2e": "npm run build && node scripts/functional-e2e.mjs",
     "typecheck": "tsc -p tsconfig.json",
@@ -54,6 +55,10 @@
       {
         "from": "../../crates/audio-sidecar/target/release/interview-audio.exe",
         "to": "audio-sidecar/interview-audio.exe"
+      },
+      {
+        "from": "../../tools/capture-helper/target/release/capture-helper.exe",
+        "to": "capture-helper/capture-helper.exe"
       },
       {
         "from": "../../node_modules/sql.js/dist/sql-wasm.wasm",
