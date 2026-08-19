@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage } from "electron";
 import { join, relative } from "node:path";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
@@ -54,7 +54,8 @@ let realtimeLogger: SafeLogger | undefined;
 let database: SqliteDatabase | undefined;
 const preloadPath = join(__dirname, "../preload/index.mjs");
 const rendererFile = join(__dirname, "../renderer/index.html");
-const productionSmokeRequested = process.argv.includes("--production-smoke");
+const visualSmokeRequested = process.argv.includes("--visual-smoke");
+const productionSmokeRequested = process.argv.includes("--production-smoke") || visualSmokeRequested;
 let mainRendererLoad: Promise<void> | undefined;
 const rendererAppReadyWindows = new Set<number>();
 const rendererAppReadyWaiters = new Map<number, Set<() => void>>();
@@ -109,6 +110,44 @@ async function readRendererReadiness(window: BrowserWindow): Promise<RendererRea
     rootChildren: document.querySelector("#root")?.children.length ?? 0,
     appReady: document.documentElement.dataset.appReady === "true"
   }), 0))`, true) as RendererReadiness;
+}
+
+async function waitForRendererPaint(window: BrowserWindow): Promise<void> {
+  await window.webContents.executeJavaScript("new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))", true);
+}
+
+async function waitForWindowVisible(window: BrowserWindow): Promise<void> {
+  if (window.isVisible()) return;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      window.removeListener("ready-to-show", finish);
+      resolve();
+    };
+    const timeout = setTimeout(finish, 5_000);
+    window.once("ready-to-show", finish);
+  });
+}
+
+function hasVisiblePixels(png: Buffer): boolean {
+  const bitmap = nativeImage.createFromBuffer(png).toBitmap();
+  for (let index = 3; index < bitmap.length; index += 4) {
+    if (bitmap[index] > 10) return true;
+  }
+  return false;
+}
+
+async function captureVisibleWindow(window: BrowserWindow): Promise<Buffer> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await waitForRendererPaint(window);
+    const png = (await window.capturePage()).toPNG();
+    if (png.byteLength > 0 && hasVisiblePixels(png)) return png;
+    if (attempt < 4) await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("Production screenshot contains no visible pixels");
 }
 
 async function loadRenderer(window: BrowserWindow, overlay = false): Promise<void> {
@@ -200,8 +239,8 @@ async function captureScreenshot(trigger = "screenshot-answer"): Promise<void> {
 function createMainWindow(): BrowserWindow {
   verifyPreload();
   mainWindow = new BrowserWindow({
-    width: 1180,
-    height: 760,
+    width: 1440,
+    height: 1000,
     minWidth: 900,
     minHeight: 620,
     title: "Interview Copilot",
@@ -241,6 +280,17 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
     appLogger?.error("PRODUCTION_SMOKE_MAIN_FAILED", { error: String(error) });
     return unavailable;
   });
+  let visualArtifacts: { main: string; overlay: string } | undefined;
+  let visualArtifactDirectory: string | undefined;
+  let mainArtifact: string | undefined;
+  if (visualSmokeRequested) {
+    const artifactDirectory = process.env.UI_ARTIFACT_DIR ?? join(process.cwd(), "artifacts", "ui");
+    mainArtifact = join(artifactDirectory, process.env.UI_MAIN_NAME ?? "main-current.png");
+    await mkdir(artifactDirectory, { recursive: true });
+    const mainPng = await captureVisibleWindow(main);
+    await writeFile(mainArtifact, mainPng);
+    visualArtifactDirectory = artifactDirectory;
+  }
   const overlay = overlayManager?.show();
   let overlayReadiness = unavailable;
   if (overlay) {
@@ -248,9 +298,17 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
     await waitForRendererLoad(overlay);
     const overlayReady = await waitForRendererReady(overlay);
     overlayReadiness = { bridgeAvailable: overlayReady, rootChildren: overlayReady ? 1 : 0, appReady: overlayReady };
+    if (visualSmokeRequested) await waitForWindowVisible(overlay);
+  }
+  if (visualSmokeRequested && overlay && mainArtifact && visualArtifactDirectory) {
+    const overlayArtifact = join(visualArtifactDirectory, process.env.UI_OVERLAY_NAME ?? "overlay-current.png");
+    const overlayPng = await captureVisibleWindow(overlay);
+    await writeFile(overlayArtifact, overlayPng);
+    visualArtifacts = { main: mainArtifact, overlay: overlayArtifact };
+    appLogger?.info("PRODUCTION_SCREENSHOTS_CAPTURED", visualArtifacts);
   }
   const ok = mainReadiness.bridgeAvailable && mainReadiness.rootChildren > 0 && Boolean(overlay) && overlayReadiness.bridgeAvailable && overlayReadiness.rootChildren > 0;
-  const result = { ok, main: mainReadiness, overlay: overlayReadiness };
+  const result = { ok, main: mainReadiness, overlay: overlayReadiness, ...(visualArtifacts ? { visualArtifacts } : {}) };
   appLogger?.info("PRODUCTION_SMOKE_RESULT", result);
   process.stdout.write(`PRODUCTION_SMOKE_RESULT ${JSON.stringify(result)}\n`);
   app.exit(ok ? 0 : 1);
@@ -499,6 +557,7 @@ function registerShortcuts(): void {
 }
 
 app.whenReady().then(async () => {
+  if (!isDevelopment()) Menu.setApplicationMenu(null);
   const logsDirectory = join(app.getPath("appData"), "InterviewCopilot", "logs");
   appLogger = new SafeLogger(logsDirectory, "app");
   audioLogger = new SafeLogger(logsDirectory, "audio");

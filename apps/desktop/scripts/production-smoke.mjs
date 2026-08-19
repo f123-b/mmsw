@@ -25,7 +25,9 @@ const electronExecutable = process.env.ELECTRON_EXECUTABLE ?? (process.platform 
   : join(repositoryRoot, "node_modules", "electron", "dist", "electron"));
 if (!existsSync(electronExecutable)) throw new Error(`Electron executable is missing: ${electronExecutable}`);
 const packaged = process.env.ELECTRON_PACKAGED === "true";
-const electronArguments = packaged ? ["--production-smoke"] : [desktopDirectory, "--production-smoke"];
+const visualSmoke = process.env.UI_VISUAL_SMOKE === "true";
+const smokeArguments = ["--production-smoke", ...(visualSmoke ? ["--visual-smoke"] : [])];
+const electronArguments = packaged ? smokeArguments : [desktopDirectory, ...smokeArguments];
 
 const exitCode = await new Promise((resolve) => {
   const child = spawn(electronExecutable, electronArguments, {

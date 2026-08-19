@@ -1,4 +1,4 @@
-import { BrowserWindow } from "electron";
+import { BrowserWindow, screen } from "electron";
 import { join } from "node:path";
 import { applyOverlayMode, nextOverlayMode, type OverlayMode } from "./overlay-mode";
 
@@ -30,13 +30,17 @@ export class OverlayManager {
       return this.window;
     }
 
+    const { x, y, width, height } = screen.getPrimaryDisplay().workArea;
     this.window = new BrowserWindow({
-      width: 420,
-      height: 320,
-      minWidth: 320,
-      minHeight: 220,
+      x,
+      y,
+      width,
+      height,
+      minWidth: width,
+      minHeight: height,
       frame: false,
       transparent: true,
+      backgroundColor: "#00000000",
       resizable: true,
       alwaysOnTop: true,
       skipTaskbar: true,
