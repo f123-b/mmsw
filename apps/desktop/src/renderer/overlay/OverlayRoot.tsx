@@ -14,6 +14,10 @@ interface OverlayRootProps {
   remoteTranscript: TranscriptSnapshot;
   micTranscript: TranscriptSnapshot;
   onToggleMode: () => void;
+  captureProtectionEnabled?: boolean;
+  captureProtectionSupported?: boolean;
+  onToggleCaptureProtection?: () => void;
+  captureTest?: boolean;
 }
 
 type PanelKey = "toolbar" | "transcript" | "answer" | "shortcuts";
@@ -57,14 +61,15 @@ function TranscriptPanel({ label, snapshot }: { label: string; snapshot: Transcr
   return <div className="overlay-transcript-content"><div className="overlay-panel-label">{label}</div>{segments.length === 0 && !snapshot.partial ? <p className="overlay-muted">等待转录...</p> : segments.map((segment) => <p key={segment.id}>{segment.text}</p>)}{snapshot.partial && <p className="partial-line">{snapshot.partial.text}</p>}</div>;
 }
 
-export function OverlayRoot({ mic, system, state, overlayMode, answerMode, question, answerText, answerStreaming, remoteTranscript, micTranscript, onToggleMode }: OverlayRootProps): JSX.Element {
+export function OverlayRoot({ mic, system, state, overlayMode, answerMode, question, answerText, answerStreaming, remoteTranscript, micTranscript, onToggleMode, captureProtectionEnabled, captureProtectionSupported, onToggleCaptureProtection, captureTest }: OverlayRootProps): JSX.Element {
   const [positions, movePanel] = usePanelPositions();
   const [answerDraft, setAnswerDraft] = useState("");
   const answerLines = useMemo(() => answerText.split(/\r?\n/).filter(Boolean).slice(-12), [answerText]);
   return (
     <main className="overlay-root">
+      {captureTest && <div className="capture-test-marker">CAPTURE_PROTECTION_TEST_MARKER_7F32</div>}
       <DraggablePanel panel="toolbar" position={positions.toolbar} onMove={movePanel} className="toolbar-panel">
-        <div className="floating-toolbar"><strong>Interview Copilot</strong><span className="toolbar-divider" /><span className="toolbar-status"><i />{state}</span><span className="toolbar-chip">麦克风 {Math.round(mic * 100)}%</span><span className="toolbar-chip">回答 {answerMode}</span><button onClick={onToggleMode}>{overlayMode === "interactive" ? "AUTO" : "PASSIVE"}</button><span className="toolbar-live">●</span></div>
+        <div className="floating-toolbar"><strong>Interview Copilot</strong><span className="toolbar-divider" /><span className="toolbar-status"><i />{state}</span><span className="toolbar-chip">麦克风 {Math.round(mic * 100)}%</span><span className="toolbar-chip">回答 {answerMode}</span><button className="toolbar-protection" title={captureProtectionSupported ? `共享保护${captureProtectionEnabled ? "已启用" : "已关闭"}` : "共享保护不支持"} disabled={!captureProtectionSupported} onClick={onToggleCaptureProtection}>◈</button><button onClick={onToggleMode}>{overlayMode === "interactive" ? "AUTO" : "PASSIVE"}</button><span className="toolbar-live">●</span></div>
       </DraggablePanel>
       <DraggablePanel panel="transcript" position={positions.transcript} onMove={movePanel} className="transcript-panel">
         <section className="overlay-panel-card"><header><strong>转录会显示在这里</strong><button aria-label="关闭转录">×</button></header><TranscriptPanel label="面试官" snapshot={remoteTranscript} /><TranscriptPanel label="我的语音" snapshot={micTranscript} /></section>

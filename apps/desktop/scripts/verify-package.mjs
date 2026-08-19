@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, sep } from "node:path";
 import { extractFile, listPackage } from "@electron/asar";
 
-const unpackedDirectory = join(process.cwd(), "apps", "desktop", "release", "win-unpacked");
+const unpackedDirectory = process.env.ELECTRON_PACKAGE_DIR ?? join(process.cwd(), "apps", "desktop", "release", "win-unpacked");
 const archive = join(unpackedDirectory, "resources", "app.asar");
 const unpackedRequired = [
   join(unpackedDirectory, "resources", "audio-sidecar", "interview-audio.exe"),

@@ -8,7 +8,7 @@ import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
-import type { OverlayMode } from "../main/overlay-manager";
+import type { CaptureProtectionCapabilities, CaptureProtectionState, OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
 import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
 import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
@@ -28,7 +28,10 @@ const api = {
   overlay: {
     show: () => ipcRenderer.invoke("overlay:show"),
     toggle: () => ipcRenderer.invoke("overlay:toggle"),
-    setMode: (mode: OverlayMode) => ipcRenderer.invoke("overlay:set-mode", mode)
+    setMode: (mode: OverlayMode) => ipcRenderer.invoke("overlay:set-mode", mode),
+    getCaptureProtection: (): Promise<CaptureProtectionState> => ipcRenderer.invoke("overlay:get-capture-protection"),
+    setCaptureProtection: (enabled: boolean): Promise<CaptureProtectionState | undefined> => ipcRenderer.invoke("overlay:set-capture-protection", enabled),
+    getCapabilities: (): Promise<CaptureProtectionCapabilities> => ipcRenderer.invoke("overlay:get-capabilities")
   },
   screenshot: {
     capture: (): Promise<ScreenshotResult> => ipcRenderer.invoke("screenshot:capture")
@@ -121,6 +124,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, mode: OverlayMode) => listener(mode);
       ipcRenderer.on("overlay:mode", handler);
       return () => ipcRenderer.removeListener("overlay:mode", handler);
+    },
+    onOverlayCaptureProtection: (listener: (state: CaptureProtectionState) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, state: CaptureProtectionState) => listener(state);
+      ipcRenderer.on("overlay:capture-protection", handler);
+      return () => ipcRenderer.removeListener("overlay:capture-protection", handler);
     },
     onShortcut: (listener: (shortcut: string) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, shortcut: string) => listener(shortcut);

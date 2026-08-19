@@ -6,7 +6,7 @@ import type { QuestionCandidate, QuestionEvent, SessionState, TranscriptSnapshot
 import type { Profile } from "@interview-copilot/shared";
 import type { ProviderCenterPublicConfig } from "../main/settings-store";
 import { normalizeMeter, StableAnswerStateMachine } from "@interview-copilot/shared";
-import type { OverlayMode } from "../main/overlay-manager";
+import type { CaptureProtectionState, OverlayMode } from "../main/overlay-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
 import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import { selectDeviceId } from "./device-selection";
@@ -229,8 +229,14 @@ function persistDevice(key: string, value: string): void {
   try { localStorage.setItem(key, value); } catch { /* localStorage can be unavailable in hardened environments */ }
 }
 
+function CaptureProtectionSettings({ status, onToggle }: { status: CaptureProtectionState; onToggle: (enabled: boolean) => void }): JSX.Element {
+  const label = !status.supported ? "不支持" : status.error ? "启用失败" : status.enabled ? "已启用" : "已关闭";
+  return <section className="capture-protection-settings"><div className="settings-subheading"><div><h2>共享保护 <small>Capture Protection</small></h2><p>在受支持的 Windows 屏幕捕获方式中隐藏面试悬浮窗。</p></div><label className="switch-control"><input type="checkbox" checked={status.enabled} disabled={!status.supported} onChange={(event) => onToggle(event.target.checked)} /><span /></label></div><div className="capture-protection-meta"><strong className={!status.supported ? "unsupported" : status.error ? "failed" : status.enabled ? "enabled" : "disabled"}>{label}</strong><span>{status.platform}</span></div><p className="capture-protection-warning">不同会议软件、录屏方式和 Windows 版本行为可能不同，无法保证所有捕获方式都排除。</p>{status.error && <p className="capture-protection-error">共享保护启用失败：悬浮窗仍可正常使用。</p>}</section>;
+}
+
 export function App(): JSX.Element {
   const isOverlay = useMemo(() => new URLSearchParams(window.location.search).get("window") === "overlay", []);
+  const captureTest = useMemo(() => new URLSearchParams(window.location.search).get("capture-test") === "1", []);
   const store = useAudioStore();
   const [page, setPage] = useState<AppPage>("home");
   const [setupOpen, setSetupOpen] = useState(false);
@@ -263,6 +269,7 @@ export function App(): JSX.Element {
   const [embeddingModel, setEmbeddingModel] = useState("text-embedding-3-small");
   const [embeddingApiKey, setEmbeddingApiKey] = useState("");
   const [providerTests, setProviderTests] = useState<Record<string, string>>({});
+  const [captureProtection, setCaptureProtection] = useState<CaptureProtectionState>({ platform: "win32", supported: false, enabled: true, applied: false });
   const [knowledgeBases, setKnowledgeBases] = useState<Array<{ id: string; name: string }>>([]);
   const [knowledgeBaseId, setKnowledgeBaseId] = useState("");
   const [knowledgeDocuments, setKnowledgeDocuments] = useState<Array<{ id: string; filename: string; status: string; error?: string }>>([]);
@@ -337,6 +344,8 @@ export function App(): JSX.Element {
           setEmbeddingBaseUrl(settings.embedding.baseUrl);
           setEmbeddingModel(settings.embedding.model);
         }
+        const [captureCapabilities, captureState] = await Promise.all([window.interviewCopilot.overlay.getCapabilities(), window.interviewCopilot.overlay.getCaptureProtection()]);
+        setCaptureProtection({ ...captureState, platform: captureCapabilities.platform, supported: captureCapabilities.captureProtectionSupported });
         let bases = await window.interviewCopilot.knowledge.listBases();
         if (bases.length === 0) {
           const created = await window.interviewCopilot.knowledge.createBase("默认知识库");
@@ -367,6 +376,7 @@ export function App(): JSX.Element {
       window.interviewCopilot.events.onAudio(store.applyEvent),
       window.interviewCopilot.events.onSessionState((state) => { store.setSessionState(state); if (state === "ENDED") void window.interviewCopilot.history.list().then(setHistoryRecords); }),
       window.interviewCopilot.events.onOverlayMode(store.setOverlayMode),
+      window.interviewCopilot.events.onOverlayCaptureProtection(setCaptureProtection),
       window.interviewCopilot.events.onScreenshot(store.setScreenshot),
       window.interviewCopilot.events.onScreenshotError(store.setNotice),
       window.interviewCopilot.events.onScreenshotDiagnostic(store.setNotice),
@@ -456,6 +466,14 @@ export function App(): JSX.Element {
   const stopAudio = async () => { await window.interviewCopilot.audio.stop(); };
   const probeAudio = async () => { await window.interviewCopilot.audio.probe({ inputDeviceId, outputDeviceId }); };
   const openOverlay = async () => { await window.interviewCopilot.overlay.show(); };
+  const toggleCaptureProtection = async (enabled: boolean) => {
+    try {
+      const next = await window.interviewCopilot.overlay.setCaptureProtection(enabled);
+      if (next) setCaptureProtection(next);
+    } catch (error) {
+      setCaptureProtection((current) => ({ ...current, error: String(error), applied: false }));
+    }
+  };
   const captureScreenshot = async () => {
     try { store.setScreenshot(await window.interviewCopilot.screenshot.capture()); }
     catch (error) { store.setNotice(`截图失败：${String(error)}`); }
@@ -585,14 +603,14 @@ export function App(): JSX.Element {
     return <section className="simple-page settings-page"><div className="page-heading"><div><span className="page-kicker">SETTINGS</span><h1>设置</h1></div><button className="dark-pill" onClick={() => void saveProviderSettings()}>保存设置</button></div><div className="settings-columns"><div><h2>LLM Provider</h2><label className="clean-field"><span>Provider Name</span><input value={llmProviderName} onChange={(event) => setLlmProviderName(event.target.value)} /></label><label className="clean-field"><span>Base URL</span><input value={llmBaseUrl} onChange={(event) => setLlmBaseUrl(event.target.value)} /></label><label className="clean-field"><span>API Key {providerSettings?.llm.hasApiKey && <em className="configured-label">已配置 · 仅输入修改</em>}</span><input type="password" value={llmApiKey} onChange={(event) => setLlmApiKey(event.target.value)} placeholder={providerSettings?.llm.hasApiKey ? "••••••••••••" : "输入 API Key"} /></label><div className="model-grid"><label className="clean-field"><span>默认 Model</span><input value={llmModel} onChange={(event) => setLlmModel(event.target.value)} /></label><label className="clean-field"><span>FAST Model</span><input value={fastModel} onChange={(event) => setFastModel(event.target.value)} /></label><label className="clean-field"><span>NORMAL Model</span><input value={normalModel} onChange={(event) => setNormalModel(event.target.value)} /></label><label className="clean-field"><span>DEEP Model</span><input value={deepModel} onChange={(event) => setDeepModel(event.target.value)} /></label><label className="clean-field"><span>Vision Model</span><input value={visionModel} onChange={(event) => setVisionModel(event.target.value)} /></label></div><div className="provider-actions"><button className="outline-pill" onClick={() => void testProvider("llm")}>测试连接</button><span className="provider-status">{providerTests.llm ?? (providerSettings?.llm.hasApiKey ? "已配置 · 未测试" : "未配置")}</span></div><h2 className="settings-section-gap">Embedding</h2><label className="clean-field"><span>Base URL</span><input value={embeddingBaseUrl} onChange={(event) => setEmbeddingBaseUrl(event.target.value)} /></label><label className="clean-field"><span>API Key {providerSettings?.embedding.hasApiKey && <em className="configured-label">已配置 · 仅输入修改</em>}</span><input type="password" value={embeddingApiKey} onChange={(event) => setEmbeddingApiKey(event.target.value)} placeholder={providerSettings?.embedding.hasApiKey ? "••••••••••••" : "可选，未配置时使用 Keyword Retrieval"} /></label><label className="clean-field"><span>Embedding Model</span><input value={embeddingModel} onChange={(event) => setEmbeddingModel(event.target.value)} /></label><div className="provider-actions"><button className="outline-pill" onClick={() => void testProvider("embedding")}>测试连接</button><span className="provider-status">{providerTests.embedding ?? (providerSettings?.embedding.hasApiKey ? "已配置 · 未测试" : "Keyword Retrieval")}</span></div></div><div><h2>ASR Provider</h2><label className="clean-field"><span>Provider</span><select value={asrProviderType} onChange={(event) => setAsrProviderType(event.target.value as typeof asrProviderType)}><option value="deepgram">Deepgram Direct</option><option value="custom-gateway">Custom Gateway</option></select></label><label className="clean-field"><span>{asrProviderType === "deepgram" ? "Deepgram API Key" : "Token / Ticket（可选）"} {providerSettings?.asr.hasApiKey && <em className="configured-label">已配置</em>}</span><input type="password" value={asrApiKey} onChange={(event) => setAsrApiKey(event.target.value)} placeholder={providerSettings?.asr.hasApiKey ? "••••••••••••" : "输入 API Key"} /></label><label className="clean-field"><span>{asrProviderType === "deepgram" ? "WebSocket URL" : "Gateway WebSocket URL"}</span><input value={asrBaseUrl} onChange={(event) => setAsrBaseUrl(event.target.value)} /></label><label className="clean-field"><span>Model</span><input value={asrModel} onChange={(event) => setAsrModel(event.target.value)} /></label><label className="clean-field"><span>Language</span><select value={asrLanguage} onChange={(event) => setAsrLanguage(event.target.value as typeof asrLanguage)}><option value="zh-CN">zh-CN</option><option value="en-US">en-US</option><option value="multi">multi</option></select></label><div className="provider-actions"><button className="outline-pill" onClick={() => void testProvider("asr")}>测试连接</button><span className="provider-status">{providerTests.asr ?? (providerSettings?.asr.hasApiKey ? "已配置 · 未测试" : "未配置")}</span></div><h2 className="settings-section-gap">回答模式</h2><label className="clean-field"><span>默认模式</span><select value={answerMode} onChange={(event) => setAnswerMode(event.target.value as typeof answerMode)}><option value="FAST">FAST · 快速</option><option value="NORMAL">NORMAL · 平衡</option><option value="DEEP">DEEP · 深度</option></select></label><div className="rag-status"><strong>RAG Mode</strong><span>{providerSettings?.embedding.hasApiKey ? "Hybrid · Vector + Keyword" : "Keyword Retrieval"}</span></div><details className="advanced-settings"><summary>高级诊断</summary><p>设备列表、Audio Probe 和 Realtime 状态在开始面试设置中显示。</p></details></div></div></section>;
   })();
 
-  if (isOverlay) return <OverlayRoot mic={store.mic} system={store.system} state={store.state} overlayMode={store.overlayMode} answerMode={store.answerMode} question={store.question} answerText={store.answerText} answerStreaming={store.answerStreaming} remoteTranscript={store.remoteTranscript} micTranscript={store.micTranscript} onToggleMode={() => void window.interviewCopilot.overlay.setMode(store.overlayMode === "interactive" ? "passive" : "interactive")} />;
+  if (isOverlay) return <OverlayRoot mic={store.mic} system={store.system} state={store.state} overlayMode={store.overlayMode} answerMode={store.answerMode} question={store.question} answerText={store.answerText} answerStreaming={store.answerStreaming} remoteTranscript={store.remoteTranscript} micTranscript={store.micTranscript} captureProtectionEnabled={captureProtection.enabled} captureProtectionSupported={captureProtection.supported} captureTest={captureTest} onToggleCaptureProtection={() => void toggleCaptureProtection(!captureProtection.enabled)} onToggleMode={() => void window.interviewCopilot.overlay.setMode(store.overlayMode === "interactive" ? "passive" : "interactive")} />;
 
   return (
     <main className="app-shell modern-shell">
       <Sidebar page={page} profileName={selectedProfile?.name} projects={projects} conversations={conversations} onNavigate={setPage} onNewConversation={beginNewConversation} onOpenConversation={(conversationId) => void openConversation(conversationId)} onOpenProject={(projectId) => void openProject(projectId)} onRenameProject={(projectId, name) => void renameProject(projectId, name)} onDeleteProject={(projectId, name) => void deleteProject(projectId, name)} />
       <section className="content-shell">
         <div className="modern-topbar"><button className="dark-pill start-interview" onClick={() => setSetupOpen(true)}>开始面试 <span>↗</span></button></div>
-        <div className="modern-main">{modernPageContent}</div>
+        <div className="modern-main">{modernPageContent}{page === "settings" && <CaptureProtectionSettings status={captureProtection} onToggle={(enabled) => void toggleCaptureProtection(enabled)} />}</div>
         {(page === "home" || page === "interview") && <ChatComposer value={composerText} onChange={setComposerText} onSubmit={() => void submitComposer()} onCreateProject={() => void createProject()} />}
         {store.notice && <button className="notice-toast" onClick={() => store.setNotice(undefined)}>{store.notice} <span>×</span></button>}
       </section>

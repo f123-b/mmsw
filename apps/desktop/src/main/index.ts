@@ -1,5 +1,6 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage } from "electron";
 import { join, relative } from "node:path";
+import { version as osVersion } from "node:os";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { AudioManager, type AudioStartOptions } from "./audio-manager";
@@ -10,7 +11,7 @@ import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session
 import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, generatePostInterviewAnalysis, HybridRetriever, ModelRouter, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type PreparationModel, type PreparationModelStep, type ProviderSettings } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewStartOptions } from "./interview-coordinator";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectRepository, type SqliteDatabase } from "./database";
-import { createSecretStore, MemorySecretStore, ProviderConfigStore, type ProviderSection } from "./settings-store";
+import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type ProviderSection } from "./settings-store";
 import { runProviderPreflight, testProviderConnection } from "./provider-preflight";
 import { parseDocument } from "./document-parsers";
 import { SafeLogger } from "./logger";
@@ -33,6 +34,7 @@ const environmentLlmSettings: ProviderSettings = {
   maxRetries: Number(process.env.INTERVIEW_COPILOT_LLM_MAX_RETRIES ?? 2)
 };
 let providerConfigStore: ProviderConfigStore | undefined;
+let overlaySettingsStore: OverlaySettingsStore | undefined;
 const routingModels: Partial<Record<"fast" | "low-latency" | "reasoning" | "vision", string>> = { fast: configuredModel, "low-latency": configuredModel, reasoning: configuredModel, vision: configuredModel };
 const answerProvider: AnswerProvider = {
   stream(request, signal) {
@@ -60,6 +62,7 @@ let database: SqliteDatabase | undefined;
 const preloadPath = join(__dirname, "../preload/index.mjs");
 const rendererFile = join(__dirname, "../renderer/index.html");
 const visualSmokeRequested = process.argv.includes("--visual-smoke");
+const captureProtectionSmokeRequested = process.argv.includes("--capture-protection-smoke");
 const productionSmokeRequested = process.argv.includes("--production-smoke") || visualSmokeRequested;
 let mainRendererLoad: Promise<void> | undefined;
 const rendererAppReadyWindows = new Set<number>();
@@ -162,9 +165,11 @@ async function loadRenderer(window: BrowserWindow, overlay = false): Promise<voi
   try {
     if (isDevelopment()) {
       const url = process.env.ELECTRON_RENDERER_URL ?? "http://localhost:5173";
-      await window.loadURL(`${url}${overlay ? "?window=overlay" : ""}`);
+      const search = new URLSearchParams({ ...(overlay ? { window: "overlay" } : {}), ...(overlay && captureProtectionSmokeRequested ? { "capture-test": "1" } : {}) }).toString();
+      await window.loadURL(`${url}${search ? `?${search}` : ""}`);
     } else {
-      await window.loadFile(rendererFile, overlay ? { search: "window=overlay" } : undefined);
+      const search = new URLSearchParams({ ...(overlay ? { window: "overlay" } : {}), ...(overlay && captureProtectionSmokeRequested ? { "capture-test": "1" } : {}) }).toString();
+      await window.loadFile(rendererFile, search ? { search } : undefined);
     }
     if (!overlay) {
       const readiness = await readRendererReadiness(window);
@@ -313,10 +318,107 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
     appLogger?.info("PRODUCTION_SCREENSHOTS_CAPTURED", visualArtifacts);
   }
   const ok = mainReadiness.bridgeAvailable && mainReadiness.rootChildren > 0 && Boolean(overlay) && overlayReadiness.bridgeAvailable && overlayReadiness.rootChildren > 0;
-  const result = { ok, main: mainReadiness, overlay: overlayReadiness, ...(visualArtifacts ? { visualArtifacts } : {}) };
+  const result = { ok, main: mainReadiness, overlay: overlayReadiness, captureProtection: overlayManager?.captureProtectionStatus, ...(visualArtifacts ? { visualArtifacts } : {}) };
   appLogger?.info("PRODUCTION_SMOKE_RESULT", result);
   process.stdout.write(`PRODUCTION_SMOKE_RESULT ${JSON.stringify(result)}\n`);
   app.exit(ok ? 0 : 1);
+}
+
+function captureContainsTestMarker(dataUrl: string): boolean {
+  const bitmap = nativeImage.createFromDataURL(dataUrl).toBitmap();
+  let markerPixels = 0;
+  for (let index = 0; index + 3 < bitmap.length; index += 4) {
+    const blue = bitmap[index];
+    const green = bitmap[index + 1];
+    const red = bitmap[index + 2];
+    const alpha = bitmap[index + 3];
+    if (alpha > 160 && red > 180 && blue > 180 && green < 130) markerPixels += 1;
+  }
+  return markerPixels >= 500;
+}
+
+async function runCaptureProtectionSmoke(main: BrowserWindow): Promise<void> {
+  await mainRendererLoad;
+  const artifactDirectory = process.env.INTERVIEW_COPILOT_CAPTURE_ARTIFACT_DIR ?? join(process.cwd(), "artifacts", "capture-protection");
+  await mkdir(artifactDirectory, { recursive: true });
+  await main.webContents.executeJavaScript("[...document.querySelectorAll('button')].find((button) => button.textContent?.includes('快捷帮助'))?.click()", true).catch(() => undefined);
+  await waitForRendererPaint(main);
+  await main.webContents.executeJavaScript("new Promise((resolve) => { const started = Date.now(); const check = () => { const element = document.querySelector('.capture-protection-settings'); if (element) { element.scrollIntoView({ block: 'center' }); resolve(true); return; } if (Date.now() - started > 5000) { resolve(false); return; } setTimeout(check, 100); }; check(); })", true).catch(() => undefined);
+  await waitForRendererPaint(main);
+  await writeFile(join(artifactDirectory, "settings-toggle.png"), await captureVisibleWindow(main));
+  const manager = overlayManager;
+  const overlay = manager?.show();
+  const unsupported = !manager?.captureProtectionSupported;
+  if (!overlay || unsupported) {
+    const result = { ok: true, supported: false, capturePath: "WINDOW_CAPTURE", control: "UNSUPPORTED", protected: "UNSUPPORTED" };
+    process.stdout.write(`CAPTURE_PROTECTION_SMOKE_RESULT ${JSON.stringify(result)}\n`);
+    app.exit(0);
+    return;
+  }
+
+  await waitForRendererLoad(overlay);
+  await waitForRendererReady(overlay);
+  await waitForWindowVisible(overlay);
+  const nativeHandle = overlay.getNativeWindowHandle();
+  const nativeWindowId = nativeHandle.length >= 8 ? nativeHandle.readBigUInt64LE(0).toString() : nativeHandle.readUInt32LE(0).toString();
+  const overlaySourceId = `window:${nativeWindowId}:1`;
+  const waitForCaptureFrame = async () => {
+    await waitForRendererPaint(overlay);
+    await new Promise<void>((resolve) => setTimeout(resolve, 120));
+  };
+  const captureToArtifact = async (name: string): Promise<{ path: string; dataUrl: string; marker: boolean }> => {
+    const screenshot = await screenshotManager.captureWindow(overlaySourceId);
+    const bytes = nativeImage.createFromDataURL(screenshot.dataUrl).toPNG();
+    const path = join(artifactDirectory, name);
+    await writeFile(path, bytes);
+    const marker = captureContainsTestMarker(screenshot.dataUrl);
+    await screenshotManager.cleanup(screenshot);
+    return { path, dataUrl: screenshot.dataUrl, marker };
+  };
+
+  manager.setCaptureProtection(false);
+  await waitForCaptureFrame();
+  await writeFile(join(artifactDirectory, "overlay-protection-off.png"), await captureVisibleWindow(overlay));
+  const off = await captureToArtifact("capture-protection-off.png");
+
+  manager.setCaptureProtection(true);
+  await waitForCaptureFrame();
+  await writeFile(join(artifactDirectory, "overlay-protection-on-local-view.png"), await captureVisibleWindow(overlay));
+  const on = await captureToArtifact("capture-protection-on.png");
+  const control = off.marker;
+  const protectedCapture = !on.marker;
+  const result = {
+    ok: control && protectedCapture,
+    supported: true,
+    capturePath: "WINDOW_CAPTURE",
+    control: control ? "PASS" : "FAIL",
+    protected: protectedCapture ? "PASS" : "FAIL",
+    localOverlayVisible: true,
+    artifacts: {
+      off: off.path,
+      on: on.path,
+      overlayOff: join(artifactDirectory, "overlay-protection-off.png"),
+      overlayOn: join(artifactDirectory, "overlay-protection-on-local-view.png")
+    }
+  };
+  await writeFile(join(artifactDirectory, "CAPTURE_PROTECTION_TEST_REPORT.md"), [
+    "# Capture Protection Test Report",
+    "",
+    `- Platform: ${process.platform}`,
+    `- Windows version: ${process.platform === "win32" ? osVersion() : "unsupported"}`,
+    `- Capture path: ${result.capturePath}`,
+    `- BrowserWindow.setContentProtection API: ${manager.captureProtectionStatus.applied ? "SUCCESS" : "FAILED"}`,
+    `- Overlay local view remains visible: ${result.localOverlayVisible ? "PASS" : "FAIL"}`,
+    `- Control capture with protection OFF: ${result.control}`,
+    `- Protected capture with protection ON: ${result.protected}`,
+    "",
+    result.ok ? "Result: PASS" : "Result: FAIL (the selected capture path still contains the marker while protection is enabled)."
+  ].join("\n"), "utf8");
+  appLogger?.info("CAPTURE_PROTECTION_SMOKE_RESULT", result);
+  process.stdout.write(`CAPTURE_PROTECTION_CONTROL ${control ? "PASS" : "FAIL"}\n`);
+  process.stdout.write(`CAPTURE_PROTECTION_ON ${protectedCapture ? "PASS" : "FAIL"}\n`);
+  process.stdout.write(`CAPTURE_PROTECTION_SMOKE_RESULT ${JSON.stringify(result)}\n`);
+  app.exit(result.ok ? 0 : 1);
 }
 
 const MAX_AGENT_FILE_BYTES = 1_000_000;
@@ -430,6 +532,22 @@ function registerIpc(): void {
   ipcMain.handle("overlay:set-mode", (_event, mode: OverlayMode) => {
     overlayManager?.setMode(mode);
     broadcast("overlay:mode", mode);
+  });
+  ipcMain.handle("overlay:get-capture-protection", () => overlayManager?.captureProtectionStatus ?? {
+    platform: process.platform,
+    supported: process.platform === "win32",
+    enabled: overlaySettingsStore?.get().captureProtection ?? true,
+    applied: false
+  });
+  ipcMain.handle("overlay:set-capture-protection", (_event, enabled: boolean) => {
+    const value = Boolean(enabled);
+    overlaySettingsStore?.setCaptureProtection(value);
+    overlayManager?.setCaptureProtection(value);
+    return overlayManager?.captureProtectionStatus;
+  });
+  ipcMain.handle("overlay:get-capabilities", () => overlayManager?.captureProtectionCapabilities ?? {
+    platform: process.platform,
+    captureProtectionSupported: process.platform === "win32"
   });
   ipcMain.handle("screenshot:capture", () => screenshotManager.capturePrimaryDisplay());
   ipcMain.handle("session:get-state", () => session.state);
@@ -677,6 +795,7 @@ app.whenReady().then(async () => {
     } catch {
       providerConfigStore = new ProviderConfigStore(database, new MemorySecretStore(), { llm: environmentLlmSettings });
     }
+    overlaySettingsStore = new OverlaySettingsStore(database);
     const llm = providerConfigStore.get("llm");
     routingModels.fast = llm.fastModel || llm.model;
     routingModels["low-latency"] = llm.normalModel || llm.model;
@@ -731,7 +850,17 @@ app.whenReady().then(async () => {
   const createdMainWindow = createMainWindow();
   overlayManager = new OverlayManager({
     preloadPath,
-    loadRenderer: (window) => loadRenderer(window, true)
+    loadRenderer: (window) => loadRenderer(window, true),
+    captureProtectionEnabled: overlaySettingsStore?.get().captureProtection ?? true,
+    onCaptureProtectionDiagnostic: (event, fields) => {
+      appLogger?.info(event, fields);
+      broadcast("overlay:capture-protection-diagnostic", { event, fields });
+    }
+  });
+  appLogger?.info("OVERLAY_CAPTURE_PROTECTION_RUNTIME", {
+    platform: process.platform,
+    windowsVersion: process.platform === "win32" ? osVersion() : undefined,
+    supported: overlayManager.captureProtectionSupported
   });
   registerIpc();
   registerShortcuts();
@@ -757,7 +886,15 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
   });
 
-  if (productionSmokeRequested) await runProductionSmoke(createdMainWindow);
+  if (captureProtectionSmokeRequested) {
+    try {
+      await runCaptureProtectionSmoke(createdMainWindow);
+    } catch (error) {
+      appLogger?.error("CAPTURE_PROTECTION_SMOKE_FAILED", { error: String(error) });
+      process.stdout.write(`CAPTURE_PROTECTION_SMOKE_RESULT ${JSON.stringify({ ok: false, supported: overlayManager?.captureProtectionSupported ?? false, capturePath: "WINDOW_CAPTURE", control: "ERROR", protected: "ERROR", error: String(error) })}\n`);
+      app.exit(1);
+    }
+  } else if (productionSmokeRequested) await runProductionSmoke(createdMainWindow);
 });
 
 app.on("before-quit", () => {

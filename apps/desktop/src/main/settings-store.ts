@@ -104,6 +104,33 @@ export class ProviderConfigStore {
   }
 }
 
+export interface OverlayCaptureProtectionSettings {
+  captureProtection: boolean;
+}
+
+export class OverlaySettingsStore {
+  private static readonly key = "overlay.captureProtection";
+
+  constructor(private readonly database: SqliteDatabase) {}
+
+  get(): OverlayCaptureProtectionSettings {
+    const stored = this.database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", [OverlaySettingsStore.key]);
+    if (!stored) return { captureProtection: true };
+    try {
+      return { captureProtection: JSON.parse(stored.value) === true };
+    } catch {
+      return { captureProtection: true };
+    }
+  }
+
+  setCaptureProtection(enabled: boolean): OverlayCaptureProtectionSettings {
+    const value = Boolean(enabled);
+    this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.key, JSON.stringify(value)]);
+    this.database.flushNow();
+    return { captureProtection: value };
+  }
+}
+
 export async function createSecretStore(appDataPath: string): Promise<SafeStorageSecretStore> {
   const { safeStorage: secureStorage } = await import("electron");
   const directory = join(appDataPath, APP_DATA_DIRECTORY);

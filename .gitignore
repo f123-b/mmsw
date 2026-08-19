@@ -17,6 +17,7 @@ apps/desktop/.data/
 .functional-e2e-user-data/
 artifacts/functional/functional-failure.png
 apps/desktop/release/
+apps/desktop/release-alt/
 release-final/
 *.db
 *.db-shm

@@ -10,6 +10,7 @@
     "build:sidecar": "cargo build --release --manifest-path ../../crates/audio-sidecar/Cargo.toml",
     "package:win": "npm run build:sidecar && npm run build && electron-builder --win",
     "smoke:production": "npm run build && node scripts/production-smoke.mjs",
+    "capture-protection:smoke": "npm run build && node scripts/capture-protection-smoke.mjs",
     "visual:smoke": "npm run build && node scripts/visual-smoke.mjs",
     "functional:e2e": "npm run build && node scripts/functional-e2e.mjs",
     "typecheck": "tsc -p tsconfig.json",

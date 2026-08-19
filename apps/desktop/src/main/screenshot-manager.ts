@@ -42,6 +42,21 @@ export class ScreenshotManager {
       );
     }
 
+    return this.saveSource(source);
+  }
+
+  async captureWindow(sourceId: string): Promise<ScreenshotResult> {
+    await this.cleanupExpired();
+    const sources = await desktopCapturer.getSources({
+      types: ["window"],
+      thumbnailSize: { width: MAX_DIMENSION, height: MAX_DIMENSION }
+    });
+    const source = sources.find((candidate) => candidate.id === sourceId);
+    if (!source) throw new Error(`Window capture source is unavailable: ${sourceId}`);
+    return this.saveSource(source);
+  }
+
+  private async saveSource(source: Electron.DesktopCapturerSource): Promise<ScreenshotResult> {
     let image = source.thumbnail;
     const original = image.getSize();
     const scale = Math.min(1, MAX_DIMENSION / Math.max(original.width, original.height));
@@ -62,7 +77,8 @@ export class ScreenshotManager {
     const directory = join(app.getPath("temp"), "interview-copilot", "screenshots");
     await mkdir(directory, { recursive: true });
     const extension = mimeType === "image/png" ? "png" : "jpg";
-    const path = join(directory, `${Date.now()}-${source.id}.${extension}`);
+    const safeSourceId = source.id.replace(/[^a-zA-Z0-9._-]+/g, "_");
+    const path = join(directory, `${Date.now()}-${safeSourceId}.${extension}`);
     await writeFile(path, buffer);
     const size = image.getSize();
     const result = {

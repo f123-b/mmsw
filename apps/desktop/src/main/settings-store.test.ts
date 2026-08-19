@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SqliteDatabase } from "./database";
-import { MemorySecretStore, ProviderConfigStore } from "./settings-store";
+import { MemorySecretStore, OverlaySettingsStore, ProviderConfigStore } from "./settings-store";
 
 describe("ProviderConfigStore", () => {
   it("keeps API keys in SecretStore and never returns them in public config", async () => {
@@ -23,6 +23,22 @@ describe("ProviderConfigStore", () => {
       const config = new ProviderConfigStore(database, new MemorySecretStore());
       expect(config.get("asr")).toMatchObject({ providerType: "deepgram", providerName: "Deepgram", model: "nova-3", language: "zh-CN" });
       expect(config.getPublic().asr).not.toHaveProperty("apiKey");
+    } finally {
+      database.close();
+    }
+  });
+});
+
+describe("OverlaySettingsStore", () => {
+  it("defaults to enabled and persists the main-process setting", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      expect(settings.get()).toEqual({ captureProtection: true });
+      settings.setCaptureProtection(false);
+      expect(settings.get()).toEqual({ captureProtection: false });
+      settings.setCaptureProtection(true);
+      expect(settings.get()).toEqual({ captureProtection: true });
     } finally {
       database.close();
     }
