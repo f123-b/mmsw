@@ -116,6 +116,18 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
+      - name: Ensure Electron runtime
+        shell: pwsh
+        run: |
+          $installScript = Join-Path $PWD "node_modules/electron/install.js"
+          if (-not (Test-Path -LiteralPath $installScript)) {
+            $installScript = Join-Path $PWD "apps/desktop/node_modules/electron/install.js"
+          }
+          if (-not (Test-Path -LiteralPath $installScript)) {
+            throw "Electron install script not found: $installScript"
+          }
+          node $installScript
+
       - name: Build NSIS installer
         shell: pwsh
         run: |
