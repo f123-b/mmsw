@@ -14,16 +14,9 @@ target/
 
 # Local application data
 apps/desktop/.data/
-.functional-e2e-user-data/
-.hud-*-data/
 .hud-product-smoke-data-*/
 .hud-*-data-*/
 .direct-hud-smoke-data/
-apps/desktop/release-p0/
-apps/desktop/release-p0b/
-apps/desktop/release-p0c/
-apps/desktop/release-p0d/
-apps/desktop/artifacts/
 artifacts/functional/functional-failure.png
 artifacts/capture-protection-v2/manual-*.png
 artifacts/capture-protection-v2/modern-manual*.png
@@ -33,6 +26,11 @@ apps/desktop/release/
 apps/desktop/release-portable*/
 apps/desktop/release-alt/
 release-final/
+output/
+artifacts/
+.codex-temp-electron/
+apps/desktop/out/
+apps/desktop/release-p0*/
 *.db
 *.db-shm
 *.db-wal
