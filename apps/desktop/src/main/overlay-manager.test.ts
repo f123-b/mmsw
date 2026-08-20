@@ -21,14 +21,14 @@ describe("applyOverlayMode", () => {
   it("restores the real BrowserWindow controls for interactive mode", () => {
     const window = makeWindow();
     applyOverlayMode(window, "interactive");
-    expect(window.setFocusable).toHaveBeenCalledWith(true);
+    expect(window.setFocusable).toHaveBeenCalledWith(false);
     expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(false, { forward: true });
   });
 
   it("temporarily enables native hit testing only for a passive control region", () => {
     const window = makeWindow();
     applyOverlayMode(window, "passive", true);
-    expect(window.setFocusable).toHaveBeenCalledWith(true);
+    expect(window.setFocusable).toHaveBeenCalledWith(false);
     expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(false, { forward: true });
   });
 

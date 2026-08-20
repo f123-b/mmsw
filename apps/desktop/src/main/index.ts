@@ -24,6 +24,8 @@ if (process.env.INTERVIEW_COPILOT_DISABLE_GPU === "1") {
   app.commandLine.appendSwitch("in-process-gpu");
 }
 
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
 let mainWindow: BrowserWindow | undefined;
 let overlayManager: OverlayManager | undefined;
 const audioManager = new AudioManager();
@@ -407,7 +409,8 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
   const result = { ok, main: mainReadiness, overlay: overlayReadiness, captureProtection: overlayManager?.captureProtectionStatus, ...(visualArtifacts ? { visualArtifacts } : {}) };
   appLogger?.info("PRODUCTION_SMOKE_RESULT", result);
   process.stdout.write(`PRODUCTION_SMOKE_RESULT ${JSON.stringify(result)}\n`);
-  app.exit(ok ? 0 : 1);
+  process.exitCode = ok ? 0 : 1;
+  app.quit();
 }
 
 type CaptureHelperResult = {
@@ -735,6 +738,7 @@ function registerIpc(): void {
    ipcMain.handle("overlay:reset-layout", () => { overlayManager?.resetLayout(); return true; });
    ipcMain.handle("overlay:toggle-shortcuts", () => { overlayManager?.toggleShortcuts(); return true; });
    ipcMain.handle("overlay:get-state", () => overlayManager?.hudState);
+   ipcMain.handle("overlay:get-layout", () => overlayManager?.hudLayout);
    ipcMain.handle("overlay:set-share-mode", (_event, enabled: boolean) => { overlayManager?.setShareMode(Boolean(enabled)); return overlayManager?.hudState; });
    ipcMain.handle("overlay:toggle-share-mode", () => { overlayManager?.toggleShareMode(); return overlayManager?.hudState; });
   ipcMain.handle("overlay:set-control-region", (_event, interactive: boolean) => {
@@ -1032,9 +1036,9 @@ function registerShortcuts(): void {
       overlaySettingsStore?.setAutomationMode(next);
       coordinator().setAutomationMode(next);
     },
-    [GLOBAL_SHORTCUTS.endInterview]: () => {
-      void stopInterviewWithAnalysis();
-    }
+     [GLOBAL_SHORTCUTS.endInterview]: () => {
+       if (coordinator().running) overlayManager?.requestEndInterviewConfirmation();
+     }
   };
   for (const [accelerator, handler] of Object.entries(shortcuts)) {
     if (!globalShortcut.register(accelerator, handler)) {
@@ -1043,7 +1047,15 @@ function registerShortcuts(): void {
   }
 }
 
-app.whenReady().then(async () => {
+if (hasSingleInstanceLock) {
+  app.on("second-instance", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+
+  app.whenReady().then(async () => {
   if (!isDevelopment()) Menu.setApplicationMenu(null);
   const appDataPath = process.env.INTERVIEW_COPILOT_TEST_DATA_PATH ?? app.getPath("appData");
   const logsDirectory = join(appDataPath, "InterviewCopilot", "logs");
@@ -1182,16 +1194,23 @@ app.whenReady().then(async () => {
     } catch (error) {
       appLogger?.error("CAPTURE_PROTECTION_SMOKE_FAILED", { error: String(error) });
       process.stdout.write(`CAPTURE_PROTECTION_SMOKE_RESULT ${JSON.stringify({ ok: false, supported: overlayManager?.captureProtectionSupported ?? false, capturePath: "WINDOW_CAPTURE", control: "ERROR", protected: "ERROR", error: String(error) })}\n`);
-      app.exit(1);
+      process.exitCode = 1;
+      app.quit();
     }
   } else if (productionSmokeRequested) await runProductionSmoke(createdMainWindow);
-});
+  });
+} else {
+  app.quit();
+}
 
 app.on("before-quit", (event) => {
   if (shutdownController.isComplete) return;
   event.preventDefault();
   if (shutdownController.inProgress) return;
-  void shutdownController.run().finally(() => app.exit(0));
+  void shutdownController.run().finally(() => {
+    const exitCode = typeof process.exitCode === "number" ? process.exitCode : 0;
+    app.exit(exitCode);
+  });
 });
 
 app.on("window-all-closed", () => {

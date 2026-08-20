@@ -8,7 +8,7 @@ import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
-import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDState, OverlayMode } from "../main/overlay-manager";
+import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
 import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
@@ -35,6 +35,7 @@ const api = {
     resetLayout: () => ipcRenderer.invoke("overlay:reset-layout"),
     toggleShortcuts: () => ipcRenderer.invoke("overlay:toggle-shortcuts"),
     getState: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:get-state"),
+    getLayout: (): Promise<HUDLayout | undefined> => ipcRenderer.invoke("overlay:get-layout"),
     setShareMode: (enabled: boolean): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:set-share-mode", enabled),
     toggleShareMode: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:toggle-share-mode"),
     setMode: (mode: OverlayMode) => ipcRenderer.invoke("overlay:set-mode", mode),
@@ -145,8 +146,13 @@ const api = {
       ipcRenderer.on("overlay:state", handler);
       return () => ipcRenderer.removeListener("overlay:state", handler);
     },
-    onOverlayCommand: (listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts") => void) => {
-      const handler = (_event: Electron.IpcRendererEvent, command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts") => listener(command);
+    onOverlayLayout: (listener: (layout: HUDLayout) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, layout: HUDLayout) => listener(layout);
+      ipcRenderer.on("overlay:layout", handler);
+      return () => ipcRenderer.removeListener("overlay:layout", handler);
+    },
+    onOverlayCommand: (listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end") => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end") => listener(command);
       ipcRenderer.on("overlay:command", handler);
       return () => ipcRenderer.removeListener("overlay:command", handler);
     },

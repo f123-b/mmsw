@@ -63,8 +63,20 @@ describe("RealtimeSession", () => {
     const socket = new FakeSocket();
     socket.bufferedAmount = 300_000;
     const session = new RealtimeSession(() => socket);
+    session.connect({ url: "wss://example.test/realtime", autoReconnect: false });
     for (let index = 0; index < 100; index += 1) session.sendAudio(new Uint8Array(2_560));
     expect(session.pendingAudioStats.queuedBytes).toBeLessThanOrEqual(192_000);
+    session.disconnect();
+  });
+
+  it("does not queue audio while reconnecting or after an error", () => {
+    const socket = new FakeSocket();
+    const session = new RealtimeSession(() => socket);
+    session.connect({ url: "wss://example.test/realtime", autoReconnect: false });
+    socket.onopen?.();
+    socket.onerror?.();
+    session.sendAudio(new Uint8Array(2_560));
+    expect(session.pendingAudioStats.queuedPackets).toBe(0);
     session.disconnect();
   });
 

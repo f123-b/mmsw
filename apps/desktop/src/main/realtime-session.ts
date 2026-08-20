@@ -131,6 +131,7 @@ export class RealtimeSession extends EventEmitter {
   private directRouter: StereoAsrChannelRouter | undefined;
   private directGeneration = 0;
   private handledDirectFailureGeneration = 0;
+  private lastBackpressureDiagnosticAt = 0;
   private audioTimelineOriginAt = 0;
   private diagnostics: AsrRuntimeDiagnostics = {
     provider: "unknown",
@@ -188,6 +189,7 @@ export class RealtimeSession extends EventEmitter {
     this.socket?.close();
     this.socket = undefined;
     this.audioQueue.clear();
+    this.lastBackpressureDiagnosticAt = 0;
     this.audioTimelineOriginAt = 0;
     this.stabilizer.clear();
     if (clearOptions) this.options = undefined;
@@ -197,6 +199,7 @@ export class RealtimeSession extends EventEmitter {
   }
 
   sendAudio(packet: Uint8Array): void {
+    if (this.manualStop || this.state === "disconnected" || this.state === "reconnecting" || this.state === "error") return;
     this.audioTimelineOriginAt ||= Date.now();
     if (this.directRouter && this.state === "connected" && this.directRouter.isReady) {
       try {
@@ -217,9 +220,15 @@ export class RealtimeSession extends EventEmitter {
       }
     }
     const stats = this.audioQueue.push(packet);
-    this.diagnostics = { ...this.diagnostics, droppedPcmPackets: stats.droppedPackets };
-    this.emitDiagnostics();
-    if (stats.droppedPackets > 0) this.emit("diagnostic", `Realtime audio backpressure dropped ${stats.droppedPackets} packet(s)`);
+    if (stats.droppedPackets !== this.diagnostics.droppedPcmPackets) {
+      this.diagnostics = { ...this.diagnostics, droppedPcmPackets: stats.droppedPackets };
+      this.emitDiagnostics();
+      const now = Date.now();
+      if (stats.droppedPackets > 0 && now - this.lastBackpressureDiagnosticAt >= 1_000) {
+        this.lastBackpressureDiagnosticAt = now;
+        this.emit("diagnostic", `Realtime audio backpressure dropped ${stats.droppedPackets} packet(s)`);
+      }
+    }
   }
 
   sendControl(message: ClientControlMessage): void {
@@ -359,6 +368,7 @@ export class RealtimeSession extends EventEmitter {
     this.handledDirectFailureGeneration = generation;
     this.directRouter?.close();
     this.directRouter = undefined;
+    this.audioQueue.clear();
     const code = messageCode(error);
     const recoverable = error instanceof ProviderError ? error.recoverable : true;
     const message = { type: "runtime_error", code, message: messageText(error), recoverable } satisfies RealtimeServerMessage;
@@ -378,6 +388,7 @@ export class RealtimeSession extends EventEmitter {
   private handleSocketFailure(socket: RealtimeSocket | undefined, error: Error | undefined, reason: string): void {
     if (socket && this.socket !== socket) return;
     this.socket = undefined;
+    this.audioQueue.clear();
     const actualReason = error?.message ? `${reason}: ${error.message}` : reason;
     this.emit("diagnostic", actualReason);
     const authFailed = /\b(401|403)\b|unauthori[sz]ed|forbidden|invalid.*(key|token)/i.test(actualReason);

@@ -27,7 +27,10 @@ apps/desktop/artifacts/
 artifacts/functional/functional-failure.png
 artifacts/capture-protection-v2/manual-*.png
 artifacts/capture-protection-v2/modern-manual*.png
+artifacts/.portable-launch-test/
+artifacts/.single-instance-test*/
 apps/desktop/release/
+apps/desktop/release-portable*/
 apps/desktop/release-alt/
 release-final/
 *.db

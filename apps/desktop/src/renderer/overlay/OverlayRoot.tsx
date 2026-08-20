@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type JSX } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type JSX } from "react";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
-import type { HUDState, OverlayMode } from "../../main/overlay-manager";
+import type { HUDLayout, HUDState, OverlayMode } from "../../main/overlay-manager";
 
 type HudState = "IDLE" | "LISTENING" | "QUESTION_DETECTED" | "GENERATING" | "ANSWER_READY" | "PAUSED" | "ERROR";
 type PanelKey = "toolbar" | "transcript" | "answer" | "shortcuts";
 type PanelLayout = { x: number; y: number; width: number; height: number; visible: boolean; collapsed: boolean; locked: boolean; opacity: number };
 type OverlayLayout = Record<PanelKey, PanelLayout>;
-type OverlayCommand = "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts";
+type OverlayCommand = "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end";
 
 interface OverlayRootProps {
   mic: number;
@@ -43,19 +43,35 @@ interface OverlayRootProps {
   captureTest?: boolean;
 }
 
-const STORAGE_KEY = "interview-copilot.overlay-layout";
+const STORAGE_KEY = "interview-copilot.overlay-layout-v2";
 const defaults: OverlayLayout = {
-  toolbar: { x: 0, y: 22, width: 300, height: 38, visible: true, collapsed: false, locked: false, opacity: 1 },
-  transcript: { x: 36, y: 104, width: 480, height: 520, visible: true, collapsed: false, locked: false, opacity: 1 },
-  answer: { x: 828, y: 104, width: 520, height: 520, visible: true, collapsed: false, locked: false, opacity: 1 },
-  shortcuts: { x: 18, y: 642, width: 300, height: 320, visible: false, collapsed: false, locked: false, opacity: 1 }
+  toolbar: { x: 0, y: 20, width: 300, height: 42, visible: true, collapsed: false, locked: true, opacity: 1 },
+  transcript: { x: 0, y: 84, width: 320, height: 360, visible: true, collapsed: false, locked: false, opacity: 1 },
+  answer: { x: 360, y: 84, width: 420, height: 360, visible: true, collapsed: false, locked: false, opacity: 1 },
+  shortcuts: { x: 24, y: 0, width: 320, height: 360, visible: false, collapsed: false, locked: false, opacity: 1 }
 };
 
 function viewportDefaults(): OverlayLayout {
+  const horizontalMargin = Math.round(window.innerWidth * 0.05);
+  const panelHeight = Math.max(360, Math.round(window.innerHeight * 0.65));
+  const panelTop = Math.max(84, Math.round(window.innerHeight * 0.11));
+  const transcriptWidth = Math.max(320, Math.round(window.innerWidth * 0.28));
+  const answerWidth = Math.max(420, Math.round(window.innerWidth * 0.42));
   return {
-    ...defaults,
-    toolbar: { ...defaults.toolbar, x: Math.max(8, Math.round((window.innerWidth - defaults.toolbar.width) / 2)) },
-    shortcuts: { ...defaults.shortcuts, y: Math.max(8, window.innerHeight - defaults.shortcuts.height - 18) }
+    toolbar: { ...defaults.toolbar, x: Math.max(0, Math.round((window.innerWidth - 300) / 2)) },
+    transcript: { ...defaults.transcript, x: horizontalMargin, y: panelTop, width: transcriptWidth, height: panelHeight },
+    answer: { ...defaults.answer, x: horizontalMargin + transcriptWidth + 40, y: panelTop, width: answerWidth, height: panelHeight },
+    shortcuts: { ...defaults.shortcuts, y: Math.max(0, window.innerHeight - 360 - 24) }
+  };
+}
+
+function fromHUDLayout(next: HUDLayout): OverlayLayout {
+  const panel = (key: PanelKey): PanelLayout => ({ ...next[key === "toolbar" ? "toolbar" : key], visible: true, collapsed: false, locked: key === "toolbar", opacity: 1 });
+  return {
+    toolbar: panel("toolbar"),
+    transcript: panel("transcript"),
+    answer: panel("answer"),
+    shortcuts: { ...panel("shortcuts"), visible: false }
   };
 }
 
@@ -77,15 +93,19 @@ function clampLayout(layout: PanelLayout): PanelLayout {
   return { ...layout, width, height, x: Math.max(8, Math.min(layout.x, Math.max(8, window.innerWidth - width - 8))), y: Math.max(8, Math.min(layout.y, Math.max(8, window.innerHeight - height - 8))) };
 }
 
-function useOverlayLayout(): [OverlayLayout, (key: PanelKey, patch: Partial<PanelLayout>) => void, () => void] {
+function useOverlayLayout(): [OverlayLayout, (key: PanelKey, patch: Partial<PanelLayout>) => void, (next: HUDLayout) => void] {
   const [layout, setLayout] = useState<OverlayLayout>(() => loadLayout());
-  const update = (key: PanelKey, patch: Partial<PanelLayout>) => setLayout((current) => {
+  const update = useCallback((key: PanelKey, patch: Partial<PanelLayout>) => setLayout((current) => {
     const next = { ...current, [key]: clampLayout({ ...current[key], ...patch }) };
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* best effort */ }
     return next;
-  });
-  const reset = () => { const next = viewportDefaults(); setLayout(next); try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* best effort */ } };
-  return [layout, update, reset];
+  }), []);
+  const applyMainLayout = useCallback((next: HUDLayout) => {
+    const nextLayout = fromHUDLayout(next);
+    setLayout(nextLayout);
+    try { localStorage.removeItem(STORAGE_KEY); } catch { /* best effort */ }
+  }, []);
+  return [layout, update, applyMainLayout];
 }
 
 function DraggableResizablePanel({ panel, layout, onChange, className, children }: { panel: PanelKey; layout: PanelLayout; onChange: (key: PanelKey, patch: Partial<PanelLayout>) => void; className: string; children: JSX.Element }): JSX.Element {
@@ -150,23 +170,38 @@ function AnswerSummary({ answerText, answerStreaming }: { answerText: string; an
   return <div className="answer-summary"><div className="answer-summary-label">CORE ANSWER</div><div className="answer-core">{core.length ? core.map((line, index) => <p key={`${line}-${index}`}>{line.replace(/^[-*]\s+/, "")}</p>) : <p className="overlay-muted">确认完整问题后显示简洁回答。</p>}{answerStreaming && <span className="answer-cursor">▌</span>}</div><div className="answer-summary-label">KEYWORDS</div><div className="answer-keywords">{keywords.length ? keywords.map((keyword) => <span key={keyword}>{keyword}</span>) : <span className="overlay-muted">等待答案</span>}</div></div>;
 }
 
+function ToolbarIcon({ name }: { name: "eye" | "eye-off" | "keyboard" | "share" | "share-off" | "stop" }): JSX.Element {
+  const common = { width: 24, height: 24, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
+  if (name === "eye" || name === "eye-off") return <svg {...common}>{name === "eye-off" && <path d="m3 3 18 18" />}<path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="2.5" /></svg>;
+  if (name === "keyboard") return <svg {...common}><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 9h.01M10 9h.01M13 9h.01M16 9h.01M7 13h.01M10 13h.01M13 13h.01M16 13h.01M8 16h8" /></svg>;
+  if (name === "share" || name === "share-off") return <svg {...common}>{name === "share-off" && <path d="m3 3 18 18" />}<circle cx="6" cy="12" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="18" cy="18" r="2.5" /><path d="m8.2 10.8 7.6-3.6M8.2 13.2l7.6 3.6" /></svg>;
+  return <svg {...common}><rect x="6" y="6" width="12" height="12" rx="2" /></svg>;
+}
+
+function EndInterviewDialog({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }): JSX.Element {
+  return <div className="end-interview-backdrop hud-interactive-region" role="presentation"><section className="end-interview-dialog" role="dialog" aria-modal="true" aria-labelledby="end-interview-title"><strong id="end-interview-title">结束面试？</strong><p>结束后将停止录音，并保存本次面试记录。</p><div><button className="dialog-cancel" onClick={onCancel}>取消</button><button className="dialog-confirm" onClick={onConfirm}>结束</button></div></section></div>;
+}
+
 function ShortcutPopover({ onAnswerLatest, onAnswerScreenshot, onHideAll, onToggleMode, onToggleAutomation, onResetLayout, onEndInterview, onClose }: { onAnswerLatest: () => Promise<void>; onAnswerScreenshot: () => Promise<void>; onHideAll: () => void; onToggleMode: () => void; onToggleAutomation: () => void; onResetLayout: () => void; onEndInterview: () => void; onClose: () => void }): JSX.Element {
   return <section className="shortcut-card" role="dialog" aria-label="键盘快捷方式"><header><div><span className="panel-kicker">QUICK ACTIONS</span><strong>快捷操作</strong></div><button onClick={onClose} aria-label="关闭快捷操作">×</button></header><div className="shortcut-actions"><button onClick={() => void onAnswerLatest()}>回答问题 <kbd>Ctrl Alt A</kbd></button><button onClick={() => void onAnswerScreenshot()}>截图并回答 <kbd>Ctrl Alt S</kbd></button><button onClick={onHideAll}>隐藏 / 显示悬浮窗 <kbd>Ctrl Alt D</kbd></button><button onClick={onClose}>隐藏 / 显示快捷方式 <kbd>Ctrl Alt K</kbd></button><button onClick={onEndInterview}>结束面试 <kbd>Ctrl Alt Q</kbd></button><button onClick={onToggleAutomation}>切换自动回答 <kbd>Ctrl Alt X</kbd></button><button onClick={onToggleMode}>切换交互 / 穿透 <kbd>Ctrl Alt P</kbd></button><div className="shortcut-static">发送面试官记录 <kbd>Ctrl Alt 1–8</kbd></div><div className="shortcut-static">滚动回答面板 <kbd>Ctrl Alt ↑↓</kbd></div><button onClick={onResetLayout}>重置面板布局</button></div></section>;
 }
 
 export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   const { state, sessionState, realtimeState, overlayMode, hudState: sharedHUDState, automationMode, question, answerText, answerStreaming, remoteTranscript, micTranscript, onToggleMode, onToggleAutomation, onAnswerQuestion, onAnswerLatest, onAnswerScreenshot, onEndInterview, onHideAll, onTogglePanels, onToggleShortcuts, onToggleShare, captureProtectionEnabled, captureProtectionSupported, captureProtectionOsFlagApplied, captureProtectionDisplayVerified, captureProtectionLastError, captureTest } = props;
-  const [layout, updateLayout, resetLayout] = useOverlayLayout();
+  const [layout, updateLayout, applyMainLayout] = useOverlayLayout();
   const [answerDraft, setAnswerDraft] = useState("");
   const [answerSending, setAnswerSending] = useState(false);
+  const [endConfirmOpen, setEndConfirmOpen] = useState(false);
   const [runtimeProtection, setRuntimeProtection] = useState<{ requested: boolean; osFlagApplied: boolean; displayCaptureVerified: boolean | null; lastError?: string }>();
   useEffect(() => {
     let disposed = false;
     void window.interviewCopilot.overlay.getCaptureProtection().then((next) => { if (!disposed) setRuntimeProtection(next); }).catch(() => undefined);
+    void window.interviewCopilot.overlay.getLayout().then((next) => { if (!disposed && next) applyMainLayout(next); }).catch(() => undefined);
     const unsubscribeProtection = window.interviewCopilot.events.onOverlayCaptureProtection((next) => { if (!disposed) setRuntimeProtection(next); });
-    const unsubscribeCommands = window.interviewCopilot.events.onOverlayCommand((command: OverlayCommand) => { if (command === "reset-layout") resetLayout(); });
-    return () => { disposed = true; unsubscribeProtection(); unsubscribeCommands(); };
-  }, [resetLayout]);
+    const unsubscribeLayout = window.interviewCopilot.events.onOverlayLayout((next) => { if (!disposed) applyMainLayout(next); });
+    const unsubscribeCommands = window.interviewCopilot.events.onOverlayCommand((command: OverlayCommand) => { if (command === "confirm-end") setEndConfirmOpen(true); });
+    return () => { disposed = true; unsubscribeProtection(); unsubscribeLayout(); unsubscribeCommands(); };
+  }, [applyMainLayout]);
   const status = hudState({ state, sessionState, realtimeState, question, answerText, answerStreaming });
   const statusMeta = HUD_LABELS[status];
   const effectiveProtectionEnabled = runtimeProtection?.requested ?? captureProtectionEnabled;
@@ -192,10 +227,11 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   const shortcutVisible = sharedHUDState.shortcutVisible && !visualHidden;
   return <main className="overlay-root" data-hud-state={status} data-hud-mode={sharedHUDState.mode} data-share-mode={sharedHUDState.shareMode ? "on" : "off"} data-overlay-mode={overlayMode}>
     {captureTest && !visualHidden && <div className="capture-test-marker">CAPTURE_PROTECTION_TEST_MARKER_7F32</div>}
-    {sharedHUDState.topBarVisible && !visualHidden && <DraggableResizablePanel panel="toolbar" layout={{ ...layout.toolbar, width: 300, height: 38, visible: true, locked: true }} onChange={updateLayout} className="toolbar-panel"><div className="floating-toolbar hud-interactive-region" role="toolbar" aria-label="面试控制栏"><div className="toolbar-brand"><strong>Interview Copilot</strong></div><button className="toolbar-control" onClick={onTogglePanels} title="显示 / 隐藏对话和回答面板" aria-label="显示或隐藏面板">▣</button><button className="toolbar-control" onClick={onToggleShortcuts} title="快捷方式 Ctrl+Alt+K" aria-label="显示快捷方式">⌨</button><button className="toolbar-control" onClick={onToggleShare} title="Share Mode：隐藏全部 HUD，Ctrl+Alt+Shift+S 恢复" aria-label="切换分享模式">◌</button><button className="toolbar-control toolbar-end-button" onClick={() => void onEndInterview()} title="结束面试 Ctrl+Alt+Q" aria-label="结束面试">×</button></div></DraggableResizablePanel>}
+    {sharedHUDState.topBarVisible && !visualHidden && <DraggableResizablePanel panel="toolbar" layout={{ ...layout.toolbar, visible: true, locked: true }} onChange={updateLayout} className="toolbar-panel"><div className="floating-toolbar hud-interactive-region" role="toolbar" aria-label="面试控制栏"><div className="toolbar-brand"><strong>Interview</strong></div><button className="toolbar-control" onClick={onTogglePanels} title="显示 / 隐藏对话和回答面板" aria-label="显示或隐藏面板"><ToolbarIcon name={panelVisible ? "eye" : "eye-off"} /></button><button className="toolbar-control" onClick={onToggleShortcuts} title="快捷方式 Ctrl+Alt+K" aria-label="显示快捷方式"><ToolbarIcon name="keyboard" /></button><button className={`toolbar-control ${sharedHUDState.shareMode ? "active" : ""}`} onClick={onToggleShare} title="Share Mode：隐藏全部 HUD，Ctrl+Alt+Shift+S 恢复" aria-label="切换分享模式"><ToolbarIcon name={sharedHUDState.shareMode ? "share-off" : "share"} /></button><button className="toolbar-control toolbar-end-button" onClick={() => setEndConfirmOpen(true)} title="结束面试 Ctrl+Alt+Q" aria-label="结束面试"><ToolbarIcon name="stop" /></button></div></DraggableResizablePanel>}
     {panelVisible && <DraggableResizablePanel panel="transcript" layout={{ ...layout.transcript, visible: true }} onChange={updateLayout} className="transcript-panel"><section className="overlay-panel-card" aria-label="Conversation Timeline"><header><div><span className="panel-kicker">CONVERSATION TIMELINE</span><strong>对话记录</strong></div><span className="panel-health">{statusMeta.label}</span></header><div className="current-question-card"><span>CURRENT QUESTION</span><strong>{question?.text ?? "等待面试官问题"}</strong></div><TranscriptTimeline snapshot={remoteTranscript} currentQuestion={question?.text} /><div className="my-voice"><span className="panel-kicker">MY VOICE</span><MicTimeline snapshot={micTranscript} /></div></section></DraggableResizablePanel>}
     {panelVisible && <DraggableResizablePanel panel="answer" layout={{ ...layout.answer, visible: true }} onChange={updateLayout} className="answer-panel"><section className="overlay-panel-card answer-card" aria-label="Answer"><header><div><span className="panel-kicker">ANSWER</span><strong>快速回答</strong></div><span className={`answer-ready ${answerStreaming ? "generating" : ""}`}>{answerStreaming ? "✦ 生成中" : answerText ? "✓ 可扫读" : "○ 等待问题"}</span></header><div className="answer-question-strip"><span>CURRENT QUESTION</span><strong>{question?.text ?? "等待面试官问题"}</strong></div><AnswerSummary answerText={answerText} answerStreaming={answerStreaming} /><div className="overlay-answer-composer hud-interactive-region"><textarea value={answerDraft} onChange={(event) => setAnswerDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitAnswer(); } }} placeholder="输入问题，Enter 发送；Shift+Enter 换行" disabled={answerSending} rows={2} /><div><button onClick={() => void submitScreenshot()} disabled={answerSending}>⊕ 截图回答</button><button className="auto-answer" onClick={() => void onToggleAutomation()} disabled={answerSending}>{automationMode === "AUTO" ? "◉ 自动" : "Ⅱ 暂停"}</button><button className="overlay-send" onClick={() => void submitAnswer()} disabled={answerSending}>↑</button></div></div></section></DraggableResizablePanel>}
-    {shortcutVisible && <DraggableResizablePanel panel="shortcuts" layout={{ ...layout.shortcuts, width: 300, visible: true }} onChange={updateLayout} className="shortcut-panel"><div className="hud-interactive-region"><ShortcutPopover onAnswerLatest={onAnswerLatest} onAnswerScreenshot={onAnswerScreenshot} onHideAll={onHideAll} onToggleMode={onToggleMode} onToggleAutomation={() => void onToggleAutomation()} onResetLayout={resetLayout} onEndInterview={() => void onEndInterview()} onClose={onToggleShortcuts} /></div></DraggableResizablePanel>}
+    {shortcutVisible && <DraggableResizablePanel panel="shortcuts" layout={{ ...layout.shortcuts, visible: true }} onChange={updateLayout} className="shortcut-panel"><div className="hud-interactive-region"><ShortcutPopover onAnswerLatest={onAnswerLatest} onAnswerScreenshot={onAnswerScreenshot} onHideAll={onHideAll} onToggleMode={onToggleMode} onToggleAutomation={() => void onToggleAutomation()} onResetLayout={() => void window.interviewCopilot.overlay.resetLayout()} onEndInterview={() => setEndConfirmOpen(true)} onClose={onToggleShortcuts} /></div></DraggableResizablePanel>}
+    {endConfirmOpen && !visualHidden && <EndInterviewDialog onCancel={() => setEndConfirmOpen(false)} onConfirm={() => { setEndConfirmOpen(false); void onEndInterview(); }} />}
     {!visualHidden && <div className={`hud-protection-indicator ${protectionTone}`} title={!effectiveProtectionSupported ? "当前平台不支持 Windows Capture Protection" : effectiveLastError ? "Windows protection flag 失败" : effectiveDisplayVerified === true ? "Display Capture Verified" : effectiveProtectionEnabled ? "Windows protection on" : "Windows protection off"}>{effectiveProtectionSupported ? "◈" : "·"}</div>}
   </main>;
 }

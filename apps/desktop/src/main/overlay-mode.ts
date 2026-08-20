@@ -14,14 +14,13 @@ export function nextOverlayMode(mode: OverlayMode): OverlayMode {
 /**
  * Apply the native hit-test state for the HUD.
  *
- * Passive mode is the normal interview state: the whole BrowserWindow is
- * transparent to the OS hit test until the renderer reports that the cursor
- * is over a small, explicitly interactive HUD region. This is necessary
- * because DOM pointer-events cannot make an Electron window itself pass
- * clicks to the window underneath it.
+ * The overlay is deliberately never focusable. `setIgnoreMouseEvents` is
+ * enough to switch between pass-through and a clickable control region, while
+ * `setFocusable(true)` would let the HUD steal focus from a meeting/browser
+ * window and appear as a normal Windows window.
  */
 export function applyOverlayMode(window: OverlayWindowLike, mode: OverlayMode, interactiveRegion = false): void {
   const interactive = mode === "interactive" || interactiveRegion;
-  window.setFocusable(interactive);
+  window.setFocusable(false);
   window.setIgnoreMouseEvents(!interactive, { forward: true });
 }

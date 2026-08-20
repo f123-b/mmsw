@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { applyOverlayMode, nextOverlayMode, type OverlayMode } from "./overlay-mode";
 import { applyCaptureProtection, getCaptureProtectionCapabilities, type CaptureProtectionCapabilities, type CaptureProtectionState } from "./overlay-capture-protection";
 import { initialHUDState, reduceHUDState, type HUDAction, type HUDState } from "./hud-state";
+import { calculateHUDLayout, type HUDLayout, type HUDWorkArea } from "./hud-layout";
 
 export { applyOverlayMode, nextOverlayMode } from "./overlay-mode";
 export type { OverlayMode, OverlayWindowLike } from "./overlay-mode";
@@ -10,6 +11,8 @@ export { getCaptureProtectionCapabilities } from "./overlay-capture-protection";
 export type { CaptureProtectionCapabilities, CaptureProtectionState } from "./overlay-capture-protection";
 export { initialHUDState, reduceHUDState } from "./hud-state";
 export type { HUDAction, HUDMode, HUDMouseMode, HUDState } from "./hud-state";
+export { calculateHUDLayout } from "./hud-layout";
+export type { HUDLayout, HUDPanelLayout, HUDWorkArea } from "./hud-layout";
 
 export interface OverlayManagerOptions {
   preloadPath?: string;
@@ -20,13 +23,14 @@ export interface OverlayManagerOptions {
   onHUDStateChange?: (state: HUDState) => void;
 }
 
-export type OverlayPanelCommand = "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts";
+export type OverlayPanelCommand = "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end";
 
 export class OverlayManager {
   private window: BrowserWindow | undefined;
   private mode: OverlayMode = "passive";
   private interactiveRegion = false;
   private hudStateValue: HUDState = { ...initialHUDState };
+  private hudLayoutValue: HUDLayout = calculateHUDLayout({ x: 0, y: 0, width: 1440, height: 900 });
   private captureProtectionEnabled: boolean;
   private captureProtectionState: CaptureProtectionState;
   private readonly capabilities: CaptureProtectionCapabilities;
@@ -55,6 +59,10 @@ export class OverlayManager {
     return this.hudStateValue;
   }
 
+  get hudLayout(): HUDLayout {
+    return this.hudLayoutValue;
+  }
+
   get currentWindow(): BrowserWindow | undefined {
     return this.window && !this.window.isDestroyed() ? this.window : undefined;
   }
@@ -75,7 +83,7 @@ export class OverlayManager {
     return this.capabilities;
   }
 
-  /** Enter the desktop HUD mode and cover the complete monitor bounds. */
+  /** Enter the desktop HUD mode and cover the active display work area. */
   enterInterviewMode(): BrowserWindow {
     // Every new interview starts click-through. Users can still reach the
     // toolbar because the renderer reports when the pointer enters a control
@@ -101,18 +109,26 @@ export class OverlayManager {
   showAll(): void { this.transition({ type: "show-all" }); }
   hideAll(): void { this.transition({ type: "hide-all" }); }
   toggleAll(): void { this.transition({ type: "toggle-panels" }); }
-  resetLayout(): void { this.sendPanelCommand("reset-layout"); }
+  resetLayout(): void {
+    this.refreshLayout(this.currentWindow?.getBounds() ?? this.targetMonitorBounds());
+  }
   toggleShortcuts(): void { this.transition({ type: "toggle-shortcuts" }); }
+  requestEndInterviewConfirmation(): void { this.sendPanelCommand("confirm-end"); }
   setShareMode(enabled: boolean): void {
     this.transition({ type: "set-share-mode", enabled });
     if (this.hudState.shareMode) {
       this.mode = "passive";
       this.interactiveRegion = false;
       this.applyMode();
+      // Sharing must remove the HUD from the captured desktop, not merely
+      // render transparent DOM. Keep the BrowserWindow alive so the ASR/AI
+      // session and the previous HUD state can be restored without recreation.
+      this.hide();
     } else if (this.hudState.running) {
       this.mode = this.hudState.mouseMode === "interactive" ? "interactive" : "passive";
       this.interactiveRegion = false;
       this.applyMode();
+      this.show().showInactive();
     }
   }
   toggleShareMode(): void { this.setShareMode(!this.hudState.shareMode); }
@@ -128,6 +144,7 @@ export class OverlayManager {
     if (!window) return;
     const bounds = this.targetMonitorBounds();
     window.setBounds(bounds, false);
+    this.refreshLayout(bounds);
   }
 
   show(): BrowserWindow {
@@ -135,11 +152,13 @@ export class OverlayManager {
       this.applyCaptureProtection();
       this.applyMode();
       this.sendHudState();
+      this.refreshLayout(this.window.getBounds());
       this.window.showInactive();
       return this.window;
     }
 
-    const { x, y, width, height } = this.targetMonitorBounds();
+    const bounds = this.targetMonitorBounds();
+    const { x, y, width, height } = bounds;
     this.window = new BrowserWindow({
       x,
       y,
@@ -170,6 +189,7 @@ export class OverlayManager {
       // Re-apply and re-check here so packaged and dev windows use the same native handle.
       this.applyCaptureProtection();
       this.sendHudState();
+      this.refreshLayout(this.window?.getBounds() ?? bounds);
       this.window?.showInactive();
     });
     this.window.on("closed", () => { this.window = undefined; });
@@ -251,6 +271,13 @@ export class OverlayManager {
     if (window) window.webContents.send("overlay:state", this.hudStateValue);
   }
 
+  private refreshLayout(bounds: Electron.Rectangle): void {
+    const workArea: HUDWorkArea = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+    this.hudLayoutValue = calculateHUDLayout(workArea);
+    const window = this.currentWindow;
+    if (window) window.webContents.send("overlay:layout", this.hudLayoutValue);
+  }
+
   private sendPanelCommand(command: OverlayPanelCommand): void {
     const window = this.currentWindow;
     if (window) window.webContents.send("overlay:command", command);
@@ -261,9 +288,9 @@ export class OverlayManager {
     if (main && !main.isDestroyed()) {
       const bounds = main.getBounds();
       const point = { x: bounds.x + Math.round(bounds.width / 2), y: bounds.y + Math.round(bounds.height / 2) };
-      return screen.getDisplayNearestPoint(point).bounds;
+      return screen.getDisplayNearestPoint(point).workArea;
     }
-    return screen.getPrimaryDisplay().bounds;
+    return screen.getPrimaryDisplay().workArea;
   }
 }
 

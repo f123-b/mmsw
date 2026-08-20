@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -28,8 +29,10 @@ const packaged = process.env.ELECTRON_PACKAGED === "true";
 const visualSmoke = process.env.UI_VISUAL_SMOKE === "true";
 // CI/desktop sandboxes can expose a broken GPU process. The smoke validates
 // window/renderer behavior, so keep it deterministic with software compositing.
+const smokeUserDataDirectory = join(tmpdir(), `interview-copilot-smoke-${process.pid}`);
 const smokeArguments = ["--production-smoke", ...(visualSmoke ? ["--visual-smoke"] : [])];
-const electronArguments = packaged ? ["--disable-gpu", "--in-process-gpu", ...smokeArguments] : ["--disable-gpu", "--in-process-gpu", desktopDirectory, ...smokeArguments];
+const electronSwitches = ["--disable-gpu", "--in-process-gpu", `--user-data-dir=${smokeUserDataDirectory}`];
+const electronArguments = packaged ? [...electronSwitches, ...smokeArguments] : [...electronSwitches, desktopDirectory, ...smokeArguments];
 
 const exitCode = await new Promise((resolve) => {
   const child = spawn(electronExecutable, electronArguments, {
