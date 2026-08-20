@@ -41,6 +41,7 @@ class FakeDeepgramSocket implements StreamingAsrSocket {
 }
 
 const directSettings: ProviderSettings = { providerName: "Deepgram", providerType: "deepgram", baseUrl: "wss://api.deepgram.com/v1/listen", apiKey: "secret", model: "nova-3", language: "zh-CN", timeoutMs: 15_000, maxRetries: 2 };
+const qwenSettings: ProviderSettings = { providerName: "Qwen Realtime ASR", providerType: "qwen", baseUrl: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime", apiKey: "secret", model: "qwen3-asr-flash-realtime", language: "zh-CN", timeoutMs: 15_000, maxRetries: 2 };
 
 describe("RealtimeSession", () => {
   it("sends client_ready and keeps ASR partials out of final history", () => {
@@ -99,6 +100,30 @@ describe("RealtimeSession", () => {
     await Promise.resolve();
     expect(messages.some((message) => message.type === "runtime_error" && message.code === "ASR_FAILED")).toBe(true);
     expect(session.connectionState).toBe("error");
+    session.disconnect();
+  });
+
+  it("uses the existing stereo router for Qwen Direct", async () => {
+    const sockets: FakeDeepgramSocket[] = [];
+    const session = new RealtimeSession(undefined, () => qwenSettings, undefined, () => { const socket = new FakeDeepgramSocket(); sockets.push(socket); return socket; });
+    session.connect({ providerType: "qwen", model: "qwen3-asr-flash-realtime", language: "zh-CN", autoReconnect: false });
+    await Promise.resolve();
+    expect(session.asrDiagnostics.provider).toBe("Qwen Direct");
+    expect(sockets).toHaveLength(2);
+    sockets[0]?.open();
+    sockets[1]?.open();
+    await Promise.resolve();
+    for (const socket of sockets) {
+      socket.emit(JSON.stringify({ type: "session.created" }));
+      socket.emit(JSON.stringify({ type: "session.updated" }));
+    }
+    for (let index = 0; index < 4; index += 1) await Promise.resolve();
+    expect(session.connectionState).toBe("connected");
+    session.sendAudio(new Uint8Array([1, 2, 3, 4]));
+    const micAudio = sockets[0]?.sent.map((value) => typeof value === "string" ? JSON.parse(value) as { type?: string; audio?: string } : {}).find((value) => value.type === "input_audio_buffer.append");
+    const remoteAudio = sockets[1]?.sent.map((value) => typeof value === "string" ? JSON.parse(value) as { type?: string; audio?: string } : {}).find((value) => value.type === "input_audio_buffer.append");
+    expect(micAudio?.audio).toBe("AQI=");
+    expect(remoteAudio?.audio).toBe("AwQ=");
     session.disconnect();
   });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DeepgramStreamingAsrProvider, ProviderError, splitStereoPcm, StereoAsrChannelRouter, type StreamingAsrSocket } from "./asr";
+import { DeepgramStreamingAsrProvider, ProviderError, QwenRealtimeAsrProvider, splitStereoPcm, StereoAsrChannelRouter, type StreamingAsrSocket } from "./asr";
 
 class FakeSocket implements StreamingAsrSocket {
   sent: Uint8Array[] = [];
@@ -115,5 +115,55 @@ describe("stereo ASR routing", () => {
     await finalizing;
     expect(segments).toEqual(["收尾问题"]);
     provider.close();
+  });
+
+  it("adapts Qwen session events, base64 PCM and final transcripts", async () => {
+    const socket = new FakeSocket();
+    const requests: Array<{ url: string; apiKey: string }> = [];
+    const provider = new QwenRealtimeAsrProvider(
+      { model: "qwen3-asr-flash-realtime", language: "zh-CN", apiKey: "secret" },
+      (options) => { requests.push(options); return socket; }
+    );
+    const segments: Array<{ text: string; startMs: number; endMs: number; final: boolean }> = [];
+    const connecting = provider.connect("remote", (segment) => segments.push({ text: segment.text, startMs: segment.startMs, endMs: segment.endMs, final: segment.final }));
+    socket.openSocket();
+    await Promise.resolve();
+    expect(new URL(requests[0]?.url ?? "wss://invalid").searchParams.get("model")).toBe("qwen3-asr-flash-realtime");
+    expect(socket.sentText).toHaveLength(0);
+    socket.emit(JSON.stringify({ type: "session.created" }));
+    const update = JSON.parse(socket.sentText[0] ?? "{}") as { type?: string; session?: { input_audio_transcription?: { language?: string } } };
+    expect(update).toMatchObject({ type: "session.update", session: { input_audio_transcription: { language: "zh" } } });
+    socket.emit(JSON.stringify({ type: "session.updated" }));
+    await connecting;
+
+    provider.sendAudio(new Uint8Array([1, 2]));
+    expect(JSON.parse(socket.sentText[1] ?? "{}")).toMatchObject({ type: "input_audio_buffer.append", audio: "AQI=" });
+    socket.emit(JSON.stringify({ type: "input_audio_buffer.speech_started", item_id: "item-1", audio_start_ms: 120 }));
+    socket.emit(JSON.stringify({ type: "conversation.item.input_audio_transcription.text", item_id: "item-1", text: "解释", stash: "一下" }));
+    socket.emit(JSON.stringify({ type: "input_audio_buffer.speech_stopped", item_id: "item-1", audio_end_ms: 760 }));
+    socket.emit(JSON.stringify({ type: "conversation.item.input_audio_transcription.completed", item_id: "item-1", transcript: "解释一下 DMA" }));
+    expect(segments).toEqual([
+      { text: "解释一下", startMs: 120, endMs: 120, final: false },
+      { text: "解释一下 DMA", startMs: 120, endMs: 760, final: true }
+    ]);
+
+    const finalizing = provider.finalize(750);
+    expect(socket.sentText.map((value) => JSON.parse(value) as { type?: string }).some((value) => value.type === "session.finish")).toBe(true);
+    socket.emit(JSON.stringify({ type: "session.finished" }));
+    await finalizing;
+    provider.close();
+  });
+
+  it("classifies a Qwen session authentication error during connect", async () => {
+    const socket = new FakeSocket();
+    const provider = new QwenRealtimeAsrProvider({ model: "qwen3-asr-flash-realtime", language: "zh-CN", apiKey: "secret" }, () => socket);
+    const errors: ProviderError[] = [];
+    const connecting = provider.connect("mic", () => undefined, (error) => errors.push(error));
+    socket.openSocket();
+    await Promise.resolve();
+    socket.emit(JSON.stringify({ type: "session.created" }));
+    socket.emit(JSON.stringify({ type: "error", error: { code: "InvalidApiKey", message: "authentication failed" } }));
+    await expect(connecting).rejects.toMatchObject({ code: "AUTH_FAILED", recoverable: false, source: "mic" });
+    expect(errors).toHaveLength(1);
   });
 });

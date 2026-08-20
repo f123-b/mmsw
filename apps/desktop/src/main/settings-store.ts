@@ -76,7 +76,8 @@ export class ProviderConfigStore {
     const configured = stored ? JSON.parse(stored.value) as Partial<ProviderSettings> : {};
     const merged = { ...DEFAULTS[section], ...this.defaults[section], ...configured, apiKey: this.secrets.get(`provider.${section}.apiKey`) ?? "" };
     if (section !== "asr") return merged;
-    const providerType = (merged.providerType ?? (merged.providerName.toLowerCase().includes("custom") ? "custom-gateway" : "deepgram")) as AsrProviderType;
+    const providerName = merged.providerName.toLowerCase();
+    const providerType = (merged.providerType ?? (providerName.includes("custom") ? "custom-gateway" : providerName.includes("qwen") || providerName.includes("千问") ? "qwen" : "deepgram")) as AsrProviderType;
     const language = merged.language ? merged.language as AsrLanguage : undefined;
     return { ...merged, providerType, language };
   }

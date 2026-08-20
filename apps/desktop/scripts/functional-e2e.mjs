@@ -125,10 +125,11 @@ const mockServer = createServer(async (request, response) => {
 await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
 const mockPort = mockServer.address().port;
 
-const child = spawn(electronExecutable, [`--remote-debugging-port=${debugPort}`, `--user-data-dir=${userDataDirectory}`, desktopDirectory], {
+const child = spawn(electronExecutable, ["--disable-gpu", "--in-process-gpu", `--remote-debugging-port=${debugPort}`, `--user-data-dir=${userDataDirectory}`, desktopDirectory], {
   cwd: desktopDirectory,
   env: {
     ...process.env,
+    INTERVIEW_COPILOT_DISABLE_GPU: "1",
     ELECTRON_DISABLE_SECURITY_WARNINGS: "true",
     INTERVIEW_COPILOT_CAPTURE_TEST: "1",
     INTERVIEW_COPILOT_TEST_DATA_PATH: userDataDirectory,
@@ -295,7 +296,7 @@ try {
   await waitFor(() => Boolean(document.querySelector(".setup-modal")));
   await screenshot("08-interview-setup.png");
   await clickText("测试音频");
-  await waitFor(() => document.body.innerText.includes("Ready"), 5_000);
+  await waitFor(() => Boolean(document.querySelector(".probe-ok")), 5_000);
   await screenshot("09-audio-probe.png");
   evidence.push("Probe: PASS; PROBE_COMPLETES_BEFORE_INTERVIEW_START: PASS");
   await clickSelector(".setup-modal .dark-pill");
@@ -332,15 +333,15 @@ try {
   evidence.push("AUTOMATION_RUNTIME_SWITCH: PASS; Overlay AUTO/MANUAL Sync: PASS");
 
   const beforeManualSend = answerRequests.length;
-  await overlay.evaluate(`(() => { const input = document.querySelector('.overlay-answer-composer input'); const setter = Object.getOwnPropertyDescriptor(input.constructor.prototype, 'value')?.set; setter.call(input, 'Mock manual question'); input.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('.overlay-send').click(); return true; })()`);
+  await overlay.evaluate(`(() => { const input = document.querySelector('.overlay-answer-composer textarea, .overlay-answer-composer input'); const setter = Object.getOwnPropertyDescriptor(input.constructor.prototype, 'value')?.set; setter.call(input, 'Mock manual question'); input.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('.overlay-send').click(); return true; })()`);
   await waitForNode(() => answerRequests.length > beforeManualSend, 15_000);
   evidence.push("OVERLAY_MANUAL_SEND: PASS");
 
   const beforeScreenshot = answerRequests.length;
   const beforeCaptured = await main.evaluate("window.__e2eMainScreenshotCaptured ?? 0");
   await main.evaluate(`window.__e2eMainScreenshotBaseline = ${beforeCaptured}`);
-  await waitFor(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('附截图')); return Boolean(button && !button.disabled); }, 15_000, overlay);
-  const screenshotButtonState = await overlay.evaluate("(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('附截图')); if (!button) return { found: false }; button.click(); return { found: true, disabled: button.disabled }; })()");
+  await waitFor(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('截图回答') || (item.innerText || '').includes('附截图')); return Boolean(button && !button.disabled); }, 15_000, overlay);
+  const screenshotButtonState = await overlay.evaluate("(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('截图回答') || (item.innerText || '').includes('附截图')); if (!button) return { found: false }; button.click(); return { found: true, disabled: button.disabled }; })()");
   if (!screenshotButtonState?.found || screenshotButtonState.disabled) throw new Error(`Screenshot button unavailable: ${JSON.stringify(screenshotButtonState)}`);
   await waitForNode(() => answerRequests.slice(beforeScreenshot).some((request) => (request.messages ?? []).some((message) => Array.isArray(message.content))), 15_000);
   await waitFor(() => (window.__e2eMainScreenshotCaptured ?? 0) > (window.__e2eMainScreenshotBaseline ?? 0), 15_000, main);

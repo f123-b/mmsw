@@ -11,9 +11,12 @@ export type { CaptureProtectionCapabilities, CaptureProtectionState } from "./ov
 export interface OverlayManagerOptions {
   preloadPath?: string;
   loadRenderer: (window: BrowserWindow) => Promise<void>;
+  getMainWindow?: () => BrowserWindow | undefined;
   captureProtectionEnabled?: boolean;
   onCaptureProtectionDiagnostic?: (event: string, fields: Record<string, unknown>) => void;
 }
+
+export type OverlayPanelCommand = "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts";
 
 export class OverlayManager {
   private window: BrowserWindow | undefined;
@@ -62,6 +65,34 @@ export class OverlayManager {
     return this.capabilities;
   }
 
+  /** Enter the desktop HUD mode and cover the complete monitor bounds. */
+  enterInterviewMode(): BrowserWindow {
+    const window = this.show();
+    this.coverCurrentMonitor();
+    window.showInactive();
+    return window;
+  }
+
+  /** Leave the desktop HUD mode and restore an interactive native window. */
+  exitInterviewMode(): void {
+    this.setMode("interactive");
+    this.hide();
+  }
+
+  showAll(): void { this.sendPanelCommand("show-all"); }
+  hideAll(): void { this.sendPanelCommand("hide-all"); }
+  toggleAll(): void { this.sendPanelCommand("toggle-all"); }
+  resetLayout(): void { this.sendPanelCommand("reset-layout"); }
+  toggleShortcuts(): void { this.sendPanelCommand("toggle-shortcuts"); }
+  setClickThrough(enabled: boolean): void { this.setMode(enabled ? "passive" : "interactive"); }
+
+  coverCurrentMonitor(): void {
+    const window = this.currentWindow;
+    if (!window) return;
+    const bounds = this.targetMonitorBounds();
+    window.setBounds(bounds, false);
+  }
+
   show(): BrowserWindow {
     if (this.window && !this.window.isDestroyed()) {
       this.applyCaptureProtection();
@@ -69,19 +100,17 @@ export class OverlayManager {
       return this.window;
     }
 
-    const { x, y, width, height } = screen.getPrimaryDisplay().workArea;
+    const { x, y, width, height } = this.targetMonitorBounds();
     this.window = new BrowserWindow({
       x,
       y,
       width,
       height,
       title: "Interview Copilot Overlay",
-      minWidth: width,
-      minHeight: height,
       frame: false,
       transparent: true,
       backgroundColor: "#00000000",
-      resizable: true,
+      resizable: false,
       alwaysOnTop: true,
       skipTaskbar: true,
       show: false,
@@ -162,5 +191,20 @@ export class OverlayManager {
     if (!this.window || this.window.isDestroyed()) return;
     applyOverlayMode(this.window, this.mode);
     this.window.webContents.send("overlay:mode", this.mode);
+  }
+
+  private sendPanelCommand(command: OverlayPanelCommand): void {
+    const window = this.currentWindow;
+    if (window) window.webContents.send("overlay:command", command);
+  }
+
+  private targetMonitorBounds(): Electron.Rectangle {
+    const main = this.options.getMainWindow?.();
+    if (main && !main.isDestroyed()) {
+      const bounds = main.getBounds();
+      const point = { x: bounds.x + Math.round(bounds.width / 2), y: bounds.y + Math.round(bounds.height / 2) };
+      return screen.getDisplayNearestPoint(point).bounds;
+    }
+    return screen.getPrimaryDisplay().bounds;
   }
 }

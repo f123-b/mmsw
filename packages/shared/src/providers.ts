@@ -1,6 +1,6 @@
 import type { AnswerProvider, AnswerProviderRequest, PromptSection } from "./answer";
 
-export type AsrProviderType = "deepgram" | "custom-gateway";
+export type AsrProviderType = "deepgram" | "qwen" | "custom-gateway";
 export type AsrLanguage = "zh-CN" | "en-US" | "multi";
 
 export interface ProviderSettings {

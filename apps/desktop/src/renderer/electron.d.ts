@@ -29,6 +29,11 @@ declare global {
       overlay: {
         show(): Promise<void>;
         toggle(): Promise<void>;
+        showAll(): Promise<boolean>;
+        hideAll(): Promise<boolean>;
+        toggleAll(): Promise<boolean>;
+        resetLayout(): Promise<boolean>;
+        toggleShortcuts(): Promise<boolean>;
         setMode(mode: OverlayMode): Promise<void>;
         getCaptureProtection(): Promise<CaptureProtectionState>;
         setCaptureProtection(enabled: boolean): Promise<CaptureProtectionState | undefined>;
@@ -115,6 +120,7 @@ declare global {
         onAudioDiagnostic(listener: (message: string) => void): () => void;
         onSessionState(listener: (state: SessionState) => void): () => void;
         onOverlayMode(listener: (mode: OverlayMode) => void): () => void;
+        onOverlayCommand(listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts") => void): () => void;
         onOverlayCaptureProtection(listener: (state: CaptureProtectionState) => void): () => void;
         onShortcut(listener: (shortcut: string) => void): () => void;
         onAudioProcess(listener: (state: AudioProcessState) => void): () => void;

@@ -11,6 +11,7 @@ import {
   DeepgramStreamingAsrProvider,
   PcmBackpressureQueue,
   ProviderError,
+  QwenRealtimeAsrProvider,
   StereoAsrChannelRouter,
   TranscriptStabilizer,
   type AsrLanguage,
@@ -47,7 +48,7 @@ export interface RealtimeSocket {
 export type RealtimeSocketFactory = (url: string) => RealtimeSocket;
 
 export interface AsrRuntimeDiagnostics {
-  provider: "Deepgram Direct" | "Custom Gateway" | "unknown";
+  provider: "Deepgram Direct" | "Qwen Direct" | "Custom Gateway" | "unknown";
   model: string;
   language: string;
   micState: "connecting" | "listening" | "error" | "stopped";
@@ -82,16 +83,16 @@ function messageText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-class WsDeepgramSocket implements StreamingAsrSocket {
-  constructor(private readonly socket: WebSocket) {}
+class WsStreamingAsrSocket implements StreamingAsrSocket {
+  constructor(private readonly socket: WebSocket, private readonly providerName: string) {}
 
   waitForOpen(): Promise<void> {
     if (this.socket.readyState === WebSocket.OPEN) return Promise.resolve();
-    if (this.socket.readyState === WebSocket.CLOSING || this.socket.readyState === WebSocket.CLOSED) return Promise.reject(new Error("Deepgram WebSocket is closed"));
+    if (this.socket.readyState === WebSocket.CLOSING || this.socket.readyState === WebSocket.CLOSED) return Promise.reject(new Error(`${this.providerName} WebSocket is closed`));
     return new Promise<void>((resolve, reject) => {
       const onOpen = () => { cleanup(); resolve(); };
       const onError = (error: Error) => { cleanup(); reject(error); };
-      const onClose = () => { cleanup(); reject(new Error("Deepgram WebSocket closed before OPEN")); };
+      const onClose = () => { cleanup(); reject(new Error(`${this.providerName} WebSocket closed before OPEN`)); };
       const cleanup = () => {
         this.socket.off("open", onOpen);
         this.socket.off("error", onError);
@@ -111,7 +112,11 @@ class WsDeepgramSocket implements StreamingAsrSocket {
 }
 
 function createDeepgramSocket(options: { url: string; apiKey: string }): StreamingAsrSocket {
-  return new WsDeepgramSocket(new WebSocket(options.url, { headers: { Authorization: `Token ${options.apiKey}` } }));
+  return new WsStreamingAsrSocket(new WebSocket(options.url, { headers: { Authorization: `Token ${options.apiKey}` } }), "Deepgram");
+}
+
+function createQwenSocket(options: { url: string; apiKey: string }): StreamingAsrSocket {
+  return new WsStreamingAsrSocket(new WebSocket(options.url, { headers: { Authorization: `Bearer ${options.apiKey}`, "OpenAI-Beta": "realtime=v1" } }), "Qwen ASR");
 }
 
 export class RealtimeSession extends EventEmitter {
@@ -140,7 +145,8 @@ export class RealtimeSession extends EventEmitter {
   constructor(
     private readonly socketFactory: RealtimeSocketFactory = (url) => new WebSocket(url) as unknown as RealtimeSocket,
     private readonly directAsrSettingsProvider?: () => ProviderSettings | undefined,
-    private readonly directSocketFactory = createDeepgramSocket
+    private readonly directSocketFactory = createDeepgramSocket,
+    private readonly qwenSocketFactory = createQwenSocket
   ) {
     super();
   }
@@ -156,7 +162,7 @@ export class RealtimeSession extends EventEmitter {
     this.reconnectAttempt = 0;
     this.diagnostics = {
       ...this.diagnostics,
-      provider: options.providerType === "deepgram" ? "Deepgram Direct" : options.providerType === "custom-gateway" ? "Custom Gateway" : "unknown",
+      provider: options.providerType === "deepgram" ? "Deepgram Direct" : options.providerType === "qwen" ? "Qwen Direct" : options.providerType === "custom-gateway" ? "Custom Gateway" : "unknown",
       model: options.model ?? "",
       language: options.language ?? "",
       micState: "connecting",
@@ -226,7 +232,7 @@ export class RealtimeSession extends EventEmitter {
 
   private openSocket(): void {
     if (this.manualStop || !this.options) return;
-    if (this.options.providerType === "deepgram") {
+    if (this.options.providerType === "deepgram" || this.options.providerType === "qwen") {
       void this.openDirectAsr();
       return;
     }
@@ -251,13 +257,16 @@ export class RealtimeSession extends EventEmitter {
     const generation = ++this.directGeneration;
     this.setState(this.reconnectAttempt === 0 ? "connecting" : "reconnecting");
     const settings = this.directAsrSettingsProvider?.();
+    const providerType = options.providerType ?? settings?.providerType ?? "deepgram";
     if (!settings?.apiKey) {
-      this.handleDirectFailure(new ProviderError("AUTH_FAILED", "Deepgram API Key 未配置，请先在设置中保存 API Key", false), generation);
+      this.handleDirectFailure(new ProviderError("AUTH_FAILED", `${providerType === "qwen" ? "千问" : "Deepgram"} API Key 未配置，请先在设置中保存 API Key`, false), generation);
       return;
     }
-    const model = options.model || settings.model || "nova-3";
+    const model = options.model || settings.model || (providerType === "qwen" ? "qwen3-asr-flash-realtime-2026-02-10" : "nova-3");
     const language = options.language || settings.language || "zh-CN";
-    const createProvider = () => new DeepgramStreamingAsrProvider({ baseUrl: options.url || settings.baseUrl, model, language, apiKey: settings.apiKey }, this.directSocketFactory);
+    const createProvider = () => providerType === "qwen"
+      ? new QwenRealtimeAsrProvider({ baseUrl: options.url || settings.baseUrl, model, language, apiKey: settings.apiKey }, this.qwenSocketFactory)
+      : new DeepgramStreamingAsrProvider({ baseUrl: options.url || settings.baseUrl, model, language, apiKey: settings.apiKey }, this.directSocketFactory);
     const router = new StereoAsrChannelRouter(createProvider(), createProvider());
     this.directRouter = router;
     this.emitAsrStatus("mic", "connecting");

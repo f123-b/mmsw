@@ -113,7 +113,7 @@ export const asrStatusSchema = z.object({
   message: z.string().optional()
 });
 
-export const asrProviderTypeSchema = z.enum(["deepgram", "custom-gateway"]);
+export const asrProviderTypeSchema = z.enum(["deepgram", "qwen", "custom-gateway"]);
 export const asrLanguageSchema = z.enum(["zh-CN", "en-US", "multi"]);
 
 export const connectionReadySchema = z.object({

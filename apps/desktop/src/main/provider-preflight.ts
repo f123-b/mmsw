@@ -125,9 +125,12 @@ async function testHttp(section: "llm" | "embedding", settings: ProviderSettings
 
 async function testAsr(settings: ProviderSettings, signal: AbortSignal): Promise<ProviderCheckResult> {
   const section: ProviderSection = "asr";
-  if (!configured(section, settings)) return { section, configured: false, reachable: false, status: "unconfigured", message: settings.providerType === "custom-gateway" ? "未配置 Custom Gateway" : "未配置 Deepgram API Key" };
-  const url = new URL(settings.baseUrl || "wss://api.deepgram.com/v1/listen");
-  if (settings.providerType !== "custom-gateway") {
+  const isQwen = settings.providerType === "qwen";
+  if (!configured(section, settings)) return { section, configured: false, reachable: false, status: "unconfigured", message: settings.providerType === "custom-gateway" ? "未配置 Custom Gateway" : isQwen ? "未配置千问 API Key" : "未配置 Deepgram API Key" };
+  const url = new URL(settings.baseUrl || (isQwen ? "wss://dashscope.aliyuncs.com/api-ws/v1/realtime" : "wss://api.deepgram.com/v1/listen"));
+  if (isQwen) {
+    url.searchParams.set("model", settings.model || "qwen3-asr-flash-realtime-2026-02-10");
+  } else if (settings.providerType !== "custom-gateway") {
     url.searchParams.set("model", settings.model);
     url.searchParams.set("language", settings.language ?? "zh-CN");
     url.searchParams.set("encoding", "linear16");
@@ -135,14 +138,50 @@ async function testAsr(settings: ProviderSettings, signal: AbortSignal): Promise
   }
   return await new Promise<ProviderCheckResult>((resolve) => {
     let settled = false;
-    const finish = (result: ProviderCheckResult) => { if (settled) return; settled = true; clearTimeout(timer); socket?.close(); resolve(result); };
+    const finish = (result: ProviderCheckResult) => { if (settled) return; settled = true; clearTimeout(timer); signal.removeEventListener("abort", abort); socket?.close(); resolve(result); };
     const timer = setTimeout(() => finish({ section, configured: true, reachable: false, status: "timeout", message: "WebSocket 握手超时" }), Math.max(1_000, settings.timeoutMs));
     let socket: WebSocket | undefined;
     const abort = () => finish({ section, configured: true, reachable: false, status: "timeout", message: "测试已取消" });
     signal.addEventListener("abort", abort, { once: true });
     try {
-      socket = new WebSocket(url, settings.providerType === "custom-gateway" ? undefined : { headers: { Authorization: `Token ${settings.apiKey}` } });
-      socket.once("open", () => finish({ section, configured: true, reachable: true, status: "ready" }));
+      const authorization = isQwen ? `Bearer ${settings.apiKey}` : `Token ${settings.apiKey}`;
+      socket = new WebSocket(url, settings.providerType === "custom-gateway" ? undefined : { headers: { Authorization: authorization, ...(isQwen ? { "OpenAI-Beta": "realtime=v1" } : {}) } });
+      socket.once("open", () => {
+        if (!isQwen) {
+          finish({ section, configured: true, reachable: true, status: "ready" });
+        }
+      });
+      if (isQwen) socket.on("message", (data) => {
+        try {
+          const message = JSON.parse(data.toString()) as { type?: string; code?: string; message?: string; error?: string | { code?: string; message?: string } };
+          if (message.type === "session.created") {
+            socket?.send(JSON.stringify({
+              event_id: `event_${Date.now()}_preflight`,
+              type: "session.update",
+              session: {
+                modalities: ["text"],
+                input_audio_format: "pcm",
+                sample_rate: 16_000,
+                input_audio_transcription: { ...(settings.language === "zh-CN" ? { language: "zh" } : settings.language === "en-US" ? { language: "en" } : {}) },
+                turn_detection: { type: "server_vad", threshold: 0, silence_duration_ms: 400 }
+              }
+            }));
+            return;
+          }
+          if (message.type === "session.updated") {
+            finish({ section, configured: true, reachable: true, status: "ready" });
+            return;
+          }
+          if (message.type === "error" || message.type === "conversation.item.input_audio_transcription.failed" || message.error) {
+            const nested = message.error && typeof message.error === "object" ? message.error : undefined;
+            const detail = [message.code, message.message, typeof message.error === "string" ? message.error : undefined, nested?.code, nested?.message].filter(Boolean).join(": ");
+            const status: ProviderCheckStatus = /invalid.*(api.?key|token)|authentication|unauthori[sz]ed|forbidden|\b(401|403)\b/i.test(detail) ? "auth_failed" : /model.*(not.*found|invalid|unsupported)|invalid.*model/i.test(detail) ? "model_not_found" : "bad_request";
+            finish({ section, configured: true, reachable: false, status, message: statusMessage(status, settings, detail) });
+          }
+        } catch (error) {
+          finish({ section, configured: true, reachable: false, status: "invalid_response", message: `千问 ASR 返回格式异常：${String(error)}` });
+        }
+      });
       socket.once("unexpected-response", (_request, response) => {
         const status = classifyHttp(response.statusCode ?? 0);
         finish({ section, configured: true, reachable: false, status, message: statusMessage(status, settings) });
@@ -181,7 +220,7 @@ export async function testCachedProviderConnection(section: ProviderSection, set
 export async function runProviderPreflight(settings: { llm: ProviderSettings; asr: ProviderSettings; embedding: ProviderSettings }, checkReachability = false, cache?: ProviderPreflightCache): Promise<ProviderPreflightResult> {
   if (!checkReachability) {
     const llm = configured("llm", settings.llm) ? { section: "llm" as const, configured: true, reachable: false, status: "testing" as const } : { section: "llm" as const, configured: false, reachable: false, status: "unconfigured" as const, message: "未配置 LLM API Key" };
-    const asr = configured("asr", settings.asr) ? { section: "asr" as const, configured: true, reachable: false, status: "testing" as const } : { section: "asr" as const, configured: false, reachable: false, status: "unconfigured" as const, message: "未配置 Deepgram API Key" };
+    const asr = configured("asr", settings.asr) ? { section: "asr" as const, configured: true, reachable: false, status: "testing" as const } : { section: "asr" as const, configured: false, reachable: false, status: "unconfigured" as const, message: settings.asr.providerType === "qwen" ? "未配置千问 API Key" : "未配置 Deepgram API Key" };
     const embedding = configured("embedding", settings.embedding) ? { section: "embedding" as const, configured: true, reachable: false, status: "testing" as const, optional: true } : { section: "embedding" as const, configured: false, reachable: false, status: "unconfigured" as const, message: "未配置 Embedding API Key", optional: true };
     return { llm, asr, embedding };
   }

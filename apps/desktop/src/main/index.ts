@@ -19,6 +19,11 @@ import { SafeLogger } from "./logger";
 import { buildConversationHistory } from "./chat-context";
 import { ShutdownController } from "./shutdown-controller";
 
+if (process.env.INTERVIEW_COPILOT_DISABLE_GPU === "1") {
+  app.commandLine.appendSwitch("disable-gpu");
+  app.commandLine.appendSwitch("in-process-gpu");
+}
+
 let mainWindow: BrowserWindow | undefined;
 let overlayManager: OverlayManager | undefined;
 const audioManager = new AudioManager();
@@ -621,8 +626,18 @@ async function runPostAnalysis(interviewId: string): Promise<void> {
 
 async function stopInterviewWithAnalysis(): Promise<void> {
   const interviewId = coordinator().interviewId;
-  await coordinator().stop("user");
-  if (interviewId) void runPostAnalysis(interviewId);
+  try {
+    await coordinator().stop("user");
+    if (interviewId) void runPostAnalysis(interviewId);
+  } finally {
+    // The HUD is a session-scoped window. Always restore the normal app even
+    // when ASR/audio shutdown reports an error or an answer is still flushing.
+    overlayManager?.exitInterviewMode();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  }
 }
 
 function chatContext(profileId?: string, userMessage = ""): string {
@@ -709,8 +724,13 @@ function registerIpc(): void {
   ipcMain.handle("audio:stop", () => audioManager.stop());
   ipcMain.handle("audio:probe", (_event, options: AudioStartOptions) => audioManager.probe(options));
   ipcMain.handle("audio:list-devices", () => productionSmokeRequested ? { inputs: [], outputs: [] } : audioManager.listDevices());
-  ipcMain.handle("overlay:show", () => { overlayManager?.show(); return true; });
-  ipcMain.handle("overlay:toggle", () => { overlayManager?.toggle(); return true; });
+   ipcMain.handle("overlay:show", () => { overlayManager?.enterInterviewMode(); return true; });
+   ipcMain.handle("overlay:toggle", () => { overlayManager?.toggle(); return true; });
+   ipcMain.handle("overlay:show-all", () => { overlayManager?.showAll(); return true; });
+   ipcMain.handle("overlay:hide-all", () => { overlayManager?.hideAll(); return true; });
+   ipcMain.handle("overlay:toggle-all", () => { overlayManager?.toggleAll(); return true; });
+   ipcMain.handle("overlay:reset-layout", () => { overlayManager?.resetLayout(); return true; });
+   ipcMain.handle("overlay:toggle-shortcuts", () => { overlayManager?.toggleShortcuts(); return true; });
   ipcMain.handle("overlay:set-mode", (_event, mode: OverlayMode) => {
     overlayManager?.setMode(mode);
     broadcast("overlay:mode", mode);
@@ -754,19 +774,32 @@ function registerIpc(): void {
     return true;
   });
   ipcMain.handle("interview:start", async (_event, options: InterviewStartOptions) => {
+    let coordinatorStarted = false;
     try {
       if (!profileRepository?.get(options.profileId)) throw new Error("PROFILE_NOT_FOUND: 面试档案不存在");
       const llm = providerConfigStore?.get("llm") ?? environmentLlmSettings;
       if (!llm.apiKey) throw new Error("LLM_NOT_CONFIGURED: 未配置 LLM API Key");
       const asr = providerConfigStore?.get("asr");
-      if ((options.providerType ?? asr?.providerType ?? "deepgram") === "deepgram" && !asr?.apiKey) throw new Error("ASR_AUTH_FAILED: 未配置 Deepgram API Key");
+      const asrProviderType = options.providerType ?? asr?.providerType ?? "deepgram";
+      if (asrProviderType !== "custom-gateway" && !asr?.apiKey) throw new Error(`ASR_AUTH_FAILED: 未配置${asrProviderType === "qwen" ? "千问" : " Deepgram"} API Key`);
       const preflight = await runProviderPreflight({ llm, asr: asr ?? { providerName: "ASR", providerType: "custom-gateway", baseUrl: options.url ?? "", apiKey: "", model: options.model ?? "", timeoutMs: 10_000, maxRetries: 0 }, embedding: providerConfigStore?.get("embedding") ?? { providerName: "Embedding", baseUrl: "", apiKey: "", model: "", timeoutMs: 10_000, maxRetries: 0 } }, true, providerPreflightCache);
       if (!preflight.llm.reachable) throw new Error(`LLM_CONNECT_FAILED: ${preflight.llm.message ?? preflight.llm.status}`);
       if (!preflight.asr.reachable) throw new Error(`ASR_CONNECT_FAILED: ${preflight.asr.message ?? preflight.asr.status}`);
       const interviewId = await coordinator().start(options);
-      overlayManager?.show();
-      return interviewId;
+       // The main window must not remain underneath the transparent HUD. Keep
+       // it available for restoration after an explicit or exceptional stop.
+       mainWindow?.hide();
+       overlayManager?.enterInterviewMode();
+       coordinatorStarted = true;
+       return interviewId;
     } catch (error) {
+      // If window creation fails after the coordinator has started, unwind the
+      // session and restore the main window before reporting the error.
+      if (coordinatorStarted || coordinator().running) {
+        await coordinator().stop("error").catch(() => undefined);
+        overlayManager?.exitInterviewMode();
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+      }
       const raw = String(error);
       const code = raw.split(":", 1)[0] || "AUDIO_DEVICE_FAILED";
       const allowed = new Set(["AUDIO_BUSY", "AUDIO_DEVICE_FAILED", "AUDIO_PROBE_REQUIRED", "AUDIO_PROBE_FAILED", "AUDIO_PROBE_MIC_FAILED", "AUDIO_PROBE_SYSTEM_FAILED", "AUDIO_PROBE_PROCESS_FAILED", "AUDIO_PROBE_PROCESS_CRASHED", "AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT", "AUDIO_PROBE_TIMEOUT", "ASR_AUTH_FAILED", "ASR_CONNECT_FAILED", "LLM_NOT_CONFIGURED", "LLM_CONNECT_FAILED", "PROFILE_NOT_FOUND", "SIDECAR_NOT_FOUND", "DATABASE_ERROR"]);
@@ -971,7 +1004,11 @@ function registerShortcuts(): void {
   const shortcuts: Record<string, () => void> = {
     [GLOBAL_SHORTCUTS.answerLatest]: () => void coordinator().answerLatest(),
     [GLOBAL_SHORTCUTS.screenshotAnswer]: () => void captureScreenshot(),
-    [GLOBAL_SHORTCUTS.toggleOverlay]: () => overlayManager?.toggle(),
+    [GLOBAL_SHORTCUTS.toggleOverlay]: () => {
+      if (coordinator().running) overlayManager?.toggleAll();
+      else overlayManager?.toggle();
+    },
+    [GLOBAL_SHORTCUTS.toggleShortcuts]: () => overlayManager?.toggleShortcuts(),
     [GLOBAL_SHORTCUTS.toggleOverlayMode]: () => {
       const mode = overlayManager?.toggleMode();
       if (mode) broadcast("overlay:mode", mode);
@@ -1070,6 +1107,7 @@ app.whenReady().then(async () => {
   overlayManager = new OverlayManager({
     preloadPath,
     loadRenderer: (window) => loadRenderer(window, true),
+    getMainWindow: () => mainWindow,
     captureProtectionEnabled: overlaySettingsStore?.get().captureProtection ?? true,
     onCaptureProtectionDiagnostic: (event, fields) => {
       appLogger?.info(event, fields);

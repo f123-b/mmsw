@@ -26,13 +26,15 @@ const electronExecutable = process.env.ELECTRON_EXECUTABLE ?? (process.platform 
 if (!existsSync(electronExecutable)) throw new Error(`Electron executable is missing: ${electronExecutable}`);
 const packaged = process.env.ELECTRON_PACKAGED === "true";
 const visualSmoke = process.env.UI_VISUAL_SMOKE === "true";
+// CI/desktop sandboxes can expose a broken GPU process. The smoke validates
+// window/renderer behavior, so keep it deterministic with software compositing.
 const smokeArguments = ["--production-smoke", ...(visualSmoke ? ["--visual-smoke"] : [])];
-const electronArguments = packaged ? smokeArguments : [desktopDirectory, ...smokeArguments];
+const electronArguments = packaged ? ["--disable-gpu", "--in-process-gpu", ...smokeArguments] : ["--disable-gpu", "--in-process-gpu", desktopDirectory, ...smokeArguments];
 
 const exitCode = await new Promise((resolve) => {
   const child = spawn(electronExecutable, electronArguments, {
     cwd: desktopDirectory,
-    env: { ...process.env },
+    env: { ...process.env, INTERVIEW_COPILOT_DISABLE_GPU: "1" },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
   });

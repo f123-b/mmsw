@@ -29,6 +29,11 @@ const api = {
   overlay: {
     show: () => ipcRenderer.invoke("overlay:show"),
     toggle: () => ipcRenderer.invoke("overlay:toggle"),
+    showAll: () => ipcRenderer.invoke("overlay:show-all"),
+    hideAll: () => ipcRenderer.invoke("overlay:hide-all"),
+    toggleAll: () => ipcRenderer.invoke("overlay:toggle-all"),
+    resetLayout: () => ipcRenderer.invoke("overlay:reset-layout"),
+    toggleShortcuts: () => ipcRenderer.invoke("overlay:toggle-shortcuts"),
     setMode: (mode: OverlayMode) => ipcRenderer.invoke("overlay:set-mode", mode),
     getCaptureProtection: (): Promise<CaptureProtectionState> => ipcRenderer.invoke("overlay:get-capture-protection"),
     setCaptureProtection: (enabled: boolean): Promise<CaptureProtectionState | undefined> => ipcRenderer.invoke("overlay:set-capture-protection", enabled),
@@ -130,6 +135,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, mode: OverlayMode) => listener(mode);
       ipcRenderer.on("overlay:mode", handler);
       return () => ipcRenderer.removeListener("overlay:mode", handler);
+    },
+    onOverlayCommand: (listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts") => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts") => listener(command);
+      ipcRenderer.on("overlay:command", handler);
+      return () => ipcRenderer.removeListener("overlay:command", handler);
     },
     onOverlayCaptureProtection: (listener: (state: CaptureProtectionState) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, state: CaptureProtectionState) => listener(state);

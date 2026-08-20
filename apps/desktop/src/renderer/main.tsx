@@ -18,6 +18,11 @@ function FatalStartupError() {
 }
 
 const rootElement = document.getElementById("root");
+const isOverlayWindow = new URLSearchParams(window.location.search).get("window") === "overlay";
+if (isOverlayWindow) {
+  document.documentElement.classList.add("overlay-window");
+  document.body.classList.add("overlay-window");
+}
 if (rootElement) {
   const root = createRoot(rootElement);
   root.render(window.interviewCopilot ? (

@@ -71,6 +71,19 @@ interface DeepgramResultMessage {
   duration?: number;
 }
 
+interface QwenRealtimeMessage {
+  type?: string;
+  item_id?: string;
+  text?: string;
+  stash?: string;
+  transcript?: string;
+  audio_start_ms?: number;
+  audio_end_ms?: number;
+  code?: string;
+  message?: string;
+  error?: string | { code?: string; message?: string };
+}
+
 function providerError(error: unknown, source: "mic" | "remote", fallbackCode: AsrProviderErrorCode, fallbackMessage: string): ProviderError {
   if (error instanceof ProviderError) return new ProviderError(error.code, error.message, error.recoverable, source);
   const message = error instanceof Error ? error.message : String(error);
@@ -234,6 +247,282 @@ export class DeepgramStreamingAsrProvider implements StreamingAsrProvider {
 
   private notifyError(error: ProviderError): void {
     this.errorListener?.(error);
+  }
+
+  private finishFinalize(): void {
+    this.finalizing = false;
+    const waiters = this.finalizeWaiters.splice(0);
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve();
+    }
+  }
+}
+
+function qwenProviderError(error: unknown, source: "mic" | "remote", fallbackCode: AsrProviderErrorCode, fallbackMessage: string): ProviderError {
+  if (error instanceof ProviderError) return new ProviderError(error.code, error.message, error.recoverable, source);
+  const message = error instanceof Error ? error.message : String(error);
+  if (/\b(401|403)\b|unauthori[sz]ed|forbidden|invalid.*(api.?key|token)|invalidapikey|authentication/i.test(message)) {
+    return new ProviderError("AUTH_FAILED", "千问 API Key 无效或未授权", false, source);
+  }
+  return new ProviderError(fallbackCode, message || fallbackMessage, true, source);
+}
+
+function qwenErrorMessage(message: QwenRealtimeMessage): string {
+  if (typeof message.error === "string") return message.error;
+  if (message.error && typeof message.error === "object") return [message.error.code, message.error.message].filter(Boolean).join(": ");
+  return [message.code, message.message].filter(Boolean).join(": ") || "Qwen ASR returned an error";
+}
+
+function qwenLanguage(language?: string): string | undefined {
+  if (language === "zh-CN") return "zh";
+  if (language === "en-US") return "en";
+  return undefined;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let index = 0; index < bytes.byteLength; index += 1) binary += String.fromCharCode(bytes[index] ?? 0);
+  return btoa(binary);
+}
+
+/** Alibaba Cloud Qwen realtime ASR adapter using the official JSON WebSocket event protocol. */
+export class QwenRealtimeAsrProvider implements StreamingAsrProvider {
+  private socket: StreamingAsrSocket | undefined;
+  private source: "mic" | "remote" = "remote";
+  private errorListener?: StreamingAsrErrorListener;
+  private segmentListener?: (segment: Omit<TranscriptSegment, "id">) => void;
+  private expectedClose = false;
+  private sessionCreated = false;
+  private sessionUpdateSent = false;
+  private sessionUpdated = false;
+  private sessionFinished = false;
+  private eventSequence = 0;
+  private sentAudioMs = 0;
+  private lastFinalEndMs = 0;
+  private activeItemId?: string;
+  private readonly itemRanges = new Map<string, { startMs: number; endMs?: number }>();
+  private readyWaiter?: { resolve: () => void; reject: (error: ProviderError) => void; timer: ReturnType<typeof setTimeout> };
+  private finalizing = false;
+  private finalizeWaiters: Array<{ resolve: () => void; timer: ReturnType<typeof setTimeout> }> = [];
+
+  constructor(
+    private readonly settings: { baseUrl?: string; model?: string; language?: string; apiKey: string },
+    private readonly socketFactory: StreamingAsrSocketFactory
+  ) {}
+
+  async connect(source: "mic" | "remote", onSegment: (segment: Omit<TranscriptSegment, "id">) => void, onError?: StreamingAsrErrorListener): Promise<void> {
+    this.close();
+    this.source = source;
+    this.errorListener = onError;
+    this.segmentListener = onSegment;
+    this.expectedClose = false;
+    this.sessionCreated = false;
+    this.sessionUpdateSent = false;
+    this.sessionUpdated = false;
+    this.sessionFinished = false;
+    this.sentAudioMs = 0;
+    this.lastFinalEndMs = 0;
+    this.activeItemId = undefined;
+    this.itemRanges.clear();
+    if (!this.settings.apiKey.trim()) throw new ProviderError("AUTH_FAILED", "千问 API Key 未配置", false, source);
+
+    let url: string;
+    try {
+      const parsed = new URL(this.settings.baseUrl || "wss://dashscope.aliyuncs.com/api-ws/v1/realtime");
+      parsed.searchParams.set("model", this.settings.model || "qwen3-asr-flash-realtime-2026-02-10");
+      url = parsed.toString();
+    } catch (error) {
+      throw qwenProviderError(error, source, "CONNECTION_FAILED", "千问 ASR URL 无效");
+    }
+
+    const socket = this.socketFactory({ url, apiKey: this.settings.apiKey });
+    this.socket = socket;
+    socket.onError((error) => this.handleError(error));
+    socket.onClose((error) => this.handleClose(error));
+    socket.onMessage((data) => this.handleMessage(data));
+    const ready = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new ProviderError("CONNECTION_FAILED", "千问 ASR 会话初始化超时", true, source)), 10_000);
+      this.readyWaiter = { resolve, reject, timer };
+    });
+    try {
+      await socket.waitForOpen();
+      if (this.sessionCreated) this.sendSessionUpdate();
+      await ready;
+    } catch (error) {
+      const failure = qwenProviderError(error, source, "CONNECTION_FAILED", "千问 ASR WebSocket 连接失败");
+      this.clearReadyWaiter();
+      this.expectedClose = true;
+      socket.close();
+      this.socket = undefined;
+      throw failure;
+    }
+  }
+
+  sendAudio(pcm: Uint8Array): void {
+    if (!this.socket || !this.sessionUpdated) throw new ProviderError("CONNECTION_FAILED", "千问 ASR 会话尚未 READY", true, this.source);
+    try {
+      this.socket.send(JSON.stringify({ event_id: this.nextEventId(), type: "input_audio_buffer.append", audio: bytesToBase64(pcm) }));
+      this.sentAudioMs += Math.round((pcm.byteLength / 2 / 16_000) * 1_000);
+    } catch (error) {
+      const failure = qwenProviderError(error, this.source, "CONNECTION_FAILED", "千问 ASR 音频发送失败");
+      this.notifyError(failure);
+      throw failure;
+    }
+  }
+
+  finalize(timeoutMs = 1_500): Promise<void> {
+    if (!this.socket || this.sessionFinished) return Promise.resolve();
+    this.finalizing = true;
+    const promise = new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.finishFinalize();
+        resolve();
+      }, Math.max(750, Math.min(3_000, timeoutMs)));
+      this.finalizeWaiters.push({ resolve, timer });
+    });
+    try {
+      this.socket.send(JSON.stringify({ event_id: this.nextEventId(), type: "session.finish" }));
+    } catch (error) {
+      this.handleError(error);
+      this.finishFinalize();
+    }
+    return promise;
+  }
+
+  close(): void {
+    this.expectedClose = true;
+    this.clearReadyWaiter();
+    this.finishFinalize();
+    const socket = this.socket;
+    this.socket = undefined;
+    if (socket) {
+      if (!this.sessionFinished && !this.finalizing) {
+        try { socket.send(JSON.stringify({ event_id: this.nextEventId(), type: "session.finish" })); } catch { /* socket may already be closed */ }
+      }
+      socket.close();
+    }
+    this.finalizing = false;
+    this.errorListener = undefined;
+    this.segmentListener = undefined;
+  }
+
+  private sendSessionUpdate(): void {
+    if (this.sessionUpdateSent || !this.socket) return;
+    this.sessionUpdateSent = true;
+    const language = qwenLanguage(this.settings.language);
+    this.socket.send(JSON.stringify({
+      event_id: this.nextEventId(),
+      type: "session.update",
+      session: {
+        modalities: ["text"],
+        input_audio_format: "pcm",
+        sample_rate: 16_000,
+        input_audio_transcription: { ...(language ? { language } : {}) },
+        turn_detection: { type: "server_vad", threshold: 0, silence_duration_ms: 400 }
+      }
+    }));
+  }
+
+  private handleMessage(data: string): void {
+    let message: QwenRealtimeMessage;
+    try {
+      const parsed: unknown = JSON.parse(data);
+      if (!parsed || typeof parsed !== "object") throw new Error("Qwen ASR message is not an object");
+      message = parsed as QwenRealtimeMessage;
+    } catch (error) {
+      this.notifyError(new ProviderError("INVALID_RESPONSE", `千问 ASR 返回了无效消息：${String(error)}`, true, this.source));
+      return;
+    }
+
+    if (message.type === "error" || message.type === "conversation.item.input_audio_transcription.failed" || message.error) {
+      const failure = qwenProviderError(new Error(qwenErrorMessage(message)), this.source, "PROVIDER_ERROR", qwenErrorMessage(message));
+      this.readyWaiter?.reject(failure);
+      this.notifyError(failure);
+      return;
+    }
+    if (message.type === "session.created") {
+      this.sessionCreated = true;
+      try { this.sendSessionUpdate(); } catch (error) { this.handleError(error); }
+      return;
+    }
+    if (message.type === "session.updated") {
+      this.sessionUpdated = true;
+      const waiter = this.readyWaiter;
+      this.readyWaiter = undefined;
+      if (waiter) {
+        clearTimeout(waiter.timer);
+        waiter.resolve();
+      }
+      return;
+    }
+    if (message.type === "input_audio_buffer.speech_started") {
+      const itemId = message.item_id || `active-${this.source}`;
+      this.activeItemId = itemId;
+      this.itemRanges.set(itemId, { startMs: Math.max(0, Math.round(message.audio_start_ms ?? this.sentAudioMs)) });
+      return;
+    }
+    if (message.type === "input_audio_buffer.speech_stopped") {
+      const itemId = message.item_id || this.activeItemId || `active-${this.source}`;
+      const current = this.itemRanges.get(itemId) ?? { startMs: this.lastFinalEndMs };
+      this.itemRanges.set(itemId, { ...current, endMs: Math.max(current.startMs, Math.round(message.audio_end_ms ?? this.sentAudioMs)) });
+      return;
+    }
+    if (message.type === "conversation.item.input_audio_transcription.text") {
+      this.emitTranscript(message, `${message.text ?? ""}${message.stash ?? ""}`, false);
+      return;
+    }
+    if (message.type === "conversation.item.input_audio_transcription.completed") {
+      this.emitTranscript(message, message.transcript ?? message.text ?? "", true);
+      return;
+    }
+    if (message.type === "session.finished") {
+      this.sessionFinished = true;
+      this.expectedClose = true;
+      this.finishFinalize();
+    }
+  }
+
+  private emitTranscript(message: QwenRealtimeMessage, value: string, final: boolean): void {
+    const text = value.trim();
+    if (!text || !this.segmentListener) return;
+    const itemId = message.item_id || this.activeItemId || `active-${this.source}`;
+    const range = this.itemRanges.get(itemId) ?? { startMs: this.lastFinalEndMs };
+    const startMs = Math.max(0, Math.round(range.startMs));
+    const endMs = Math.max(startMs, Math.round(range.endMs ?? this.sentAudioMs));
+    this.segmentListener({ source: this.source, text, startMs, endMs, final });
+    if (final) {
+      this.lastFinalEndMs = endMs;
+      this.itemRanges.delete(itemId);
+      if (this.activeItemId === itemId) this.activeItemId = undefined;
+    }
+  }
+
+  private handleError(error: unknown): void {
+    const failure = qwenProviderError(error, this.source, "PROVIDER_ERROR", "千问 ASR Provider 错误");
+    this.readyWaiter?.reject(failure);
+    this.notifyError(failure);
+  }
+
+  private handleClose(error?: Error): void {
+    if (this.expectedClose) return;
+    const failure = new ProviderError("PROVIDER_CLOSED", error?.message || "千问 ASR WebSocket 已断开", true, this.source);
+    this.readyWaiter?.reject(failure);
+    this.notifyError(failure);
+  }
+
+  private nextEventId(): string {
+    this.eventSequence += 1;
+    return `event_${Date.now()}_${this.eventSequence}`;
+  }
+
+  private notifyError(error: ProviderError): void {
+    this.errorListener?.(error);
+  }
+
+  private clearReadyWaiter(): void {
+    if (this.readyWaiter) clearTimeout(this.readyWaiter.timer);
+    this.readyWaiter = undefined;
   }
 
   private finishFinalize(): void {
