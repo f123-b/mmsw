@@ -59,6 +59,28 @@ describe("InterviewCoordinator software E2E", () => {
     vi.useRealTimers();
   });
 
+  it("uses a remote partial to prepare detection and confirms on the final transcript", async () => {
+    vi.useFakeTimers();
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    let clock = 1_000;
+    const provider: AnswerProvider = { stream: async function* () { yield "核心回答"; } };
+    const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, now: () => clock });
+    const events: unknown[] = [];
+    coordinator.on("event", (event: { type: string; event?: unknown }) => { if (event.type === "question") events.push(event.event); });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "AUTO", answerMode: "NORMAL" });
+    realtime.emit("transcript", {}, { id: "partial", source: "remote", text: "如果重新设计", startMs: 0, endMs: 500, final: false });
+    expect(events.some((event) => (event as { type: string }).type === "question_candidate")).toBe(true);
+    realtime.emit("transcript", {}, { id: "final", source: "remote", text: "如果重新设计，你会怎么优化？", startMs: 0, endMs: 900, final: true });
+    clock = 1_600;
+    vi.advanceTimersByTime(500);
+    for (let index = 0; index < 20; index += 1) await Promise.resolve();
+    expect(events.some((event) => (event as { type: string }).type === "question_confirmed")).toBe(true);
+    await coordinator.stop();
+    vi.useRealTimers();
+  });
+
   it("answers three consecutive questions in AUTO and persists answered status", async () => {
     vi.useFakeTimers();
     const audio = new FakeAudio();

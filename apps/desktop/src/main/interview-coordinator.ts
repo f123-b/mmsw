@@ -323,16 +323,17 @@ export class InterviewCoordinator extends EventEmitter {
         while (this.recentTranscript.length > 12) this.recentTranscript.shift();
       }
       if (segment.source !== "remote") return;
+      // Partials are used for early classification only. They never confirm
+      // or answer by themselves; the final segment still owns confirmation.
+      if (!segment.final) {
+        this.detector.observe(segment, this.now()).forEach((event) => this.handleQuestionEvent(event));
+        this.scheduleQuestionFlush();
+        return;
+      }
       const utterance = this.aggregator.push(segment);
       if (!utterance) return;
       this.detector.observe(utterance, this.now()).forEach((event) => this.handleQuestionEvent(event));
-      if (this.questionFlushTimer) clearTimeout(this.questionFlushTimer);
-      this.questionFlushTimer = setTimeout(() => {
-        this.questionFlushTimer = undefined;
-        this.detector.flush(this.now()).forEach((event) => {
-          this.handleQuestionEvent(event);
-        });
-      }, 500);
+      this.scheduleQuestionFlush();
     });
     this.options.realtime.on("message", (message: RealtimeServerMessage) => this.emitEvent({ type: "realtime_message", message }));
     this.options.realtime.on("diagnostic", (message: string) => this.emitDiagnostic(message));
@@ -358,6 +359,14 @@ export class InterviewCoordinator extends EventEmitter {
   private handleQuestionEvent(event: QuestionEvent): void {
     this.emitQuestion(event);
     if ((event.type === "question_confirmed" || event.type === "question_superseded") && this.activeOptions?.automationMode === "AUTO") void this.answer(event.question);
+  }
+
+  private scheduleQuestionFlush(): void {
+    if (this.questionFlushTimer) clearTimeout(this.questionFlushTimer);
+    this.questionFlushTimer = setTimeout(() => {
+      this.questionFlushTimer = undefined;
+      this.detector.flush(this.now()).forEach((event) => this.handleQuestionEvent(event));
+    }, 500);
   }
 
   private cancelAnswer(reason: "user" | "superseded" | "timeout"): void {

@@ -3,6 +3,7 @@ export const GLOBAL_SHORTCUTS = {
   screenshotAnswer: "CommandOrControl+Alt+S",
   toggleOverlay: "CommandOrControl+Alt+D",
   toggleShortcuts: "CommandOrControl+Alt+K",
+  toggleShareMode: "CommandOrControl+Alt+Shift+S",
   toggleOverlayMode: "CommandOrControl+Alt+P",
   toggleAutomation: "CommandOrControl+Alt+X",
   endInterview: "CommandOrControl+Alt+Q"

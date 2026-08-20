@@ -2,11 +2,14 @@ import { BrowserWindow, screen } from "electron";
 import { join } from "node:path";
 import { applyOverlayMode, nextOverlayMode, type OverlayMode } from "./overlay-mode";
 import { applyCaptureProtection, getCaptureProtectionCapabilities, type CaptureProtectionCapabilities, type CaptureProtectionState } from "./overlay-capture-protection";
+import { initialHUDState, reduceHUDState, type HUDAction, type HUDState } from "./hud-state";
 
 export { applyOverlayMode, nextOverlayMode } from "./overlay-mode";
 export type { OverlayMode, OverlayWindowLike } from "./overlay-mode";
 export { getCaptureProtectionCapabilities } from "./overlay-capture-protection";
 export type { CaptureProtectionCapabilities, CaptureProtectionState } from "./overlay-capture-protection";
+export { initialHUDState, reduceHUDState } from "./hud-state";
+export type { HUDAction, HUDMode, HUDMouseMode, HUDState } from "./hud-state";
 
 export interface OverlayManagerOptions {
   preloadPath?: string;
@@ -14,13 +17,16 @@ export interface OverlayManagerOptions {
   getMainWindow?: () => BrowserWindow | undefined;
   captureProtectionEnabled?: boolean;
   onCaptureProtectionDiagnostic?: (event: string, fields: Record<string, unknown>) => void;
+  onHUDStateChange?: (state: HUDState) => void;
 }
 
 export type OverlayPanelCommand = "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts";
 
 export class OverlayManager {
   private window: BrowserWindow | undefined;
-  private mode: OverlayMode = "interactive";
+  private mode: OverlayMode = "passive";
+  private interactiveRegion = false;
+  private hudStateValue: HUDState = { ...initialHUDState };
   private captureProtectionEnabled: boolean;
   private captureProtectionState: CaptureProtectionState;
   private readonly capabilities: CaptureProtectionCapabilities;
@@ -45,6 +51,10 @@ export class OverlayManager {
     return this.mode;
   }
 
+  get hudState(): HUDState {
+    return this.hudStateValue;
+  }
+
   get currentWindow(): BrowserWindow | undefined {
     return this.window && !this.window.isDestroyed() ? this.window : undefined;
   }
@@ -67,6 +77,12 @@ export class OverlayManager {
 
   /** Enter the desktop HUD mode and cover the complete monitor bounds. */
   enterInterviewMode(): BrowserWindow {
+    // Every new interview starts click-through. Users can still reach the
+    // toolbar because the renderer reports when the pointer enters a control
+    // region, at which point only the native hit-test state is relaxed.
+    this.transition({ type: "start" });
+    this.mode = "passive";
+    this.interactiveRegion = false;
     const window = this.show();
     this.coverCurrentMonitor();
     window.showInactive();
@@ -75,16 +91,37 @@ export class OverlayManager {
 
   /** Leave the desktop HUD mode and restore an interactive native window. */
   exitInterviewMode(): void {
-    this.setMode("interactive");
+    this.transition({ type: "stop" });
+    this.mode = "interactive";
+    this.interactiveRegion = false;
+    this.applyMode();
     this.hide();
   }
 
-  showAll(): void { this.sendPanelCommand("show-all"); }
-  hideAll(): void { this.sendPanelCommand("hide-all"); }
-  toggleAll(): void { this.sendPanelCommand("toggle-all"); }
+  showAll(): void { this.transition({ type: "show-all" }); }
+  hideAll(): void { this.transition({ type: "hide-all" }); }
+  toggleAll(): void { this.transition({ type: "toggle-panels" }); }
   resetLayout(): void { this.sendPanelCommand("reset-layout"); }
-  toggleShortcuts(): void { this.sendPanelCommand("toggle-shortcuts"); }
+  toggleShortcuts(): void { this.transition({ type: "toggle-shortcuts" }); }
+  setShareMode(enabled: boolean): void {
+    this.transition({ type: "set-share-mode", enabled });
+    if (this.hudState.shareMode) {
+      this.mode = "passive";
+      this.interactiveRegion = false;
+      this.applyMode();
+    } else if (this.hudState.running) {
+      this.mode = this.hudState.mouseMode === "interactive" ? "interactive" : "passive";
+      this.interactiveRegion = false;
+      this.applyMode();
+    }
+  }
+  toggleShareMode(): void { this.setShareMode(!this.hudState.shareMode); }
   setClickThrough(enabled: boolean): void { this.setMode(enabled ? "passive" : "interactive"); }
+
+  setControlRegion(interactive: boolean): void {
+    this.interactiveRegion = this.hudState.shareMode ? false : Boolean(interactive);
+    this.applyMode();
+  }
 
   coverCurrentMonitor(): void {
     const window = this.currentWindow;
@@ -96,6 +133,8 @@ export class OverlayManager {
   show(): BrowserWindow {
     if (this.window && !this.window.isDestroyed()) {
       this.applyCaptureProtection();
+      this.applyMode();
+      this.sendHudState();
       this.window.showInactive();
       return this.window;
     }
@@ -114,7 +153,9 @@ export class OverlayManager {
       alwaysOnTop: true,
       skipTaskbar: true,
       show: false,
-      focusable: true,
+      // Never make the HUD active while it is being created. Passive mode
+      // will keep the browser/meeting window focused underneath it.
+      focusable: false,
       webPreferences: {
         preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"),
         contextIsolation: true,
@@ -128,6 +169,7 @@ export class OverlayManager {
       // Chromium may only expose the final native HWND after the first compositor frame.
       // Re-apply and re-check here so packaged and dev windows use the same native handle.
       this.applyCaptureProtection();
+      this.sendHudState();
       this.window?.showInactive();
     });
     this.window.on("closed", () => { this.window = undefined; });
@@ -146,7 +188,9 @@ export class OverlayManager {
   }
 
   setMode(mode: OverlayMode): void {
-    this.mode = mode;
+    this.mode = this.hudStateValue.shareMode ? "passive" : mode;
+    this.interactiveRegion = false;
+    this.transition({ type: "set-mouse-mode", mode: this.mode === "interactive" ? "interactive" : "passthrough" });
     this.applyMode();
   }
 
@@ -185,12 +229,26 @@ export class OverlayManager {
   destroy(): void {
     this.window?.destroy();
     this.window = undefined;
+    this.hudStateValue = { ...initialHUDState };
   }
 
   private applyMode(): void {
     if (!this.window || this.window.isDestroyed()) return;
-    applyOverlayMode(this.window, this.mode);
+    applyOverlayMode(this.window, this.mode, this.interactiveRegion);
     this.window.webContents.send("overlay:mode", this.mode);
+    this.sendHudState();
+  }
+
+  private transition(action: HUDAction): void {
+    const next = reduceHUDState(this.hudStateValue, action);
+    this.hudStateValue = next;
+    this.options.onHUDStateChange?.(next);
+    this.sendHudState();
+  }
+
+  private sendHudState(): void {
+    const window = this.currentWindow;
+    if (window) window.webContents.send("overlay:state", this.hudStateValue);
   }
 
   private sendPanelCommand(command: OverlayPanelCommand): void {
@@ -208,3 +266,6 @@ export class OverlayManager {
     return screen.getPrimaryDisplay().bounds;
   }
 }
+
+/** Backwards-compatible name for the singleton HUD window manager. */
+export { OverlayManager as HUDWindowManager };

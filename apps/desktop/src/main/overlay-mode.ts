@@ -11,8 +11,17 @@ export function nextOverlayMode(mode: OverlayMode): OverlayMode {
   return mode === "interactive" ? "passive" : "interactive";
 }
 
-export function applyOverlayMode(window: OverlayWindowLike, mode: OverlayMode): void {
-  const passive = mode === "passive";
-  window.setFocusable(!passive);
-  window.setIgnoreMouseEvents(passive, { forward: true });
+/**
+ * Apply the native hit-test state for the HUD.
+ *
+ * Passive mode is the normal interview state: the whole BrowserWindow is
+ * transparent to the OS hit test until the renderer reports that the cursor
+ * is over a small, explicitly interactive HUD region. This is necessary
+ * because DOM pointer-events cannot make an Electron window itself pass
+ * clicks to the window underneath it.
+ */
+export function applyOverlayMode(window: OverlayWindowLike, mode: OverlayMode, interactiveRegion = false): void {
+  const interactive = mode === "interactive" || interactiveRegion;
+  window.setFocusable(interactive);
+  window.setIgnoreMouseEvents(!interactive, { forward: true });
 }

@@ -16,7 +16,14 @@ target/
 apps/desktop/.data/
 .functional-e2e-user-data/
 .hud-*-data/
+.hud-product-smoke-data-*/
+.hud-*-data-*/
 .direct-hud-smoke-data/
+apps/desktop/release-p0/
+apps/desktop/release-p0b/
+apps/desktop/release-p0c/
+apps/desktop/release-p0d/
+apps/desktop/artifacts/
 artifacts/functional/functional-failure.png
 artifacts/capture-protection-v2/manual-*.png
 artifacts/capture-protection-v2/modern-manual*.png

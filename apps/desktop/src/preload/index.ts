@@ -8,7 +8,7 @@ import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
-import type { CaptureProtectionCapabilities, CaptureProtectionState, OverlayMode } from "../main/overlay-manager";
+import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
 import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
@@ -34,7 +34,11 @@ const api = {
     toggleAll: () => ipcRenderer.invoke("overlay:toggle-all"),
     resetLayout: () => ipcRenderer.invoke("overlay:reset-layout"),
     toggleShortcuts: () => ipcRenderer.invoke("overlay:toggle-shortcuts"),
+    getState: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:get-state"),
+    setShareMode: (enabled: boolean): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:set-share-mode", enabled),
+    toggleShareMode: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:toggle-share-mode"),
     setMode: (mode: OverlayMode) => ipcRenderer.invoke("overlay:set-mode", mode),
+    setControlRegion: (interactive: boolean) => ipcRenderer.invoke("overlay:set-control-region", interactive),
     getCaptureProtection: (): Promise<CaptureProtectionState> => ipcRenderer.invoke("overlay:get-capture-protection"),
     setCaptureProtection: (enabled: boolean): Promise<CaptureProtectionState | undefined> => ipcRenderer.invoke("overlay:set-capture-protection", enabled),
     getCapabilities: (): Promise<CaptureProtectionCapabilities> => ipcRenderer.invoke("overlay:get-capabilities"),
@@ -135,6 +139,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, mode: OverlayMode) => listener(mode);
       ipcRenderer.on("overlay:mode", handler);
       return () => ipcRenderer.removeListener("overlay:mode", handler);
+    },
+    onOverlayState: (listener: (state: HUDState) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, state: HUDState) => listener(state);
+      ipcRenderer.on("overlay:state", handler);
+      return () => ipcRenderer.removeListener("overlay:state", handler);
     },
     onOverlayCommand: (listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts") => void) => {
       const handler = (_event: Electron.IpcRendererEvent, command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts") => listener(command);

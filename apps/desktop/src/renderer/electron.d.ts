@@ -7,7 +7,7 @@ import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
-import type { CaptureProtectionCapabilities, CaptureProtectionState, OverlayMode } from "../main/overlay-manager";
+import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
 import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
 import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
@@ -34,7 +34,11 @@ declare global {
         toggleAll(): Promise<boolean>;
         resetLayout(): Promise<boolean>;
         toggleShortcuts(): Promise<boolean>;
+        getState(): Promise<HUDState | undefined>;
+        setShareMode(enabled: boolean): Promise<HUDState | undefined>;
+        toggleShareMode(): Promise<HUDState | undefined>;
         setMode(mode: OverlayMode): Promise<void>;
+        setControlRegion(interactive: boolean): Promise<boolean>;
         getCaptureProtection(): Promise<CaptureProtectionState>;
         setCaptureProtection(enabled: boolean): Promise<CaptureProtectionState | undefined>;
         getCapabilities(): Promise<CaptureProtectionCapabilities>;
@@ -120,6 +124,7 @@ declare global {
         onAudioDiagnostic(listener: (message: string) => void): () => void;
         onSessionState(listener: (state: SessionState) => void): () => void;
         onOverlayMode(listener: (mode: OverlayMode) => void): () => void;
+        onOverlayState(listener: (state: HUDState) => void): () => void;
         onOverlayCommand(listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts") => void): () => void;
         onOverlayCaptureProtection(listener: (state: CaptureProtectionState) => void): () => void;
         onShortcut(listener: (shortcut: string) => void): () => void;

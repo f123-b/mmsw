@@ -25,6 +25,13 @@ describe("applyOverlayMode", () => {
     expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(false, { forward: true });
   });
 
+  it("temporarily enables native hit testing only for a passive control region", () => {
+    const window = makeWindow();
+    applyOverlayMode(window, "passive", true);
+    expect(window.setFocusable).toHaveBeenCalledWith(true);
+    expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(false, { forward: true });
+  });
+
   it("toggles mode for the passive recovery shortcut", () => {
     expect(nextOverlayMode("interactive")).toBe("passive");
     expect(nextOverlayMode("passive")).toBe("interactive");

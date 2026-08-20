@@ -6,7 +6,7 @@ import type { AsrProviderType, QuestionCandidate, QuestionEvent, SessionState, T
 import type { Profile } from "@interview-copilot/shared";
 import type { ProviderCenterPublicConfig, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import { normalizeMeter, StableAnswerStateMachine } from "@interview-copilot/shared";
-import type { CaptureProtectionState, OverlayMode } from "../main/overlay-manager";
+import type { CaptureProtectionState, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
 import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import { selectDeviceId } from "./device-selection";
@@ -52,6 +52,7 @@ interface AudioStore {
   micDetected: boolean;
   systemDetected: boolean;
   overlayMode: OverlayMode;
+  hudState: HUDState;
   sessionState: SessionState;
   automationMode: "MANUAL" | "AUTO";
   answerMode: "FAST" | "NORMAL" | "DEEP";
@@ -72,6 +73,7 @@ interface AudioStore {
   notice?: string;
   applyEvent: (event: AudioSidecarEvent) => void;
   setOverlayMode: (mode: OverlayMode) => void;
+  setHUDState: (state: HUDState) => void;
   setSessionState: (state: SessionState) => void;
   setAutomationMode: (mode: "MANUAL" | "AUTO") => void;
   setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => void;
@@ -96,6 +98,7 @@ const useAudioStore = create<AudioStore>((set) => ({
   micDetected: false,
   systemDetected: false,
   overlayMode: "interactive",
+  hudState: { running: false, panelVisible: false, shortcutVisible: false, shareMode: false, topBarVisible: false, mouseMode: "passthrough", mode: "HIDDEN" },
   sessionState: "IDLE",
   automationMode: "AUTO",
   answerMode: "NORMAL",
@@ -129,6 +132,7 @@ const useAudioStore = create<AudioStore>((set) => ({
     return { state: event.recoverable ? "DEGRADED" : "FAILED", notice: event.reason, probeError: event.reason };
   }),
   setOverlayMode: (overlayMode) => set({ overlayMode }),
+  setHUDState: (hudState) => set({ hudState }),
   setSessionState: (sessionState) => set({ sessionState }),
   setAutomationMode: (automationMode) => set({ automationMode }),
   setAnswerMode: (answerMode) => set({ answerMode }),
@@ -291,6 +295,16 @@ export function App(): JSX.Element {
   const isOverlay = useMemo(() => new URLSearchParams(window.location.search).get("window") === "overlay", []);
   const captureTest = useMemo(() => new URLSearchParams(window.location.search).get("capture-test") === "1", []);
   const store = useAudioStore();
+  useEffect(() => {
+    // The initial mode event can be emitted before the overlay renderer has
+    // finished mounting. Mirror the native OverlayManager default locally so
+    // the DOM hit-test model starts passive on the first rendered frame.
+    if (isOverlay) store.setOverlayMode("passive");
+  }, [isOverlay]);
+  useEffect(() => {
+    if (!isOverlay) return;
+    void window.interviewCopilot.overlay.getState().then((state) => { if (state) store.setHUDState(state); }).catch(() => undefined);
+  }, [isOverlay]);
   const [page, setPage] = useState<AppPage>("home");
   const [setupOpen, setSetupOpen] = useState(false);
   const [composerText, setComposerText] = useState("");
@@ -432,6 +446,7 @@ export function App(): JSX.Element {
       window.interviewCopilot.events.onAudio(store.applyEvent),
       window.interviewCopilot.events.onSessionState((state) => { store.setSessionState(state); if (state === "ENDED") void window.interviewCopilot.history.list().then(setHistoryRecords); }),
       window.interviewCopilot.events.onOverlayMode(store.setOverlayMode),
+      window.interviewCopilot.events.onOverlayState(store.setHUDState),
       window.interviewCopilot.events.onOverlayCaptureProtection(setCaptureProtection),
       window.interviewCopilot.events.onScreenshot(store.setScreenshot),
       window.interviewCopilot.events.onScreenshotError(store.setNotice),
@@ -681,7 +696,7 @@ export function App(): JSX.Element {
     return <section className="simple-page settings-page"><div className="page-heading"><div><span className="page-kicker">SETTINGS</span><h1>设置</h1></div><button className="dark-pill" onClick={() => void saveProviderSettings()}>保存设置</button></div><div className="settings-columns"><div><h2>LLM Provider</h2><label className="clean-field"><span>Provider Name</span><input value={llmProviderName} onChange={(event) => setLlmProviderName(event.target.value)} /></label><label className="clean-field"><span>Base URL</span><input value={llmBaseUrl} onChange={(event) => setLlmBaseUrl(event.target.value)} /></label><label className="clean-field"><span>API Key {providerSettings?.llm.hasApiKey && <em className="configured-label">已配置 · 仅输入修改</em>}</span><input type="password" value={llmApiKey} onChange={(event) => setLlmApiKey(event.target.value)} placeholder={providerSettings?.llm.hasApiKey ? "••••••••••••" : "输入 API Key"} /></label><div className="model-grid"><label className="clean-field"><span>默认 Model</span><input value={llmModel} onChange={(event) => setLlmModel(event.target.value)} /></label><label className="clean-field"><span>FAST Model</span><input value={fastModel} onChange={(event) => setFastModel(event.target.value)} /></label><label className="clean-field"><span>NORMAL Model</span><input value={normalModel} onChange={(event) => setNormalModel(event.target.value)} /></label><label className="clean-field"><span>DEEP Model</span><input value={deepModel} onChange={(event) => setDeepModel(event.target.value)} /></label><label className="clean-field"><span>Vision Model</span><input value={visionModel} onChange={(event) => setVisionModel(event.target.value)} /></label></div><div className="provider-actions"><button className="outline-pill" onClick={() => void testProvider("llm")}>测试连接</button><span className="provider-status">{providerTests.llm ?? (providerSettings?.llm.hasApiKey ? "已配置 · 未测试" : "未配置")}</span></div><h2 className="settings-section-gap">Embedding</h2><label className="clean-field"><span>Base URL</span><input value={embeddingBaseUrl} onChange={(event) => setEmbeddingBaseUrl(event.target.value)} /></label><label className="clean-field"><span>API Key {providerSettings?.embedding.hasApiKey && <em className="configured-label">已配置 · 仅输入修改</em>}</span><input type="password" value={embeddingApiKey} onChange={(event) => setEmbeddingApiKey(event.target.value)} placeholder={providerSettings?.embedding.hasApiKey ? "••••••••••••" : "可选，未配置时使用 Keyword Retrieval"} /></label><label className="clean-field"><span>Embedding Model</span><input value={embeddingModel} onChange={(event) => setEmbeddingModel(event.target.value)} /></label><div className="provider-actions"><button className="outline-pill" onClick={() => void testProvider("embedding")}>测试连接</button><span className="provider-status">{providerTests.embedding ?? (providerSettings?.embedding.hasApiKey ? "已配置 · 未测试" : "Keyword Retrieval")}</span></div></div><div><h2>ASR Provider</h2><label className="clean-field"><span>Provider</span><select value={asrProviderType} onChange={(event) => { const next = event.target.value as AsrProviderType; setAsrProviderType(next); setProviderTests((current) => ({ ...current, asr: "配置已更改 · 请重新测试" })); if (next === "qwen") { setAsrBaseUrl("wss://dashscope.aliyuncs.com/api-ws/v1/realtime"); setAsrModel("qwen3-asr-flash-realtime-2026-02-10"); } else if (next === "deepgram") { setAsrBaseUrl("wss://api.deepgram.com/v1/listen"); setAsrModel("nova-3"); } }}><option value="deepgram">Deepgram Direct</option><option value="qwen">Qwen Direct（千问）</option><option value="custom-gateway">Custom Gateway</option></select></label><label className="clean-field"><span>{asrProviderType === "qwen" ? "千问 API Key" : asrProviderType === "deepgram" ? "Deepgram API Key" : "Token / Ticket（可选）"} {providerSettings?.asr.hasApiKey && <em className="configured-label">已配置</em>}</span><input type="password" value={asrApiKey} onChange={(event) => setAsrApiKey(event.target.value)} placeholder={providerSettings?.asr.hasApiKey ? "••••••••••••" : "输入 API Key"} /></label><label className="clean-field"><span>{asrProviderType === "custom-gateway" ? "Gateway WebSocket URL" : "WebSocket URL"}</span><input value={asrBaseUrl} onChange={(event) => setAsrBaseUrl(event.target.value)} /></label><label className="clean-field"><span>Model</span><input value={asrModel} onChange={(event) => setAsrModel(event.target.value)} /></label><label className="clean-field"><span>Language</span><select value={asrLanguage} onChange={(event) => setAsrLanguage(event.target.value as typeof asrLanguage)}><option value="zh-CN">zh-CN</option><option value="en-US">en-US</option><option value="multi">multi</option></select></label><div className="provider-actions"><button className="outline-pill" onClick={() => void testProvider("asr")}>测试连接</button><span className="provider-status">{providerTests.asr ?? (providerSettings?.asr.hasApiKey ? "已配置 · 未测试" : "未配置")}</span></div><h2 className="settings-section-gap">回答模式</h2><label className="clean-field"><span>默认模式</span><select value={answerMode} onChange={(event) => setAnswerMode(event.target.value as typeof answerMode)}><option value="FAST">FAST · 快速</option><option value="NORMAL">NORMAL · 平衡</option><option value="DEEP">DEEP · 深度</option></select></label><div className="rag-status"><strong>RAG Mode</strong><span>{providerSettings?.embedding.hasApiKey ? "Hybrid · Vector + Keyword" : "Keyword Retrieval"}</span></div><details className="advanced-settings"><summary>高级诊断</summary><p>设备列表、Audio Probe 和 Realtime 状态在开始面试设置中显示。</p></details></div></div></section>;
   })();
 
-  if (isOverlay) return <OverlayRoot mic={store.mic} system={store.system} state={store.state} sessionState={store.sessionState} realtimeState={store.realtimeState} overlayMode={store.overlayMode} automationMode={store.automationMode} answerMode={store.answerMode} question={store.question} answerText={store.answerText} answerStreaming={store.answerStreaming} remoteTranscript={store.remoteTranscript} micTranscript={store.micTranscript} captureProtectionEnabled={captureProtection.requested} captureProtectionSupported={captureProtection.supported} captureProtectionOsFlagApplied={captureProtection.osFlagApplied} captureProtectionDisplayVerified={captureProtection.displayCaptureVerified} captureProtectionLastError={captureProtection.lastError} captureTest={captureTest} onToggleCaptureProtection={() => void toggleCaptureProtection(!captureProtection.requested)} onToggleMode={() => void window.interviewCopilot.overlay.setMode(store.overlayMode === "interactive" ? "passive" : "interactive")} onToggleAutomation={toggleAutomation} onAnswerQuestion={(text) => window.interviewCopilot.interview.answerQuestion(text).catch((error) => { store.setNotice(`发送问题失败：${userFacingError(error)}`); throw error; })} onAnswerLatest={() => window.interviewCopilot.interview.answerLatest().catch((error) => { store.setNotice(`回答最新问题失败：${userFacingError(error)}`); throw error; })} onAnswerScreenshot={() => window.interviewCopilot.interview.answerScreenshot().catch((error) => { store.setNotice(`截图失败：${userFacingError(error)}`); throw error; })} onEndInterview={() => window.interviewCopilot.interview.stop()} onHideAll={() => void window.interviewCopilot.overlay.hideAll()} onShowAll={() => void window.interviewCopilot.overlay.showAll()} />;
+  if (isOverlay) return <OverlayRoot mic={store.mic} system={store.system} state={store.state} sessionState={store.sessionState} realtimeState={store.realtimeState} overlayMode={store.overlayMode} hudState={store.hudState} automationMode={store.automationMode} answerMode={store.answerMode} question={store.question} answerText={store.answerText} answerStreaming={store.answerStreaming} remoteTranscript={store.remoteTranscript} micTranscript={store.micTranscript} captureProtectionEnabled={captureProtection.requested} captureProtectionSupported={captureProtection.supported} captureProtectionOsFlagApplied={captureProtection.osFlagApplied} captureProtectionDisplayVerified={captureProtection.displayCaptureVerified} captureProtectionLastError={captureProtection.lastError} captureTest={captureTest} onToggleCaptureProtection={() => void toggleCaptureProtection(!captureProtection.requested)} onToggleMode={() => void window.interviewCopilot.overlay.setMode(store.overlayMode === "interactive" ? "passive" : "interactive")} onToggleAutomation={toggleAutomation} onAnswerQuestion={(text) => window.interviewCopilot.interview.answerQuestion(text).catch((error) => { store.setNotice(`发送问题失败：${userFacingError(error)}`); throw error; })} onAnswerLatest={() => window.interviewCopilot.interview.answerLatest().catch((error) => { store.setNotice(`回答最新问题失败：${userFacingError(error)}`); throw error; })} onAnswerScreenshot={() => window.interviewCopilot.interview.answerScreenshot().catch((error) => { store.setNotice(`截图失败：${userFacingError(error)}`); throw error; })} onEndInterview={() => window.interviewCopilot.interview.stop()} onHideAll={() => void window.interviewCopilot.overlay.hideAll()} onShowAll={() => void window.interviewCopilot.overlay.showAll()} onTogglePanels={() => void window.interviewCopilot.overlay.toggleAll()} onToggleShortcuts={() => void window.interviewCopilot.overlay.toggleShortcuts()} onToggleShare={() => void window.interviewCopilot.overlay.toggleShareMode()} />;
 
   return (
     <main className="app-shell modern-shell">

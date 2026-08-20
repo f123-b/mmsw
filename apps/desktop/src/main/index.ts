@@ -382,7 +382,10 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
     await writeFile(mainArtifact, mainPng);
     visualArtifactDirectory = artifactDirectory;
   }
-  const overlay = overlayManager?.show();
+  // Smoke tests exercise the product HUD state, not the diagnostics-only blank
+  // window. Enter the same running state used by a real interview so the
+  // visual artifact includes TopBar and panels.
+  const overlay = overlayManager?.enterInterviewMode();
   let overlayReadiness = unavailable;
   if (overlay) {
     overlay.show();
@@ -731,6 +734,13 @@ function registerIpc(): void {
    ipcMain.handle("overlay:toggle-all", () => { overlayManager?.toggleAll(); return true; });
    ipcMain.handle("overlay:reset-layout", () => { overlayManager?.resetLayout(); return true; });
    ipcMain.handle("overlay:toggle-shortcuts", () => { overlayManager?.toggleShortcuts(); return true; });
+   ipcMain.handle("overlay:get-state", () => overlayManager?.hudState);
+   ipcMain.handle("overlay:set-share-mode", (_event, enabled: boolean) => { overlayManager?.setShareMode(Boolean(enabled)); return overlayManager?.hudState; });
+   ipcMain.handle("overlay:toggle-share-mode", () => { overlayManager?.toggleShareMode(); return overlayManager?.hudState; });
+  ipcMain.handle("overlay:set-control-region", (_event, interactive: boolean) => {
+    overlayManager?.setControlRegion(Boolean(interactive));
+    return true;
+  });
   ipcMain.handle("overlay:set-mode", (_event, mode: OverlayMode) => {
     overlayManager?.setMode(mode);
     broadcast("overlay:mode", mode);
@@ -1005,10 +1015,14 @@ function registerShortcuts(): void {
     [GLOBAL_SHORTCUTS.answerLatest]: () => void coordinator().answerLatest(),
     [GLOBAL_SHORTCUTS.screenshotAnswer]: () => void captureScreenshot(),
     [GLOBAL_SHORTCUTS.toggleOverlay]: () => {
-      if (coordinator().running) overlayManager?.toggleAll();
+      if (coordinator().running) {
+        if (overlayManager?.hudState.mode === "HIDDEN") overlayManager.showAll();
+        else overlayManager?.hideAll();
+      }
       else overlayManager?.toggle();
     },
-    [GLOBAL_SHORTCUTS.toggleShortcuts]: () => overlayManager?.toggleShortcuts(),
+     [GLOBAL_SHORTCUTS.toggleShortcuts]: () => overlayManager?.toggleShortcuts(),
+     [GLOBAL_SHORTCUTS.toggleShareMode]: () => overlayManager?.toggleShareMode(),
     [GLOBAL_SHORTCUTS.toggleOverlayMode]: () => {
       const mode = overlayManager?.toggleMode();
       if (mode) broadcast("overlay:mode", mode);
@@ -1112,7 +1126,8 @@ app.whenReady().then(async () => {
     onCaptureProtectionDiagnostic: (event, fields) => {
       appLogger?.info(event, fields);
       broadcast("overlay:capture-protection-diagnostic", { event, fields });
-    }
+    },
+    onHUDStateChange: (state) => broadcast("overlay:state", state)
   });
   appLogger?.info("OVERLAY_CAPTURE_PROTECTION_RUNTIME", {
     platform: process.platform,
@@ -1130,7 +1145,25 @@ app.whenReady().then(async () => {
   coordinator().on("event", (event: { type: string; [key: string]: unknown }) => {
     if (event.type === "session_state") broadcast("session:state", event.state);
     if (event.type === "transcript") broadcast("realtime:transcript", event.snapshot);
-    if (event.type === "question") broadcast("question:event", event.event);
+    if (event.type === "question") {
+      const questionEvent = event.event as { type?: string; text?: string; questionScore?: number; confidence?: number; candidate?: boolean; confirmed?: boolean; reason?: string; category?: string; fingerprint?: string; ignoredReason?: string; dedupeScore?: number };
+      if (questionEvent.type === "question_diagnostic") {
+        realtimeLogger?.info("QUESTION_DETECTOR_DIAGNOSTIC", {
+          rawTranscript: questionEvent.text,
+          detected: questionEvent.confirmed ?? false,
+          confidence: questionEvent.confidence ?? questionEvent.questionScore,
+          questionScore: questionEvent.questionScore,
+          candidate: questionEvent.candidate,
+          confirmed: questionEvent.confirmed,
+          category: questionEvent.category,
+          reason: questionEvent.reason,
+          fingerprint: questionEvent.fingerprint,
+          ignoredReason: questionEvent.ignoredReason,
+          dedupeScore: questionEvent.dedupeScore
+        });
+      }
+      broadcast("question:event", event.event);
+    }
     if (event.type === "realtime_message") broadcast("realtime:message", event.message);
     if (event.type === "realtime_state") broadcast("realtime:state", event.state);
     if (event.type === "automation_mode") broadcast("interview:automation-mode", event.mode);
