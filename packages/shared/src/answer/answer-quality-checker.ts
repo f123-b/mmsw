@@ -5,6 +5,7 @@ export interface AnswerQualityResult {
   score: number;
   issues: string[];
   suggestions: string[];
+  needsRepair: boolean;
 }
 
 export interface AnswerQualityInput {
@@ -54,6 +55,7 @@ export class AnswerQualityChecker {
       suggestions.push("只使用简历或知识库中能被证实的项目经历");
       score -= 0.25;
     }
-    return { score: Math.max(0, Math.min(1, Number(score.toFixed(2)))), issues, suggestions };
+    const normalizedScore = Math.max(0, Math.min(1, Number(score.toFixed(2))));
+    return { score: normalizedScore, issues, suggestions, needsRepair: normalizedScore < 0.65 || issues.includes("possibly-invented-experience") };
   }
 }

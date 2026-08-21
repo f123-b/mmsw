@@ -39,6 +39,15 @@ describe("Answer routing and generation", () => {
     expect(context.recentTranscript.length).toBeLessThanOrEqual(12);
     expect(context.recentTranscript.at(-1)).toBe("对话 19");
   });
+
+  it("repairs a low-quality grounded answer before finalizing", async () => {
+    let calls = 0;
+    const repairProvider: AnswerProvider = { stream: async function* () { calls += 1; yield calls === 1 ? "技术说明。" : "我在项目中使用CAN做实时通信，主要看重它的仲裁和稳定性。"; } };
+    let final = "";
+    for await (const event of new AnswerAgent({ normal: repairProvider }, new ModelRouter({ normal: "test-model" })).stream({ id: "q-repair", text: "为什么使用CAN" }, "NORMAL", { experienceContext: ["项目证据：使用 CAN 做实时通信"] })) if (event.type === "answer_end") final = event.text;
+    expect(calls).toBe(2);
+    expect(final).toContain("我在项目中使用CAN");
+  });
 });
 
 describe("StableAnswerStateMachine", () => {

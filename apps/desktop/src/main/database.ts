@@ -12,7 +12,8 @@ import {
   type QuestionRecord,
   type AnswerRecord,
   type TranscriptRecord,
-  type KnowledgeChunk
+  type KnowledgeChunk,
+  type ProfileBuilderOutput
 } from "@interview-copilot/shared";
 
 export const APP_DATA_DIRECTORY = "InterviewCopilot";
@@ -128,6 +129,10 @@ export class SqliteDatabase {
         CREATE TABLE IF NOT EXISTS conversation_messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL, model TEXT, created_at INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS conversations_updated_at_idx ON conversations(updated_at DESC);
         CREATE INDEX IF NOT EXISTS conversation_messages_conversation_idx ON conversation_messages(conversation_id, created_at);
+      `],
+      [6, `
+        CREATE TABLE IF NOT EXISTS profile_builder_artifacts (profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE, version INTEGER NOT NULL, status TEXT NOT NULL, source_snapshot_json TEXT NOT NULL, artifact_json TEXT NOT NULL, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS profile_builder_artifacts_updated_at_idx ON profile_builder_artifacts(updated_at DESC);
       `]
     ];
     for (const [version, sql] of migrations) {
@@ -204,6 +209,56 @@ export class SqliteProfileRepository {
     const skills = this.database.all<{ id: string; name: string; description: string; content: string; tags_json: string }>("SELECT id, name, description, content, tags_json FROM skills WHERE profile_id = ? ORDER BY name", [row.id]).map((skill) => ({ id: skill.id, name: skill.name, description: skill.description, content: skill.content, tags: JSON.parse(skill.tags_json) as string[] }));
     const knowledgeBaseIds = this.database.all<{ knowledge_base_id: string }>("SELECT knowledge_base_id FROM profile_knowledge WHERE profile_id = ?", [row.id]).map((item) => item.knowledge_base_id);
     return { id: row.id, name: row.name, language: row.language, resume: row.resume_json ? JSON.parse(row.resume_json) : undefined, jobDescription: row.job_description_json ? JSON.parse(row.job_description_json) : undefined, instructions: value<string>(row.instructions), skills, knowledgeBaseIds, createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+}
+
+export interface ProfileBuilderArtifactRecord {
+  profileId: string;
+  version: number;
+  status: "ready" | "partial" | "error";
+  sourceSnapshot: unknown;
+  artifact?: ProfileBuilderOutput;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export class SqliteProfileBuilderRepository {
+  constructor(private readonly database: SqliteDatabase) {}
+
+  get(profileId: string): ProfileBuilderArtifactRecord | undefined {
+    const row = this.database.first<{ profileId: string; version: number; status: string; sourceSnapshotJson: string; artifactJson: string; error: string | null; createdAt: number; updatedAt: number }>("SELECT profile_id AS profileId, version, status, source_snapshot_json AS sourceSnapshotJson, artifact_json AS artifactJson, error, created_at AS createdAt, updated_at AS updatedAt FROM profile_builder_artifacts WHERE profile_id = ?", [profileId]);
+    if (!row) return undefined;
+    return {
+      profileId: row.profileId,
+      version: row.version,
+      status: row.status as ProfileBuilderArtifactRecord["status"],
+      sourceSnapshot: JSON.parse(row.sourceSnapshotJson),
+      artifact: row.artifactJson ? JSON.parse(row.artifactJson) as ProfileBuilderOutput : undefined,
+      ...(row.error ? { error: row.error } : {}),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt
+    };
+  }
+
+  save(input: { profileId: string; status: ProfileBuilderArtifactRecord["status"]; sourceSnapshot: unknown; artifact?: ProfileBuilderOutput; error?: string; now?: number }): ProfileBuilderArtifactRecord {
+    const now = input.now ?? Date.now();
+    const existing = this.get(input.profileId);
+    this.database.run("INSERT INTO profile_builder_artifacts(profile_id, version, status, source_snapshot_json, artifact_json, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(profile_id) DO UPDATE SET version=excluded.version, status=excluded.status, source_snapshot_json=excluded.source_snapshot_json, artifact_json=excluded.artifact_json, error=excluded.error, updated_at=excluded.updated_at", [input.profileId, input.artifact?.version ?? existing?.version ?? 1, input.status, JSON.stringify(input.sourceSnapshot), input.artifact ? JSON.stringify(input.artifact) : existing?.artifact ? JSON.stringify(existing.artifact) : "{}", input.error ?? null, existing?.createdAt ?? now, now]);
+    this.database.flushNow();
+    return this.get(input.profileId) as ProfileBuilderArtifactRecord;
+  }
+
+  invalidate(profileId: string, now = Date.now()): void {
+    const current = this.get(profileId);
+    if (!current) return;
+    this.database.run("UPDATE profile_builder_artifacts SET status = 'partial', error = ?, updated_at = ? WHERE profile_id = ?", ["资料已更新，等待 Profile Builder 重建", now, profileId]);
+    this.database.flush();
+  }
+
+  delete(profileId: string): void {
+    this.database.run("DELETE FROM profile_builder_artifacts WHERE profile_id = ?", [profileId]);
+    this.database.flushNow();
   }
 }
 

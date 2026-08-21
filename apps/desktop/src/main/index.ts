@@ -9,9 +9,9 @@ import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, generatePostInterviewAnalysis, HybridKnowledgeRetriever, HybridRetriever, KeywordReranker, ModelRouter, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionDetector2, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type PreparationModel, type PreparationModelStep, type ProviderSettings, type QuestionDetectionType, type QuestionSpeechAct } from "@interview-copilot/shared";
+import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, generatePostInterviewAnalysis, HybridKnowledgeRetriever, HybridRetriever, KeywordReranker, LocalQuestionClassifier, ModelRouter, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionDetector2, retrieveProfileExperience, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type PreparationModel, type PreparationModelStep, type ProviderSettings, type QuestionDetectionType, type QuestionSpeechAct } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewStartOptions } from "./interview-coordinator";
-import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectRepository, type SqliteDatabase } from "./database";
+import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectRepository, type SqliteDatabase } from "./database";
 import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type ProviderSection } from "./settings-store";
 import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnection } from "./provider-preflight";
 import { parseDocument } from "./document-parsers";
@@ -19,6 +19,8 @@ import { SafeLogger } from "./logger";
 import { buildConversationHistory } from "./chat-context";
 import { ShutdownController } from "./shutdown-controller";
 import { LocalAsrServiceManager } from "./local-asr-service-manager";
+import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
+import { OnnxQuestionClassifier } from "./onnx-question-classifier";
 
 if (process.env.INTERVIEW_COPILOT_DISABLE_GPU === "1") {
   app.commandLine.appendSwitch("disable-gpu");
@@ -41,6 +43,34 @@ function localAsrPathCandidates(...segments: string[]): string[] {
     join(app.getAppPath(), "..", "..", "apps", "local-asr-service", ...segments),
     join(__dirname, "..", "..", "..", "..", "apps", "local-asr-service", ...segments)
   ];
+}
+
+function questionClassifierPathCandidates(fileName: string): string[] {
+  return [
+    process.env.INTERVIEW_COPILOT_QUESTION_CLASSIFIER_DIR ? join(process.env.INTERVIEW_COPILOT_QUESTION_CLASSIFIER_DIR, fileName) : undefined,
+    join(process.resourcesPath, "question-classifier", fileName),
+    join(process.cwd(), "apps", "desktop", "models", "question-classifier", fileName),
+    join(app.getAppPath(), "..", "..", "apps", "desktop", "models", "question-classifier", fileName),
+    join(__dirname, "..", "..", "..", "..", "apps", "desktop", "models", "question-classifier", fileName)
+  ].filter((candidate): candidate is string => Boolean(candidate));
+}
+
+let localQuestionModelPromise: Promise<OnnxQuestionClassifier | undefined> | undefined;
+function loadLocalQuestionModel(): Promise<OnnxQuestionClassifier | undefined> {
+  if (!localQuestionModelPromise) {
+    localQuestionModelPromise = (async () => {
+      const modelPath = firstExistingLocalPath(questionClassifierPathCandidates("model.onnx"));
+      const labelsPath = firstExistingLocalPath(questionClassifierPathCandidates("labels.json"));
+      if (!modelPath || !labelsPath) return undefined;
+      try {
+        return await OnnxQuestionClassifier.load(modelPath, labelsPath);
+      } catch (error) {
+        realtimeLogger?.warn("LOCAL_QUESTION_MODEL", { modelPath, error: String(error) });
+        return undefined;
+      }
+    })();
+  }
+  return localQuestionModelPromise;
 }
 
 const localAsrServiceManager = new LocalAsrServiceManager({
@@ -113,7 +143,15 @@ const answerAgent = new AnswerAgent(
   { fast: answerProvider, normal: answerProvider, "low-latency": answerProvider, reasoning: answerProvider, vision: answerProvider },
   answerModelRouter
 );
+const localQuestionClassifier = new LocalQuestionClassifier({
+  async predict(text, context) {
+    const model = await loadLocalQuestionModel();
+    if (model) return model.predict(text, context);
+    return new LocalQuestionClassifier().predict(text, context);
+  }
+});
 const questionDetector2 = new QuestionDetector2({
+  localClassifier: localQuestionClassifier,
   llmConfirmer: async (text, contextText) => {
     const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings;
     if (!settings.apiKey) throw new Error("LLM classifier is not configured");
@@ -140,6 +178,8 @@ let profileRepository: SqliteProfileRepository | undefined;
 let knowledgeRepository: SqliteKnowledgeRepository | undefined;
 let historyRepository: SqliteInterviewHistoryRepository | undefined;
 let projectRepository: SqliteProjectRepository | undefined;
+let profileBuilderRepository: SqliteProfileBuilderRepository | undefined;
+let profileBuilderService: ProfileBuilderService | undefined;
 let conversationRepository: SqliteConversationRepository | undefined;
 let preparationRuntime: PreparationAgentRuntime | undefined;
 let preparationAbortController: AbortController | undefined;
@@ -150,6 +190,7 @@ let appLogger: SafeLogger | undefined;
 let audioLogger: SafeLogger | undefined;
 let realtimeLogger: SafeLogger | undefined;
 let database: SqliteDatabase | undefined;
+let lastInterviewProfileId: string | undefined;
 const preloadPath = join(__dirname, "../preload/index.mjs");
 const rendererFile = join(__dirname, "../renderer/index.html");
 const visualSmokeRequested = process.argv.includes("--visual-smoke");
@@ -159,6 +200,15 @@ const productionSmokeRequested = process.argv.includes("--production-smoke") || 
 let mainRendererLoad: Promise<void> | undefined;
 const rendererAppReadyWindows = new Set<number>();
 const rendererAppReadyWaiters = new Map<number, Set<() => void>>();
+
+function triggerProfileBuilder(profileId: string | undefined): void {
+  if (!profileId || !profileBuilderService) return;
+  void profileBuilderService.rebuild(profileId).catch((error) => appLogger?.warn("profile builder failed", { profileId, error: String(error) }));
+}
+
+function triggerProfilesForKnowledgeBase(knowledgeBaseId: string): void {
+  for (const profile of profileRepository?.list() ?? []) if (profile.knowledgeBaseIds.includes(knowledgeBaseId)) triggerProfileBuilder(profile.id);
+}
 const shutdownController = new ShutdownController([
   { name: "unregister-shortcuts", run: () => globalShortcut.unregisterAll() },
   { name: "abort-preparation", run: () => preparationAbortController?.abort() },
@@ -702,6 +752,7 @@ async function stopInterviewWithAnalysis(): Promise<void> {
   try {
     await coordinator().stop("user");
     if (interviewId) void runPostAnalysis(interviewId);
+    triggerProfileBuilder(lastInterviewProfileId);
   } finally {
     // The HUD is a session-scoped window. Always restore the normal app even
     // when ASR/audio shutdown reports an error or an answer is still flushing.
@@ -873,6 +924,7 @@ function registerIpc(): void {
       if (!preflight.llm.reachable) throw new Error(`LLM_CONNECT_FAILED: ${preflight.llm.message ?? preflight.llm.status}`);
       if (!preflight.asr.reachable) throw new Error(`ASR_CONNECT_FAILED: ${preflight.asr.message ?? preflight.asr.status}`);
       const interviewId = await coordinator().start(options);
+       lastInterviewProfileId = options.profileId;
        // The main window must not remain underneath the transparent HUD. Keep
        // it available for restoration after an explicit or exceptional stop.
        mainWindow?.hide();
@@ -925,7 +977,11 @@ function registerIpc(): void {
   ipcMain.handle("chat:delete-conversation", (_event, conversationId: string) => { conversationRepository?.delete(conversationId); return true; });
   ipcMain.handle("profiles:list", () => profileRepository?.list() ?? []);
   ipcMain.handle("profiles:get", (_event, profileId: string) => profileRepository?.get(profileId));
-  ipcMain.handle("profiles:save", (_event, input: Parameters<SqliteProfileRepository["save"]>[0]) => profileRepository?.save(input));
+  ipcMain.handle("profiles:save", (_event, input: Parameters<SqliteProfileRepository["save"]>[0]) => {
+    const saved = profileRepository?.save(input);
+    triggerProfileBuilder(saved?.id);
+    return saved;
+  });
   ipcMain.handle("profiles:delete", (_event, profileId: string) => { profileRepository?.delete(profileId); return true; });
   ipcMain.handle("profiles:clone", (_event, profileId: string, name: string) => profileRepository?.clone(profileId, name));
   ipcMain.handle("profiles:select-active", (_event, profileId: string) => profileRepository?.setActive(profileId));
@@ -947,13 +1003,17 @@ function registerIpc(): void {
       }
     }
     const material = { rawContent: parsed.text, summary };
-    return profileRepository.save({ ...profile, ...(input.kind === "resume" ? { resume: material } : { jobDescription: material }), updatedAt: Date.now() });
+    const saved = profileRepository.save({ ...profile, ...(input.kind === "resume" ? { resume: material } : { jobDescription: material }), updatedAt: Date.now() });
+    triggerProfileBuilder(saved.id);
+    return saved;
   });
   ipcMain.handle("profiles:remove-material", (_event, profileId: string, kind: "resume" | "jobDescription") => {
     if (!profileRepository) throw new Error("Profile database is still initializing");
     const profile = profileRepository.get(profileId);
     if (!profile) throw new Error("Profile not found");
-    return profileRepository.save({ ...profile, ...(kind === "resume" ? { resume: undefined } : { jobDescription: undefined }), updatedAt: Date.now() });
+    const saved = profileRepository.save({ ...profile, ...(kind === "resume" ? { resume: undefined } : { jobDescription: undefined }), updatedAt: Date.now() });
+    triggerProfileBuilder(saved.id);
+    return saved;
   });
   ipcMain.handle("knowledge:list-bases", () => knowledgeRepository?.listKnowledgeBases() ?? []);
   ipcMain.handle("knowledge:create-base", (_event, name: string) => knowledgeRepository?.createKnowledgeBase(name));
@@ -974,9 +1034,13 @@ function registerIpc(): void {
         for (const chunk of chunks) chunk.embedding = await embeddingProvider.embed(chunk.text);
       }
       knowledgeRepository.replaceChunks(document.id, chunks);
-      return knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, status: "ready" });
+      const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, status: "ready" });
+      triggerProfilesForKnowledgeBase(knowledgeBase.id);
+      return saved;
     } catch (error) {
-      return knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, status: "error", error: String(error) });
+      const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, status: "error", error: String(error) });
+      triggerProfilesForKnowledgeBase(knowledgeBase.id);
+      return saved;
     }
   });
   ipcMain.handle("knowledge:delete", (_event, documentId: string) => { knowledgeRepository?.deleteDocument(documentId); return true; });
@@ -992,10 +1056,19 @@ function registerIpc(): void {
         for (const chunk of chunks) chunk.embedding = await embeddingProvider.embed(chunk.text);
       }
       knowledgeRepository.replaceChunks(document.id, chunks);
-      return knowledgeRepository.saveDocument({ ...document, status: "ready", error: undefined });
+      const saved = knowledgeRepository.saveDocument({ ...document, status: "ready", error: undefined });
+      triggerProfilesForKnowledgeBase(document.knowledgeBaseId);
+      return saved;
     } catch (error) {
-      return knowledgeRepository.saveDocument({ ...document, status: "error", error: String(error) });
+      const saved = knowledgeRepository.saveDocument({ ...document, status: "error", error: String(error) });
+      triggerProfilesForKnowledgeBase(document.knowledgeBaseId);
+      return saved;
     }
+  });
+  ipcMain.handle("profile-builder:get", (_event, profileId: string) => profileBuilderService?.get(profileId));
+  ipcMain.handle("profile-builder:rebuild", async (_event, profileId: string) => {
+    if (!profileBuilderService) throw new Error("Profile Builder is still initializing");
+    return profileBuilderService.rebuild(profileId);
   });
   ipcMain.handle("history:list", () => historyRepository?.listInterviews() ?? []);
   ipcMain.handle("history:get", (_event, interviewId: string) => historyRepository?.snapshot(interviewId));
@@ -1086,9 +1159,9 @@ function registerIpc(): void {
     return runProviderPreflight({ llm: providerConfigStore.get("llm"), asr: providerConfigStore.get("asr"), embedding: providerConfigStore.get("embedding") }, Boolean(checkReachability), providerPreflightCache);
   });
   ipcMain.handle("projects:list", () => projectRepository?.list() ?? []);
-  ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string }) => projectRepository?.create(input.name, input.profileId));
-  ipcMain.handle("projects:rename", (_event, projectId: string, name: string) => projectRepository?.rename(projectId, name));
-  ipcMain.handle("projects:delete", (_event, projectId: string) => { projectRepository?.delete(projectId); return true; });
+  ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string }) => { const project = projectRepository?.create(input.name, input.profileId); triggerProfileBuilder(project?.profileId); return project; });
+  ipcMain.handle("projects:rename", (_event, projectId: string, name: string) => { const project = projectRepository?.get(projectId); const updated = projectRepository?.rename(projectId, name); triggerProfileBuilder(updated?.profileId ?? project?.profileId); return updated; });
+  ipcMain.handle("projects:delete", (_event, projectId: string) => { const project = projectRepository?.get(projectId); projectRepository?.delete(projectId); triggerProfileBuilder(project?.profileId); return true; });
 }
 
 function registerShortcuts(): void {
@@ -1145,6 +1218,7 @@ if (hasSingleInstanceLock) {
     profileRepository = new SqliteProfileRepository(database);
     knowledgeRepository = new SqliteKnowledgeRepository(database);
     projectRepository = new SqliteProjectRepository(database);
+    profileBuilderRepository = new SqliteProfileBuilderRepository(database);
     conversationRepository = new SqliteConversationRepository(database);
     try {
       providerConfigStore = new ProviderConfigStore(database, await createSecretStore(appDataPath), { llm: environmentLlmSettings });
@@ -1165,6 +1239,17 @@ if (hasSingleInstanceLock) {
     database = undefined;
   }
   historyRepository = database ? new SqliteInterviewHistoryRepository(database) : undefined;
+  if (profileRepository && projectRepository && knowledgeRepository && historyRepository && profileBuilderRepository) {
+    profileBuilderService = new ProfileBuilderService(
+      profileRepository,
+      projectRepository,
+      knowledgeRepository,
+      historyRepository,
+      profileBuilderRepository,
+      { generate: (input) => createProfileBuilderModel(answerProvider, providerConfigStore?.get("llm") ?? environmentLlmSettings).generate(input) },
+      (record) => broadcast("profile-builder:updated", record)
+    );
+  }
   interviewCoordinator = new InterviewCoordinator({
     audio: audioManager,
     asrManager: realtimeSession,
@@ -1187,6 +1272,7 @@ if (hasSingleInstanceLock) {
     },
     contextProvider: async (question, profileId, recentTranscript) => {
       const profile = profileRepository?.get(profileId);
+      const experience = retrieveProfileExperience(question.text, profileBuilderService?.get(profileId)?.artifact).map((hit) => hit.text);
       const chunks = knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? [];
       let retrieved = await new HybridKnowledgeRetriever({ chunks, topK: 5, candidateK: 20, reranker: new KeywordReranker() }).search(question.text);
       const embeddingSettings = providerConfigStore?.get("embedding");
@@ -1202,6 +1288,7 @@ if (hasSingleInstanceLock) {
         profileSummary: profile?.resume?.summary,
         jobDescriptionSummary: profile?.jobDescription?.summary,
         skills: (profile?.skills ?? []).map((skill) => ({ id: skill.id, name: skill.name, content: `${skill.description}\n${skill.content}` })),
+        experienceContext: experience,
         retrievedKnowledge: retrieved.slice(0, 5).map((chunk) => `${chunk.metadata.filename}: ${chunk.text}`),
         recentTranscript: recentTranscript.slice(-12)
       };

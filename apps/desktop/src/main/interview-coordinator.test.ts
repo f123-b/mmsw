@@ -81,6 +81,56 @@ describe("InterviewCoordinator software E2E", () => {
     vi.useRealTimers();
   });
 
+  it("promotes an implicit follow-up using the remembered topic", async () => {
+    vi.useFakeTimers();
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    let clock = 1_000;
+    const provider: AnswerProvider = { stream: async function* () { yield "我会结合项目回答。"; } };
+    const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, now: () => clock });
+    const confirmed: string[] = [];
+    coordinator.on("event", (event: { type: string; event?: { type?: string; question?: { text?: string } } }) => {
+      if (event.type === "question" && event.event?.type === "question_confirmed") confirmed.push(event.event.question?.text ?? "");
+    });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "AUTO", answerMode: "NORMAL" });
+    realtime.emit("transcript", {}, { id: "topic", source: "remote", text: "介绍一下你的FOC项目", startMs: 0, endMs: 900, final: true });
+    clock = 1_600;
+    vi.advanceTimersByTime(500);
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+    realtime.emit("transcript", {}, { id: "implicit", source: "remote", text: "好，说说", startMs: 2_000, endMs: 2_600, final: true });
+    clock = 3_600;
+    vi.advanceTimersByTime(500);
+    for (let turn = 0; turn < 24; turn += 1) await Promise.resolve();
+    expect(confirmed.some((text) => text.includes("电机控制/FOC") && text.includes("好，说说"))).toBe(true);
+    await coordinator.stop();
+    vi.useRealTimers();
+  });
+
+  it("keeps short prompts and punctuation-split prompts from the recorded interview", async () => {
+    vi.useFakeTimers();
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    let clock = 1_000;
+    const provider: AnswerProvider = { stream: async function* () { yield "不会自动回答"; } };
+    const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, now: () => clock });
+    const confirmed: string[] = [];
+    coordinator.on("event", (event: { type: string; event?: { type?: string; question?: { text?: string } } }) => {
+      if (event.type === "question" && event.event?.type === "question_confirmed") confirmed.push(event.event.question?.text ?? "");
+    });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
+    realtime.emit("transcript", {}, { id: "v1", source: "remote", text: "请解释 volatile。", startMs: 0, endMs: 900, final: true });
+    realtime.emit("transcript", {}, { id: "v2", source: "remote", text: "关键字的作用。", startMs: 900, endMs: 1_600, final: true });
+    realtime.emit("transcript", {}, { id: "v3", source: "remote", text: "以及常见误区，十五秒。", startMs: 1_600, endMs: 2_300, final: true });
+    clock = 3_000;
+    vi.advanceTimersByTime(500);
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+    expect(confirmed.some((text) => text.includes("volatile") && text.includes("关键字") && text.includes("常见误区"))).toBe(true);
+    await coordinator.stop();
+    vi.useRealTimers();
+  });
+
   it("answers three consecutive questions in AUTO and persists answered status", async () => {
     vi.useFakeTimers();
     const audio = new FakeAudio();

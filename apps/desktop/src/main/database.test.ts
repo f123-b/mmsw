@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectRepository } from "./database";
+import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectRepository } from "./database";
 
 describe("SQLite persistence", () => {
   it("persists profile CRUD, clone and active selection", async () => {
@@ -90,6 +90,21 @@ describe("SQLite persistence", () => {
       expect(projects.get(project.id)?.name).toBe("新项目");
       projects.delete(project.id);
       expect(projects.get(project.id)).toBeUndefined();
+    } finally { database.close(); }
+  });
+
+  it("persists Profile Builder artifacts without changing legacy records", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const profile = profiles.save({ name: "画像测试", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const builder = new SqliteProfileBuilderRepository(database);
+      const artifact = { version: 1 as const, profileId: profile.id, generatedAt: 10, status: "ready" as const, sourceIds: ["resume-1"], skillGraph: { nodes: [], edges: [] }, projectGraph: { nodes: [], edges: [] }, answerMaterials: [], faqs: [], warnings: [] };
+      builder.save({ profileId: profile.id, status: "ready", sourceSnapshot: { sources: ["resume-1"] }, artifact, now: 10 });
+      expect(builder.get(profile.id)?.artifact?.profileId).toBe(profile.id);
+      expect(profiles.get(profile.id)?.name).toBe("画像测试");
+      builder.invalidate(profile.id, 20);
+      expect(builder.get(profile.id)?.status).toBe("partial");
     } finally { database.close(); }
   });
 });

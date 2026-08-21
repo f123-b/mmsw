@@ -28,12 +28,20 @@ describe("Interview Copilot core upgrade", () => {
     expect(memory.snapshot().recentQuestions).toEqual(["问题2", "问题3", "问题4", "问题5", "问题6", "问题7", "问题8", "问题9", "问题10", "问题11"]);
   });
 
+  it("keeps grounded entities for follow-up resolution", () => {
+    const memory = new InterviewMemory();
+    memory.recordQuestion("介绍一下你的FOC项目，里面用了DMA和CAN");
+    expect(memory.snapshot().entities).toEqual(expect.arrayContaining(["FOC", "DMA", "CAN"]));
+  });
+
   it("formats spoken answer prompts and checks answer quality", () => {
     const formatter = new InterviewAnswerFormatter();
     expect(formatter.instructions("FAST")).toContain("30~80");
     expect(formatter.format("# 第一部分\n- 我会先看采样时序。", "FAST")).toBe("我会先看采样时序。");
     const quality = new AnswerQualityChecker().check({ question: "为什么使用CAN", answer: "CAN用于工业通信。", mode: "NORMAL" });
     expect(quality.issues).toContain("not-first-person");
+    expect(quality.needsRepair).toBe(true);
+    expect(formatter.format("首先，这个项目需要进行优化。因此要关注实时性。", "NORMAL")).toContain("我一般先");
   });
 
   it("runs candidate retrieval, reranking and returns top five", async () => {

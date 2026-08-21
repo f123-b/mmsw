@@ -4,6 +4,7 @@ import { create } from "zustand";
 import type { AudioDevices, AudioDrift, AudioSidecarEvent, ProbeResult, RealtimeServerMessage } from "@interview-copilot/protocol";
 import type { AsrProviderType, QuestionCandidate, QuestionEvent, SessionState, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { Profile } from "@interview-copilot/shared";
+import type { ProfileBuilderArtifactRecord } from "../main/database";
 import type { ProviderCenterPublicConfig, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import { normalizeMeter, StableAnswerStateMachine } from "@interview-copilot/shared";
 import type { CaptureProtectionState, HUDState, OverlayMode } from "../main/overlay-manager";
@@ -317,6 +318,8 @@ export function App(): JSX.Element {
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [profileId, setProfileId] = useState("");
+  const [profileBuilderArtifact, setProfileBuilderArtifact] = useState<ProfileBuilderArtifactRecord>();
+  const [profileBuilderRunning, setProfileBuilderRunning] = useState(false);
   const [providerSettings, setProviderSettings] = useState<ProviderCenterPublicConfig>();
   const [llmProviderName, setLlmProviderName] = useState("OpenAI-compatible");
   const [llmModel, setLlmModel] = useState("gpt-4o-mini");
@@ -506,6 +509,17 @@ export function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
+    if (!profileId) {
+      setProfileBuilderArtifact(undefined);
+      return;
+    }
+    void window.interviewCopilot.profileBuilder.get(profileId).then(setProfileBuilderArtifact).catch(() => setProfileBuilderArtifact(undefined));
+    return window.interviewCopilot.events.onProfileBuilderUpdated((record) => {
+      if (record.profileId === profileId) setProfileBuilderArtifact(record);
+    });
+  }, [profileId]);
+
+  useEffect(() => {
     if (knowledgeBaseId) void window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId).then(setKnowledgeDocuments);
   }, [knowledgeBaseId]);
 
@@ -631,6 +645,19 @@ export function App(): JSX.Element {
   const addSkill = async () => { if (!selectedProfile) return; const name = await requestDialog({ kind: "form", title: "新增 Skill", label: "Skill 名称", required: true }); if (typeof name !== "string" || !name.trim()) return; const content = await requestDialog({ kind: "form", title: "Skill 内容", label: "内容", multiline: true, confirmLabel: "保存" }); const skill = { id: `skill-${Date.now()}`, name: name.trim(), description: "", content: typeof content === "string" ? content : "", tags: [] }; const updated = await window.interviewCopilot.profiles.save({ ...selectedProfile, skills: [...selectedProfile.skills, skill] }); if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); };
   const editSkill = async (skillId: string) => { if (!selectedProfile) return; const skill = selectedProfile.skills.find((item) => item.id === skillId); if (!skill) return; const content = await requestDialog({ kind: "form", title: `编辑 Skill：${skill.name}`, label: "内容", defaultValue: skill.content, multiline: true, confirmLabel: "保存" }); if (typeof content !== "string") return; const updated = await window.interviewCopilot.profiles.save({ ...selectedProfile, skills: selectedProfile.skills.map((item) => item.id === skillId ? { ...item, content } : item) }); if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); };
   const removeProfileMaterial = async (kind: "resume" | "jobDescription") => { if (!selectedProfile) return; const updated = await window.interviewCopilot.profiles.removeMaterial(selectedProfile.id, kind); if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); };
+  const rebuildProfileBuilder = async () => {
+    if (!selectedProfile || profileBuilderRunning) return;
+    setProfileBuilderRunning(true);
+    try {
+      const artifact = await window.interviewCopilot.profileBuilder.rebuild(selectedProfile.id);
+      setProfileBuilderArtifact(artifact);
+      store.setNotice("Profile Builder 已完成：技能图谱、项目图谱和回答素材已更新");
+    } catch (error) {
+      store.setNotice(`Profile Builder 失败：${userFacingError(error)}`);
+    } finally {
+      setProfileBuilderRunning(false);
+    }
+  };
   const deleteSkill = async (skillId: string) => { if (!selectedProfile) return; const updated = await window.interviewCopilot.profiles.save({ ...selectedProfile, skills: selectedProfile.skills.filter((skill) => skill.id !== skillId) }); if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); };
   const toggleKnowledgeBase = async (baseId: string, linked: boolean) => { if (!selectedProfile) return; const ids = linked ? selectedProfile.knowledgeBaseIds.filter((id) => id !== baseId) : [...selectedProfile.knowledgeBaseIds, baseId]; const updated = await window.interviewCopilot.profiles.save({ ...selectedProfile, knowledgeBaseIds: ids }); if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); };
 
@@ -704,7 +731,11 @@ export function App(): JSX.Element {
       <Sidebar page={page} profileName={selectedProfile?.name} projects={projects} conversations={conversations} onNavigate={setPage} onNewConversation={beginNewConversation} onOpenConversation={(conversationId) => void openConversation(conversationId)} onOpenProject={(projectId) => void openProject(projectId)} onRenameProject={(projectId, name) => void renameProject(projectId, name)} onDeleteProject={(projectId, name) => void deleteProject(projectId, name)} />
       <section className="content-shell">
         <div className="modern-topbar"><button className="dark-pill start-interview" onClick={() => setSetupOpen(true)}>开始面试 <span>↗</span></button></div>
-        <div className="modern-main">{modernPageContent}{page === "settings" && <CaptureProtectionSettings status={captureProtection} onToggle={(enabled) => void toggleCaptureProtection(enabled)} />}</div>
+        <div className="modern-main">
+          {modernPageContent}
+          {page === "profiles" && selectedProfile && <div className="profile-subsection"><h3>Profile Builder</h3><p className="page-note">上传 Resume、项目资料或完成面试后会自动整理；所有素材都保留来源证据。</p><div className="detail-actions"><button className="outline-pill" disabled={profileBuilderRunning} onClick={() => void rebuildProfileBuilder()}>{profileBuilderRunning ? "构建中…" : "立即构建画像"}</button><span className="page-note">{profileBuilderArtifact?.artifact ? `技能 ${profileBuilderArtifact.artifact.skillGraph.nodes.length} · 项目 ${profileBuilderArtifact.artifact.projectGraph.nodes.length} · 回答素材 ${profileBuilderArtifact.artifact.answerMaterials.length} · FAQ ${profileBuilderArtifact.artifact.faqs.length}` : "尚未生成"}</span></div>{profileBuilderArtifact?.artifact?.warnings.map((warning) => <small className="page-note" key={warning}>{warning}</small>)}</div>}
+          {page === "settings" && <CaptureProtectionSettings status={captureProtection} onToggle={(enabled) => void toggleCaptureProtection(enabled)} />}
+        </div>
         {(page === "home" || page === "interview") && <ChatComposer value={composerText} onChange={setComposerText} onSubmit={() => void submitComposer()} onCreateProject={() => void createProject()} />}
         {store.notice && <button className="notice-toast" onClick={() => store.setNotice(undefined)}>{store.notice} <span>×</span></button>}
       </section>

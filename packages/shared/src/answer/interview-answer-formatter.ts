@@ -15,6 +15,20 @@ function cleanMarkdown(text: string): string {
     .trim();
 }
 
+function naturalize(text: string): string {
+  return text
+    .replace(/^(综上所述|综上|总的来说)[，,：:]?\s*/i, "")
+    .replace(/首先[，,：:]?/g, "我一般先")
+    .replace(/其次[，,：:]?/g, "然后")
+    .replace(/因此/g, "所以")
+    .replace(/需要注意的是[，,：:]?/g, "我会特别注意")
+    .replace(/该项目/g, "这个项目")
+    .replace(/本项目/g, "我的项目")
+    .replace(/进行(了)?/g, "做了")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function trimToSentence(text: string, max: number): string {
   if (text.length <= max) return text;
   const candidate = text.slice(0, max);
@@ -32,7 +46,7 @@ export class InterviewAnswerFormatter {
   }
 
   format(text: string, mode: AnswerMode): string {
-    const clean = cleanMarkdown(text);
+    const clean = naturalize(cleanMarkdown(text));
     if (!clean) return "";
     return trimToSentence(clean, this.policy(mode).max);
   }

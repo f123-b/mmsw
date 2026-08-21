@@ -9,6 +9,7 @@ export interface InterviewMemorySnapshot {
   recentQuestions: string[];
   recentAnswers: string[];
   topics: string[];
+  entities: string[];
   currentTopic?: string;
   pendingQuestion?: string;
   turns: InterviewMemoryTurn[];
@@ -33,6 +34,7 @@ function inferTopic(text: string): string | undefined {
 /** Runtime interview context. It is intentionally independent from SQLite schema. */
 export class InterviewMemory {
   private readonly turns: InterviewMemoryTurn[] = [];
+  private readonly entities = new Set<string>();
   private pendingQuestion: string | undefined;
   private currentTopic: string | undefined;
 
@@ -40,6 +42,7 @@ export class InterviewMemory {
 
   reset(): void {
     this.turns.length = 0;
+    this.entities.clear();
     this.pendingQuestion = undefined;
     this.currentTopic = undefined;
   }
@@ -48,6 +51,7 @@ export class InterviewMemory {
     const normalized = normalize(question);
     if (!normalized) return;
     const topic = metadata.topic || inferTopic(normalized) || this.currentTopic;
+    extractEntities(normalized).forEach((entity) => this.entities.add(entity));
     this.turns.push({ question: normalized, topic, createdAt: metadata.createdAt });
     while (this.turns.length > this.maxTurns) this.turns.shift();
     this.pendingQuestion = normalized;
@@ -80,6 +84,7 @@ export class InterviewMemory {
       recentQuestions: turns.map((turn) => turn.question),
       recentAnswers: turns.map((turn) => turn.answer || "").filter(Boolean),
       topics: [...new Set(turns.map((turn) => turn.topic).filter((topic): topic is string => Boolean(topic)))],
+      entities: [...this.entities].slice(-30),
       currentTopic: this.currentTopic,
       pendingQuestion: this.pendingQuestion,
       turns
@@ -92,4 +97,9 @@ export class InterviewMemory {
     if (snapshot.currentTopic) lines.unshift(`当前技术主题：${snapshot.currentTopic}`);
     return [...lines, ...recentTranscript.slice(-6)].join("\n").slice(-8_000);
   }
+}
+
+function extractEntities(text: string): string[] {
+  const known = ["FOC", "DMA", "PWM", "CAN", "UART", "SPI", "I2C", "RTOS", "SQLite", "RAG", "ASR", "VAD", "SVPWM", "Clarke", "Park", "编码器", "电流环", "速度环"];
+  return known.filter((entity) => text.toLowerCase().includes(entity.toLowerCase()));
 }

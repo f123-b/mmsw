@@ -14,6 +14,17 @@ describe("Question Detection 2.0", () => {
     expect(result.score.finalScore).toBe(0);
   });
 
+  it("uses an injected local classifier for contextual spoken follow-ups", async () => {
+    const detector = new QuestionDetector2({
+      localClassifier: {
+        predict: async () => ({ type: "FOLLOW_UP", confidence: 0.96 })
+      }
+    });
+    const result = await detector.analyze("好，说说", "当前主题：FOC 项目", true, { recentTranscript: ["面试官：介绍一下你的 FOC 项目。"] });
+    expect(result.isQuestion).toBe(true);
+    expect(result.speechAct).toBe("FOLLOW_UP");
+  });
+
   it("only invokes the LLM on the low-confidence band", async () => {
     let calls = 0;
     const detector = new QuestionDetector2({ llmConfirmer: async () => { calls += 1; return { isQuestion: true, confidence: 0.94 }; } });

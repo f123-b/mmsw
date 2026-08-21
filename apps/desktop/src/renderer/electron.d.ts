@@ -11,7 +11,7 @@ import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, 
 import type { SessionState } from "@interview-copilot/shared";
 import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
 import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, ProjectRecord } from "../main/database";
+import type { ConversationMessageRecord, ConversationRecord, ProfileBuilderArtifactRecord, ProjectRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 
 declare global {
@@ -85,6 +85,10 @@ declare global {
         attachMaterial(input: { profileId: string; kind: "resume" | "jobDescription"; filename: string; mimeType: string; bytes: Uint8Array }): Promise<Profile | undefined>;
         removeMaterial(profileId: string, kind: "resume" | "jobDescription"): Promise<Profile | undefined>;
       };
+      profileBuilder: {
+        get(profileId: string): Promise<ProfileBuilderArtifactRecord | undefined>;
+        rebuild(profileId: string): Promise<ProfileBuilderArtifactRecord>;
+      };
       settings: {
         get(): Promise<ProviderCenterPublicConfig | undefined>;
         update(section: ProviderSection, input: Partial<ProviderSettings>): Promise<PublicProviderSettings | undefined>;
@@ -148,6 +152,7 @@ declare global {
         onChatMessageDelta(listener: (event: unknown) => void): () => void;
         onChatMessageEnd(listener: (event: unknown) => void): () => void;
         onChatError(listener: (event: unknown) => void): () => void;
+        onProfileBuilderUpdated(listener: (event: ProfileBuilderArtifactRecord) => void): () => void;
       };
     };
   }

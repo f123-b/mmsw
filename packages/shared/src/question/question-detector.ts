@@ -1,7 +1,8 @@
 import { classifyQuestion, type QuestionCategory, type QuestionClassification } from "../question-classifier";
+import type { LocalQuestionModel, LocalQuestionResult } from "./local-classifier";
 import type { QuestionAnalysis, QuestionDetectionContext, QuestionDetectionType, QuestionLLMConfirmer, QuestionScore, QuestionSpeechAct } from "./types";
 
-const RULE_KEYWORDS = /什么|为什么|为何|怎么|如何|介绍|原理|区别|优化|请问|能不能|是否|有没有|哪个|哪里|解释|讲一下|说一下|困难|挑战|设计|如果.*(重新|改|换|设计)/;
+const RULE_KEYWORDS = /什么|为什么|为何|怎么|如何|介绍|原理|区别|优化|请问|能不能|是否|有没有|哪个|哪里|解释|讲一下|说一下|说说|展开|困难|挑战|设计|如果.*(重新|改|换|设计)/;
 const CLARIFICATION_KEYWORDS = /具体一点|什么意思|没听清|再说一遍|能展开|详细一点|指的是|怎么理解/;
 const FILLER_ONLY = /^(嗯+|呃+|啊+|哦+|好+|对+|那个|嗯嗯|知道了)[。！？?！\s]*$/i;
 const SMALL_TALK = /^(你好|您好|谢谢|辛苦了|好的|明白了|嗯嗯|哈哈)[。！？?！\s]*$/i;
@@ -44,28 +45,59 @@ function inferSpeechAct(text: string, isQuestion: boolean, followUp: boolean): Q
   return followUp ? "FOLLOW_UP" : "QUESTION";
 }
 
+function fuseLocalClassification(base: QuestionClassification, local: LocalQuestionResult): QuestionClassification {
+  const localIsQuestion = local.type === "QUESTION" || local.type === "FOLLOW_UP";
+  const localConfidence = clamp(local.confidence);
+  const strongRuleQuestion = base.isQuestion && base.confidence >= 0.72;
+  const isQuestion = localIsQuestion
+    ? localConfidence >= 0.55 || strongRuleQuestion
+    : strongRuleQuestion;
+  const category: QuestionCategory = local.type === "FOLLOW_UP" ? "followup" : base.category;
+  return {
+    ...base,
+    isQuestion,
+    confidence: Math.max(base.confidence, localConfidence),
+    category,
+    reason: `${base.reason}+local-${local.type.toLowerCase()}`,
+  };
+}
+
 /** Rules + local semantic classifier + selective LLM confirmation. */
 export class QuestionDetector {
   private readonly classifier: { classify(text: string, contextText?: string, final?: boolean): QuestionClassification };
   private readonly llmConfirmer?: QuestionLLMConfirmer;
+  private readonly localClassifier?: LocalQuestionModel;
   private readonly threshold: number;
   private readonly llmMinScore: number;
   private readonly llmMaxScore: number;
 
-  constructor(options: { classifier?: { classify(text: string, contextText?: string, final?: boolean): QuestionClassification }; llmConfirmer?: QuestionLLMConfirmer; threshold?: number; llmMinScore?: number; llmMaxScore?: number } = {}) {
+  constructor(options: { classifier?: { classify(text: string, contextText?: string, final?: boolean): QuestionClassification }; localClassifier?: LocalQuestionModel; llmConfirmer?: QuestionLLMConfirmer; threshold?: number; llmMinScore?: number; llmMaxScore?: number } = {}) {
     this.classifier = options.classifier ?? { classify: classifyQuestion };
+    this.localClassifier = options.localClassifier;
     this.llmConfirmer = options.llmConfirmer;
     this.threshold = options.threshold ?? 0.85;
     this.llmMinScore = options.llmMinScore ?? 0.5;
     this.llmMaxScore = options.llmMaxScore ?? 0.8;
   }
 
+  get hasLocalClassifier(): boolean { return Boolean(this.localClassifier); }
+
   analyzeSync(text: string, contextText = "", final = true, context: QuestionDetectionContext = {}): QuestionAnalysis {
     return buildAnalysisWithClassifier(text, { ...context, contextText }, final, this.classifier, undefined, this.threshold);
   }
 
   async analyze(text: string, contextText = "", final = true, context: QuestionDetectionContext = {}): Promise<QuestionAnalysis> {
-    const preliminary = this.analyzeSync(text, contextText, final, context);
+    let preliminary = this.analyzeSync(text, contextText, final, context);
+    if (this.localClassifier) {
+      try {
+        const local = await this.localClassifier.predict(text, context.recentTranscript?.slice(-10) ?? (contextText ? [contextText] : []));
+        const localClassifier = { classify: () => fuseLocalClassification(preliminary.classification, local) };
+        preliminary = buildAnalysisWithClassifier(text, { ...context, contextText }, final, localClassifier, undefined, this.threshold);
+      } catch {
+        // The local model is an accelerator. Rules and the optional LLM remain
+        // the compatibility path if the model is missing or cannot load.
+      }
+    }
     const weightedWithoutLlm = 0.3 * preliminary.score.ruleScore + 0.5 * preliminary.score.semanticScore;
     if (!this.llmConfirmer || weightedWithoutLlm < this.llmMinScore || weightedWithoutLlm > this.llmMaxScore) {
       return preliminary;

@@ -62,6 +62,18 @@ describe("question scoring", () => {
     expect(detector.flush(1_500)[0]?.type).toBe("question_confirmed");
   });
 
+  it.each([
+    "讲一下 SPI",
+    "请解释 volatile",
+    "DMA 和中断采样相比，各自的优缺点是什么？",
+    "围绕 FOC 项目，好，说说",
+    "SPI 有哪几种模式？"
+  ])("confirms concise real interview prompt: %s", (text) => {
+    const detector = new QuestionDetector();
+    detector.observe({ text, final: true, startMs: 0, endMs: 900 }, 900);
+    expect(detector.flush(1_500)[0]?.type).toBe("question_confirmed");
+  });
+
   it("uses partial speech for early classification but waits for final before confirming", () => {
     const detector = new QuestionDetector();
     expect(detector.observe({ text: "如果重新设计", final: false, startMs: 0, endMs: 500 }, 500)[0]).toMatchObject({ type: "question_candidate" });

@@ -19,6 +19,7 @@ export interface TranscriptAggregatorOptions {
 }
 
 const TERMINAL_PUNCTUATION = /[?？!！。；;]$/;
+const CONTINUATION_START = /^(关键字|作用|以及|并且|而且|尤其|包括|比如|具体|分别|常见|十五秒|只讲|简单说|先说|你会|你准备|用一句话|为什么|怎么|如何|如果|那如果)/;
 
 function normalize(text: string): string {
   return text.replace(/\s+/g, " ").trim();
@@ -30,6 +31,18 @@ function mergeText(left: string, right: string): string {
   if (!a) return b;
   if (!b) return a;
   return `${a}${/^[，。！？、,.!?；;：:]/.test(b) ? "" : " "}${b}`;
+}
+
+function shouldMergeAfterPunctuation(previous: string, next: string): boolean {
+  if (!TERMINAL_PUNCTUATION.test(previous)) return true;
+  const previousBody = previous.replace(/[?？!！。；;]+$/, "").trim();
+  const nextText = normalize(next);
+  // ASR often closes each partial final with a full stop even though the
+  // interviewer is continuing the same prompt: “请解释 volatile。” →
+  // “关键字的作用。” → “以及常见误区”。 Keep those fragments together.
+  if (CONTINUATION_START.test(nextText)) return true;
+  if (previousBody.length <= 24 && /^(请|你来|讲一下|说一下|解释|说明|介绍|什么是|为什么|怎么|如何|如果|那)/.test(previousBody)) return true;
+  return false;
 }
 
 export class TranscriptAggregator {
@@ -54,7 +67,7 @@ export class TranscriptAggregator {
     const canMerge = Boolean(
       previous &&
       segment.startMs - previous.endMs <= this.maxGapMs &&
-      (!this.punctuationBoundary || !TERMINAL_PUNCTUATION.test(previous.text))
+      (!this.punctuationBoundary || shouldMergeAfterPunctuation(previous.text, text))
     );
     if (canMerge && previous) {
       previous.text = mergeText(previous.text, text);

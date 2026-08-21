@@ -13,7 +13,7 @@ import type { TencentValidationState, TencentValidationStatus } from "../main/se
 import type { SessionState } from "@interview-copilot/shared";
 import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
 import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, ProjectRecord } from "../main/database";
+import type { ConversationMessageRecord, ConversationRecord, ProfileBuilderArtifactRecord, ProjectRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 
 const api = {
@@ -84,6 +84,10 @@ const api = {
     active: (): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:active"),
     attachMaterial: (input: { profileId: string; kind: "resume" | "jobDescription"; filename: string; mimeType: string; bytes: Uint8Array }): Promise<Profile | undefined> => ipcRenderer.invoke("profiles:attach-material", input),
     removeMaterial: (profileId: string, kind: "resume" | "jobDescription") => ipcRenderer.invoke("profiles:remove-material", profileId, kind)
+  },
+  profileBuilder: {
+    get: (profileId: string): Promise<ProfileBuilderArtifactRecord | undefined> => ipcRenderer.invoke("profile-builder:get", profileId),
+    rebuild: (profileId: string): Promise<ProfileBuilderArtifactRecord> => ipcRenderer.invoke("profile-builder:rebuild", profileId)
   },
   settings: {
     get: (): Promise<ProviderCenterPublicConfig | undefined> => ipcRenderer.invoke("settings:get"),
@@ -255,6 +259,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
       ipcRenderer.on("chat:error", handler);
       return () => ipcRenderer.removeListener("chat:error", handler);
+    },
+    onProfileBuilderUpdated: (listener: (event: ProfileBuilderArtifactRecord) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: ProfileBuilderArtifactRecord) => listener(payload);
+      ipcRenderer.on("profile-builder:updated", handler);
+      return () => ipcRenderer.removeListener("profile-builder:updated", handler);
     }
   }
 };

@@ -20,6 +20,7 @@ export interface AnswerContextInput {
   profileSummary?: string;
   jobDescriptionSummary?: string;
   skills?: AnswerSkillContext[];
+  experienceContext?: string[];
   retrievedKnowledge?: string[];
   recentTranscript?: string[];
   interviewMemory?: InterviewMemorySnapshot;
@@ -29,6 +30,7 @@ export interface ContextPack {
   profileSummary?: string;
   jobDescriptionSummary?: string;
   skills: AnswerSkillContext[];
+  experienceContext: string[];
   retrievedKnowledge: string[];
   recentTranscript: string[];
   interviewMemory?: InterviewMemorySnapshot;
@@ -56,6 +58,7 @@ export class ContextRouter {
       profileSummary: input.profileSummary,
       jobDescriptionSummary: input.jobDescriptionSummary,
       skills,
+      experienceContext: (input.experienceContext ?? []).slice(0, 5),
       retrievedKnowledge: (input.retrievedKnowledge ?? []).slice(0, 6),
       recentTranscript,
       interviewMemory: input.interviewMemory
@@ -64,7 +67,7 @@ export class ContextRouter {
 }
 
 export interface PromptSection {
-  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "retrieval-context" | "recent-transcript" | "interview-memory" | "conversation-history" | "question" | "output-format";
+  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "experience-context" | "retrieval-context" | "recent-transcript" | "interview-memory" | "conversation-history" | "question" | "output-format";
   content: string;
 }
 
@@ -76,6 +79,7 @@ export class PromptBuilder {
     ];
     if (context.profileSummary || context.jobDescriptionSummary) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary].filter(Boolean).join("\n") });
     if (context.skills.length > 0) sections.push({ name: "skill-context", content: context.skills.map((skill) => `${skill.name}: ${skill.content}`).join("\n") });
+    if (context.experienceContext.length > 0) sections.push({ name: "experience-context", content: `优先使用以下真实经历素材，不能补写未出现的事实：\n${context.experienceContext.join("\n---\n")}` });
     if (context.retrievedKnowledge.length > 0) sections.push({ name: "retrieval-context", content: context.retrievedKnowledge.join("\n---\n") });
     if (context.recentTranscript.length > 0) sections.push({ name: "recent-transcript", content: `最近必要对话：\n${context.recentTranscript.join("\n")}` });
     if (context.interviewMemory) {
@@ -151,9 +155,25 @@ export class AnswerAgent {
       text += delta;
       yield { type: "answer_delta", answerId, delta };
     }
-    const formattedText = this.formatter.format(text, mode);
-    const groundingText = [context.profileSummary, context.jobDescriptionSummary, ...context.skills.map((skill) => skill.content), ...context.retrievedKnowledge].filter(Boolean).join("\n");
-    const quality = this.qualityChecker.check({ question: question.text, answer: formattedText, mode, groundingText });
+    let formattedText = this.formatter.format(text, mode);
+    const groundingText = [context.profileSummary, context.jobDescriptionSummary, ...context.skills.map((skill) => skill.content), ...context.experienceContext, ...context.retrievedKnowledge].filter(Boolean).join("\n");
+    let quality = this.qualityChecker.check({ question: question.text, answer: formattedText, mode, groundingText });
+    // Repair only when grounded profile material exists. This keeps the
+    // realtime path low-latency for generic answers while preventing a
+    // clearly poor or ungrounded answer from being shown as final.
+    if (quality.needsRepair && groundingText.trim()) {
+      let repaired = "";
+      for await (const delta of provider.stream({
+        model: selection.model,
+        sections: [...sections, { name: "output-format", content: `请修正上一版答案：只保留有证据的项目经历，改成第一人称自然口语，直接回答问题，控制在 ${mode === "FAST" ? "30-80" : mode === "DEEP" ? "150-250" : "80-150"} 字。只输出修正后的答案。` }]
+      }, signal)) repaired += delta;
+      const repairedText = this.formatter.format(repaired, mode);
+      const repairedQuality = this.qualityChecker.check({ question: question.text, answer: repairedText, mode, groundingText });
+      if (repairedText && repairedQuality.score >= quality.score) {
+        formattedText = repairedText;
+        quality = repairedQuality;
+      }
+    }
     yield { type: "answer_end", answerId, text: formattedText, quality };
   }
 }

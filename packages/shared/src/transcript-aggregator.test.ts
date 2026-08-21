@@ -17,4 +17,20 @@ describe("TranscriptAggregator", () => {
     expect(aggregator.flush("mic")[0]?.source).toBe("mic");
     expect(aggregator.flush("remote")[0]?.source).toBe("remote");
   });
+
+  it("keeps punctuation-terminated ASR fragments together when the next fragment continues the prompt", () => {
+    const aggregator = new TranscriptAggregator();
+    expect(aggregator.push({ id: "r1", source: "remote", text: "请解释 volatile。", startMs: 0, endMs: 900, final: true })?.text).toBe("请解释 volatile。");
+    expect(aggregator.push({ id: "r2", source: "remote", text: "关键字的作用。", startMs: 900, endMs: 1_600, final: true })?.text).toBe("请解释 volatile。 关键字的作用。");
+    expect(aggregator.push({ id: "r3", source: "remote", text: "以及常见误区，十五秒。", startMs: 1_600, endMs: 2_300, final: true })?.text).toBe("请解释 volatile。 关键字的作用。 以及常见误区，十五秒。");
+  });
+
+  it("does not carry a remote prompt across a candidate answer", () => {
+    const aggregator = new TranscriptAggregator();
+    aggregator.push({ id: "r1", source: "remote", text: "你准备怎么开始补这块？", startMs: 0, endMs: 900, final: true });
+    aggregator.push({ id: "m1", source: "mic", text: "我会先梳理基础。", startMs: 900, endMs: 1_600, final: true });
+    // The coordinator performs this source-boundary flush.
+    aggregator.flush("remote");
+    expect(aggregator.push({ id: "r2", source: "remote", text: "好，那回到你的项目。", startMs: 1_600, endMs: 2_300, final: true })?.text).toBe("好，那回到你的项目。");
+  });
 });

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import type { ClientControlMessage, RealtimeServerMessage, TranscriptSegment } from "@interview-copilot/protocol";
 import {
   AnswerAgent,
+  InterviewBrain,
   InterviewMemory,
   InterviewHistoryStore,
   QuestionDetector,
@@ -76,6 +77,7 @@ export interface InterviewCoordinatorOptions {
   history?: InterviewHistoryPort;
   contextProvider?: (question: QuestionCandidate, profileId: string, recentTranscript: string[]) => AnswerContextInput | Promise<AnswerContextInput>;
   asrSettingsProvider?: (profileId: string) => Pick<RealtimeConnectOptions, "providerType" | "providerName" | "model" | "language" | "url">;
+  interviewBrain?: InterviewBrain;
   now?: () => number;
   initialAutomationMode?: "MANUAL" | "AUTO";
 }
@@ -93,6 +95,7 @@ export type InterviewCoordinatorEvent =
 export class InterviewCoordinator extends EventEmitter {
   private readonly detector: QuestionDetector;
   private readonly detector2: QuestionDetector2;
+  private readonly brain: InterviewBrain;
   private readonly memory: InterviewMemory;
   private readonly aggregator: TranscriptAggregator;
   private readonly history: InterviewHistoryPort;
@@ -122,6 +125,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.asr = options.asrManager ?? options.realtime ?? (() => { throw new Error("ASRManager is required"); })();
     this.detector = options.detector ?? new QuestionDetector();
     this.detector2 = options.questionDetector2 ?? new QuestionDetector2();
+    this.brain = options.interviewBrain ?? new InterviewBrain();
     this.memory = options.memory ?? new InterviewMemory(10);
     this.aggregator = options.aggregator ?? new TranscriptAggregator();
     this.history = options.history ?? new InterviewHistoryStore();
@@ -340,6 +344,10 @@ export class InterviewCoordinator extends EventEmitter {
         this.recentTranscript.push(`${segment.source === "remote" ? "面试官" : "我"}：${segment.text}`);
         while (this.recentTranscript.length > 12) this.recentTranscript.shift();
       }
+      // A candidate answer marks a hard turn boundary for the remote
+      // aggregator. Without this, two unrelated interviewer prompts inside
+      // the 1.8s ASR window can be merged into one question.
+      if (segment.final && segment.source === "mic") this.aggregator.flush("remote");
       if (segment.source !== "remote") return;
       // Partials are used for early classification only. They never confirm
       // or answer by themselves; the final segment still owns confirmation.
@@ -380,27 +388,26 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private async observeFinalQuestion(utterance: { text: string; startMs: number; endMs: number; final: true }): Promise<void> {
-    // Level 1 + Level 2 are synchronous. Only ambiguous candidates continue
-    // to the optional async LLM confirmation, preserving existing timing.
+    // Rules remain the first signal. When the local classifier is configured,
+    // the async call adds the CPU-local ONNX speech-act signal. Test and
+    // third-party integrations without that optional model retain the old
+    // synchronous fast path.
     // The current final segment is already in recentTranscript; exclude it so
     // a short standalone question is not mistaken for a follow-up to itself.
     const previousTranscript = this.recentTranscript.slice(0, -1);
     const contextText = this.memory.contextText(previousTranscript);
-    const quick = this.detector2.analyzeSync(utterance.text, contextText, true, { memory: this.memory.snapshot(), recentTranscript: previousTranscript });
-    if (!quick.isQuestion && quick.score.finalScore < 0.5) return;
-    // High-confidence local results stay synchronous so the legacy debounce
-    // timer keeps its original realtime behavior. Ambiguous candidates use
-    // the optional async LLM confirmation before entering the legacy flow.
-    if (quick.isQuestion) {
-      if (!this.activeInterviewId) return;
-      this.detector.observe(utterance, this.now()).forEach((event) => this.handleQuestionEvent(event));
-      this.scheduleQuestionFlush();
-      return;
+    const detectionContext = { memory: this.memory.snapshot(), recentTranscript: previousTranscript };
+    let analysis = this.detector2.analyzeSync(utterance.text, contextText, true, detectionContext);
+    let decision = this.brain.analyze({ text: utterance.text, analysis, memory: detectionContext.memory, recentTranscript: previousTranscript });
+    if (this.detector2.hasLocalClassifier || (!decision.isQuestion && analysis.score.finalScore >= 0.5)) {
+      analysis = await this.detector2.analyze(utterance.text, contextText, true, detectionContext);
+      decision = this.brain.analyze({ text: utterance.text, analysis, memory: detectionContext.memory, recentTranscript: previousTranscript });
     }
-    const analysis = await this.detector2.analyze(utterance.text, contextText, true, { memory: this.memory.snapshot(), recentTranscript: previousTranscript });
-    if (!analysis.isQuestion) return;
-    if (!this.activeInterviewId) return;
-    this.detector.observe(utterance, this.now()).forEach((event) => this.handleQuestionEvent(event));
+    // Elliptical follow-ups such as “好，说说” are promoted by
+    // InterviewBrain immediately when a topic exists in memory.
+    if (!decision.isQuestion || !this.activeInterviewId) return;
+    const observed = decision.normalizedQuestion && decision.normalizedQuestion !== utterance.text ? { ...utterance, text: decision.normalizedQuestion } : utterance;
+    this.detector.observe(observed, this.now()).forEach((event) => this.handleQuestionEvent(event));
     this.scheduleQuestionFlush();
   }
 

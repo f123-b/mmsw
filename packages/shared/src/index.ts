@@ -210,7 +210,7 @@ export interface QuestionDetectorOptions {
   contextWindowMs?: number;
 }
 
-const QUESTION_WORDS = /为什么|为何|怎么|如何|能不能|可不可以|什么|哪个|哪里|是否|有没有|请问|解释|介绍|说一下|讲讲|展开|继续|优势|区别|原理|原因|怎么解决|那如果|再说说|吗[？?。.!！]?|呢[？?。.!！]?/i;
+const QUESTION_WORDS = /为什么|为何|怎么|如何|能不能|可不可以|什么|哪个|哪里|哪几种|哪一类|是否|有没有|请问|解释|解释一下|说明|说明一下|介绍|说一下|说说|讲一下|讲讲|展开|继续|优势|优缺点|区别|原理|原因|怎么解决|怎么验证|第一步|先看什么|那如果|再说说|自我介绍|常见误区|时序|吗[？?。.!！]?|呢[？?。.!！]?/i;
 
 function normalizeQuestionText(text: string): string {
   return text.replace(/[\s，。！？、,.!?]+/g, "").toLowerCase();
@@ -261,7 +261,11 @@ export class QuestionDetector {
   private readonly context = new Map<number, { startMs: number; endMs: number; text: string; final: boolean }>();
 
   constructor(options: QuestionDetectorOptions = {}) {
-    this.completenessThreshold = options.completenessThreshold ?? 0.82;
+    // Question Detection 2.0 already performs semantic/context filtering.
+    // The legacy detector is only the debounce/dedupe gate now, so a lower
+    // threshold is needed for natural prompts such as “讲一下 SPI” and
+    // contextual prompts such as “好，说说”.
+    this.completenessThreshold = options.completenessThreshold ?? 0.65;
     this.silenceMs = options.silenceMs ?? 500;
     this.dedupeWindowMs = options.dedupeWindowMs ?? 10_000;
     this.similarityThreshold = options.similarityThreshold ?? 0.9;
@@ -398,3 +402,5 @@ export * from "./vad";
 export * from "./question-detector-2";
 export * from "./interview-memory";
 export * from "./question";
+export * from "./profile-builder";
+export * from "./interview-brain";
