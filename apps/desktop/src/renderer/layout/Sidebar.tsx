@@ -28,7 +28,11 @@ export function Sidebar({ page, profileName, projects, conversations, onNavigate
     <aside className="sidebar">
       <button className="sidebar-brand" onClick={onNewConversation} aria-label="新对话">
         <span className="brand-wave" aria-hidden="true"><i /><i /><i /><i /><i /></span>
-        <span className="brand-name">Interview Copilot</span>
+        <span className="brand-copy"><span className="brand-name">Interview Copilot</span><small>AI 面试智能体</small></span>
+      </button>
+      <button className="sidebar-start-card" onClick={() => onNavigate("interview")}>
+        <span className="sidebar-start-icon">↗</span>
+        <span><strong>开始一场面试</strong><small>实时听题 · 生成回答</small></span>
       </button>
       <nav className="sidebar-nav" aria-label="主导航">
         {items.map((item) => (
@@ -38,9 +42,9 @@ export function Sidebar({ page, profileName, projects, conversations, onNavigate
           </button>
         ))}
       </nav>
-      <div className="sidebar-section-label">项目</div>
+      <div className="sidebar-section-label">工作区</div>
       {projects.length === 0 ? <div className="sidebar-empty">还没有项目</div> : projects.slice(0, 6).map((project) => <div className="sidebar-project-row" key={project.id}><button className="sidebar-conversation" onClick={() => onOpenProject(project.id)}><span>▸</span><span className="sidebar-conversation-title">{project.name}</span></button><button className="sidebar-project-action" title="重命名项目" onClick={() => onRenameProject(project.id, project.name)}>✎</button><button className="sidebar-project-action danger-text" title="删除项目" onClick={() => onDeleteProject(project.id, project.name)}>×</button></div>)}
-      <div className="sidebar-section-label conversation-label">对话</div>
+      <div className="sidebar-section-label conversation-label">最近对话</div>
       {conversations.length === 0 ? <div className="sidebar-empty">还没有对话</div> : conversations.slice(0, 8).map((conversation) => <button className="sidebar-conversation" key={conversation.id} onClick={() => onOpenConversation(conversation.id)}><span>•</span><span className="sidebar-conversation-title">{conversation.title}</span></button>)}
       <div className="sidebar-bottom">
         <button className="help-row" onClick={() => onNavigate("settings")}><span className="help-icon">?</span><span>快捷帮助</span></button>

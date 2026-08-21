@@ -19,11 +19,13 @@ export interface HUDLayout {
   shortcuts: HUDPanelLayout;
 }
 
-const TOPBAR_WIDTH = 300;
-const TOPBAR_HEIGHT = 42;
+const TOPBAR_MAX_WIDTH = 920;
+const TOPBAR_HEIGHT = 72;
+const TOPBAR_TOP_RATIO = 0.16;
 const SHORTCUT_WIDTH = 320;
 const SHORTCUT_HEIGHT = 360;
-const PANEL_GAP = 40;
+const PANEL_GAP = 16;
+const PANEL_CONTENT_MAX_WIDTH = 1080;
 
 /**
  * Calculate the default HUD geometry in work-area coordinates.
@@ -33,20 +35,19 @@ const PANEL_GAP = 40;
  * setups, and per-monitor DPI scaling.
  */
 export function calculateHUDLayout(workArea: HUDWorkArea): HUDLayout {
-  const horizontalMargin = Math.round(workArea.width * 0.05);
-  const panelHeight = Math.max(360, Math.round(workArea.height * 0.65));
-  const panelTop = Math.max(84, Math.round(workArea.height * 0.11));
-  const desiredTranscriptWidth = Math.round(workArea.width * 0.28);
-  const desiredAnswerWidth = Math.round(workArea.width * 0.42);
-  const usablePanelWidth = Math.max(560, workArea.width - horizontalMargin * 2 - PANEL_GAP);
-  const transcriptWidth = Math.min(desiredTranscriptWidth, Math.max(260, Math.round(usablePanelWidth * 0.4)));
-  const answerWidth = Math.min(desiredAnswerWidth, Math.max(320, usablePanelWidth - transcriptWidth));
+  const usableWidth = Math.max(0, Math.min(PANEL_CONTENT_MAX_WIDTH, workArea.width - 48));
+  const horizontalMargin = Math.max(24, Math.round((workArea.width - usableWidth) / 2));
+  const panelTop = Math.max(180, Math.round(workArea.height * 0.325));
+  const panelHeight = Math.max(300, Math.min(Math.round(workArea.height * 0.39), workArea.height - panelTop - 32));
+  const transcriptWidth = Math.round(usableWidth * 0.365);
+  const answerWidth = Math.max(0, usableWidth - transcriptWidth - PANEL_GAP);
+  const toolbarWidth = Math.min(TOPBAR_MAX_WIDTH, Math.max(420, Math.round(workArea.width * 0.54)), Math.max(0, workArea.width - 48));
 
   return {
     toolbar: {
-      x: Math.max(0, Math.round((workArea.width - TOPBAR_WIDTH) / 2)),
-      y: 20,
-      width: TOPBAR_WIDTH,
+      x: Math.max(0, Math.round((workArea.width - toolbarWidth) / 2)),
+      y: Math.max(24, Math.round(workArea.height * TOPBAR_TOP_RATIO)),
+      width: toolbarWidth,
       height: TOPBAR_HEIGHT
     },
     transcript: {
