@@ -24,7 +24,8 @@ function ruleScoreFor(text: string, final: boolean): number {
 }
 
 function isFollowUp(text: string, contextText: string, memory?: QuestionDetectionContext["memory"]): boolean {
-  const shortFollowUp = /^(那|然后|还有|具体|为什么|怎么|如何|如果|再|继续|这个|它|这里|其中)/.test(text) || text.length <= 10;
+  const shortFollowUp = /^(那|然后|还有|具体|为什么|怎么|如何|如果|再|这个|它|这里|其中)/.test(text)
+    || /^(?:好|好的|嗯+|明白了?|对)[，,、\s]*(?:说说|讲讲|展开(?:说)?|具体(?:说)?|再说说|再讲讲|为什么呢|怎么做呢)/i.test(text);
   return Boolean((memory?.currentTopic || contextText.length > text.length) && shortFollowUp);
 }
 
@@ -49,9 +50,11 @@ function fuseLocalClassification(base: QuestionClassification, local: LocalQuest
   const localIsQuestion = local.type === "QUESTION" || local.type === "FOLLOW_UP";
   const localConfidence = clamp(local.confidence);
   const strongRuleQuestion = base.isQuestion && base.confidence >= 0.72;
+  const explicitQuestion = /[？?]$/.test(base.questionText) || /(?:吗|呢)[。！？?！\s]*$/i.test(base.questionText);
+  const confidentStatement = local.type === "STATEMENT" && localConfidence >= 0.82 && !explicitQuestion;
   const isQuestion = localIsQuestion
     ? localConfidence >= 0.55 || strongRuleQuestion
-    : strongRuleQuestion;
+    : strongRuleQuestion && !confidentStatement;
   const category: QuestionCategory = local.type === "FOLLOW_UP" ? "followup" : base.category;
   return {
     ...base,
@@ -90,7 +93,12 @@ export class QuestionDetector {
     let preliminary = this.analyzeSync(text, contextText, final, context);
     if (this.localClassifier) {
       try {
-        const local = await this.localClassifier.predict(text, context.recentTranscript?.slice(-10) ?? (contextText ? [contextText] : []));
+        const localContext = context.recentTranscript?.length
+          ? context.recentTranscript.slice(-10)
+          : contextText
+            ? [contextText]
+            : [];
+        const local = await this.localClassifier.predict(text, localContext);
         const localClassifier = { classify: () => fuseLocalClassification(preliminary.classification, local) };
         preliminary = buildAnalysisWithClassifier(text, { ...context, contextText }, final, localClassifier, undefined, this.threshold);
       } catch {
@@ -104,7 +112,8 @@ export class QuestionDetector {
     }
     try {
       const confirmation = await this.llmConfirmer(preliminary.normalizedQuestion, contextText);
-      return buildAnalysisWithClassifier(text, { ...context, contextText }, final, this.classifier, confirmation, this.threshold);
+      const effectiveClassifier = { classify: () => preliminary.classification };
+      return buildAnalysisWithClassifier(text, { ...context, contextText }, final, effectiveClassifier, confirmation, this.threshold);
     } catch {
       return preliminary;
     }
@@ -129,7 +138,10 @@ function buildAnalysisWithClassifier(
   const llmScore = llm ? clamp(llm.confidence) : semanticScore;
   const finalScore = clamp(0.3 * ruleScore + 0.5 * semanticScore + 0.2 * llmScore);
   const candidateQuestion = !FILLER_ONLY.test(normalized) && !SMALL_TALK.test(normalized);
-  const isQuestion = candidateQuestion && (llm?.isQuestion ?? classification.isQuestion) && finalScore >= threshold;
+  const llmRescue = Boolean(llm?.isQuestion && llm.confidence >= 0.82 && (ruleScore >= 0.35 || contextualFollowUp));
+  const isQuestion = candidateQuestion
+    && (llm?.isQuestion ?? classification.isQuestion)
+    && (finalScore >= threshold || llmRescue);
   const type = llm?.type && isQuestion ? llm.type : inferType(normalized, classification.category, contextualFollowUp);
   const speechAct = llm?.label && isQuestion ? llm.label : inferSpeechAct(normalized, isQuestion, contextualFollowUp);
   return {

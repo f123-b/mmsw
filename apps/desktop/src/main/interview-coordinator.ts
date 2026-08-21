@@ -119,6 +119,8 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly recentTranscript: string[] = [];
   private readonly historyQuestionIds = new Map<string, string>();
   private questionFlushTimer: NodeJS.Timeout | undefined;
+  private finalQuestionSequence = 0;
+  private finalQuestionQueue: Promise<void> | undefined;
 
   constructor(private readonly options: InterviewCoordinatorOptions) {
     super();
@@ -358,7 +360,23 @@ export class InterviewCoordinator extends EventEmitter {
       }
       const utterance = this.aggregator.push(segment);
       if (!utterance) return;
-      void this.observeFinalQuestion(utterance).catch((error) => this.emitDiagnostic(`Question 2.0 analysis failed: ${String(error)}`));
+      const sequence = ++this.finalQuestionSequence;
+      // The synchronous compatibility path must start immediately so the
+      // 500ms debounce timer is scheduled against the same clock tick used by
+      // the ASR event. Only the real local/remote classifier path needs the
+      // serialized async queue below.
+      if (!this.detector2.hasLocalClassifier) {
+        void this.observeFinalQuestion(utterance, sequence).catch((error) => this.emitDiagnostic(`Question 2.0 analysis failed: ${String(error)}`));
+        return;
+      }
+      const run = () => this.observeFinalQuestion(utterance, sequence);
+      const next = this.finalQuestionQueue ? this.finalQuestionQueue.then(run) : run();
+      const tracked = next.catch((error) => this.emitDiagnostic(`Question 2.0 analysis failed: ${String(error)}`));
+      this.finalQuestionQueue = tracked;
+      void tracked.then(
+        () => { if (this.finalQuestionQueue === tracked) this.finalQuestionQueue = undefined; },
+        () => { if (this.finalQuestionQueue === tracked) this.finalQuestionQueue = undefined; }
+      );
     });
     this.asr.on("message", (message: RealtimeServerMessage) => this.emitEvent({ type: "realtime_message", message }));
     this.asr.on("diagnostic", (message: string) => this.emitDiagnostic(message));
@@ -387,7 +405,7 @@ export class InterviewCoordinator extends EventEmitter {
     if ((event.type === "question_confirmed" || event.type === "question_superseded") && this.activeOptions?.automationMode === "AUTO") void this.answer(event.question);
   }
 
-  private async observeFinalQuestion(utterance: { text: string; startMs: number; endMs: number; final: true }): Promise<void> {
+  private async observeFinalQuestion(utterance: { text: string; startMs: number; endMs: number; final: true; confidence?: number }, sequence: number): Promise<void> {
     // Rules remain the first signal. When the local classifier is configured,
     // the async call adds the CPU-local ONNX speech-act signal. Test and
     // third-party integrations without that optional model retain the old
@@ -407,7 +425,20 @@ export class InterviewCoordinator extends EventEmitter {
     // InterviewBrain immediately when a topic exists in memory.
     if (!decision.isQuestion || !this.activeInterviewId) return;
     const observed = decision.normalizedQuestion && decision.normalizedQuestion !== utterance.text ? { ...utterance, text: decision.normalizedQuestion } : utterance;
-    this.detector.observe(observed, this.now()).forEach((event) => this.handleQuestionEvent(event));
+    if (sequence !== this.finalQuestionSequence && this.finalQuestionSequence - sequence > 1) return;
+    const effectiveAnalysis = analysis.isQuestion
+      ? analysis
+      : {
+        ...analysis,
+        isQuestion: true,
+        type: decision.type,
+        speechAct: decision.type === "follow_up" ? "FOLLOW_UP" as const : "QUESTION" as const,
+        confidence: Math.max(analysis.confidence, decision.confidence),
+        normalizedQuestion: decision.normalizedQuestion,
+        reason: decision.reason,
+        score: { ...analysis.score, finalScore: Math.max(analysis.score.finalScore, decision.confidence), semanticScore: Math.max(analysis.score.semanticScore, decision.confidence) }
+      };
+    this.detector.observe({ ...observed, analysis: effectiveAnalysis }, this.now()).forEach((event) => this.handleQuestionEvent(event));
     this.scheduleQuestionFlush();
   }
 

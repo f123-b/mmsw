@@ -90,6 +90,7 @@
           "!openasr-home/models/interrupted-downloads{,/**}",
           "!openasr-home/models/staging{,/**}",
           "!openasr-home/models/funasr-nano-q8_0.oasr{,/**}",
+          "!**/*q8*",
           "!**/*q4*",
           "!**/*q4_k*",
           "!**/*test.stdout.log",

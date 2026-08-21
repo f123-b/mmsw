@@ -27,6 +27,14 @@ export interface QuestionDetectionContext {
   contextText?: string;
 }
 
+export interface QuestionAnalysisSnapshot {
+  type: QuestionDetectionType;
+  speechAct: QuestionSpeechAct;
+  confidence: number;
+  reason: string;
+  score: QuestionScore;
+}
+
 export interface QuestionDetectionResult {
   isQuestion: boolean;
   type: QuestionDetectionType;

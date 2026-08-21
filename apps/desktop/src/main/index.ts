@@ -1323,7 +1323,7 @@ if (hasSingleInstanceLock) {
     if (event.type === "session_state") broadcast("session:state", event.state);
     if (event.type === "transcript") broadcast("realtime:transcript", event.snapshot);
     if (event.type === "question") {
-      const questionEvent = event.event as { type?: string; text?: string; questionScore?: number; confidence?: number; candidate?: boolean; confirmed?: boolean; reason?: string; category?: string; fingerprint?: string; ignoredReason?: string; dedupeScore?: number };
+      const questionEvent = event.event as { type?: string; text?: string; questionScore?: number; confidence?: number; candidate?: boolean; confirmed?: boolean; reason?: string; category?: string; detectionType?: string; speechAct?: string; fingerprint?: string; ignoredReason?: string; dedupeScore?: number };
       if (questionEvent.type === "question_diagnostic") {
         realtimeLogger?.info("QUESTION_DETECTOR_DIAGNOSTIC", {
           rawTranscript: questionEvent.text,
@@ -1333,6 +1333,8 @@ if (hasSingleInstanceLock) {
           candidate: questionEvent.candidate,
           confirmed: questionEvent.confirmed,
           category: questionEvent.category,
+          detectionType: questionEvent.detectionType,
+          speechAct: questionEvent.speechAct,
           reason: questionEvent.reason,
           fingerprint: questionEvent.fingerprint,
           ignoredReason: questionEvent.ignoredReason,

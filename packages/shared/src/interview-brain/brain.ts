@@ -3,13 +3,13 @@ import type { QuestionAnalysis, QuestionDetectionType } from "../question";
 import { routeAnswerTask } from "./router";
 import type { AnswerTask, InterviewBrainDecision, QuestionEventInput } from "./types";
 
-const ELLIPTICAL_FOLLOW_UP = /^(好|好的|嗯|嗯嗯|那好|明白了)?[，,。！!、\s]*(说说|讲讲|展开说|具体说|继续|然后呢|还有吗|再说说|再讲讲|怎么说|为什么呢|怎么做呢)[。！？?！\s]*$/i;
-const CONTEXTUAL_FOLLOW_UP = /^(那|然后|还有|具体|如果|再|继续|这个|它|这里|其中|为什么|怎么|如何)/;
+const ELLIPTICAL_FOLLOW_UP = /^(好|好的|嗯|嗯嗯|那好|明白了)?[，,。！!、\s]*(说说|讲讲|展开说|具体说|继续(?:说说|讲讲|展开说)?|然后呢|还有吗|再说说|再讲讲|怎么说|为什么呢|怎么做呢)[。！？?！\s]*$/i;
+const CONTEXTUAL_FOLLOW_UP = /^(那|然后|还有|具体|如果|再|这个|它|这里|其中|为什么|怎么|如何)/;
 
 function normalize(text: string): string { return text.replace(/\s+/g, " ").trim(); }
 
 function trailingFollowUp(text: string): string {
-  const match = text.match(/(?:^|[。！？?！；;]\s*|\s+)(好|好的|嗯|嗯嗯|那好)?[，,。！!、\s]*(说说|讲讲|展开说|具体说|继续|然后呢|还有吗|再说说|再讲讲|怎么说|为什么呢|怎么做呢)[。！？?！\s]*$/i);
+  const match = text.match(/(?:^|[。！？?！；;]\s*|\s+)(好|好的|嗯|嗯嗯|那好)?[，,。！!、\s]*(说说|讲讲|展开说|具体说|继续(?:说说|讲讲|展开说)?|然后呢|还有吗|再说说|再讲讲|怎么说|为什么呢|怎么做呢)[。！？?！\s]*$/i);
   return match ? normalize(match[0]) : text;
 }
 

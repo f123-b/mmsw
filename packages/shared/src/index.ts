@@ -69,6 +69,7 @@ export function normalizeMeter(value: number): number {
 
 import type { TranscriptSegment, TranscriptSource } from "@interview-copilot/protocol";
 import { classifyQuestion, questionFingerprint, type QuestionCategory } from "./question-classifier";
+import type { QuestionAnalysis, QuestionDetectionType, QuestionScore, QuestionSpeechAct } from "./question/types";
 
 export { classifyQuestion, questionFingerprint } from "./question-classifier";
 export type { QuestionCategory, QuestionClassification } from "./question-classifier";
@@ -190,6 +191,10 @@ export interface QuestionCandidate {
   detectedAt: number;
   status: QuestionStatus;
   category?: QuestionCategory;
+  detectionType?: QuestionDetectionType;
+  speechAct?: QuestionSpeechAct;
+  scoreBreakdown?: QuestionScore;
+  asrConfidence?: number;
   fingerprint?: string;
   final?: boolean;
   triggerReason?: string;
@@ -200,7 +205,7 @@ export type QuestionEvent =
   | { type: "question_confirmed"; question: QuestionCandidate }
   | { type: "question_superseded"; previousQuestionId: string; question: QuestionCandidate }
   | { type: "question_ignored"; question: QuestionCandidate; reason: "duplicate" | "incomplete" }
-  | { type: "question_diagnostic"; text: string; questionScore: number; confidence: number; candidate: boolean; confirmed: boolean; reason: string; category?: QuestionCategory; fingerprint?: string; ignoredReason?: "duplicate" | "incomplete"; dedupeScore?: number };
+  | { type: "question_diagnostic"; text: string; questionScore: number; confidence: number; candidate: boolean; confirmed: boolean; reason: string; category?: QuestionCategory; detectionType?: QuestionDetectionType; speechAct?: QuestionSpeechAct; fingerprint?: string; ignoredReason?: "duplicate" | "incomplete"; dedupeScore?: number };
 
 export interface QuestionDetectorOptions {
   completenessThreshold?: number;
@@ -243,6 +248,11 @@ export function scoreQuestion(text: string, final: boolean, contextText = ""): {
   return { score, confidence };
 }
 
+function scoreFromAnalysis(analysis: QuestionAnalysis): { score: number; confidence: QuestionConfidence } {
+  const score = Math.max(0, Math.min(1, analysis.score.finalScore));
+  return { score, confidence: score >= 0.88 ? "high" : score >= 0.65 ? "medium" : "low" };
+}
+
 export class QuestionDetector {
   private stateValue: QuestionState = "IDLE";
   private currentText = "";
@@ -261,11 +271,10 @@ export class QuestionDetector {
   private readonly context = new Map<number, { startMs: number; endMs: number; text: string; final: boolean }>();
 
   constructor(options: QuestionDetectorOptions = {}) {
-    // Question Detection 2.0 already performs semantic/context filtering.
-    // The legacy detector is only the debounce/dedupe gate now, so a lower
-    // threshold is needed for natural prompts such as “讲一下 SPI” and
-    // contextual prompts such as “好，说说”.
-    this.completenessThreshold = options.completenessThreshold ?? 0.65;
+    // Question Detection 2.0 performs semantic/context filtering. This class
+    // is the temporal gate, so the threshold should match the public detector
+    // contract instead of silently accepting medium-confidence candidates.
+    this.completenessThreshold = options.completenessThreshold ?? 0.82;
     this.silenceMs = options.silenceMs ?? 500;
     this.dedupeWindowMs = options.dedupeWindowMs ?? 10_000;
     this.similarityThreshold = options.similarityThreshold ?? 0.9;
@@ -283,7 +292,7 @@ export class QuestionDetector {
     this.resetBuffer();
   }
 
-  observe(input: { text: string; final: boolean; startMs: number; endMs: number }, observedAtMs = Date.now()): QuestionEvent[] {
+  observe(input: { text: string; final: boolean; startMs: number; endMs: number; confidence?: number; analysis?: QuestionAnalysis }, observedAtMs = Date.now()): QuestionEvent[] {
     const text = input.text.trim();
     if (!text) return [];
     const newUtterance = !this.currentText || input.startMs > this.lastAudioEndMs + this.silenceMs;
@@ -300,15 +309,16 @@ export class QuestionDetector {
     this.context.set(input.startMs, { startMs: input.startMs, endMs: input.endMs, text: this.currentText, final: input.final });
     for (const [startMs, item] of this.context) if (input.endMs - item.startMs > this.contextWindowMs) this.context.delete(startMs);
     const contextText = [...this.context.values()].sort((left, right) => left.startMs - right.startMs).map((item) => item.text).join(" ");
-    const classification = classifyQuestion(this.currentText, contextText, input.final);
-    const scored = scoreQuestion(this.currentText, input.final, contextText);
-    if (!classification.isQuestion) {
-      return [{ type: "question_diagnostic", text: this.currentText, questionScore: scored.score, confidence: classification.confidence, candidate: false, confirmed: false, reason: classification.reason, category: classification.category, fingerprint: questionFingerprint(this.currentText) }];
+    const classification = input.analysis?.classification ?? classifyQuestion(this.currentText, contextText, input.final);
+    const scored = input.analysis ? scoreFromAnalysis(input.analysis) : scoreQuestion(this.currentText, input.final, contextText);
+    if (!(input.analysis?.isQuestion ?? classification.isQuestion)) {
+      if (input.final) this.currentCandidate = undefined;
+      return [{ type: "question_diagnostic", text: this.currentText, questionScore: scored.score, confidence: input.analysis?.confidence ?? classification.confidence, candidate: false, confirmed: false, reason: input.analysis?.reason ?? classification.reason, category: classification.category, detectionType: input.analysis?.type, speechAct: input.analysis?.speechAct, fingerprint: questionFingerprint(this.currentText) }];
     }
-    const candidate = this.makeCandidate(scored, classification, observedAtMs, input.final);
+    const candidate = this.makeCandidate(this.currentText, scored, classification, observedAtMs, input.final, input.analysis, input.confidence);
     this.currentCandidate = candidate;
     this.stateValue = scored.score >= this.completenessThreshold ? "WAITING_COMPLETION" : "POSSIBLE_QUESTION";
-    return [{ type: "question_candidate", question: candidate }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, confidence: classification.confidence, candidate: true, confirmed: false, reason: classification.reason, category: classification.category, fingerprint: candidate.fingerprint }];
+    return [{ type: "question_candidate", question: candidate }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, confidence: input.analysis?.confidence ?? classification.confidence, candidate: true, confirmed: false, reason: input.analysis?.reason ?? classification.reason, category: classification.category, detectionType: input.analysis?.type, speechAct: input.analysis?.speechAct, fingerprint: candidate.fingerprint }];
   }
 
   flush(observedAtMs = Date.now()): QuestionEvent[] {
@@ -319,13 +329,13 @@ export class QuestionDetector {
     }
     if (candidate.final === false) return [];
     if (observedAtMs - this.lastObservedAtMs < this.silenceMs || candidate.score < this.completenessThreshold) {
-      return [{ type: "question_ignored", question: { ...candidate, status: "ignored" }, reason: "incomplete" }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, confidence: candidate.score, candidate: true, confirmed: false, reason: "incomplete", category: candidate.category, fingerprint: candidate.fingerprint, ignoredReason: "incomplete" }];
+      return [{ type: "question_ignored", question: { ...candidate, status: "ignored" }, reason: "incomplete" }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, confidence: candidate.score, candidate: true, confirmed: false, reason: "incomplete", category: candidate.category, detectionType: candidate.detectionType, speechAct: candidate.speechAct, fingerprint: candidate.fingerprint, ignoredReason: "incomplete" }];
     }
     const dedupeScore = this.confirmed.reduce((maximum, previous) => observedAtMs - previous.detectedAt < this.dedupeWindowMs ? Math.max(maximum, previous.fingerprint && candidate.fingerprint && previous.fingerprint === candidate.fingerprint ? 1 : questionSimilarity(previous.text, candidate.text)) : maximum, 0);
     if (dedupeScore >= this.similarityThreshold) {
       this.stateValue = "IDLE";
       this.resetBuffer();
-      return [{ type: "question_ignored", question: { ...candidate, status: "ignored" }, reason: "duplicate" }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, confidence: candidate.score, candidate: true, confirmed: false, reason: "duplicate", category: candidate.category, fingerprint: candidate.fingerprint, ignoredReason: "duplicate", dedupeScore }];
+      return [{ type: "question_ignored", question: { ...candidate, status: "ignored" }, reason: "duplicate" }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, confidence: candidate.score, candidate: true, confirmed: false, reason: "duplicate", category: candidate.category, detectionType: candidate.detectionType, speechAct: candidate.speechAct, fingerprint: candidate.fingerprint, ignoredReason: "duplicate", dedupeScore }];
     }
     const confirmed = { ...candidate, status: "confirmed" as const };
     const previous = this.confirmed.at(-1);
@@ -336,7 +346,7 @@ export class QuestionDetector {
       ? { type: "question_superseded", previousQuestionId: previous.id, question: confirmed }
       : { type: "question_confirmed", question: confirmed };
     this.resetBuffer(false);
-    return [event, { type: "question_diagnostic", text: confirmed.text, questionScore: confirmed.score, confidence: confirmed.score, candidate: true, confirmed: true, reason: confirmed.triggerReason ?? "confirmed", category: confirmed.category, fingerprint: confirmed.fingerprint, dedupeScore }];
+    return [event, { type: "question_diagnostic", text: confirmed.text, questionScore: confirmed.score, confidence: confirmed.score, candidate: true, confirmed: true, reason: confirmed.triggerReason ?? "confirmed", category: confirmed.category, detectionType: confirmed.detectionType, speechAct: confirmed.speechAct, fingerprint: confirmed.fingerprint, dedupeScore }];
   }
 
   markAnswering(questionId: string): void {
@@ -360,19 +370,23 @@ export class QuestionDetector {
     if (this.currentCandidate?.id === questionId) this.stateValue = "IDLE";
   }
 
-  private makeCandidate(scored: { score: number; confidence: QuestionConfidence }, classification: ReturnType<typeof classifyQuestion>, detectedAt: number, final: boolean): QuestionCandidate {
+  private makeCandidate(text: string, scored: { score: number; confidence: QuestionConfidence }, classification: ReturnType<typeof classifyQuestion>, detectedAt: number, final: boolean, analysis?: QuestionAnalysis, asrConfidence?: number): QuestionCandidate {
     return {
       id: `question-${++this.questionCounter}`,
-      text: classification.questionText,
+      text,
       confidence: scored.confidence,
       score: scored.score,
-      source: "rules",
+      source: analysis ? "extractor" : "rules",
       detectedAt,
       status: "candidate",
       category: classification.category,
-      fingerprint: questionFingerprint(classification.questionText),
+      detectionType: analysis?.type,
+      speechAct: analysis?.speechAct,
+      scoreBreakdown: analysis?.score,
+      asrConfidence,
+      fingerprint: questionFingerprint(text),
       final,
-      triggerReason: classification.reason
+      triggerReason: analysis?.reason ?? classification.reason
     };
   }
 

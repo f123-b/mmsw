@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { QuestionDetector, classifyQuestion, questionFingerprint, questionSimilarity, scoreQuestion } from "./index";
+import { QuestionDetector, QuestionDetector2, classifyQuestion, questionFingerprint, questionSimilarity, scoreQuestion } from "./index";
 
 describe("QuestionDetector", () => {
   it("waits for silence before confirming a complete remote question", () => {
@@ -96,5 +96,31 @@ describe("question scoring", () => {
     expect(classifyQuestion("为什么？", "", true)).toMatchObject({ isQuestion: true, category: "followup" });
     expect(classifyQuestion("然后呢？", "前面的问题已经解释了同步采样和缓存策略。", true)).toMatchObject({ isQuestion: true, category: "followup" });
     expect(scoreQuestion("手动模式问题：不要自动回答", true).score).toBeGreaterThanOrEqual(0.82);
+  });
+
+  it.each([
+    "你主要负责什么",
+    "这个方案有什么风险",
+    "你做过哪些优化",
+    "你能讲一下电流环怎么设计吗"
+  ])("recognizes spoken questions without relying on terminal punctuation: %s", (text) => {
+    expect(classifyQuestion(text, "上一轮面试官在追问项目细节", true).isQuestion).toBe(true);
+  });
+
+  it.each([
+    "系统原理是通过状态机切换。",
+    "我先说明一下原理。",
+    "这次优化之后延迟下降了。",
+    "好的，继续"
+  ])("rejects technical statements and bare continuation: %s", (text) => {
+    expect(classifyQuestion(text, "面试官：介绍一下你的项目？", true).isQuestion).toBe(false);
+  });
+
+  it("passes the semantic detector result through the temporal gate", () => {
+    const detector = new QuestionDetector();
+    const analysis = new QuestionDetector2().analyzeSync("你主要负责什么", "面试官：介绍一下你的项目？", true);
+    const events = detector.observe({ text: "你主要负责什么", final: true, startMs: 0, endMs: 900, analysis }, 900);
+    expect(events[0]?.type).toBe("question_candidate");
+    expect(events[0]).toMatchObject({ question: { detectionType: "project", speechAct: "QUESTION", source: "extractor" } });
   });
 });
