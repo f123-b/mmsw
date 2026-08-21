@@ -1,3 +1,7 @@
+import type { InterviewMemorySnapshot } from "./interview-memory";
+import { AnswerQualityChecker, type AnswerQualityResult } from "./answer/answer-quality-checker";
+import { InterviewAnswerFormatter } from "./answer/interview-answer-formatter";
+
 export type AnswerMode = "FAST" | "NORMAL" | "DEEP";
 
 export interface AnswerQuestion {
@@ -18,6 +22,7 @@ export interface AnswerContextInput {
   skills?: AnswerSkillContext[];
   retrievedKnowledge?: string[];
   recentTranscript?: string[];
+  interviewMemory?: InterviewMemorySnapshot;
 }
 
 export interface ContextPack {
@@ -26,6 +31,7 @@ export interface ContextPack {
   skills: AnswerSkillContext[];
   retrievedKnowledge: string[];
   recentTranscript: string[];
+  interviewMemory?: InterviewMemorySnapshot;
 }
 
 function relevance(question: string, skill: AnswerSkillContext): number {
@@ -51,13 +57,14 @@ export class ContextRouter {
       jobDescriptionSummary: input.jobDescriptionSummary,
       skills,
       retrievedKnowledge: (input.retrievedKnowledge ?? []).slice(0, 6),
-      recentTranscript
+      recentTranscript,
+      interviewMemory: input.interviewMemory
     };
   }
 }
 
 export interface PromptSection {
-  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "retrieval-context" | "recent-transcript" | "conversation-history" | "question" | "output-format";
+  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "retrieval-context" | "recent-transcript" | "interview-memory" | "conversation-history" | "question" | "output-format";
   content: string;
 }
 
@@ -65,15 +72,20 @@ export class PromptBuilder {
   build(question: AnswerQuestion, mode: AnswerMode, context: ContextPack): PromptSection[] {
     const sections: PromptSection[] = [
       { name: "system/base", content: "你是实时面试辅助。回答必须真实、直接、便于快速阅读，不得虚构用户经历。" },
-      { name: "interview-style", content: `回答模式：${mode}。先给核心回答，再给 2~4 个关键点；仅在资料真实匹配时结合项目。` }
+      { name: "interview-style", content: `回答模式：${mode}。${new InterviewAnswerFormatter().instructions(mode)}` }
     ];
     if (context.profileSummary || context.jobDescriptionSummary) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary].filter(Boolean).join("\n") });
     if (context.skills.length > 0) sections.push({ name: "skill-context", content: context.skills.map((skill) => `${skill.name}: ${skill.content}`).join("\n") });
     if (context.retrievedKnowledge.length > 0) sections.push({ name: "retrieval-context", content: context.retrievedKnowledge.join("\n---\n") });
     if (context.recentTranscript.length > 0) sections.push({ name: "recent-transcript", content: `最近必要对话：\n${context.recentTranscript.join("\n")}` });
+    if (context.interviewMemory) {
+      const memory = context.interviewMemory;
+      const turns = memory.turns.slice(-10).map((turn) => `问题：${turn.question}${turn.answer ? `\n回答：${turn.answer}` : ""}`).join("\n");
+      sections.push({ name: "interview-memory", content: [`当前主题：${memory.currentTopic || "未确定"}`, turns].filter(Boolean).join("\n") });
+    }
     sections.push({ name: "question", content: question.text });
-    const length = mode === "FAST" ? "60-120" : mode === "DEEP" ? "200-400" : "120-220";
-    sections.push({ name: "output-format", content: `输出中文 sneak peek，控制在 ${length} 字左右：先给一句核心回答，再给 2~4 个关键点；仅在资料真实匹配时结合项目，不要写成长篇论文。` });
+    const length = mode === "FAST" ? "30-80" : mode === "DEEP" ? "150-250" : "80-150";
+    sections.push({ name: "output-format", content: `输出中文面试口述答案，控制在 ${length} 字左右。结构为：第一句直接回答；第二部分结合真实项目；第三部分补充优化或总结。不要写标题、编号或百科解释。` });
     return sections;
   }
 }
@@ -112,14 +124,16 @@ export interface AnswerProvider {
 export type AnswerGenerationEvent =
   | { type: "answer_start"; answerId: string; questionId: string; mode: AnswerMode; model: string }
   | { type: "answer_delta"; answerId: string; delta: string }
-  | { type: "answer_end"; answerId: string; text: string };
+  | { type: "answer_end"; answerId: string; text: string; quality?: AnswerQualityResult };
 
 export class AnswerAgent {
   constructor(
     private readonly providers: Partial<Record<ModelRoute, AnswerProvider>>,
     private readonly modelRouter = new ModelRouter({}, "configured-default"),
     private readonly contextRouter = new ContextRouter(),
-    private readonly promptBuilder = new PromptBuilder()
+    private readonly promptBuilder = new PromptBuilder(),
+    private readonly formatter = new InterviewAnswerFormatter(),
+    private readonly qualityChecker = new AnswerQualityChecker()
   ) {}
 
   async *stream(question: AnswerQuestion, mode: AnswerMode, contextInput: AnswerContextInput = {}, signal?: AbortSignal, options: { hasScreenshot?: boolean; attachments?: Array<{ mimeType: string; dataUrl: string }> } = {}): AsyncGenerator<AnswerGenerationEvent> {
@@ -137,7 +151,10 @@ export class AnswerAgent {
       text += delta;
       yield { type: "answer_delta", answerId, delta };
     }
-    yield { type: "answer_end", answerId, text };
+    const formattedText = this.formatter.format(text, mode);
+    const groundingText = [context.profileSummary, context.jobDescriptionSummary, ...context.skills.map((skill) => skill.content), ...context.retrievedKnowledge].filter(Boolean).join("\n");
+    const quality = this.qualityChecker.check({ question: question.text, answer: formattedText, mode, groundingText });
+    yield { type: "answer_end", answerId, text: formattedText, quality };
   }
 }
 

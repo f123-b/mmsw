@@ -66,6 +66,22 @@
       {
         "from": "../../node_modules/sql.js/dist/sql-wasm.wasm",
         "to": "sql.js/sql-wasm.wasm"
+      },
+      {
+        "from": "../../apps/local-asr-service",
+        "to": "local-asr-service",
+        "filter": [
+          "**/*",
+          "!**/.venv{,/**}",
+          "!**/__pycache__{,/**}",
+          "!openasr-downloads{,/**}",
+          "!openasr-home/models/download-q8-chunks{,/**}",
+          "!openasr-home/models/interrupted-downloads{,/**}",
+          "!**/*q4*",
+          "!**/*q4_k*",
+          "!**/*test.stdout.log",
+          "!**/*test.stderr.log"
+        ]
       }
     ],
     "win": {

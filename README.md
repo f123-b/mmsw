@@ -35,6 +35,8 @@ npm run dev
 
 正常面试页面不要求用户手工配置 Node/npm 或启动服务；Direct 连接由 Electron Main 自动建立。Custom Gateway 的 URL 和 ticket 仅在高级设置中使用。
 
+选择 `Local Fun-ASR-Nano` 时，首次需要安装 OpenASR、下载 `funasr-nano:q8` 模型并为 `apps/local-asr-service` 安装 Python 依赖。之后点击设置中的“测试连接”或“开始面试”，Electron Main 会自动、隐藏地启动 OpenASR 和本地 WebSocket facade，并在退出软件时清理自己启动的进程；不需要用户打开两个服务窗口。详见 [`apps/local-asr-service/README.md`](apps/local-asr-service/README.md)。
+
 ## ASR Gateway 合约与真实 Provider
 
 如果必须使用 Advanced Custom Gateway（需要真实 Deepgram API Key；未提供时保留 `REQUIRES_REAL_DEEPGRAM_VALIDATION`），可在开发机上启动：

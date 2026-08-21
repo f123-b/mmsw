@@ -3,8 +3,10 @@ import { existsSync } from "node:fs";
 import type { ClientControlMessage, RealtimeServerMessage, TranscriptSegment } from "@interview-copilot/protocol";
 import {
   AnswerAgent,
+  InterviewMemory,
   InterviewHistoryStore,
   QuestionDetector,
+  QuestionDetector2,
   SessionStateMachine,
   TranscriptAggregator,
   type AnswerContextInput,
@@ -31,7 +33,7 @@ export interface InterviewAudioPort {
   on(event: "pcm-packet" | "event" | "diagnostic", listener: (...args: any[]) => void): this;
 }
 
-export interface InterviewRealtimePort {
+export interface InterviewASRPort {
   connect(options: RealtimeConnectOptions): void;
   finalize?(timeoutMs?: number): Promise<void>;
   disconnect(): void;
@@ -39,6 +41,9 @@ export interface InterviewRealtimePort {
   sendControl(message: ClientControlMessage): void;
   on(event: "state" | "transcript" | "message" | "diagnostic", listener: (...args: any[]) => void): this;
 }
+
+/** Backward-compatible name retained for integrations built before ASRManager. */
+export type InterviewRealtimePort = InterviewASRPort;
 
 export interface InterviewStartOptions extends Omit<RealtimeConnectOptions, "autoReconnect" | "language"> {
   profileId: string;
@@ -60,10 +65,13 @@ export interface InterviewHistoryPort {
 
 export interface InterviewCoordinatorOptions {
   audio: InterviewAudioPort;
-  realtime: InterviewRealtimePort;
+  asrManager?: InterviewASRPort;
+  realtime?: InterviewRealtimePort;
   session: SessionStateMachine;
   answerAgent: AnswerAgent;
   detector?: QuestionDetector;
+  questionDetector2?: QuestionDetector2;
+  memory?: InterviewMemory;
   aggregator?: TranscriptAggregator;
   history?: InterviewHistoryPort;
   contextProvider?: (question: QuestionCandidate, profileId: string, recentTranscript: string[]) => AnswerContextInput | Promise<AnswerContextInput>;
@@ -84,6 +92,8 @@ export type InterviewCoordinatorEvent =
 
 export class InterviewCoordinator extends EventEmitter {
   private readonly detector: QuestionDetector;
+  private readonly detector2: QuestionDetector2;
+  private readonly memory: InterviewMemory;
   private readonly aggregator: TranscriptAggregator;
   private readonly history: InterviewHistoryPort;
   private readonly now: () => number;
@@ -102,13 +112,17 @@ export class InterviewCoordinator extends EventEmitter {
   private answerFirstTokenAt: number | undefined;
   private accumulatedAnswerText = "";
   private readonly questionConfirmedAt = new Map<string, number>();
+  private readonly asr: InterviewASRPort;
   private readonly recentTranscript: string[] = [];
   private readonly historyQuestionIds = new Map<string, string>();
   private questionFlushTimer: NodeJS.Timeout | undefined;
 
   constructor(private readonly options: InterviewCoordinatorOptions) {
     super();
+    this.asr = options.asrManager ?? options.realtime ?? (() => { throw new Error("ASRManager is required"); })();
     this.detector = options.detector ?? new QuestionDetector();
+    this.detector2 = options.questionDetector2 ?? new QuestionDetector2();
+    this.memory = options.memory ?? new InterviewMemory(10);
     this.aggregator = options.aggregator ?? new TranscriptAggregator();
     this.history = options.history ?? new InterviewHistoryStore();
     this.now = options.now ?? (() => Date.now());
@@ -156,19 +170,21 @@ export class InterviewCoordinator extends EventEmitter {
     this.activeOptions = { ...startOptions, automationMode };
     this.activeProfileId = startOptions.profileId;
     this.detector.reset();
+    this.memory.reset();
     this.currentQuestion = undefined;
     this.historyQuestionIds.clear();
     this.questionConfirmedAt.clear();
     this.recentTranscript.length = 0;
+    this.memory.reset();
     this.aggregator.clear();
     this.transition("CONNECTING");
     try {
       // The real interview path deliberately omits meterOnly so PCM reaches ASR.
-      this.options.realtime.connect({ ...startOptions, ...asrSettings, providerType, url: connectUrl, language: asrSettings?.language ?? (startOptions.language as AsrLanguage | undefined), autoReconnect: true });
+      this.asr.connect({ ...startOptions, ...asrSettings, providerType, url: connectUrl, language: asrSettings?.language ?? (startOptions.language as AsrLanguage | undefined), autoReconnect: true });
       await this.options.audio.start({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true });
     } catch (error) {
       await Promise.resolve(this.options.audio.stop()).catch(() => undefined);
-      this.options.realtime.disconnect();
+      this.asr.disconnect();
       this.failInterview(String(error));
       throw error;
     }
@@ -182,8 +198,8 @@ export class InterviewCoordinator extends EventEmitter {
     this.questionFlushTimer = undefined;
     this.cancelAnswer(reason === "error" ? "timeout" : "user");
     try { await Promise.resolve(this.options.audio.stop()); } catch (error) { this.emitDiagnostic(`Audio stop failed: ${String(error)}`); }
-    try { await this.options.realtime.finalize?.(1_000); } catch (error) { this.emitDiagnostic(`ASR finalize failed: ${String(error)}`); }
-    try { this.options.realtime.disconnect(); } catch (error) { this.emitDiagnostic(`ASR disconnect failed: ${String(error)}`); }
+    try { await this.asr.finalize?.(1_000); } catch (error) { this.emitDiagnostic(`ASR finalize failed: ${String(error)}`); }
+    try { this.asr.disconnect(); } catch (error) { this.emitDiagnostic(`ASR disconnect failed: ${String(error)}`); }
     if (!this.options.session.canTransition("ENDING") && this.options.session.canTransition("ERROR")) this.transition("ERROR");
     if (this.options.session.canTransition("ENDING")) this.transition("ENDING");
     this.history.endInterview(interviewId, reason === "error" ? "error" : "ended", this.now());
@@ -262,7 +278,8 @@ export class InterviewCoordinator extends EventEmitter {
     const startedAt = this.now();
     this.accumulatedAnswerText = "";
     try {
-      const context = await this.contextProvider(question, this.activeProfileId ?? "", [...this.recentTranscript]);
+      const providerContext = await this.contextProvider(question, this.activeProfileId ?? "", [...this.recentTranscript]);
+      const context = { ...providerContext, recentTranscript: providerContext.recentTranscript ?? [...this.recentTranscript], interviewMemory: this.memory.snapshot() };
       for await (const event of this.options.answerAgent.stream({ id: question.id, text: question.text }, mode, context, controller.signal, streamOptions)) {
         if (controller.signal.aborted) return;
         if (event.type === "answer_start") {
@@ -280,9 +297,10 @@ export class InterviewCoordinator extends EventEmitter {
         } else {
           const finishedAt = this.now();
           const answerText = event.text || this.accumulatedAnswerText;
-          this.emit("event", { type: "realtime_message", message: { type: "answer_end", answerId: event.answerId, text: answerText } });
+          this.emit("event", { type: "realtime_message", message: { type: "answer_end", answerId: event.answerId, text: answerText, quality: event.quality } });
           const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
           this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: answerText, model: this.answerModel ?? "configured", mode: this.answerMode ?? mode, startedAt: this.answerStartedAt ?? startedAt, firstTokenAt: this.answerFirstTokenAt, finishedAt, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
+          this.memory.recordAnswer(answerText, { question: question.text, createdAt: finishedAt });
           this.detector.markAnswered(question.id);
           this.options.history?.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "answered");
           this.answerId = undefined;
@@ -304,8 +322,8 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private bindPorts(): void {
-    this.options.audio.on("pcm-packet", (packet: Uint8Array) => this.options.realtime.sendAudio(packet));
-    this.options.realtime.on("state", (state: RealtimeConnectionState) => {
+    this.options.audio.on("pcm-packet", (packet: Uint8Array) => this.asr.sendAudio(packet));
+    this.asr.on("state", (state: RealtimeConnectionState) => {
       this.emitEvent({ type: "realtime_state", state });
       if (state === "connected" && this.options.session.canTransition("READY")) {
         this.transition("READY");
@@ -314,7 +332,7 @@ export class InterviewCoordinator extends EventEmitter {
       if (state === "reconnecting" && this.options.session.canTransition("RECONNECTING")) this.transition("RECONNECTING");
       if (state === "error" && this.running) this.emitDiagnostic("ASR connection failed; reconnect is still enabled");
     });
-    this.options.realtime.on("transcript", (snapshot: unknown, segment: TranscriptSegment) => {
+    this.asr.on("transcript", (snapshot: unknown, segment: TranscriptSegment) => {
       this.emit("event", { type: "transcript", snapshot, segment });
       if (!this.activeInterviewId) return;
       if (segment.final) {
@@ -332,16 +350,16 @@ export class InterviewCoordinator extends EventEmitter {
       }
       const utterance = this.aggregator.push(segment);
       if (!utterance) return;
-      this.detector.observe(utterance, this.now()).forEach((event) => this.handleQuestionEvent(event));
-      this.scheduleQuestionFlush();
+      void this.observeFinalQuestion(utterance).catch((error) => this.emitDiagnostic(`Question 2.0 analysis failed: ${String(error)}`));
     });
-    this.options.realtime.on("message", (message: RealtimeServerMessage) => this.emitEvent({ type: "realtime_message", message }));
-    this.options.realtime.on("diagnostic", (message: string) => this.emitDiagnostic(message));
+    this.asr.on("message", (message: RealtimeServerMessage) => this.emitEvent({ type: "realtime_message", message }));
+    this.asr.on("diagnostic", (message: string) => this.emitDiagnostic(message));
   }
 
   private emitQuestion(event: QuestionEvent): void {
-    if (event.type === "question_confirmed" || event.type === "question_superseded") {
+      if (event.type === "question_confirmed" || event.type === "question_superseded") {
       this.currentQuestion = event.question;
+      this.memory.recordQuestion(event.question.text, { createdAt: event.question.detectedAt });
       if (this.activeInterviewId) {
         const stored = this.history.addQuestion({ interviewId: this.activeInterviewId, text: event.question.text, confidence: event.question.confidence, source: event.question.source, detectedAt: event.question.detectedAt, status: event.question.status });
         this.historyQuestionIds.set(event.question.id, stored.id);
@@ -359,6 +377,31 @@ export class InterviewCoordinator extends EventEmitter {
   private handleQuestionEvent(event: QuestionEvent): void {
     this.emitQuestion(event);
     if ((event.type === "question_confirmed" || event.type === "question_superseded") && this.activeOptions?.automationMode === "AUTO") void this.answer(event.question);
+  }
+
+  private async observeFinalQuestion(utterance: { text: string; startMs: number; endMs: number; final: true }): Promise<void> {
+    // Level 1 + Level 2 are synchronous. Only ambiguous candidates continue
+    // to the optional async LLM confirmation, preserving existing timing.
+    // The current final segment is already in recentTranscript; exclude it so
+    // a short standalone question is not mistaken for a follow-up to itself.
+    const previousTranscript = this.recentTranscript.slice(0, -1);
+    const contextText = this.memory.contextText(previousTranscript);
+    const quick = this.detector2.analyzeSync(utterance.text, contextText, true, { memory: this.memory.snapshot(), recentTranscript: previousTranscript });
+    if (!quick.isQuestion && quick.score.finalScore < 0.5) return;
+    // High-confidence local results stay synchronous so the legacy debounce
+    // timer keeps its original realtime behavior. Ambiguous candidates use
+    // the optional async LLM confirmation before entering the legacy flow.
+    if (quick.isQuestion) {
+      if (!this.activeInterviewId) return;
+      this.detector.observe(utterance, this.now()).forEach((event) => this.handleQuestionEvent(event));
+      this.scheduleQuestionFlush();
+      return;
+    }
+    const analysis = await this.detector2.analyze(utterance.text, contextText, true, { memory: this.memory.snapshot(), recentTranscript: previousTranscript });
+    if (!analysis.isQuestion) return;
+    if (!this.activeInterviewId) return;
+    this.detector.observe(utterance, this.now()).forEach((event) => this.handleQuestionEvent(event));
+    this.scheduleQuestionFlush();
   }
 
   private scheduleQuestionFlush(): void {

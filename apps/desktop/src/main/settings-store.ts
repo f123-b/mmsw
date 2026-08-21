@@ -77,7 +77,7 @@ export class ProviderConfigStore {
     const merged = { ...DEFAULTS[section], ...this.defaults[section], ...configured, apiKey: this.secrets.get(`provider.${section}.apiKey`) ?? "" };
     if (section !== "asr") return merged;
     const providerName = merged.providerName.toLowerCase();
-    const providerType = (merged.providerType ?? (providerName.includes("custom") ? "custom-gateway" : providerName.includes("qwen") || providerName.includes("千问") ? "qwen" : "deepgram")) as AsrProviderType;
+    const providerType = (merged.providerType ?? (providerName.includes("custom") ? "custom-gateway" : providerName.includes("fun-asr") || providerName.includes("funasr") || providerName.includes("本地") ? "funasr-local" : providerName.includes("qwen") || providerName.includes("千问") ? "qwen" : "deepgram")) as AsrProviderType;
     const language = merged.language ? merged.language as AsrLanguage : undefined;
     return { ...merged, providerType, language };
   }

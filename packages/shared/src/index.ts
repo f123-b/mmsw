@@ -383,6 +383,8 @@ export class QuestionDetector {
 }
 
 export * from "./answer";
+export * from "./answer/interview-answer-formatter";
+export * from "./answer/answer-quality-checker";
 export * from "./profile";
 export * from "./knowledge";
 export * from "./agent";
@@ -390,4 +392,9 @@ export * from "./history";
 export * from "./transcript-aggregator";
 export * from "./providers";
 export * from "./asr";
+export * from "./asr/index";
 export * from "./analysis";
+export * from "./vad";
+export * from "./question-detector-2";
+export * from "./interview-memory";
+export * from "./question";

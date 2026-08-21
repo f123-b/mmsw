@@ -9,7 +9,7 @@ import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, generatePostInterviewAnalysis, HybridRetriever, ModelRouter, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type PreparationModel, type PreparationModelStep, type ProviderSettings } from "@interview-copilot/shared";
+import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, generatePostInterviewAnalysis, HybridKnowledgeRetriever, HybridRetriever, KeywordReranker, ModelRouter, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionDetector2, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type PreparationModel, type PreparationModelStep, type ProviderSettings, type QuestionDetectionType, type QuestionSpeechAct } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewStartOptions } from "./interview-coordinator";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectRepository, type SqliteDatabase } from "./database";
 import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type ProviderSection } from "./settings-store";
@@ -18,6 +18,7 @@ import { parseDocument } from "./document-parsers";
 import { SafeLogger } from "./logger";
 import { buildConversationHistory } from "./chat-context";
 import { ShutdownController } from "./shutdown-controller";
+import { LocalAsrServiceManager } from "./local-asr-service-manager";
 
 if (process.env.INTERVIEW_COPILOT_DISABLE_GPU === "1") {
   app.commandLine.appendSwitch("disable-gpu");
@@ -29,6 +30,48 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 let mainWindow: BrowserWindow | undefined;
 let overlayManager: OverlayManager | undefined;
 const audioManager = new AudioManager();
+function firstExistingLocalPath(candidates: Array<string | undefined>): string | undefined {
+  return candidates.find((candidate): candidate is string => Boolean(candidate && existsSync(candidate)));
+}
+
+function localAsrPathCandidates(...segments: string[]): string[] {
+  return [
+    join(process.resourcesPath, "local-asr-service", ...segments),
+    join(process.cwd(), "apps", "local-asr-service", ...segments),
+    join(app.getAppPath(), "..", "..", "apps", "local-asr-service", ...segments),
+    join(__dirname, "..", "..", "..", "..", "apps", "local-asr-service", ...segments)
+  ];
+}
+
+const localAsrServiceManager = new LocalAsrServiceManager({
+  resolveServiceRoot: () => {
+    const candidates = [
+      process.env.INTERVIEW_COPILOT_LOCAL_ASR_DIR,
+      join(process.resourcesPath, "local-asr-service"),
+      join(process.cwd(), "apps", "local-asr-service"),
+      join(app.getAppPath(), "..", "..", "apps", "local-asr-service"),
+      join(__dirname, "..", "..", "..", "..", "apps", "local-asr-service")
+    ];
+    return candidates.filter((candidate): candidate is string => typeof candidate === "string").find((candidate) => existsSync(join(candidate, "server.py")));
+  },
+  resolveOpenAsrPath: () => firstExistingLocalPath([
+    process.env.INTERVIEW_COPILOT_OPENASR_PATH,
+    ...localAsrPathCandidates("openasr-runtime", "openasr-0.1.30-windows-x86_64", "openasr.exe")
+  ]),
+  resolveOpenAsrHome: () => firstExistingLocalPath([
+    process.env.INTERVIEW_COPILOT_OPENASR_HOME,
+    ...localAsrPathCandidates("openasr-home")
+  ]),
+  resolveModelPack: (model) => {
+    if (model !== "funasr-nano:q8") return undefined;
+    return firstExistingLocalPath([
+      process.env.INTERVIEW_COPILOT_FUNASR_MODEL_PACK,
+      ...localAsrPathCandidates("openasr-home", "models", "funasr-nano-q8_0.oasr"),
+      ...localAsrPathCandidates("models", "funasr-nano-q8_0.oasr")
+    ]);
+  },
+  log: (message) => realtimeLogger?.info("LOCAL_ASR_SERVICE", { message })
+});
 const screenshotManager = new ScreenshotManager({
   onDiagnostic: (message) => broadcast("screenshot:diagnostic", message),
   getOverlayWindow: () => overlayManager?.currentWindow,
@@ -46,7 +89,7 @@ const screenshotManager = new ScreenshotManager({
   }
 });
 const session = new SessionStateMachine();
-const realtimeSession = new RealtimeSession(undefined, () => providerConfigStore?.get("asr"));
+const realtimeSession = new RealtimeSession(undefined, () => providerConfigStore?.get("asr"), undefined, undefined, undefined, localAsrServiceManager);
 const configuredModel = process.env.INTERVIEW_COPILOT_LLM_MODEL ?? "gpt-4o-mini";
 const environmentLlmSettings: ProviderSettings = {
   providerName: process.env.INTERVIEW_COPILOT_LLM_PROVIDER ?? "OpenAI-compatible",
@@ -70,6 +113,28 @@ const answerAgent = new AnswerAgent(
   { fast: answerProvider, normal: answerProvider, "low-latency": answerProvider, reasoning: answerProvider, vision: answerProvider },
   answerModelRouter
 );
+const questionDetector2 = new QuestionDetector2({
+  llmConfirmer: async (text, contextText) => {
+    const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings;
+    if (!settings.apiKey) throw new Error("LLM classifier is not configured");
+    const model = settings.fastModel || settings.model || configuredModel;
+    let output = "";
+    for await (const delta of answerProvider.stream({
+      model,
+      sections: [
+        { name: "system/base", content: "你是面试问题分类器。只返回 JSON，不要 Markdown。字段：label（QUESTION、FOLLOW_UP、STATEMENT、SMALL_TALK）、isQuestion（boolean）、confidence（0到1）、type（technical、project、behavior、follow_up、clarification、not_question）、reason。" },
+        { name: "recent-transcript", content: contextText || "无上下文" },
+        { name: "question", content: text }
+      ]
+    })) output += delta;
+    const json = output.match(/\{[\s\S]*\}/)?.[0];
+    if (!json) throw new Error("LLM classifier returned invalid JSON");
+    const parsed = JSON.parse(json) as { label?: QuestionSpeechAct; isQuestion?: boolean; confidence?: number; type?: QuestionDetectionType; reason?: string };
+    const label = ["QUESTION", "FOLLOW_UP", "STATEMENT", "SMALL_TALK"].includes(parsed.label || "") ? parsed.label : undefined;
+    const type = ["technical", "project", "behavior", "follow_up", "clarification", "not_question"].includes(parsed.type || "") ? parsed.type : undefined;
+    return { isQuestion: Boolean(parsed.isQuestion ?? (label === "QUESTION" || label === "FOLLOW_UP")), confidence: Math.max(0, Math.min(1, Number(parsed.confidence ?? 0))), label, type, reason: parsed.reason };
+  }
+});
 let interviewCoordinator: InterviewCoordinator | undefined;
 let profileRepository: SqliteProfileRepository | undefined;
 let knowledgeRepository: SqliteKnowledgeRepository | undefined;
@@ -103,6 +168,7 @@ const shutdownController = new ShutdownController([
   { name: "stop-audio", run: async () => { await audioManager.stop(); } },
   { name: "finalize-realtime", run: async () => { if (!interviewCoordinator?.running) await realtimeSession.finalize?.(1_000); } },
   { name: "disconnect-realtime", run: () => realtimeSession.disconnect() },
+  { name: "stop-local-asr-service", run: () => localAsrServiceManager.stop() },
   { name: "flush-database", run: () => database?.flushNow() },
   { name: "close-database", run: () => database?.close() },
   { name: "destroy-overlay", run: () => overlayManager?.destroy() },
@@ -121,6 +187,7 @@ function isDevelopment(): boolean {
 
 function userFacingError(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
+  if (raw.includes("Local Fun-ASR-Nano 启动失败")) return `${raw}。首次使用请安装 OpenASR、下载模型并安装本地 ASR 依赖`;
   const mappings: Array<[string, string]> = [
     ["AUDIO_PROBE_TIMEOUT", "音频检测超时，请检查设备后重试"],
     ["AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT", "音频检测程序未返回结果，请重试"],
@@ -129,7 +196,7 @@ function userFacingError(error: unknown): string {
     ["AUDIO_PROBE_SYSTEM_FAILED", "系统音频回采不可用"],
     ["AUDIO_PROBE_REQUIRED", "请先完成一次音频检测"],
     ["ASR_AUTH_FAILED", "未配置或未授权 Deepgram API Key，请前往设置"],
-    ["ASR_CONNECT_FAILED", "ASR 连接失败，请检查 Deepgram 设置"],
+    ["ASR_CONNECT_FAILED", "ASR 连接失败，请检查 ASR 设置或本地服务"],
     ["LLM_NOT_CONFIGURED", "未配置 LLM API Key，请前往设置"],
     ["LLM_CONNECT_FAILED", "LLM 连接失败，请检查测试结果和网络"],
     ["PROFILE_NOT_FOUND", "面试档案不存在，请先选择有效档案"],
@@ -795,7 +862,13 @@ function registerIpc(): void {
       if (!llm.apiKey) throw new Error("LLM_NOT_CONFIGURED: 未配置 LLM API Key");
       const asr = providerConfigStore?.get("asr");
       const asrProviderType = options.providerType ?? asr?.providerType ?? "deepgram";
-      if (asrProviderType !== "custom-gateway" && !asr?.apiKey) throw new Error(`ASR_AUTH_FAILED: 未配置${asrProviderType === "qwen" ? "千问" : " Deepgram"} API Key`);
+      if (asrProviderType !== "custom-gateway" && asrProviderType !== "funasr-local" && !asr?.apiKey) throw new Error(`ASR_AUTH_FAILED: 未配置${asrProviderType === "qwen" ? "千问" : " Deepgram"} API Key`);
+      if (asrProviderType === "funasr-local") {
+        await localAsrServiceManager.ensureRunning({
+          webSocketUrl: options.url ?? asr?.baseUrl,
+          model: options.model ?? asr?.model
+        });
+      }
       const preflight = await runProviderPreflight({ llm, asr: asr ?? { providerName: "ASR", providerType: "custom-gateway", baseUrl: options.url ?? "", apiKey: "", model: options.model ?? "", timeoutMs: 10_000, maxRetries: 0 }, embedding: providerConfigStore?.get("embedding") ?? { providerName: "Embedding", baseUrl: "", apiKey: "", model: "", timeoutMs: 10_000, maxRetries: 0 } }, true, providerPreflightCache);
       if (!preflight.llm.reachable) throw new Error(`LLM_CONNECT_FAILED: ${preflight.llm.message ?? preflight.llm.status}`);
       if (!preflight.asr.reachable) throw new Error(`ASR_CONNECT_FAILED: ${preflight.asr.message ?? preflight.asr.status}`);
@@ -1002,7 +1075,11 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:test-connection", async (_event, section: ProviderSection) => {
     if (!providerConfigStore) throw new Error("Settings are still initializing");
-    return testCachedProviderConnection(section, providerConfigStore.get(section), providerPreflightCache);
+    const settings = providerConfigStore.get(section);
+    if (section === "asr" && settings.providerType === "funasr-local") {
+      await localAsrServiceManager.ensureRunning({ webSocketUrl: settings.baseUrl, model: settings.model });
+    }
+    return testCachedProviderConnection(section, settings, providerPreflightCache);
   });
   ipcMain.handle("settings:preflight", (_event, checkReachability = false) => {
     if (!providerConfigStore) throw new Error("Settings are still initializing");
@@ -1090,9 +1167,10 @@ if (hasSingleInstanceLock) {
   historyRepository = database ? new SqliteInterviewHistoryRepository(database) : undefined;
   interviewCoordinator = new InterviewCoordinator({
     audio: audioManager,
-    realtime: realtimeSession,
+    asrManager: realtimeSession,
     session,
     answerAgent,
+    questionDetector2,
     history: historyRepository,
     initialAutomationMode: overlaySettingsStore?.getAutomationMode() ?? "AUTO",
     asrSettingsProvider: (profileId) => {
@@ -1110,12 +1188,12 @@ if (hasSingleInstanceLock) {
     contextProvider: async (question, profileId, recentTranscript) => {
       const profile = profileRepository?.get(profileId);
       const chunks = knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? [];
-      let retrieved = new HybridRetriever().search(question.text, chunks, { topK: 16 });
+      let retrieved = await new HybridKnowledgeRetriever({ chunks, topK: 5, candidateK: 20, reranker: new KeywordReranker() }).search(question.text);
       const embeddingSettings = providerConfigStore?.get("embedding");
       if (embeddingSettings?.apiKey && embeddingSettings.model && chunks.length > 0) {
         try {
           const vector = await new OpenAICompatibleEmbeddingProvider(embeddingSettings).embed(question.text);
-          retrieved = new HybridRetriever().search(question.text, chunks, { topK: 16, embeddingProvider: { embed: () => vector } });
+          retrieved = await new HybridKnowledgeRetriever({ chunks, topK: 5, candidateK: 20, embeddingProvider: { embed: () => vector }, reranker: new KeywordReranker() }).search(question.text);
         } catch (error) {
           broadcast("realtime:diagnostic", `RAG embedding unavailable; keyword retrieval used: ${String(error)}`);
         }
@@ -1124,7 +1202,7 @@ if (hasSingleInstanceLock) {
         profileSummary: profile?.resume?.summary,
         jobDescriptionSummary: profile?.jobDescription?.summary,
         skills: (profile?.skills ?? []).map((skill) => ({ id: skill.id, name: skill.name, content: `${skill.description}\n${skill.content}` })),
-        retrievedKnowledge: retrieved.slice(0, 6).map((chunk) => `${chunk.metadata.filename}: ${chunk.text}`),
+        retrievedKnowledge: retrieved.slice(0, 5).map((chunk) => `${chunk.metadata.filename}: ${chunk.text}`),
         recentTranscript: recentTranscript.slice(-12)
       };
     }

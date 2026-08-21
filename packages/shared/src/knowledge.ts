@@ -105,6 +105,22 @@ export interface Reranker {
   score(query: string, chunk: KnowledgeChunk): number;
 }
 
+export interface KnowledgeRetriever {
+  search(query: string): Promise<RetrievalResult[]>;
+}
+
+export interface AsyncEmbeddingProvider {
+  embed(text: string): number[] | Promise<number[]>;
+}
+
+export interface KnowledgeRetrieverOptions {
+  chunks: KnowledgeChunk[];
+  embeddingProvider?: AsyncEmbeddingProvider;
+  reranker?: Reranker;
+  candidateK?: number;
+  topK?: number;
+}
+
 function keywordScore(query: string, text: string): number {
   const queryTerms = query.toLowerCase().match(/[a-z0-9]+|[\u4e00-\u9fff]/gi) ?? [];
   if (queryTerms.length === 0) return 0;
@@ -167,5 +183,32 @@ export class HybridRetriever {
       selected.push(scored.splice(bestIndex, 1)[0]);
     }
     return selected;
+  }
+}
+
+/** Async retrieval facade: embedding/keyword candidates -> reranker -> final top K. */
+export class HybridKnowledgeRetriever implements KnowledgeRetriever {
+  private readonly hybrid = new HybridRetriever();
+
+  constructor(private readonly options: KnowledgeRetrieverOptions) {}
+
+  async search(query: string): Promise<RetrievalResult[]> {
+    const queryEmbedding = this.options.embeddingProvider ? await this.options.embeddingProvider.embed(query) : undefined;
+    const candidates = this.hybrid.search(query, this.options.chunks, {
+      candidateK: this.options.candidateK ?? 20,
+      topK: this.options.candidateK ?? 20,
+      embeddingProvider: queryEmbedding ? { embed: () => queryEmbedding } : undefined
+    });
+    const reranker = this.options.reranker ?? new KeywordReranker();
+    return candidates
+      .map((candidate) => ({ ...candidate, score: candidate.score * 0.4 + reranker.score(query, candidate) * 0.6 }))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, this.options.topK ?? 5);
+  }
+}
+
+export class KeywordReranker implements Reranker {
+  score(query: string, chunk: KnowledgeChunk): number {
+    return keywordScore(query, `${chunk.metadata.filename} ${chunk.metadata.section || ""} ${chunk.text}`);
   }
 }

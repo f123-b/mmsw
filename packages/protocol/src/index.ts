@@ -113,7 +113,7 @@ export const asrStatusSchema = z.object({
   message: z.string().optional()
 });
 
-export const asrProviderTypeSchema = z.enum(["deepgram", "qwen", "custom-gateway"]);
+export const asrProviderTypeSchema = z.enum(["deepgram", "qwen", "custom-gateway", "funasr-local"]);
 export const asrLanguageSchema = z.enum(["zh-CN", "en-US", "multi"]);
 
 export const connectionReadySchema = z.object({
@@ -164,10 +164,17 @@ export const answerDeltaSchema = z.object({
   delta: z.string()
 });
 
+export const answerQualitySchema = z.object({
+  score: z.number().min(0).max(1),
+  issues: z.array(z.string()),
+  suggestions: z.array(z.string())
+});
+
 export const answerEndSchema = z.object({
   type: z.literal("answer_end"),
   answerId: z.string().min(1),
-  text: z.string()
+  text: z.string(),
+  quality: answerQualitySchema.optional()
 });
 
 export const answerCancelledSchema = z.object({

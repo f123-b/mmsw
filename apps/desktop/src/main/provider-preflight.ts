@@ -49,7 +49,7 @@ export class ProviderPreflightCache {
 
 function configured(section: ProviderSection, settings: ProviderSettings): boolean {
   if (section === "reranker" && settings.providerName === "Disabled") return true;
-  if (section === "asr" && settings.providerType === "custom-gateway") return Boolean(settings.baseUrl && settings.model);
+  if (section === "asr" && (settings.providerType === "custom-gateway" || settings.providerType === "funasr-local")) return Boolean(settings.baseUrl && settings.model);
   const capabilities = providerCapabilities(settings);
   return Boolean(settings.baseUrl && settings.model && (!capabilities.requiresApiKey || settings.apiKey));
 }
@@ -126,11 +126,12 @@ async function testHttp(section: "llm" | "embedding", settings: ProviderSettings
 async function testAsr(settings: ProviderSettings, signal: AbortSignal): Promise<ProviderCheckResult> {
   const section: ProviderSection = "asr";
   const isQwen = settings.providerType === "qwen";
-  if (!configured(section, settings)) return { section, configured: false, reachable: false, status: "unconfigured", message: settings.providerType === "custom-gateway" ? "未配置 Custom Gateway" : isQwen ? "未配置千问 API Key" : "未配置 Deepgram API Key" };
+  const isLocal = settings.providerType === "funasr-local";
+  if (!configured(section, settings)) return { section, configured: false, reachable: false, status: "unconfigured", message: settings.providerType === "custom-gateway" ? "未配置 Custom Gateway" : isLocal ? "未配置本地 ASR 服务地址或模型" : isQwen ? "未配置千问 API Key" : "未配置 Deepgram API Key" };
   const url = new URL(settings.baseUrl || (isQwen ? "wss://dashscope.aliyuncs.com/api-ws/v1/realtime" : "wss://api.deepgram.com/v1/listen"));
   if (isQwen) {
     url.searchParams.set("model", settings.model || "qwen3-asr-flash-realtime-2026-02-10");
-  } else if (settings.providerType !== "custom-gateway") {
+  } else if (settings.providerType !== "custom-gateway" && !isLocal) {
     url.searchParams.set("model", settings.model);
     url.searchParams.set("language", settings.language ?? "zh-CN");
     url.searchParams.set("encoding", "linear16");
@@ -145,9 +146,12 @@ async function testAsr(settings: ProviderSettings, signal: AbortSignal): Promise
     signal.addEventListener("abort", abort, { once: true });
     try {
       const authorization = isQwen ? `Bearer ${settings.apiKey}` : `Token ${settings.apiKey}`;
-      socket = new WebSocket(url, settings.providerType === "custom-gateway" ? undefined : { headers: { Authorization: authorization, ...(isQwen ? { "OpenAI-Beta": "realtime=v1" } : {}) } });
+      socket = new WebSocket(url, settings.providerType === "custom-gateway" || isLocal ? undefined : { headers: { Authorization: authorization, ...(isQwen ? { "OpenAI-Beta": "realtime=v1" } : {}) } });
       socket.once("open", () => {
-        if (!isQwen) {
+        if (isLocal) {
+          socket?.send(JSON.stringify({ type: "config", model: settings.model, language: settings.language ?? "zh-CN", sampleRate: 16_000, channels: 1, vad: true }));
+          finish({ section, configured: true, reachable: true, status: "ready" });
+        } else if (!isQwen) {
           finish({ section, configured: true, reachable: true, status: "ready" });
         }
       });
@@ -220,7 +224,7 @@ export async function testCachedProviderConnection(section: ProviderSection, set
 export async function runProviderPreflight(settings: { llm: ProviderSettings; asr: ProviderSettings; embedding: ProviderSettings }, checkReachability = false, cache?: ProviderPreflightCache): Promise<ProviderPreflightResult> {
   if (!checkReachability) {
     const llm = configured("llm", settings.llm) ? { section: "llm" as const, configured: true, reachable: false, status: "testing" as const } : { section: "llm" as const, configured: false, reachable: false, status: "unconfigured" as const, message: "未配置 LLM API Key" };
-    const asr = configured("asr", settings.asr) ? { section: "asr" as const, configured: true, reachable: false, status: "testing" as const } : { section: "asr" as const, configured: false, reachable: false, status: "unconfigured" as const, message: settings.asr.providerType === "qwen" ? "未配置千问 API Key" : "未配置 Deepgram API Key" };
+    const asr = configured("asr", settings.asr) ? { section: "asr" as const, configured: true, reachable: false, status: "testing" as const } : { section: "asr" as const, configured: false, reachable: false, status: "unconfigured" as const, message: settings.asr.providerType === "funasr-local" ? "未配置本地 ASR 服务" : settings.asr.providerType === "qwen" ? "未配置千问 API Key" : "未配置 Deepgram API Key" };
     const embedding = configured("embedding", settings.embedding) ? { section: "embedding" as const, configured: true, reachable: false, status: "testing" as const, optional: true } : { section: "embedding" as const, configured: false, reachable: false, status: "unconfigured" as const, message: "未配置 Embedding API Key", optional: true };
     return { llm, asr, embedding };
   }

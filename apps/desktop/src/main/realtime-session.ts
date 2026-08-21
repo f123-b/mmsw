@@ -12,14 +12,18 @@ import {
   PcmBackpressureQueue,
   ProviderError,
   QwenRealtimeAsrProvider,
+  LocalFunASRProvider,
   StereoAsrChannelRouter,
   TranscriptStabilizer,
   type AsrLanguage,
   type AsrProviderType,
   type ProviderSettings,
   type StreamingAsrSocket,
-  type TranscriptSnapshot
+  type TranscriptSnapshot,
+  SileroVADProvider,
+  splitStereoPcm
 } from "@interview-copilot/shared";
+import type { LocalAsrServiceManager } from "./local-asr-service-manager";
 
 export type RealtimeConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting" | "error";
 
@@ -48,7 +52,7 @@ export interface RealtimeSocket {
 export type RealtimeSocketFactory = (url: string) => RealtimeSocket;
 
 export interface AsrRuntimeDiagnostics {
-  provider: "Deepgram Direct" | "Qwen Direct" | "Custom Gateway" | "unknown";
+  provider: "Deepgram Direct" | "Qwen Direct" | "Custom Gateway" | "Local Fun-ASR-Nano" | "unknown";
   model: string;
   language: string;
   micState: "connecting" | "listening" | "error" | "stopped";
@@ -119,6 +123,10 @@ function createQwenSocket(options: { url: string; apiKey: string }): StreamingAs
   return new WsStreamingAsrSocket(new WebSocket(options.url, { headers: { Authorization: `Bearer ${options.apiKey}`, "OpenAI-Beta": "realtime=v1" } }), "Qwen ASR");
 }
 
+function createLocalAsrSocket(options: { url: string; apiKey?: string }): StreamingAsrSocket {
+  return new WsStreamingAsrSocket(new WebSocket(options.url), "Local Fun-ASR-Nano");
+}
+
 export class RealtimeSession extends EventEmitter {
   private socket: RealtimeSocket | undefined;
   private options: RealtimeConnectOptions | undefined;
@@ -128,6 +136,8 @@ export class RealtimeSession extends EventEmitter {
   private state: RealtimeConnectionState = "disconnected";
   private readonly audioQueue = new PcmBackpressureQueue(192_000);
   private readonly stabilizer = new TranscriptStabilizer();
+  private readonly micVad = new SileroVADProvider({ sampleRate: 16_000 });
+  private readonly remoteVad = new SileroVADProvider({ sampleRate: 16_000 });
   private directRouter: StereoAsrChannelRouter | undefined;
   private directGeneration = 0;
   private handledDirectFailureGeneration = 0;
@@ -147,7 +157,9 @@ export class RealtimeSession extends EventEmitter {
     private readonly socketFactory: RealtimeSocketFactory = (url) => new WebSocket(url) as unknown as RealtimeSocket,
     private readonly directAsrSettingsProvider?: () => ProviderSettings | undefined,
     private readonly directSocketFactory = createDeepgramSocket,
-    private readonly qwenSocketFactory = createQwenSocket
+    private readonly qwenSocketFactory = createQwenSocket,
+    private readonly localSocketFactory = createLocalAsrSocket,
+    private readonly localAsrServiceManager?: LocalAsrServiceManager
   ) {
     super();
   }
@@ -163,7 +175,7 @@ export class RealtimeSession extends EventEmitter {
     this.reconnectAttempt = 0;
     this.diagnostics = {
       ...this.diagnostics,
-      provider: options.providerType === "deepgram" ? "Deepgram Direct" : options.providerType === "qwen" ? "Qwen Direct" : options.providerType === "custom-gateway" ? "Custom Gateway" : "unknown",
+      provider: options.providerType === "deepgram" ? "Deepgram Direct" : options.providerType === "qwen" ? "Qwen Direct" : options.providerType === "custom-gateway" ? "Custom Gateway" : options.providerType === "funasr-local" ? "Local Fun-ASR-Nano" : "unknown",
       model: options.model ?? "",
       language: options.language ?? "",
       micState: "connecting",
@@ -172,6 +184,8 @@ export class RealtimeSession extends EventEmitter {
       droppedPcmPackets: this.audioQueue.stats.droppedPackets
     };
     this.audioTimelineOriginAt = 0;
+    this.micVad.reset();
+    this.remoteVad.reset();
     this.emitDiagnostics();
     this.openSocket();
   }
@@ -191,6 +205,8 @@ export class RealtimeSession extends EventEmitter {
     this.audioQueue.clear();
     this.lastBackpressureDiagnosticAt = 0;
     this.audioTimelineOriginAt = 0;
+    this.micVad.reset();
+    this.remoteVad.reset();
     this.stabilizer.clear();
     if (clearOptions) this.options = undefined;
     this.diagnostics = { ...this.diagnostics, micState: "stopped", remoteState: "stopped" };
@@ -200,6 +216,7 @@ export class RealtimeSession extends EventEmitter {
 
   sendAudio(packet: Uint8Array): void {
     if (this.manualStop || this.state === "disconnected" || this.state === "reconnecting" || this.state === "error") return;
+    if (!this.hasSpeech(packet)) return;
     this.audioTimelineOriginAt ||= Date.now();
     if (this.directRouter && this.state === "connected" && this.directRouter.isReady) {
       try {
@@ -231,6 +248,14 @@ export class RealtimeSession extends EventEmitter {
     }
   }
 
+  private hasSpeech(packet: Uint8Array): boolean {
+    // The sidecar emits interleaved stereo PCM16. Keep tiny synthetic packets
+    // usable for diagnostics/tests while gating real audio frames.
+    if (packet.byteLength < 160 || packet.byteLength % 4 !== 0) return true;
+    const channels = splitStereoPcm(packet);
+    return this.micVad.process(channels.mic).speech || this.remoteVad.process(channels.system).speech;
+  }
+
   sendControl(message: ClientControlMessage): void {
     const validated = clientControlMessageSchema.parse(message);
     if (!this.isSocketWritable()) return;
@@ -241,7 +266,7 @@ export class RealtimeSession extends EventEmitter {
 
   private openSocket(): void {
     if (this.manualStop || !this.options) return;
-    if (this.options.providerType === "deepgram" || this.options.providerType === "qwen") {
+    if (this.options.providerType === "deepgram" || this.options.providerType === "qwen" || this.options.providerType === "funasr-local") {
       void this.openDirectAsr();
       return;
     }
@@ -267,20 +292,28 @@ export class RealtimeSession extends EventEmitter {
     this.setState(this.reconnectAttempt === 0 ? "connecting" : "reconnecting");
     const settings = this.directAsrSettingsProvider?.();
     const providerType = options.providerType ?? settings?.providerType ?? "deepgram";
-    if (!settings?.apiKey) {
+    if (providerType !== "funasr-local" && !settings?.apiKey) {
       this.handleDirectFailure(new ProviderError("AUTH_FAILED", `${providerType === "qwen" ? "千问" : "Deepgram"} API Key 未配置，请先在设置中保存 API Key`, false), generation);
       return;
     }
-    const model = options.model || settings.model || (providerType === "qwen" ? "qwen3-asr-flash-realtime-2026-02-10" : "nova-3");
-    const language = options.language || settings.language || "zh-CN";
-    const createProvider = () => providerType === "qwen"
-      ? new QwenRealtimeAsrProvider({ baseUrl: options.url || settings.baseUrl, model, language, apiKey: settings.apiKey }, this.qwenSocketFactory)
-      : new DeepgramStreamingAsrProvider({ baseUrl: options.url || settings.baseUrl, model, language, apiKey: settings.apiKey }, this.directSocketFactory);
+    const model = options.model || settings?.model || (providerType === "qwen" ? "qwen3-asr-flash-realtime-2026-02-10" : providerType === "funasr-local" ? "funasr-nano:q8" : "nova-3");
+    const language = options.language || settings?.language || "zh-CN";
+    const createProvider = () => providerType === "funasr-local"
+      ? new LocalFunASRProvider(this.localSocketFactory, "remote", { url: options.url || settings?.baseUrl, model, language, sampleRate: 16_000, channels: 1, vad: true })
+      : providerType === "qwen"
+      ? new QwenRealtimeAsrProvider({ baseUrl: options.url || settings?.baseUrl, model, language, apiKey: settings?.apiKey ?? "" }, this.qwenSocketFactory)
+      : new DeepgramStreamingAsrProvider({ baseUrl: options.url || settings?.baseUrl, model, language, apiKey: settings?.apiKey ?? "" }, this.directSocketFactory);
     const router = new StereoAsrChannelRouter(createProvider(), createProvider());
     this.directRouter = router;
     this.emitAsrStatus("mic", "connecting");
     this.emitAsrStatus("remote", "connecting");
     try {
+      if (providerType === "funasr-local") {
+        await this.localAsrServiceManager?.ensureRunning({
+          webSocketUrl: options.url || settings?.baseUrl,
+          model
+        });
+      }
       await router.connect((segment) => this.handleDirectSegment(segment), (error) => this.handleDirectProviderError(error, generation));
       if (this.manualStop || generation !== this.directGeneration || this.directRouter !== router) {
         router.close();
