@@ -1,4 +1,5 @@
 import type { TranscriptSegment, TranscriptSource } from "@interview-copilot/protocol";
+import { normalizeTechnicalTerms } from "./terminology";
 
 export interface TranscriptUtterance {
   id: string;
@@ -19,10 +20,14 @@ export interface TranscriptAggregatorOptions {
 }
 
 const TERMINAL_PUNCTUATION = /[?？!！。；;]$/;
-const CONTINUATION_START = /^(关键字|作用|以及|并且|而且|尤其|包括|比如|具体|分别|常见|十五秒|只讲|简单说|先说|你会|你准备|用一句话|为什么|怎么|如何|如果|那如果)/;
+const CONTINUATION_START = /^(关键字|关键点|作用|以及|并且|而且|尤其|包括|比如|例如|具体|分别|常见|十五秒|只讲|简单说|先说|你会|你准备|用一句话|急速|抖动|当时|接着|最后|然后|隔离|硬件|软件|故障|可观测|验证|排查|定位|设计|实现|考虑|在|其中|同时|关于|针对)/;
+const INCOMPLETE_TAIL = /(?:比如|例如|包括|以及|并且|而且|尤其|关于|针对|问题是|最后|然后|怎么|如何|哪些|什么|是否|能否)[。！？?！；;，,、\s]*$/;
+const STANDALONE_ACKNOWLEDGEMENT = /^(?:好|好的|那|嗯+|呃+|啊+|哦+|对|明白了?|知道了?|行|可以)[。！？?！\s，,、]*$/i;
+const STANDALONE_REPAIR_QUESTION = /^(?:你觉得(?:呢)?|怎么(?:回答|答|说)|答案(?:是什么|呢))[。！？?！\s]*$/i;
+const STANDALONE_TRANSITION = /^(?:还有(?:一个)?问题|下一个(?:问题)?|再问(?:一个)?|接下来(?:问)?)[。！？?！\s，,、]*$/i;
 
 function normalize(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
+  return normalizeTechnicalTerms(text);
 }
 
 function mergeText(left: string, right: string): string {
@@ -35,18 +40,29 @@ function mergeText(left: string, right: string): string {
 
 function shouldMergeAfterPunctuation(previous: string, next: string): boolean {
   if (!TERMINAL_PUNCTUATION.test(previous)) return true;
-  const previousBody = previous.replace(/[?？!！。；;]+$/, "").trim();
   const nextText = normalize(next);
+  // Acknowledgements and meta prompts are new speech acts, not continuations
+  // of the previous interview question. Keeping them separate prevents a
+  // complete technical question from being replaced by “那。你觉得呢？”。
+  if (
+    STANDALONE_ACKNOWLEDGEMENT.test(previous.trim())
+    || STANDALONE_ACKNOWLEDGEMENT.test(nextText)
+    || STANDALONE_REPAIR_QUESTION.test(nextText)
+    || STANDALONE_TRANSITION.test(nextText)
+  ) return false;
+  // ASR punctuation is frequently inserted at a segment endpoint. A phrase
+  // such as “比如。” or “最后。” is not a semantic end of the prompt.
+  if (INCOMPLETE_TAIL.test(previous.trim())) return true;
   // ASR often closes each partial final with a full stop even though the
   // interviewer is continuing the same prompt: “请解释 volatile。” →
   // “关键字的作用。” → “以及常见误区”。 Keep those fragments together.
-  if (CONTINUATION_START.test(nextText)) return true;
-  if (previousBody.length <= 24 && /^(请|你来|讲一下|说一下|解释|说明|介绍|什么是|为什么|怎么|如何|如果|那)/.test(previousBody)) return true;
-  return false;
+  return CONTINUATION_START.test(nextText);
 }
 
 export class TranscriptAggregator {
   private readonly current: Partial<Record<TranscriptSource, TranscriptUtterance>> = {};
+  private readonly completed: Partial<Record<TranscriptSource, TranscriptUtterance[]>> = {};
+  private readonly parts: Partial<Record<TranscriptSource, Map<string, string>>> = {};
   private readonly maxGapMs: number;
   private readonly punctuationBoundary: boolean;
 
@@ -64,18 +80,34 @@ export class TranscriptAggregator {
     const text = normalize(segment.text);
     if (!text) return undefined;
     const previous = this.current[segment.source];
+
+    // Some ASR providers revise a final segment using the same id. Replace
+    // that segment instead of appending a duplicate copy to the utterance.
+    if (previous?.segmentIds.includes(segment.id)) {
+      this.parts[segment.source]?.set(segment.id, text);
+      previous.startMs = Math.min(previous.startMs, segment.startMs);
+      previous.endMs = Math.max(previous.endMs, segment.endMs);
+      if (segment.confidence !== undefined) previous.confidence = segment.confidence;
+      previous.text = this.rebuildText(segment.source, previous.segmentIds);
+      return { ...previous, segmentIds: [...previous.segmentIds] };
+    }
     const canMerge = Boolean(
       previous &&
       segment.startMs - previous.endMs <= this.maxGapMs &&
       (!this.punctuationBoundary || shouldMergeAfterPunctuation(previous.text, text))
     );
     if (canMerge && previous) {
-      previous.text = mergeText(previous.text, text);
+      this.parts[segment.source] ??= new Map<string, string>();
+      this.parts[segment.source]?.set(segment.id, text);
+      previous.text = this.rebuildText(segment.source, [...previous.segmentIds, segment.id]);
       previous.endMs = Math.max(previous.endMs, segment.endMs);
       previous.segmentIds.push(segment.id);
       if (segment.confidence !== undefined) previous.confidence = segment.confidence;
       return { ...previous, segmentIds: [...previous.segmentIds] };
     }
+    if (previous) this.enqueueCompleted(segment.source, previous);
+    const parts = new Map<string, string>([[segment.id, text]]);
+    this.parts[segment.source] = parts;
     const utterance: TranscriptUtterance = {
       id: `utterance-${segment.source}-${segment.id}`,
       source: segment.source,
@@ -90,11 +122,23 @@ export class TranscriptAggregator {
     return { ...utterance, segmentIds: [...utterance.segmentIds] };
   }
 
+  /**
+   * Returns utterances that were closed by a later segment starting a new
+   * speech turn. The current turn is intentionally left open until flush().
+   */
+  drainCompleted(source: TranscriptSource): TranscriptUtterance[] {
+    const values = this.completed[source] ?? [];
+    delete this.completed[source];
+    return values.map((value) => ({ ...value, segmentIds: [...value.segmentIds] }));
+  }
+
   flush(source?: TranscriptSource): TranscriptUtterance[] {
     if (source) {
       const value = this.current[source];
+      const completed = this.drainCompleted(source);
       delete this.current[source];
-      return value ? [{ ...value, segmentIds: [...value.segmentIds] }] : [];
+      delete this.parts[source];
+      return value ? [...completed, { ...value, segmentIds: [...value.segmentIds] }] : completed;
     }
     const values = (Object.keys(this.current) as TranscriptSource[]).flatMap((item) => this.flush(item));
     return values;
@@ -103,5 +147,21 @@ export class TranscriptAggregator {
   clear(): void {
     delete this.current.mic;
     delete this.current.remote;
+    delete this.completed.mic;
+    delete this.completed.remote;
+    delete this.parts.mic;
+    delete this.parts.remote;
+  }
+
+  private enqueueCompleted(source: TranscriptSource, utterance: TranscriptUtterance): void {
+    const queue = this.completed[source] ?? [];
+    queue.push({ ...utterance, segmentIds: [...utterance.segmentIds] });
+    this.completed[source] = queue;
+  }
+
+  private rebuildText(source: TranscriptSource, segmentIds: string[]): string {
+    const parts = this.parts[source];
+    if (!parts) return "";
+    return segmentIds.reduce((text, id) => mergeText(text, parts.get(id) ?? ""), "");
   }
 }

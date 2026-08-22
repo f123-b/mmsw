@@ -2,7 +2,7 @@ import type { InterviewMemorySnapshot } from "../interview-memory";
 import type { QuestionCategory, QuestionClassification } from "../question-classifier";
 
 export type QuestionDetectionType = "technical" | "project" | "behavior" | "follow_up" | "clarification" | "not_question";
-export type QuestionSpeechAct = "QUESTION" | "FOLLOW_UP" | "STATEMENT" | "SMALL_TALK";
+export type QuestionSpeechAct = "QUESTION" | "FOLLOW_UP" | "STATEMENT" | "SMALL_TALK" | "INSTRUCTION" | "CONTROL";
 
 export interface QuestionScore {
   ruleScore: number;

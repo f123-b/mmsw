@@ -1,15 +1,18 @@
-import { classifyQuestion, type QuestionCategory, type QuestionClassification } from "../question-classifier";
+import { classifyNonQuestionSpeechAct, classifyQuestion, type QuestionCategory, type QuestionClassification } from "../question-classifier";
 import type { LocalQuestionModel, LocalQuestionResult } from "./local-classifier";
 import type { QuestionAnalysis, QuestionDetectionContext, QuestionDetectionType, QuestionLLMConfirmer, QuestionScore, QuestionSpeechAct } from "./types";
+import { normalizeTechnicalTerms } from "../terminology";
 
 const RULE_KEYWORDS = /什么|为什么|为何|怎么|如何|介绍|原理|区别|优化|请问|能不能|是否|有没有|哪个|哪里|解释|讲一下|说一下|说说|展开|困难|挑战|设计|如果.*(重新|改|换|设计)/;
+const ROBUST_QUESTION_FORM = /为什么|为何|什么是|哪些|哪种|区别|原理|介绍|解释|说明|请问|怎么(?:排查|解决|定位|判断|验证|设计|优化)|如何(?:排查|解决|定位|判断|验证|设计|优化)|如果.*(?:重新|改|换|设计)|会怎么优化/;
 const CLARIFICATION_KEYWORDS = /具体一点|什么意思|没听清|再说一遍|能展开|详细一点|指的是|怎么理解/;
 const FILLER_ONLY = /^(嗯+|呃+|啊+|哦+|好+|对+|那个|嗯嗯|知道了)[。！？?！\s]*$/i;
 const SMALL_TALK = /^(你好|您好|谢谢|辛苦了|好的|明白了|嗯嗯|哈哈)[。！？?！\s]*$/i;
+const META_PROMPT_ONLY = /^(?:你觉得(?:呢)?|怎么(?:回答|答|说)|答案(?:是什么|呢))[。！？?！\s]*$/i;
 
 function clamp(value: number): number { return Math.max(0, Math.min(1, value)); }
 
-function normalize(text: string): string { return text.replace(/\s+/g, " ").trim(); }
+function normalize(text: string): string { return normalizeTechnicalTerms(text); }
 
 function ruleScoreFor(text: string, final: boolean): number {
   if (!text || FILLER_ONLY.test(text)) return 0;
@@ -41,6 +44,8 @@ function inferType(text: string, category: QuestionCategory, contextualFollowUp:
 }
 
 function inferSpeechAct(text: string, isQuestion: boolean, followUp: boolean): QuestionSpeechAct {
+  const nonQuestionAct = classifyNonQuestionSpeechAct(text);
+  if (nonQuestionAct) return nonQuestionAct;
   if (SMALL_TALK.test(text)) return "SMALL_TALK";
   if (!isQuestion) return "STATEMENT";
   return followUp ? "FOLLOW_UP" : "QUESTION";
@@ -50,7 +55,7 @@ function fuseLocalClassification(base: QuestionClassification, local: LocalQuest
   const localIsQuestion = local.type === "QUESTION" || local.type === "FOLLOW_UP";
   const localConfidence = clamp(local.confidence);
   const strongRuleQuestion = base.isQuestion && base.confidence >= 0.72;
-  const explicitQuestion = /[？?]$/.test(base.questionText) || /(?:吗|呢)[。！？?！\s]*$/i.test(base.questionText);
+  const explicitQuestion = /[？?]/.test(base.questionText) || /(?:吗|呢)[。！？?！\s]*$/i.test(base.questionText);
   const confidentStatement = local.type === "STATEMENT" && localConfidence >= 0.82 && !explicitQuestion;
   const isQuestion = localIsQuestion
     ? localConfidence >= 0.55 || strongRuleQuestion
@@ -131,17 +136,43 @@ function buildAnalysisWithClassifier(
   const normalized = normalize(text);
   const contextText = normalize(context.contextText || [context.memory?.currentTopic, ...(context.recentTranscript || [])].filter(Boolean).join(" "));
   const classification = { ...classifier.classify(normalized, contextText, final) };
+  const nonQuestionAct = classifyNonQuestionSpeechAct(normalized);
+  if (nonQuestionAct) {
+    const ruleScore = ruleScoreFor(normalized, final);
+    const nonQuestionClassification = { ...classification, isQuestion: false, confidence: 0, reason: nonQuestionAct === "CONTROL" ? "control-speech" : "answer-instruction" };
+    return {
+      text: normalized,
+      isQuestion: false,
+      type: "not_question",
+      speechAct: nonQuestionAct,
+      confidence: 0,
+      normalizedQuestion: normalized,
+      reason: nonQuestionClassification.reason,
+      score: { ruleScore, semanticScore: 0, llmScore: 0, finalScore: 0 },
+      llmUsed: Boolean(llm),
+      classification: nonQuestionClassification,
+      legacyCategory: nonQuestionClassification.category
+    };
+  }
   if (classification.isQuestion && RULE_KEYWORDS.test(normalized) && normalized.length >= 6) classification.confidence = Math.max(classification.confidence, 0.9);
   const contextualFollowUp = isFollowUp(normalized, contextText, context.memory);
   const ruleScore = ruleScoreFor(normalized, final);
   const semanticScore = classification.isQuestion ? clamp(classification.confidence) : 0;
-  const llmScore = llm ? clamp(llm.confidence) : semanticScore;
-  const finalScore = clamp(0.3 * ruleScore + 0.5 * semanticScore + 0.2 * llmScore);
-  const candidateQuestion = !FILLER_ONLY.test(normalized) && !SMALL_TALK.test(normalized);
+  // A negative/low-confidence LLM confirmation must not erase a clear local
+  // question signal. LLM is a tie-breaker here, not the source of truth.
+  const llmScore = llm?.isQuestion ? clamp(llm.confidence) : semanticScore;
+  const rawFinalScore = clamp(0.3 * ruleScore + 0.5 * semanticScore + 0.2 * llmScore);
+  // Explicit interview prompts such as “介绍一下你的项目” are complete
+  // questions even when they do not contain a question particle. Their rule
+  // signal is intentionally stronger than a generic topic statement, so let
+  // the robust path accept the classifier's 0.60+ confidence here.
+  const robustRuleQuestion = classification.isQuestion && classification.confidence >= 0.60 && ruleScore >= 0.35 && ROBUST_QUESTION_FORM.test(normalized);
+  const finalScore = robustRuleQuestion ? Math.max(rawFinalScore, 0.86) : rawFinalScore;
+  const candidateQuestion = !FILLER_ONLY.test(normalized) && !SMALL_TALK.test(normalized) && !META_PROMPT_ONLY.test(normalized);
   const llmRescue = Boolean(llm?.isQuestion && llm.confidence >= 0.82 && (ruleScore >= 0.35 || contextualFollowUp));
   const isQuestion = candidateQuestion
-    && (llm?.isQuestion ?? classification.isQuestion)
-    && (finalScore >= threshold || llmRescue);
+    && (robustRuleQuestion || (llm?.isQuestion ?? classification.isQuestion))
+    && (finalScore >= threshold || llmRescue || robustRuleQuestion);
   const type = llm?.type && isQuestion ? llm.type : inferType(normalized, classification.category, contextualFollowUp);
   const speechAct = llm?.label && isQuestion ? llm.label : inferSpeechAct(normalized, isQuestion, contextualFollowUp);
   return {

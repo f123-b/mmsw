@@ -92,8 +92,12 @@ const mockServer = createServer(async (request, response) => {
     return;
   }
   if (payload.stream === false) {
+    if (!isChatFirstTurn && !isChatSecondTurn) answerRequests.push(payload);
+    const answer = imageMessage
+      ? "Mock vision answer... 已分析截图内容。"
+      : messageContents.includes("Mock manual question") ? "Mock LLM answer for manual question..." : "Mock LLM answer... 已使用 Profile 和当前问题生成。";
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "OK" } }] }));
+    response.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: answer } }] }));
     return;
   }
   if (messageContents.includes("面试准备 Agent")) {

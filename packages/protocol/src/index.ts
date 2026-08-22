@@ -183,6 +183,11 @@ export const answerCancelledSchema = z.object({
   reason: z.enum(["user", "superseded", "timeout"])
 });
 
+export const answerResetSchema = z.object({
+  type: z.literal("answer_reset"),
+  questionId: z.string().min(1)
+});
+
 export const runtimeErrorSchema = z.object({
   type: z.literal("runtime_error"),
   code: z.enum([
@@ -215,6 +220,7 @@ export const realtimeServerMessageSchema = z.discriminatedUnion("type", [
   answerDeltaSchema,
   answerEndSchema,
   answerCancelledSchema,
+  answerResetSchema,
   runtimeErrorSchema
 ]);
 

@@ -19,9 +19,9 @@ export interface HUDLayout {
   shortcuts: HUDPanelLayout;
 }
 
-const TOPBAR_MAX_WIDTH = 920;
-const TOPBAR_HEIGHT = 72;
-const TOPBAR_TOP_RATIO = 0.16;
+const TOPBAR_MAX_WIDTH = 680;
+const TOPBAR_HEIGHT = 50;
+const TOPBAR_TOP_RATIO = 0.08;
 const SHORTCUT_WIDTH = 320;
 const SHORTCUT_HEIGHT = 360;
 const PANEL_GAP = 16;
@@ -41,7 +41,7 @@ export function calculateHUDLayout(workArea: HUDWorkArea): HUDLayout {
   const panelHeight = Math.max(300, Math.min(Math.round(workArea.height * 0.39), workArea.height - panelTop - 32));
   const transcriptWidth = Math.round(usableWidth * 0.365);
   const answerWidth = Math.max(0, usableWidth - transcriptWidth - PANEL_GAP);
-  const toolbarWidth = Math.min(TOPBAR_MAX_WIDTH, Math.max(420, Math.round(workArea.width * 0.54)), Math.max(0, workArea.width - 48));
+  const toolbarWidth = Math.min(TOPBAR_MAX_WIDTH, Math.max(460, Math.round(workArea.width * 0.42)), Math.max(0, workArea.width - 40));
 
   return {
     toolbar: {

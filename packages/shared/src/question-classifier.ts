@@ -1,3 +1,5 @@
+import { normalizeTechnicalTerms } from "./terminology";
+
 export type QuestionCategory = "technical" | "project" | "behavioral" | "followup";
 
 export interface QuestionClassification {
@@ -25,13 +27,24 @@ const BEHAVIORAL_TERMS = /团队|沟通|冲突|压力|挑战|困难|问题|失�
 const FOLLOWUP_TERMS = /那|那么|如果|继续|再|还有|具体|为什么|怎么|如何|然后/;
 const CONTEXTUAL_FOLLOWUP = /^(?:好|好的|嗯+|明白了?|对)[，,、\s]*(?:说说|讲讲|展开(?:说)?|具体(?:说)?|再说说|再讲讲|为什么呢|怎么做呢|然后呢|还有吗)/i;
 const BARE_CONTINUATION = /^(?:(?:好|好的|嗯+|明白了?|对)[，,、\s]*)?(?:继续|然后|再见|下一个|换个问题|换一个问题)[。！？?！\s]*$/i;
+const CONTROL_SPEECH = /^(?:(?:好|好的|行|可以|嗯+|那)[，,、\s]*)?(?:下一个问题|下一题|换一个问题|换个问题|再来一个(?:问题)?|接下来(?:问)?)(?:[，,、].*)?[。！？?！\s，,、]*$/i;
+const INSTRUCTION_SPEECH = /^(?:(?:好|好的|行|可以|嗯+)[，,、\s]*)?(?:尽量|最好|请尽量|控制在|用.{0,8}(?:秒|分钟)|给个.{0,14}(?:例子|路径|思路|排查路径)|简单(?:说|讲)|简短(?:一点)?|讲清楚|说清楚|结合(?:你|自己的)?项目|用你项目里的例子)/i;
 
 function normalize(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
+  return normalizeTechnicalTerms(text);
 }
 
 export function questionFingerprint(text: string): string {
   return normalize(text).toLowerCase().replace(/[\s，。！？、,.!?；;：:"“”‘’（）()【】\[\]{}<>]/g, "").slice(0, 240);
+}
+
+export function classifyNonQuestionSpeechAct(text: string): "INSTRUCTION" | "CONTROL" | undefined {
+  const normalized = normalize(text);
+  if (CONTROL_SPEECH.test(normalized)) return "CONTROL";
+  // A sentence that explicitly asks “怎么/为什么/什么” remains a question;
+  // otherwise these are interview constraints, not answerable questions.
+  if (INSTRUCTION_SPEECH.test(normalized) && !/[？?]$/.test(normalized) && !/为什么|为何|什么|怎么|如何|是否/.test(normalized)) return "INSTRUCTION";
+  return undefined;
 }
 
 function categoryFor(text: string): QuestionCategory {
@@ -51,6 +64,8 @@ export function classifyQuestion(text: string, contextText = "", final = false):
   const normalized = normalize(text);
   const context = normalize(contextText);
   if (!normalized) return { isQuestion: false, confidence: 0, category: "project", questionText: "", reason: "empty" };
+  const nonQuestionAct = classifyNonQuestionSpeechAct(normalized);
+  if (nonQuestionAct) return { isQuestion: false, confidence: 0, category: "followup", questionText: normalized, reason: nonQuestionAct === "CONTROL" ? "control-speech" : "answer-instruction" };
 
   const hasQuestionMark = /[？?]$/.test(normalized);
   const questionForm = QUESTION_FORMS.some((pattern) => pattern.test(normalized));

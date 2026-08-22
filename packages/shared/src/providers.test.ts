@@ -24,9 +24,10 @@ describe("OpenAICompatibleAnswerProvider", () => {
       ]);
     });
     const deltas: string[] = [];
-    for await (const delta of provider.stream({ model: "configured-model", sections: [{ name: "question", content: "请介绍项目" }] })) deltas.push(delta);
+    for await (const delta of provider.stream({ model: "configured-model", maxOutputTokens: 1_024, sections: [{ name: "question", content: "请介绍项目" }] })) deltas.push(delta);
     expect(deltas.join("")).toBe("核心回答");
     expect(JSON.parse(String(request?.body)).model).toBe("configured-model");
+    expect(JSON.parse(String(request?.body)).max_tokens).toBe(1_024);
   });
 
   it("uses the DeepSeek chat endpoint and disables thinking for low-latency modes", async () => {
@@ -42,6 +43,16 @@ describe("OpenAICompatibleAnswerProvider", () => {
     expect(requestUrl).toBe("https://api.deepseek.com/chat/completions");
     expect(requestBody?.thinking).toEqual({ type: "disabled" });
     expect(deltas.join("")).toBe("OK");
+  });
+
+  it("supports a non-streaming completion for direct-display answers", async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const provider = new OpenAICompatibleAnswerProvider({ providerName: "test", baseUrl: "https://llm.test", apiKey: "secret", model: "test-model", timeoutMs: 5_000, maxRetries: 2 }, async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "一次性回答" } }] }), { status: 200 });
+    });
+    await expect(provider.complete({ model: "test-model", sections: [{ name: "question", content: "问题" }], maxRetries: 0 })).resolves.toBe("一次性回答");
+    expect(requestBody?.stream).toBe(false);
   });
 
   it("ignores reasoning-only SSE deltas instead of exposing chain of thought", async () => {

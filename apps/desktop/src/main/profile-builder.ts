@@ -1,5 +1,5 @@
-import type { AnswerProvider, ProfileBuilderInput, ProfileBuilderModel, ProfileBuilderOutput, ProfileBuilderSource } from "@interview-copilot/shared";
-import { ProfileBuilderAgent } from "@interview-copilot/shared";
+import type { AnswerProvider, KnowledgeDocumentType, ProfileBuilderInput, ProfileBuilderModel, ProfileBuilderOutput, ProfileBuilderSource } from "@interview-copilot/shared";
+import { ProfileBuilderAgent, normalizeTechnicalTerms } from "@interview-copilot/shared";
 import { createHash } from "node:crypto";
 import { SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectRepository, type ProfileBuilderArtifactRecord } from "./database";
 
@@ -9,6 +9,13 @@ function sourceFingerprint(source: ProfileBuilderSource): string {
 
 function sourceText(title: string, raw: string, summary?: string): string {
   return [`标题：${title}`, summary ? `摘要：${summary}` : "", raw].filter(Boolean).join("\n").slice(0, 16_000);
+}
+
+function profileBuilderSourceKind(documentType: KnowledgeDocumentType): ProfileBuilderSource["kind"] {
+  if (documentType === "resume" || documentType === "job-description") return "resume";
+  if (documentType === "skill") return "skill";
+  if (documentType === "interview-question") return "interview";
+  return "project";
 }
 
 export class ProfileBuilderService {
@@ -47,6 +54,7 @@ export class ProfileBuilderService {
     const sourceSnapshot = { generatedAt: Date.now(), sources: input.sources.map((source) => ({ id: source.id, kind: source.kind, title: source.title, updatedAt: source.updatedAt, fingerprint: sourceFingerprint(source) })) };
     try {
       const artifact = await new ProfileBuilderAgent(this.model).build(input);
+      this.syncDetectedSkills(profileId, artifact);
       const record = this.artifacts.save({ profileId, status: artifact.status, sourceSnapshot, artifact });
       this.onUpdated?.(record);
       return record;
@@ -57,6 +65,24 @@ export class ProfileBuilderService {
     }
   }
 
+  private syncDetectedSkills(profileId: string, artifact: ProfileBuilderOutput): void {
+    const profile = this.profiles.get(profileId);
+    if (!profile || artifact.skillGraph.nodes.length === 0) return;
+    const existingNames = new Set(profile.skills.map((skill) => normalizeTechnicalTerms(skill.name).toLowerCase()));
+    const detectedSkills = artifact.skillGraph.nodes.filter((node) => {
+      const key = normalizeTechnicalTerms(node.label).toLowerCase();
+      return key && !existingNames.has(key);
+    }).map((node) => ({
+      id: `resume-skill-${profileId}-${normalizeTechnicalTerms(node.label).toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/gi, "-").slice(0, 40)}`,
+      name: node.label,
+      description: node.description || "根据简历自动识别",
+      content: `简历证据：${node.description || node.label}`,
+      tags: ["resume-detected", "待确认"]
+    }));
+    if (detectedSkills.length === 0) return;
+    this.profiles.save({ ...profile, skills: [...profile.skills, ...detectedSkills] });
+  }
+
   private collectSources(profileId: string): ProfileBuilderSource[] {
     const profile = this.profiles.get(profileId);
     if (!profile) return [];
@@ -65,7 +91,7 @@ export class ProfileBuilderService {
     if (profile.jobDescription) sources.push({ id: `job-${profileId}`, kind: "resume", title: "Job Description", text: sourceText("Job Description", profile.jobDescription.rawContent, profile.jobDescription.summary), updatedAt: profile.updatedAt });
     for (const skill of profile.skills) sources.push({ id: `skill-${skill.id}`, kind: "skill", title: skill.name, text: `${skill.name}\n${skill.description}\n${skill.content}\n${skill.tags.join("、")}`, updatedAt: profile.updatedAt });
     for (const project of this.projects.list().filter((item) => item.profileId === profileId)) sources.push({ id: `project-${project.id}`, kind: "project", title: project.name, text: `项目名称：${project.name}`, updatedAt: project.updatedAt });
-    for (const document of this.knowledge.listDocuments().filter((item) => profile.knowledgeBaseIds.includes(item.knowledgeBaseId) && item.status === "ready")) sources.push({ id: `document-${document.id}`, kind: "project", title: document.filename, text: document.text, updatedAt: document.updatedAt });
+    for (const document of this.knowledge.listDocuments().filter((item) => profile.knowledgeBaseIds.includes(item.knowledgeBaseId) && item.status === "ready")) sources.push({ id: `document-${document.id}`, kind: profileBuilderSourceKind(document.documentType), title: `${document.filename} · ${document.documentType}`, text: document.text, updatedAt: document.updatedAt });
     for (const interview of this.history.listInterviews().filter((item) => item.profileId === profileId)) {
       const snapshot = this.history.snapshot(interview.id);
       const answers = new Map(snapshot.answers.map((answer) => [answer.questionId, answer.text]));
@@ -97,4 +123,3 @@ export function createProfileBuilderModel(answerProvider: AnswerProvider, settin
 }
 
 export type { ProfileBuilderOutput };
-

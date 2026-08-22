@@ -6,14 +6,15 @@ import type { RealtimeServerMessage } from "@interview-copilot/protocol";
 import type { RealtimeConnectOptions } from "../main/realtime-session";
 import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
+import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
-import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
-import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, ProfileBuilderArtifactRecord, ProjectRecord } from "../main/database";
+import type { Profile, ProfileInput, ProviderSettings, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
+import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
+import type { ConversationMessageRecord, ConversationRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 
 const api = {
@@ -32,6 +33,8 @@ const api = {
     showAll: () => ipcRenderer.invoke("overlay:show-all"),
     hideAll: () => ipcRenderer.invoke("overlay:hide-all"),
     toggleAll: () => ipcRenderer.invoke("overlay:toggle-all"),
+    toggleTranscript: () => ipcRenderer.invoke("overlay:toggle-transcript"),
+    toggleAnswer: () => ipcRenderer.invoke("overlay:toggle-answer"),
     resetLayout: () => ipcRenderer.invoke("overlay:reset-layout"),
     toggleShortcuts: () => ipcRenderer.invoke("overlay:toggle-shortcuts"),
     getState: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:get-state"),
@@ -66,6 +69,13 @@ const api = {
     setAutomationMode: (mode: "MANUAL" | "AUTO") => ipcRenderer.invoke("interview:set-automation-mode", mode) as Promise<boolean>,
     setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => ipcRenderer.invoke("interview:set-answer-mode", mode) as Promise<boolean>
   },
+  writtenTest: {
+    start: (options: WrittenTestStartOptions) => ipcRenderer.invoke("written-test:start", options) as Promise<boolean>,
+    stop: () => ipcRenderer.invoke("written-test:stop") as Promise<boolean>,
+    answerScreenshot: () => ipcRenderer.invoke("written-test:answer-screenshot") as Promise<void>,
+    getState: () => ipcRenderer.invoke("written-test:get-state") as Promise<WrittenTestState>,
+    setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => ipcRenderer.invoke("written-test:set-answer-mode", mode) as Promise<boolean>
+  },
   chat: {
     createConversation: (input: { profileId?: string; projectId?: string; title?: string }): Promise<ConversationRecord> => ipcRenderer.invoke("chat:create-conversation", input),
     listConversations: (profileId?: string): Promise<ConversationRecord[]> => ipcRenderer.invoke("chat:list-conversations", profileId),
@@ -92,6 +102,9 @@ const api = {
   settings: {
     get: (): Promise<ProviderCenterPublicConfig | undefined> => ipcRenderer.invoke("settings:get"),
     update: (section: ProviderSection, input: Partial<ProviderSettings>): Promise<PublicProviderSettings | undefined> => ipcRenderer.invoke("settings:update", section, input),
+    saveLlmProfile: (input: LlmModelProfileInput): Promise<ProviderCenterPublicConfig | undefined> => ipcRenderer.invoke("settings:save-llm-profile", input),
+    activateLlmProfile: (profileId: string): Promise<ProviderCenterPublicConfig | undefined> => ipcRenderer.invoke("settings:activate-llm-profile", profileId),
+    deleteLlmProfile: (profileId: string): Promise<ProviderCenterPublicConfig | undefined> => ipcRenderer.invoke("settings:delete-llm-profile", profileId),
     testConnection: (section: ProviderSection): Promise<ProviderCheckResult> => ipcRenderer.invoke("settings:test-connection", section),
     preflight: (checkReachability?: boolean): Promise<ProviderPreflightResult> => ipcRenderer.invoke("settings:preflight", checkReachability)
   },
@@ -107,9 +120,27 @@ const api = {
     renameBase: (knowledgeBaseId: string, name: string) => ipcRenderer.invoke("knowledge:rename-base", knowledgeBaseId, name),
     deleteBase: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:delete-base", knowledgeBaseId) as Promise<boolean>,
     listDocuments: (knowledgeBaseId?: string) => ipcRenderer.invoke("knowledge:list-documents", knowledgeBaseId),
-    ingest: (input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array }) => ipcRenderer.invoke("knowledge:ingest", input),
+    ingest: (input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array; documentType?: string }) => ipcRenderer.invoke("knowledge:ingest", input),
+    updateType: (documentId: string, documentType: string) => ipcRenderer.invoke("knowledge:update-type", documentId, documentType),
     delete: (documentId: string) => ipcRenderer.invoke("knowledge:delete", documentId),
     reindex: (documentId: string) => ipcRenderer.invoke("knowledge:reindex", documentId)
+  },
+  questionBank: {
+    list: (options?: { search?: string; type?: QuestionBankType; limit?: number }): Promise<QuestionBankQuestionRecord[]> => ipcRenderer.invoke("question-bank:list", options),
+    get: (questionId: string): Promise<QuestionBankQuestionRecord | undefined> => ipcRenderer.invoke("question-bank:get", questionId),
+    saveQuestion: (input: QuestionBankQuestionInput): Promise<QuestionBankQuestionRecord | undefined> => ipcRenderer.invoke("question-bank:save-question", input),
+    deleteQuestion: (questionId: string): Promise<boolean> => ipcRenderer.invoke("question-bank:delete-question", questionId),
+    saveAnswer: (input: QuestionBankAnswerCardInput): Promise<QuestionBankAnswerCardRecord | undefined> => ipcRenderer.invoke("question-bank:save-answer", input),
+    deleteAnswer: (answerCardId: string): Promise<boolean> => ipcRenderer.invoke("question-bank:delete-answer", answerCardId),
+    listSkills: (search?: string): Promise<QuestionBankSkillRecord[]> => ipcRenderer.invoke("question-bank:list-skills", search),
+    saveSkill: (input: QuestionBankSkillInput): Promise<QuestionBankSkillRecord | undefined> => ipcRenderer.invoke("question-bank:save-skill", input),
+    saveSkillPoint: (input: QuestionBankSkillPointInput): Promise<unknown> => ipcRenderer.invoke("question-bank:save-skill-point", input),
+    linkSkill: (questionId: string, skillId: string): Promise<boolean> => ipcRenderer.invoke("question-bank:link-skill", questionId, skillId),
+    listJobs: (): Promise<QuestionBankJobProfileRecord[]> => ipcRenderer.invoke("question-bank:list-jobs"),
+    saveJob: (input: QuestionBankJobProfileInput): Promise<QuestionBankJobProfileRecord | undefined> => ipcRenderer.invoke("question-bank:save-job", input),
+    importText: (input: { text: string; filename?: string; includeProject?: boolean; includeBehavioral?: boolean }): Promise<QuestionBankImportResult | undefined> => ipcRenderer.invoke("question-bank:import-text", input),
+    generateAnswers: (input?: { questionIds?: string[]; onlyUnanswered?: boolean }): Promise<QuestionBankAnswerGenerationResult> => ipcRenderer.invoke("question-bank:generate-answers", input),
+    match: (text: string): Promise<{ question: QuestionBankQuestionRecord; score: number; exact: boolean } | undefined> => ipcRenderer.invoke("question-bank:match", text)
   },
   history: {
     list: () => ipcRenderer.invoke("history:list"),
@@ -235,6 +266,11 @@ const api = {
       ipcRenderer.on("interview:answer-mode", handler);
       return () => ipcRenderer.removeListener("interview:answer-mode", handler);
     },
+    onWrittenTestState: (listener: (state: WrittenTestState) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, state: WrittenTestState) => listener(state);
+      ipcRenderer.on("written-test:state", handler);
+      return () => ipcRenderer.removeListener("written-test:state", handler);
+    },
     onPreparationEvent: (listener: (event: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
       ipcRenderer.on("preparation:event", handler);
@@ -264,6 +300,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, payload: ProfileBuilderArtifactRecord) => listener(payload);
       ipcRenderer.on("profile-builder:updated", handler);
       return () => ipcRenderer.removeListener("profile-builder:updated", handler);
+    },
+    onQuestionBankAnswerGenerationProgress: (listener: (event: { status: "started" | "running" | "completed"; total: number; completed: number; generated: number; skipped: number; failed: number; questionId?: string; error?: string }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: { status: "started" | "running" | "completed"; total: number; completed: number; generated: number; skipped: number; failed: number; questionId?: string; error?: string }) => listener(payload);
+      ipcRenderer.on("question-bank:answer-generation-progress", handler);
+      return () => ipcRenderer.removeListener("question-bank:answer-generation-progress", handler);
     }
   }
 };

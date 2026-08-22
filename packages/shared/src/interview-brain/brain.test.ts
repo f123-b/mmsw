@@ -16,6 +16,23 @@ describe("InterviewBrain", () => {
     expect(decision.answerTask?.context.join("\n")).toContain("介绍一下你的FOC项目");
   });
 
+  it("keeps the parent question when normalizing a short follow-up", () => {
+    const memory = new InterviewMemory();
+    memory.recordQuestion("如果 IIC 问题再次出现，你会怎么一步步定位和验证？");
+    memory.recordAnswer("我会先复现并记录关键波形。");
+    const decision = new InterviewBrain().analyze({ text: "怎么验证？", memory: memory.snapshot() });
+    expect(decision.isQuestion).toBe(true);
+    expect(decision.normalizedQuestion).toContain("如果 IIC 问题再次出现");
+    expect(decision.normalizedQuestion).toContain("追问：怎么验证");
+  });
+
+  it("does not promote acknowledgement or repair meta text to a question", () => {
+    const memory = new InterviewMemory();
+    memory.recordQuestion("介绍一下你的 IIC 项目");
+    expect(new InterviewBrain().analyze({ text: "那。", memory: memory.snapshot() }).isQuestion).toBe(false);
+    expect(new InterviewBrain().analyze({ text: "怎么回答？", memory: memory.snapshot() }).isQuestion).toBe(false);
+  });
+
   it("does not turn a standalone acknowledgement into a question", () => {
     const memory = new InterviewMemory();
     const decision = new InterviewBrain().analyze({ text: "嗯", memory: memory.snapshot() });

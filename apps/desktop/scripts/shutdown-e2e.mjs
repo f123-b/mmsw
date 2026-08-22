@@ -43,6 +43,14 @@ const mockServer = createServer(async (request, response) => {
     return;
   }
   if (payload.stream === false) {
+    if (contents.includes(marker)) {
+      answerRequestSeen = true;
+      // Direct-display interview answers wait for the complete response. Keep
+      // this request open so shutdown can verify that the in-flight request is
+      // cancelled and persisted without exposing partial text.
+      response.writeHead(200, { "content-type": "application/json" });
+      return;
+    }
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "OK" } }] }));
     return;
@@ -282,8 +290,8 @@ results.push(await runScenario("active-interview", async (renderer, userDataDire
   const interviewId = await renderer.evaluate(`window.interviewCopilot.interview.start(${JSON.stringify({ profileId, url: `ws://127.0.0.1:${asrPort}/realtime`, inputDeviceId: "mock-mic", outputDeviceId: "mock-system", automationMode: "MANUAL", answerMode: "NORMAL", providerType: "custom-gateway" })})`);
   if (!interviewId) throw new Error("active-interview: interview did not start");
   await waitForNode(() => pcmPackets > 0, "active-interview: mock ASR did not receive PCM");
-  const partialSeen = await renderer.evaluate(`(async () => { const seen = new Promise((resolve) => { const off = window.interviewCopilot.events.onRealtimeMessage((message) => { if (message.type === 'answer_delta' && message.delta.includes(${JSON.stringify(partialAnswer)})) { off(); resolve(true); } }); setTimeout(() => { off(); resolve(false); }, 10_000); }); void window.interviewCopilot.interview.answerQuestion(${JSON.stringify(marker)}); return await seen; })()`);
-  if (!partialSeen || !answerRequestSeen) throw new Error("active-interview: slow LLM did not expose a partial answer");
+  await renderer.evaluate(`window.interviewCopilot.interview.answerQuestion(${JSON.stringify(marker)})`);
+  await waitForNode(() => answerRequestSeen, "active-interview: direct-display LLM request was not observed");
   await closeThroughElectron(renderer);
   await closeAllRendererWindows(processInfo.port);
   await waitForExit(processInfo.child);
@@ -291,8 +299,8 @@ results.push(await runScenario("active-interview", async (renderer, userDataDire
   const latest = database.latest;
   const answer = database.snapshot?.answers.find((item) => item.cancelReason === "user");
   if (!latest || latest.status !== "ended" || !latest.endedAt) throw new Error("active-interview: reopened interview is not ended");
-  if (!answer || answer.cancelReason !== "user" || !answer.text.includes(partialAnswer)) throw new Error("active-interview: partial answer or user cancel reason was not persisted");
-  return { processExit: "PASS", sqliteReopen: "PASS", endedAt: latest.endedAt, status: latest.status, partialText: answer.text, cancelReason: answer.cancelReason };
+  if (!answer || answer.cancelReason !== "user") throw new Error("active-interview: in-flight answer or user cancel reason was not persisted");
+  return { processExit: "PASS", sqliteReopen: "PASS", endedAt: latest.endedAt, status: latest.status, answerText: answer.text, cancelReason: answer.cancelReason };
 }));
 
 scenarios.push("active-chat");

@@ -6,7 +6,7 @@ describe("HUD state lifecycle", () => {
     let state = { ...initialHUDState };
     for (let index = 0; index < 100; index += 1) {
       state = reduceHUDState(state, { type: "start" });
-      expect(state).toMatchObject({ running: true, panelVisible: true, topBarVisible: true, shareMode: false, mode: "FULL" });
+      expect(state).toMatchObject({ running: true, panelVisible: true, transcriptVisible: true, answerVisible: true, topBarVisible: true, shareMode: false, mode: "FULL" });
       state = reduceHUDState(state, { type: "stop" });
       expect(state).toEqual(initialHUDState);
     }
@@ -17,7 +17,7 @@ describe("HUD state lifecycle", () => {
     state = reduceHUDState(state, { type: "toggle-panels" });
     expect(state).toMatchObject({ mode: "MINI", panelVisible: false, topBarVisible: true });
     state = reduceHUDState(state, { type: "set-share-mode", enabled: true });
-    expect(state).toMatchObject({ running: true, shareMode: true, panelVisible: false, shortcutVisible: false, topBarVisible: false, mouseMode: "passthrough", mode: "HIDDEN" });
+    expect(state).toMatchObject({ running: true, shareMode: true, panelVisible: false, transcriptVisible: false, answerVisible: false, shortcutVisible: false, topBarVisible: false, mouseMode: "passthrough", mode: "HIDDEN" });
     state = reduceHUDState(state, { type: "set-share-mode", enabled: false });
     expect(state).toMatchObject({ running: true, shareMode: false, mode: "MINI", panelVisible: false, topBarVisible: true });
     state = reduceHUDState(reduceHUDState(state, { type: "set-mouse-mode", mode: "interactive" }), { type: "set-share-mode", enabled: true });
@@ -25,5 +25,15 @@ describe("HUD state lifecycle", () => {
     expect(state.mouseMode).toBe("interactive");
     state = reduceHUDState(state, { type: "hide-all" });
     expect(state).toMatchObject({ mode: "HIDDEN", panelVisible: false, shortcutVisible: false, topBarVisible: false });
+  });
+
+  it("toggles the transcript and answer panels independently", () => {
+    let state = reduceHUDState(initialHUDState, { type: "start" });
+    state = reduceHUDState(state, { type: "toggle-transcript" });
+    expect(state).toMatchObject({ panelVisible: true, transcriptVisible: false, answerVisible: true, topBarVisible: true, mode: "FULL" });
+    state = reduceHUDState(state, { type: "toggle-answer" });
+    expect(state).toMatchObject({ panelVisible: false, transcriptVisible: false, answerVisible: false, topBarVisible: true, mode: "MINI" });
+    state = reduceHUDState(state, { type: "toggle-transcript" });
+    expect(state).toMatchObject({ panelVisible: true, transcriptVisible: true, answerVisible: false, mode: "FULL" });
   });
 });

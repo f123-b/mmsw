@@ -39,7 +39,7 @@ describe("Interview Copilot core upgrade", () => {
     expect(formatter.instructions("FAST")).toContain("30~80");
     expect(formatter.format("# 第一部分\n- 我会先看采样时序。", "FAST")).toBe("我会先看采样时序。");
     const quality = new AnswerQualityChecker().check({ question: "为什么使用CAN", answer: "CAN用于工业通信。", mode: "NORMAL" });
-    expect(quality.issues).toContain("not-first-person");
+    expect(quality.issues).not.toContain("not-first-person");
     expect(quality.needsRepair).toBe(true);
     expect(formatter.format("首先，这个项目需要进行优化。因此要关注实时性。", "NORMAL")).toContain("我一般先");
   });

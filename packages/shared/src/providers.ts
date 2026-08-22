@@ -14,6 +14,13 @@ export interface ProviderSettings {
   normalModel?: string;
   deepModel?: string;
   visionModel?: string;
+  fallbackModel?: string;
+  questionRecognitionModel?: string;
+  profileBuilderModel?: string;
+  questionBankModel?: string;
+  chatModel?: string;
+  postInterviewModel?: string;
+  preparationModel?: string;
   timeoutMs: number;
   maxRetries: number;
   /** Explicitly override whether this provider requires an API key. */
@@ -100,6 +107,24 @@ function extractDelta(value: unknown): string {
   return "";
 }
 
+function extractCompletion(value: unknown): string {
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  const choices = Array.isArray(record.choices) ? record.choices : [];
+  const choice = choices[0] as Record<string, unknown> | undefined;
+  const message = choice?.message as Record<string, unknown> | undefined;
+  if (typeof message?.content === "string") return message.content;
+  if (Array.isArray(message?.content)) {
+    return message.content.map((part) => {
+      if (!part || typeof part !== "object") return "";
+      const item = part as Record<string, unknown>;
+      return typeof item.text === "string" ? item.text : typeof item.content === "string" ? item.content : "";
+    }).join("");
+  }
+  if (typeof record.output_text === "string") return record.output_text;
+  return extractDelta(value);
+}
+
 function abortError(): Error {
   const error = new Error("Provider request aborted");
   error.name = "AbortError";
@@ -164,7 +189,7 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
   async *stream(request: AnswerProviderRequest, signal?: AbortSignal): AsyncIterable<string> {
     const externalSignal = signal ?? new AbortController().signal;
     let lastError: unknown;
-    const retries = Math.max(0, Math.min(5, this.settings.maxRetries));
+    const retries = Math.max(0, Math.min(5, request.maxRetries ?? this.settings.maxRetries));
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       if (externalSignal.aborted) throw abortError();
       const controller = new AbortController();
@@ -179,7 +204,13 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
             "content-type": "application/json",
             ...(this.settings.apiKey ? { authorization: `Bearer ${this.settings.apiKey}` } : {})
           },
-          body: JSON.stringify({ model: request.model || this.settings.model, messages: buildMessages(request.sections, request.attachments), ...(thinking ? { thinking } : {}), stream: true }),
+          body: JSON.stringify({
+            model: request.model || this.settings.model,
+            messages: buildMessages(request.sections, request.attachments),
+            ...(thinking ? { thinking } : {}),
+            ...(request.maxOutputTokens ? { max_tokens: request.maxOutputTokens } : {}),
+            stream: true
+          }),
           signal: controller.signal
         });
         if (!response.ok) throw new Error(`Answer provider HTTP ${response.status}: ${await readError(response)}`);
@@ -189,6 +220,53 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
           yield delta;
         }
         return;
+      } catch (error) {
+        if (externalSignal.aborted) throw abortError();
+        lastError = error;
+        if (attempt >= retries) break;
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, 250 * (attempt + 1));
+          externalSignal.addEventListener("abort", () => { clearTimeout(timer); reject(abortError()); }, { once: true });
+        });
+      } finally {
+        clearTimeout(timeout);
+        externalSignal.removeEventListener("abort", abort);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("Answer provider request failed");
+  }
+
+  async complete(request: AnswerProviderRequest, signal?: AbortSignal): Promise<string> {
+    const externalSignal = signal ?? new AbortController().signal;
+    let lastError: unknown;
+    const retries = Math.max(0, Math.min(5, request.maxRetries ?? this.settings.maxRetries));
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      if (externalSignal.aborted) throw abortError();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), Math.max(1_000, this.settings.timeoutMs));
+      const abort = () => controller.abort();
+      externalSignal.addEventListener("abort", abort, { once: true });
+      try {
+        const thinking = thinkingForRequest(this.settings, request);
+        const response = await this.fetchImpl(providerEndpoint(this.settings, providerCapabilities(this.settings).chatPath), {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(this.settings.apiKey ? { authorization: `Bearer ${this.settings.apiKey}` } : {})
+          },
+          body: JSON.stringify({
+            model: request.model || this.settings.model,
+            messages: buildMessages(request.sections, request.attachments),
+            ...(thinking ? { thinking } : {}),
+            ...(request.maxOutputTokens ? { max_tokens: request.maxOutputTokens } : {}),
+            stream: false
+          }),
+          signal: controller.signal
+        });
+        if (!response.ok) throw new Error(`Answer provider HTTP ${response.status}: ${await readError(response)}`);
+        const completion = extractCompletion(await response.json());
+        if (!completion.trim()) throw new Error("Answer provider returned an empty completion");
+        return completion;
       } catch (error) {
         if (externalSignal.aborted) throw abortError();
         lastError = error;

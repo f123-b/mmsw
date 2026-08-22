@@ -45,5 +45,18 @@ describe("Question Detection 2.0", () => {
     await detector.analyze("介绍一下你的项目");
     expect(calls).toBe(1);
   });
+
+  it("does not let a meta prompt replace a substantive interview question", async () => {
+    const detector = new QuestionDetector2({ localClassifier: { predict: async () => ({ type: "FOLLOW_UP", confidence: 0.96 }) } });
+    const result = await detector.analyze("怎么回答？", "当前技术主题：嵌入式通信", true, { recentTranscript: ["面试官：IIC 通讯偶发读不到数据，你会怎么排查？"] });
+    expect(result.isQuestion).toBe(false);
+  });
+
+  it("keeps a clear technical question when the optional LLM confirmer disagrees", async () => {
+    const detector = new QuestionDetector2({ llmConfirmer: async () => ({ isQuestion: false, confidence: 0.4 }) });
+    const result = await detector.analyze("IIC 通讯偶发读不到数据，你会怎么排查？", "", true);
+    expect(result.isQuestion).toBe(true);
+    expect(result.score.finalScore).toBeGreaterThanOrEqual(0.85);
+  });
 });
 

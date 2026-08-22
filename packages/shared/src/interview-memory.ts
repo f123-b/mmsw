@@ -1,3 +1,5 @@
+import { normalizeTechnicalTerms } from "./terminology";
+
 export interface InterviewMemoryTurn {
   question: string;
   answer?: string;
@@ -16,14 +18,14 @@ export interface InterviewMemorySnapshot {
 }
 
 function normalize(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
+  return normalizeTechnicalTerms(text);
 }
 
 function inferTopic(text: string): string | undefined {
   const candidates: Array<[RegExp, string]> = [
     [/FOC|电流环|电压环|SVPWM|Clarke|Park/i, "电机控制/FOC"],
     [/DMA|中断|采样|PWM/i, "实时采样与中断"],
-    [/CAN|SPI|I2C|UART|串口|总线|通信/i, "嵌入式通信"],
+    [/CAN|IIC|I2C|SPI|UART|串口|总线|通信/i, "嵌入式通信"],
     [/RTOS|任务|线程|调度|并发/i, "实时系统与并发"],
     [/SQLite|数据库|RAG|知识库|向量|Embedding/i, "数据与知识库"],
     [/架构|模块|系统设计|部署|服务/i, "系统架构"]
@@ -100,6 +102,6 @@ export class InterviewMemory {
 }
 
 function extractEntities(text: string): string[] {
-  const known = ["FOC", "DMA", "PWM", "CAN", "UART", "SPI", "I2C", "RTOS", "SQLite", "RAG", "ASR", "VAD", "SVPWM", "Clarke", "Park", "编码器", "电流环", "速度环"];
+  const known = ["FOC", "DMA", "PWM", "CAN", "UART", "SPI", "IIC", "I2C", "RTOS", "SQLite", "RAG", "ASR", "VAD", "SVPWM", "Clarke", "Park", "编码器", "电流环", "速度环"];
   return known.filter((entity) => text.toLowerCase().includes(entity.toLowerCase()));
 }

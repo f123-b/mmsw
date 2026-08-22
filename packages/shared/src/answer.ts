@@ -1,12 +1,27 @@
 import type { InterviewMemorySnapshot } from "./interview-memory";
 import { AnswerQualityChecker, type AnswerQualityResult } from "./answer/answer-quality-checker";
 import { InterviewAnswerFormatter } from "./answer/interview-answer-formatter";
+import { normalizeTechnicalTerms } from "./terminology";
 
 export type AnswerMode = "FAST" | "NORMAL" | "DEEP";
+
+export type AnswerQuestionKind =
+  | "technical"
+  | "concept"
+  | "comparison"
+  | "system-design"
+  | "troubleshooting"
+  | "code"
+  | "project"
+  | "behavioral"
+  | "follow-up"
+  | "clarification";
 
 export interface AnswerQuestion {
   id: string;
   text: string;
+  /** Optional detector hint. The answer router still validates it from text. */
+  kind?: AnswerQuestionKind;
 }
 
 export interface AnswerSkillContext {
@@ -19,9 +34,11 @@ export interface AnswerSkillContext {
 export interface AnswerContextInput {
   profileSummary?: string;
   jobDescriptionSummary?: string;
+  profileInstructions?: string;
   skills?: AnswerSkillContext[];
   experienceContext?: string[];
   retrievedKnowledge?: string[];
+  preparedAnswer?: { content: string; score: number; verified: boolean; source?: string };
   recentTranscript?: string[];
   interviewMemory?: InterviewMemorySnapshot;
 }
@@ -29,16 +46,49 @@ export interface AnswerContextInput {
 export interface ContextPack {
   profileSummary?: string;
   jobDescriptionSummary?: string;
+  profileInstructions?: string;
   skills: AnswerSkillContext[];
   experienceContext: string[];
   retrievedKnowledge: string[];
+  preparedAnswer?: { content: string; score: number; verified: boolean; source?: string };
   recentTranscript: string[];
   interviewMemory?: InterviewMemorySnapshot;
 }
 
+const ANSWER_KIND_HINTS: Record<string, AnswerQuestionKind> = {
+  technical: "technical",
+  project: "project",
+  behavior: "behavioral",
+  behavioral: "behavioral",
+  follow_up: "follow-up",
+  "follow-up": "follow-up",
+  clarification: "clarification"
+};
+
+/** Routes a question to a response strategy instead of using one universal template. */
+export function classifyAnswerQuestion(text: string, hint?: string): AnswerQuestionKind {
+  const normalized = normalizeTechnicalTerms(text);
+  if (hint && ANSWER_KIND_HINTS[hint]) return ANSWER_KIND_HINTS[hint];
+  if (/代码|编程|手写|实现一个|写一个|补全|伪代码|算法题|时间复杂度|空间复杂度|输出结果|leetcode|debug|修复这段|code\b/i.test(normalized)) return "code";
+  if (/系统设计|架构设计|设计一个系统|高并发|可扩展|容灾|降级|限流|服务拆分|数据库设计|缓存设计|消息队列/.test(normalized)) return "system-design";
+  if (/区别|对比|比较|优缺点|取舍|权衡|为什么不用|选型|差异/.test(normalized)) return "comparison";
+  if (/排查|定位|故障|报错|异常|线上问题|怎么解决|如何解决|怎么验证|监控|告警/.test(normalized)) return "troubleshooting";
+  if (/团队|冲突|压力|困难|失败|沟通|协作|领导|决策|优势|缺点|成长/.test(normalized) && /你|我|经历|遇到|如何/.test(normalized)) return "behavioral";
+  if (/项目|负责|主导|经历|做过|落地|交付|简历|成果|业绩/.test(normalized)) return "project";
+  if (/上一题|刚才|继续|具体一点|展开|那如果|然后|还有/.test(normalized) && normalized.length < 34) return "follow-up";
+  if (/具体一点|什么意思|没听清|再说一遍|能展开|详细一点|指的是|怎么理解/.test(normalized)) return "clarification";
+  if (/什么是|原理|定义|作用|为什么|如何|怎么|怎样|是什么/.test(normalized)) return "concept";
+  return "technical";
+}
+
+function answerTokenBudget(mode: AnswerMode, kind: AnswerQuestionKind): number {
+  if (kind === "code") return mode === "FAST" ? 1_024 : mode === "DEEP" ? 2_400 : 1_600;
+  return mode === "FAST" ? 512 : mode === "DEEP" ? 1_600 : 1_024;
+}
+
 function relevance(question: string, skill: AnswerSkillContext): number {
-  const tokens = question.toLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/i).filter(Boolean);
-  const content = `${skill.name} ${skill.content}`.toLowerCase();
+  const tokens = normalizeTechnicalTerms(question).toLowerCase().match(/[a-z0-9+#]+|[\u4e00-\u9fff]{2,}/gi) ?? [];
+  const content = normalizeTechnicalTerms(`${skill.name} ${skill.content}`).toLowerCase();
   return tokens.filter((token) => content.includes(token)).length / Math.max(1, tokens.length);
 }
 
@@ -46,6 +96,7 @@ export class ContextRouter {
   route(question: string, input: AnswerContextInput = {}): ContextPack {
     const skills = (input.skills ?? [])
       .map((skill) => ({ ...skill, relevance: skill.relevance ?? relevance(question, skill) }))
+      .filter((skill) => (skill.relevance ?? 0) > 0)
       .sort((left, right) => (right.relevance ?? 0) - (left.relevance ?? 0))
       .slice(0, 3);
     let transcriptBudget = 2_400;
@@ -57,9 +108,11 @@ export class ContextRouter {
     return {
       profileSummary: input.profileSummary,
       jobDescriptionSummary: input.jobDescriptionSummary,
+      profileInstructions: input.profileInstructions,
       skills,
       experienceContext: (input.experienceContext ?? []).slice(0, 5),
       retrievedKnowledge: (input.retrievedKnowledge ?? []).slice(0, 6),
+      preparedAnswer: input.preparedAnswer,
       recentTranscript,
       interviewMemory: input.interviewMemory
     };
@@ -73,13 +126,16 @@ export interface PromptSection {
 
 export class PromptBuilder {
   build(question: AnswerQuestion, mode: AnswerMode, context: ContextPack): PromptSection[] {
+    const kind = classifyAnswerQuestion(question.text, question.kind);
     const sections: PromptSection[] = [
-      { name: "system/base", content: "你是实时面试辅助。回答必须真实、直接、便于快速阅读，不得虚构用户经历。" },
-      { name: "interview-style", content: `回答模式：${mode}。${new InterviewAnswerFormatter().instructions(mode)}` }
+      { name: "system/base", content: "你是实时面试辅助。先判断题型，再按题型回答。回答必须真实、直接、便于快速阅读；只有问题明确要求个人经历时才使用项目经历，严禁虚构用户经历。" },
+      { name: "interview-style", content: `题型：${kind}。回答模式：${mode}。${new InterviewAnswerFormatter().instructions(mode, kind)}` }
     ];
-    if (context.profileSummary || context.jobDescriptionSummary) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary].filter(Boolean).join("\n") });
+    const experienceRequested = ["project", "behavioral", "follow-up", "clarification"].includes(kind)
+      || /项目|经历|做过|负责|简历|实际|结合.*经验/.test(question.text);
+    if (context.profileSummary || context.jobDescriptionSummary || context.profileInstructions) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary, context.profileInstructions ? `候选人回答偏好：${context.profileInstructions}` : ""].filter(Boolean).join("\n") });
     if (context.skills.length > 0) sections.push({ name: "skill-context", content: context.skills.map((skill) => `${skill.name}: ${skill.content}`).join("\n") });
-    if (context.experienceContext.length > 0) sections.push({ name: "experience-context", content: `优先使用以下真实经历素材，不能补写未出现的事实：\n${context.experienceContext.join("\n---\n")}` });
+    if (experienceRequested && context.experienceContext.length > 0) sections.push({ name: "experience-context", content: `以下是真实经历素材。只使用与问题直接相关的内容，不能补写未出现的事实：\n${context.experienceContext.join("\n---\n")}` });
     if (context.retrievedKnowledge.length > 0) sections.push({ name: "retrieval-context", content: context.retrievedKnowledge.join("\n---\n") });
     if (context.recentTranscript.length > 0) sections.push({ name: "recent-transcript", content: `最近必要对话：\n${context.recentTranscript.join("\n")}` });
     if (context.interviewMemory) {
@@ -88,13 +144,28 @@ export class PromptBuilder {
       sections.push({ name: "interview-memory", content: [`当前主题：${memory.currentTopic || "未确定"}`, turns].filter(Boolean).join("\n") });
     }
     sections.push({ name: "question", content: question.text });
-    const length = mode === "FAST" ? "30-80" : mode === "DEEP" ? "150-250" : "80-150";
-    sections.push({ name: "output-format", content: `输出中文面试口述答案，控制在 ${length} 字左右。结构为：第一句直接回答；第二部分结合真实项目；第三部分补充优化或总结。不要写标题、编号或百科解释。` });
+    const length = kind === "code"
+      ? mode === "FAST" ? "先给最小可运行代码和一句解释" : "完整代码、关键解释、复杂度和边界情况"
+      : mode === "FAST" ? "30-80" : mode === "DEEP" ? "150-250" : "80-150";
+    const strategy = {
+      code: "先说明思路，再给完整代码块（题目未指定语言时默认 C++17），然后解释关键行、时间/空间复杂度和边界情况；代码不要只写片段，也不要声称来自候选人的项目。",
+      "system-design": "按需求和约束、整体架构、核心链路、数据一致性/稳定性、扩展性和权衡回答；只有明确问到项目时才引用项目。",
+      comparison: "先给结论，再按核心差异、适用场景、优缺点和选型依据对比，不要强行加入项目经历。",
+      troubleshooting: "按现象、可能原因、定位步骤、修复方案和验证方式回答；不要把排查方案包装成候选人已经做过的经历。",
+      project: "只使用提供的简历、项目和面试素材，按背景、个人职责、关键难点、结果和复盘回答；资料没有的内容明确说没有证据。",
+      behavioral: "使用真实经历回答，按情境、任务、行动、结果和反思组织；没有对应经历就说明资料不足，不要编造。",
+      "follow-up": "承接上一轮上下文，只补充面试官追问的新增信息，不重复整段答案。",
+      clarification: "先直接解释被追问的概念，再用一个简短例子说明。",
+      concept: "先给定义或结论，再解释原理、关键点和常见误区；不要为了显得个性化而硬塞项目经历。",
+      technical: "直接回答技术问题，再补充关键依据、风险或验证方式；只有问题明确要求时才引用项目。"
+    }[kind];
+    sections.push({ name: "output-format", content: kind === "code" ? `${strategy} 保证答案完整，不要在代码或解释中途截断。` : `回答长度或结构：${length}。${strategy} 不要写“首先/其次/最后”的模板化标题，不要百科式展开。` });
     return sections;
   }
 }
 
 export type ModelRoute = "fast" | "normal" | "reasoning" | "vision" | "low-latency";
+export type ModelSnapshot = Partial<Record<ModelRoute, string>> & { fallback?: string };
 
 export interface ModelSelection {
   route: ModelRoute;
@@ -102,15 +173,21 @@ export interface ModelSelection {
 }
 
 export class ModelRouter {
-  constructor(private readonly models: Partial<Record<ModelRoute, string>> = {}, private readonly fallbackModel = "") {}
+  constructor(private readonly models: Partial<Record<ModelRoute, string>> = {}, private fallbackModel = "") {}
 
   setModels(models: Partial<Record<ModelRoute, string>>): void {
     Object.assign(this.models, models);
   }
 
-  select(question: string, mode: AnswerMode = "NORMAL", hasScreenshot = false): ModelSelection {
+  setFallbackModel(model: string): void { this.fallbackModel = model; }
+
+  snapshot(): ModelSnapshot { return { ...this.models, fallback: this.fallbackModel }; }
+
+  select(question: string, mode: AnswerMode = "NORMAL", hasScreenshot = false, override?: ModelSnapshot): ModelSelection {
     const route: ModelRoute = hasScreenshot ? "vision" : mode === "FAST" ? "fast" : mode === "DEEP" ? "reasoning" : "normal";
-    return { route, model: this.models[route] ?? (route === "normal" ? this.models["low-latency"] : undefined) ?? this.fallbackModel };
+    const models = override ?? this.models;
+    const fallback = override?.fallback ?? this.fallbackModel;
+    return { route, model: models[route] ?? (route === "normal" ? models["low-latency"] : undefined) ?? fallback };
   }
 }
 
@@ -119,16 +196,43 @@ export interface AnswerProviderRequest {
   sections: PromptSection[];
   attachments?: Array<{ mimeType: string; dataUrl: string }>;
   thinking?: boolean;
+  /** Provider-side output budget. Prevents default server limits cutting an answer off. */
+  maxOutputTokens?: number;
+  /** Optional per-request retry override. */
+  maxRetries?: number;
 }
 
 export interface AnswerProvider {
   stream(request: AnswerProviderRequest, signal?: AbortSignal): AsyncIterable<string>;
+  /** Optional non-streaming completion path used by the interview UI. */
+  complete?(request: AnswerProviderRequest, signal?: AbortSignal): Promise<string>;
 }
 
 export type AnswerGenerationEvent =
   | { type: "answer_start"; answerId: string; questionId: string; mode: AnswerMode; model: string }
   | { type: "answer_delta"; answerId: string; delta: string }
   | { type: "answer_end"; answerId: string; text: string; quality?: AnswerQualityResult };
+
+export interface AnswerGenerationOptions {
+  hasScreenshot?: boolean;
+  attachments?: Array<{ mimeType: string; dataUrl: string }>;
+  maxOutputTokens?: number;
+  instruction?: string;
+  /** Keep the provider stream internal and emit only the final answer. */
+  directDisplay?: boolean;
+  /** Whether answer_delta events should be exposed to the UI. */
+  emitDeltas?: boolean;
+  /** Repair is intentionally disabled for low-latency live interview answers. */
+  allowQualityRepair?: boolean;
+  /** Preserve the model's completed text instead of rewriting it after generation. */
+  formatAnswer?: boolean;
+  /** Per-request retry override for latency-sensitive calls. */
+  maxRetries?: number;
+  /** Use the configured fast route for ordinary automatic interview questions. */
+  preferFastRoute?: boolean;
+  /** Freeze a model routing snapshot for a running interview session. */
+  modelOverride?: ModelSnapshot;
+}
 
 export class AnswerAgent {
   constructor(
@@ -140,35 +244,60 @@ export class AnswerAgent {
     private readonly qualityChecker = new AnswerQualityChecker()
   ) {}
 
-  async *stream(question: AnswerQuestion, mode: AnswerMode, contextInput: AnswerContextInput = {}, signal?: AbortSignal, options: { hasScreenshot?: boolean; attachments?: Array<{ mimeType: string; dataUrl: string }> } = {}): AsyncGenerator<AnswerGenerationEvent> {
-    const context = this.contextRouter.route(question.text, contextInput);
-    const selection = this.modelRouter.select(question.text, mode, options.hasScreenshot ?? false);
+  getModelSnapshot(): ModelSnapshot { return this.modelRouter.snapshot(); }
+
+  async *stream(question: AnswerQuestion, mode: AnswerMode, contextInput: AnswerContextInput = {}, signal?: AbortSignal, options: AnswerGenerationOptions = {}): AsyncGenerator<AnswerGenerationEvent> {
+    const routedQuestion = { ...question, text: normalizeTechnicalTerms(question.text) };
+    const context = this.contextRouter.route(routedQuestion.text, contextInput);
+    const kind = classifyAnswerQuestion(routedQuestion.text, routedQuestion.kind);
+    let selection = this.modelRouter.select(routedQuestion.text, mode, options.hasScreenshot ?? false, options.modelOverride);
+    if (options.preferFastRoute && kind !== "code" && !(options.hasScreenshot ?? false)) {
+      const fastSelection = this.modelRouter.select(routedQuestion.text, "FAST", false, options.modelOverride);
+      if (fastSelection.model) selection = fastSelection;
+    }
     if (!selection.model) throw new Error(`No model configured for ${selection.route}`);
     const provider = this.providers[selection.route] ?? (selection.route === "normal" ? this.providers["low-latency"] : undefined);
     if (!provider) throw new Error(`No AnswerProvider configured for ${selection.route}`);
     const answerId = `answer-${Date.now()}-${question.id}`;
-    const sections = this.promptBuilder.build(question, mode, context);
-    yield { type: "answer_start", answerId, questionId: question.id, mode, model: selection.model };
+    const sections = this.promptBuilder.build(routedQuestion, mode, context);
+    if (options.instruction?.trim()) sections.push({ name: "output-format", content: options.instruction.trim() });
+    yield { type: "answer_start", answerId, questionId: routedQuestion.id, mode, model: selection.model };
+    const providerRequest: AnswerProviderRequest = {
+      model: selection.model,
+      sections,
+      attachments: options.attachments,
+      thinking: mode === "DEEP",
+      maxOutputTokens: options.maxOutputTokens ?? answerTokenBudget(mode, kind),
+      maxRetries: options.maxRetries
+    };
     let text = "";
-    for await (const delta of provider.stream({ model: selection.model, sections, attachments: options.attachments, thinking: mode === "DEEP" }, signal)) {
-      if (!delta) continue;
-      text += delta;
-      yield { type: "answer_delta", answerId, delta };
+    if (options.directDisplay && provider.complete) {
+      text = await provider.complete(providerRequest, signal);
+    } else {
+      for await (const delta of provider.stream(providerRequest, signal)) {
+        if (!delta) continue;
+        text += delta;
+        if (options.emitDeltas !== false && !options.directDisplay) yield { type: "answer_delta", answerId, delta };
+      }
     }
-    let formattedText = this.formatter.format(text, mode);
+    let formattedText = options.formatAnswer === false ? text.trim() : this.formatter.format(text, mode, kind);
     const groundingText = [context.profileSummary, context.jobDescriptionSummary, ...context.skills.map((skill) => skill.content), ...context.experienceContext, ...context.retrievedKnowledge].filter(Boolean).join("\n");
-    let quality = this.qualityChecker.check({ question: question.text, answer: formattedText, mode, groundingText });
+    let quality = this.qualityChecker.check({ question: routedQuestion.text, answer: formattedText, mode, kind, groundingText });
     // Repair only when grounded profile material exists. This keeps the
     // realtime path low-latency for generic answers while preventing a
     // clearly poor or ungrounded answer from being shown as final.
-    if (quality.needsRepair && groundingText.trim()) {
+    if (options.allowQualityRepair !== false && quality.needsRepair && groundingText.trim()) {
       let repaired = "";
       for await (const delta of provider.stream({
         model: selection.model,
-        sections: [...sections, { name: "output-format", content: `请修正上一版答案：只保留有证据的项目经历，改成第一人称自然口语，直接回答问题，控制在 ${mode === "FAST" ? "30-80" : mode === "DEEP" ? "150-250" : "80-150"} 字。只输出修正后的答案。` }]
+        sections: [...sections, { name: "output-format", content: `请修正上一版答案：${kind === "project" || kind === "behavioral" ? "只保留有证据的个人经历" : "不要强行添加项目经历"}，直接回答问题，保留代码题的完整代码和解释，不要在中途截断。只输出修正后的答案。` }],
+        attachments: options.attachments,
+        thinking: mode === "DEEP",
+        maxOutputTokens: options.maxOutputTokens ?? answerTokenBudget(mode, kind),
+        maxRetries: options.maxRetries
       }, signal)) repaired += delta;
-      const repairedText = this.formatter.format(repaired, mode);
-      const repairedQuality = this.qualityChecker.check({ question: question.text, answer: repairedText, mode, groundingText });
+      const repairedText = this.formatter.format(repaired, mode, kind);
+      const repairedQuality = this.qualityChecker.check({ question: routedQuestion.text, answer: repairedText, mode, kind, groundingText });
       if (repairedText && repairedQuality.score >= quality.score) {
         formattedText = repairedText;
         quality = repairedQuality;
@@ -191,8 +320,13 @@ export class StableAnswerStateMachine {
 
   get snapshot(): StableAnswerSnapshot { return { ...this.value }; }
 
+  reset(): StableAnswerSnapshot {
+    this.value = { displayedText: "", pendingText: "", streaming: false };
+    return this.snapshot;
+  }
+
   start(answerId: string): StableAnswerSnapshot {
-    this.value = { ...this.value, pendingAnswerId: answerId, pendingText: "", streaming: true };
+    this.value = { displayedText: "", displayedAnswerId: undefined, pendingAnswerId: answerId, pendingText: "", streaming: true };
     return this.snapshot;
   }
 

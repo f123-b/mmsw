@@ -21,6 +21,13 @@ describe("QuestionDetector", () => {
     expect(detector.flush(13_200)[0]?.type).toBe("question_superseded");
   });
 
+  it("confirms a complete pending question before a new aggregated utterance replaces it", () => {
+    const detector = new QuestionDetector();
+    detector.observe({ text: "如果 IIC 通讯偶发读不到数据，你会怎么排查？", final: true, startMs: 0, endMs: 2_000, utteranceId: "u1" }, 1_000);
+    const events = detector.observe({ text: "那。", final: true, startMs: 2_100, endMs: 2_300, utteranceId: "u2" }, 1_100);
+    expect(events[0]).toMatchObject({ type: "question_confirmed", question: { text: "如果 IIC 通讯偶发读不到数据，你会怎么排查？" } });
+  });
+
   it("emits supersede for a distinct follow-up question", () => {
     const detector = new QuestionDetector();
     detector.observe({ text: "什么是 volatile？", final: true, startMs: 0, endMs: 500 }, 500);
@@ -111,7 +118,9 @@ describe("question scoring", () => {
     "系统原理是通过状态机切换。",
     "我先说明一下原理。",
     "这次优化之后延迟下降了。",
-    "好的，继续"
+    "好的，继续",
+    "尽量用你项目里的例子来说。",
+    "好，下一个问题，中段里。"
   ])("rejects technical statements and bare continuation: %s", (text) => {
     expect(classifyQuestion(text, "面试官：介绍一下你的项目？", true).isQuestion).toBe(false);
   });

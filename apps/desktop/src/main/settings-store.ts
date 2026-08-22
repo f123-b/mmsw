@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { AsrLanguage, AsrProviderType, ProviderSettings } from "@interview-copilot/shared";
 import { APP_DATA_DIRECTORY, type SqliteDatabase } from "./database";
@@ -10,8 +11,22 @@ export interface PublicProviderSettings extends Omit<ProviderSettings, "apiKey">
   hasApiKey: boolean;
 }
 
+export interface PublicLlmModelProfile extends Omit<ProviderSettings, "apiKey"> {
+  id: string;
+  name: string;
+  hasApiKey: boolean;
+}
+
+export interface LlmModelProfileInput extends Omit<ProviderSettings, "apiKey"> {
+  id?: string;
+  name: string;
+  apiKey?: string;
+}
+
 export interface ProviderCenterPublicConfig {
   llm: PublicProviderSettings;
+  llmProfiles: PublicLlmModelProfile[];
+  activeLlmProfileId: string;
   asr: PublicProviderSettings;
   embedding: PublicProviderSettings;
   reranker?: PublicProviderSettings;
@@ -71,10 +86,90 @@ const DEFAULTS: Record<ProviderSection, ProviderSettings> = {
 export class ProviderConfigStore {
   constructor(private readonly database: SqliteDatabase, private readonly secrets: SecretStore, private readonly defaults: Partial<Record<ProviderSection, Partial<ProviderSettings>>> = {}) {}
 
-  get(section: ProviderSection): ProviderSettings {
+  private static readonly llmProfilesKey = "provider.llm.profiles";
+  private static readonly activeLlmProfileKey = "provider.llm.activeProfileId";
+
+  private getStoredProvider(section: ProviderSection): ProviderSettings {
     const stored = this.database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", [`provider.${section}`]);
     const configured = stored ? JSON.parse(stored.value) as Partial<ProviderSettings> : {};
-    const merged = { ...DEFAULTS[section], ...this.defaults[section], ...configured, apiKey: this.secrets.get(`provider.${section}.apiKey`) ?? "" };
+    return { ...DEFAULTS[section], ...this.defaults[section], ...configured, apiKey: this.secrets.get(`provider.${section}.apiKey`) ?? "" };
+  }
+
+  private writeStoredProvider(section: ProviderSection, settings: ProviderSettings): void {
+    const { apiKey: _apiKey, ...safe } = settings;
+    this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [`provider.${section}`, JSON.stringify(safe)]);
+    this.database.flushNow();
+  }
+
+  private readLlmProfiles(): Array<Omit<ProviderSettings, "apiKey"> & { id: string; name: string }> {
+    const stored = this.database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", [ProviderConfigStore.llmProfilesKey]);
+    if (!stored) return [];
+    try {
+      const value = JSON.parse(stored.value) as unknown;
+      if (!Array.isArray(value)) return [];
+      return value.filter((profile): profile is Omit<ProviderSettings, "apiKey"> & { id: string; name: string } => Boolean(profile && typeof profile === "object" && typeof (profile as { id?: unknown }).id === "string" && typeof (profile as { name?: unknown }).name === "string"));
+    } catch {
+      return [];
+    }
+  }
+
+  private writeLlmProfiles(profiles: Array<Omit<ProviderSettings, "apiKey"> & { id: string; name: string }>): void {
+    this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [ProviderConfigStore.llmProfilesKey, JSON.stringify(profiles)]);
+    this.database.flushNow();
+  }
+
+  private readActiveLlmProfileId(): string | undefined {
+    const stored = this.database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", [ProviderConfigStore.activeLlmProfileKey]);
+    if (!stored) return undefined;
+    try {
+      const value = JSON.parse(stored.value);
+      return typeof value === "string" ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private writeActiveLlmProfileId(id: string): void {
+    this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [ProviderConfigStore.activeLlmProfileKey, JSON.stringify(id)]);
+    this.database.flushNow();
+  }
+
+  private profileSecretKey(id: string): string { return `provider.llm.profile.${id}.apiKey`; }
+
+  private profileSettings(profile: Omit<ProviderSettings, "apiKey"> & { id: string; name: string }): ProviderSettings {
+    return { ...profile, apiKey: this.secrets.get(this.profileSecretKey(profile.id)) ?? "" };
+  }
+
+  private publicLlmProfile(profile: Omit<ProviderSettings, "apiKey"> & { id: string; name: string }): PublicLlmModelProfile {
+    const { apiKey: _apiKey, ...safe } = this.profileSettings(profile);
+    return { id: profile.id, name: profile.name, ...safe, hasApiKey: Boolean(this.secrets.get(this.profileSecretKey(profile.id)) ?? "") };
+  }
+
+  private ensureLlmProfiles(): { profiles: Array<Omit<ProviderSettings, "apiKey"> & { id: string; name: string }>; activeId: string } {
+    let profiles = this.readLlmProfiles();
+    if (profiles.length === 0) {
+      const current = this.getStoredProvider("llm");
+      const { apiKey: _apiKey, ...safe } = current;
+      const id = "llm-profile-default";
+      profiles = [{ id, name: "默认模型配置", ...safe }];
+      this.writeLlmProfiles(profiles);
+      if (current.apiKey) this.secrets.set(this.profileSecretKey(id), current.apiKey);
+      this.writeActiveLlmProfileId(id);
+    }
+    const storedActiveId = this.readActiveLlmProfileId();
+    const activeId = profiles.some((profile) => profile.id === storedActiveId) ? storedActiveId as string : profiles[0].id;
+    if (activeId !== storedActiveId) this.writeActiveLlmProfileId(activeId);
+    return { profiles, activeId };
+  }
+
+  get(section: ProviderSection): ProviderSettings {
+    if (section === "llm") {
+      const profiles = this.readLlmProfiles();
+      const activeId = this.readActiveLlmProfileId();
+      const activeProfile = profiles.find((profile) => profile.id === activeId) ?? profiles[0];
+      if (activeProfile) return this.profileSettings(activeProfile);
+    }
+    const merged = this.getStoredProvider(section);
     if (section !== "asr") return merged;
     const providerName = merged.providerName.toLowerCase();
     const providerType = (merged.providerType ?? (providerName.includes("custom") ? "custom-gateway" : providerName.includes("fun-asr") || providerName.includes("funasr") || providerName.includes("本地") ? "funasr-local" : providerName.includes("qwen") || providerName.includes("千问") ? "qwen" : "deepgram")) as AsrProviderType;
@@ -83,17 +178,30 @@ export class ProviderConfigStore {
   }
 
   getPublic(): ProviderCenterPublicConfig {
+    const { profiles, activeId } = this.ensureLlmProfiles();
     const publicSettings = (section: ProviderSection): PublicProviderSettings => {
       const value = this.get(section);
       const { apiKey: _apiKey, ...safe } = value;
       return { ...safe, hasApiKey: Boolean(value.apiKey) };
     };
-    return { llm: publicSettings("llm"), asr: publicSettings("asr"), embedding: publicSettings("embedding"), reranker: publicSettings("reranker") };
+    return { llm: publicSettings("llm"), llmProfiles: profiles.map((profile) => this.publicLlmProfile(profile)), activeLlmProfileId: activeId, asr: publicSettings("asr"), embedding: publicSettings("embedding"), reranker: publicSettings("reranker") };
   }
 
   update(section: ProviderSection, input: Partial<ProviderSettings>): PublicProviderSettings {
     const current = this.get(section);
     const next = { ...current, ...input };
+    if (section === "llm") {
+      const { profiles, activeId } = this.ensureLlmProfiles();
+      const activeProfile = profiles.find((profile) => profile.id === activeId) ?? profiles[0];
+      const { apiKey: _apiKey, ...safe } = next;
+      this.writeLlmProfiles(profiles.map((profile) => profile.id === activeProfile.id ? { ...profile, ...safe } : profile));
+      if (input.apiKey !== undefined) {
+        if (input.apiKey) this.secrets.set(this.profileSecretKey(activeProfile.id), input.apiKey);
+        else this.secrets.delete(this.profileSecretKey(activeProfile.id));
+      }
+      this.writeStoredProvider(section, next);
+      return { ...safe, hasApiKey: Boolean(next.apiKey) };
+    }
     if (input.apiKey !== undefined) {
       if (input.apiKey) this.secrets.set(`provider.${section}.apiKey`, input.apiKey);
       else this.secrets.delete(`provider.${section}.apiKey`);
@@ -102,6 +210,49 @@ export class ProviderConfigStore {
     this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [`provider.${section}`, JSON.stringify(safe)]);
     this.database.flushNow();
     return { ...safe, hasApiKey: Boolean(next.apiKey) };
+  }
+
+  saveLlmProfile(input: LlmModelProfileInput): ProviderCenterPublicConfig {
+    const { profiles } = this.ensureLlmProfiles();
+    const id = input.id?.trim() || `llm-profile-${randomUUID()}`;
+    const existing = profiles.find((profile) => profile.id === id);
+    const seed = existing ? this.profileSettings(existing) : { ...DEFAULTS.llm, ...this.defaults.llm, apiKey: "" };
+    const { id: _id, name: rawName, apiKey, ...settings } = input;
+    const nextSettings = { ...seed, ...settings };
+    const { apiKey: _apiKey, ...safe } = nextSettings;
+    const nextProfile = { id, name: rawName.trim() || "未命名模型配置", ...safe };
+    this.writeLlmProfiles(existing ? profiles.map((profile) => profile.id === id ? nextProfile : profile) : [...profiles, nextProfile]);
+    if (apiKey !== undefined) {
+      if (apiKey) this.secrets.set(this.profileSecretKey(id), apiKey);
+      else this.secrets.delete(this.profileSecretKey(id));
+    }
+    this.writeActiveLlmProfileId(id);
+    this.writeStoredProvider("llm", { ...nextSettings, apiKey: apiKey ?? (existing ? this.secrets.get(this.profileSecretKey(id)) ?? "" : "") });
+    return this.getPublic();
+  }
+
+  activateLlmProfile(id: string): ProviderCenterPublicConfig {
+    const { profiles } = this.ensureLlmProfiles();
+    const profile = profiles.find((item) => item.id === id);
+    if (!profile) throw new Error("LLM_PROFILE_NOT_FOUND: 模型配置不存在");
+    const settings = this.profileSettings(profile);
+    this.writeActiveLlmProfileId(id);
+    this.writeStoredProvider("llm", settings);
+    if (settings.apiKey) this.secrets.set("provider.llm.apiKey", settings.apiKey);
+    else this.secrets.delete("provider.llm.apiKey");
+    return this.getPublic();
+  }
+
+  deleteLlmProfile(id: string): ProviderCenterPublicConfig {
+    const { profiles, activeId } = this.ensureLlmProfiles();
+    if (profiles.length <= 1) throw new Error("LLM_PROFILE_REQUIRED: 至少保留一个模型配置");
+    const nextProfiles = profiles.filter((profile) => profile.id !== id);
+    if (nextProfiles.length === profiles.length) throw new Error("LLM_PROFILE_NOT_FOUND: 模型配置不存在");
+    this.writeLlmProfiles(nextProfiles);
+    this.secrets.delete(this.profileSecretKey(id));
+    const nextActiveId = activeId === id ? nextProfiles[0].id : activeId;
+    this.writeActiveLlmProfileId(nextActiveId);
+    return this.activateLlmProfile(nextActiveId);
   }
 }
 

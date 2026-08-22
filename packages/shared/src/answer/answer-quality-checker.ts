@@ -1,4 +1,4 @@
-import type { AnswerMode } from "../answer";
+import type { AnswerMode, AnswerQuestionKind } from "../answer";
 import { ANSWER_LENGTH_POLICY } from "./interview-answer-formatter";
 
 export interface AnswerQualityResult {
@@ -12,6 +12,7 @@ export interface AnswerQualityInput {
   question: string;
   answer: string;
   mode: AnswerMode;
+  kind?: AnswerQuestionKind;
   groundingText?: string;
 }
 
@@ -20,13 +21,14 @@ export class AnswerQualityChecker {
   check(input: AnswerQualityInput): AnswerQualityResult {
     const issues: string[] = [];
     const suggestions: string[] = [];
-    const policy = ANSWER_LENGTH_POLICY[input.mode];
+    const kind = input.kind ?? "technical";
+    const policy = kind === "code" ? { min: 80, max: 3_200 } : ANSWER_LENGTH_POLICY[input.mode];
     const answer = input.answer.trim();
     const grounding = `${input.groundingText || ""} ${input.question}`.toLowerCase();
     let score = 1;
     if (answer.length < policy.min && input.mode !== "FAST") {
       issues.push("answer-too-short");
-      suggestions.push(`补充到约 ${policy.min}~${policy.max} 字，并加入一条项目细节`);
+      suggestions.push(`补充到约 ${policy.min}~${policy.max} 字，补足题型要求的关键内容`);
       score -= 0.18;
     }
     if (answer.length > policy.max) {
@@ -34,7 +36,7 @@ export class AnswerQualityChecker {
       suggestions.push(`压缩到约 ${policy.min}~${policy.max} 字`);
       score -= 0.2;
     }
-    if (!/(我|我们|我会|我一般|在项目中|我的)/.test(answer)) {
+    if ((kind === "project" || kind === "behavioral") && !/(我|我们|我会|我一般|在项目中|我的)/.test(answer)) {
       issues.push("not-first-person");
       suggestions.push("改成候选人口吻，使用第一人称直接回答");
       score -= 0.16;

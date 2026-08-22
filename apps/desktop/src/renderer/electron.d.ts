@@ -5,13 +5,14 @@ import type { RealtimeServerMessage } from "@interview-copilot/protocol";
 import type { RealtimeConnectOptions } from "../main/realtime-session";
 import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
+import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
-import type { Profile, ProfileInput, ProviderSettings } from "@interview-copilot/shared";
-import type { ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, ProfileBuilderArtifactRecord, ProjectRecord } from "../main/database";
+import type { KnowledgeDocumentType, Profile, ProfileInput, ProviderSettings, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
+import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
+import type { ConversationMessageRecord, ConversationRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 
 declare global {
@@ -32,6 +33,8 @@ declare global {
         showAll(): Promise<boolean>;
         hideAll(): Promise<boolean>;
         toggleAll(): Promise<boolean>;
+        toggleTranscript(): Promise<boolean>;
+        toggleAnswer(): Promise<boolean>;
         resetLayout(): Promise<boolean>;
         toggleShortcuts(): Promise<boolean>;
         getState(): Promise<HUDState | undefined>;
@@ -66,6 +69,13 @@ declare global {
         setAutomationMode(mode: "MANUAL" | "AUTO"): Promise<boolean>;
         setAnswerMode(mode: "FAST" | "NORMAL" | "DEEP"): Promise<boolean>;
       };
+      writtenTest: {
+        start(options: WrittenTestStartOptions): Promise<boolean>;
+        stop(): Promise<boolean>;
+        answerScreenshot(): Promise<void>;
+        getState(): Promise<WrittenTestState>;
+        setAnswerMode(mode: "FAST" | "NORMAL" | "DEEP"): Promise<boolean>;
+      };
       chat: {
         createConversation(input: { profileId?: string; projectId?: string; title?: string }): Promise<ConversationRecord>;
         listConversations(profileId?: string): Promise<ConversationRecord[]>;
@@ -92,6 +102,9 @@ declare global {
       settings: {
         get(): Promise<ProviderCenterPublicConfig | undefined>;
         update(section: ProviderSection, input: Partial<ProviderSettings>): Promise<PublicProviderSettings | undefined>;
+        saveLlmProfile(input: LlmModelProfileInput): Promise<ProviderCenterPublicConfig | undefined>;
+        activateLlmProfile(profileId: string): Promise<ProviderCenterPublicConfig | undefined>;
+        deleteLlmProfile(profileId: string): Promise<ProviderCenterPublicConfig | undefined>;
         testConnection(section: ProviderSection): Promise<ProviderCheckResult>;
         preflight(checkReachability?: boolean): Promise<ProviderPreflightResult>;
       };
@@ -106,10 +119,28 @@ declare global {
         createBase(name: string): Promise<{ id: string; name: string; createdAt: number; updatedAt: number } | undefined>;
         renameBase(knowledgeBaseId: string, name: string): Promise<{ id: string; name: string; createdAt: number; updatedAt: number } | undefined>;
         deleteBase(knowledgeBaseId: string): Promise<boolean>;
-        listDocuments(knowledgeBaseId?: string): Promise<Array<{ id: string; knowledgeBaseId: string; filename: string; mimeType: string; status: string; error?: string }>>;
-        ingest(input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array }): Promise<unknown>;
+        listDocuments(knowledgeBaseId?: string): Promise<Array<{ id: string; knowledgeBaseId: string; filename: string; mimeType: string; documentType: KnowledgeDocumentType; status: string; error?: string }>>;
+        ingest(input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array; documentType?: KnowledgeDocumentType | "auto" }): Promise<unknown>;
+        updateType(documentId: string, documentType: KnowledgeDocumentType): Promise<unknown>;
         delete(documentId: string): Promise<boolean>;
         reindex(documentId: string): Promise<unknown>;
+      };
+      questionBank: {
+        list(options?: { search?: string; type?: QuestionBankType; limit?: number }): Promise<QuestionBankQuestionRecord[]>;
+        get(questionId: string): Promise<QuestionBankQuestionRecord | undefined>;
+        saveQuestion(input: QuestionBankQuestionInput): Promise<QuestionBankQuestionRecord | undefined>;
+        deleteQuestion(questionId: string): Promise<boolean>;
+        saveAnswer(input: QuestionBankAnswerCardInput): Promise<QuestionBankAnswerCardRecord | undefined>;
+        deleteAnswer(answerCardId: string): Promise<boolean>;
+        listSkills(search?: string): Promise<QuestionBankSkillRecord[]>;
+        saveSkill(input: QuestionBankSkillInput): Promise<QuestionBankSkillRecord | undefined>;
+        saveSkillPoint(input: QuestionBankSkillPointInput): Promise<unknown>;
+        linkSkill(questionId: string, skillId: string): Promise<boolean>;
+        listJobs(): Promise<QuestionBankJobProfileRecord[]>;
+        saveJob(input: QuestionBankJobProfileInput): Promise<QuestionBankJobProfileRecord | undefined>;
+        importText(input: { text: string; filename?: string; includeProject?: boolean; includeBehavioral?: boolean }): Promise<QuestionBankImportResult | undefined>;
+        generateAnswers(input?: { questionIds?: string[]; onlyUnanswered?: boolean }): Promise<QuestionBankAnswerGenerationResult>;
+        match(text: string): Promise<{ question: QuestionBankQuestionRecord; score: number; exact: boolean } | undefined>;
       };
       history: {
         list(): Promise<Array<{ id: string; profileId: string; startedAt: number; endedAt?: number; status: string; language: string; automationMode: string; createdAt: number }>>;
@@ -147,12 +178,14 @@ declare global {
         onQuestion(listener: (event: QuestionEvent) => void): () => void;
         onAutomationMode(listener: (mode: "MANUAL" | "AUTO") => void): () => void;
         onAnswerMode(listener: (mode: "FAST" | "NORMAL" | "DEEP") => void): () => void;
+        onWrittenTestState(listener: (state: WrittenTestState) => void): () => void;
         onPreparationEvent(listener: (event: unknown) => void): () => void;
         onChatMessageStart(listener: (event: unknown) => void): () => void;
         onChatMessageDelta(listener: (event: unknown) => void): () => void;
         onChatMessageEnd(listener: (event: unknown) => void): () => void;
         onChatError(listener: (event: unknown) => void): () => void;
         onProfileBuilderUpdated(listener: (event: ProfileBuilderArtifactRecord) => void): () => void;
+        onQuestionBankAnswerGenerationProgress(listener: (event: { status: "started" | "running" | "completed"; total: number; completed: number; generated: number; skipped: number; failed: number; questionId?: string; error?: string }) => void): () => void;
       };
     };
   }

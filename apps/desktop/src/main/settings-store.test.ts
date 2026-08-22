@@ -56,6 +56,41 @@ describe("ProviderConfigStore", () => {
       database.close();
     }
   });
+
+  it("saves independent LLM profiles and switches the active model with its API key", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const config = new ProviderConfigStore(database, new MemorySecretStore());
+      const first = config.saveLlmProfile({ name: "小米 Mimo", providerName: "Xiaomi", baseUrl: "https://mimo.test/v1", model: "mimo-pro", fastModel: "mimo-fast", questionRecognitionModel: "mimo-classifier", profileBuilderModel: "mimo-profile", questionBankModel: "mimo-bank", chatModel: "mimo-chat", postInterviewModel: "mimo-review", preparationModel: "mimo-prep", timeoutMs: 30_000, maxRetries: 2, apiKey: "mimo-key" });
+      const mimoProfile = first.llmProfiles.find((profile) => profile.name === "小米 Mimo");
+      expect(mimoProfile).toBeDefined();
+      expect(first.activeLlmProfileId).toBe(mimoProfile?.id);
+      expect(mimoProfile).toMatchObject({ name: "小米 Mimo", model: "mimo-pro", fastModel: "mimo-fast", questionRecognitionModel: "mimo-classifier", profileBuilderModel: "mimo-profile", questionBankModel: "mimo-bank", chatModel: "mimo-chat", postInterviewModel: "mimo-review", preparationModel: "mimo-prep", hasApiKey: true });
+
+      const second = config.saveLlmProfile({ name: "DeepSeek", providerName: "DeepSeek", baseUrl: "https://deepseek.test/v1", model: "deepseek-chat", timeoutMs: 30_000, maxRetries: 2, apiKey: "deepseek-key" });
+      expect(second.llmProfiles).toHaveLength(3);
+      expect(config.get("llm")).toMatchObject({ model: "deepseek-chat", apiKey: "deepseek-key" });
+
+      const switched = config.activateLlmProfile(mimoProfile?.id ?? "");
+      expect(switched.activeLlmProfileId).toBe(mimoProfile?.id);
+      expect(config.get("llm")).toMatchObject({ model: "mimo-pro", apiKey: "mimo-key" });
+      expect(JSON.stringify(switched)).not.toContain("mimo-key");
+      expect(JSON.stringify(switched)).not.toContain("deepseek-key");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("does not allow deleting the last LLM profile", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const config = new ProviderConfigStore(database, new MemorySecretStore());
+      const current = config.getPublic();
+      expect(() => config.deleteLlmProfile(current.activeLlmProfileId)).toThrow("LLM_PROFILE_REQUIRED");
+    } finally {
+      database.close();
+    }
+  });
 });
 
 describe("OverlaySettingsStore", () => {

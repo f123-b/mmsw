@@ -9,10 +9,11 @@ import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, generatePostInterviewAnalysis, HybridKnowledgeRetriever, HybridRetriever, KeywordReranker, LocalQuestionClassifier, ModelRouter, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionDetector2, retrieveProfileExperience, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type PreparationModel, type PreparationModelStep, type ProviderSettings, type QuestionDetectionType, type QuestionSpeechAct } from "@interview-copilot/shared";
+import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, generatePostInterviewAnalysis, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionDetector2, retrieveProfileExperience, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewStartOptions } from "./interview-coordinator";
-import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectRepository, type SqliteDatabase } from "./database";
-import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type ProviderSection } from "./settings-store";
+import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
+import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectRepository, SqliteQuestionBankRepository, type SqliteDatabase } from "./database";
+import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type ProviderSection } from "./settings-store";
 import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnection } from "./provider-preflight";
 import { parseDocument } from "./document-parsers";
 import { SafeLogger } from "./logger";
@@ -138,7 +139,22 @@ const answerProvider: AnswerProvider = {
     return new OpenAICompatibleAnswerProvider(settings).stream(request, signal);
   }
 };
-const answerModelRouter = new ModelRouter(routingModels);
+const answerModelRouter = new ModelRouter(routingModels, configuredModel);
+function applyLlmRouting(settings: Pick<ProviderSettings, "model" | "fastModel" | "normalModel" | "deepModel" | "visionModel" | "fallbackModel">): void {
+  routingModels.fast = settings.fastModel || settings.model;
+  routingModels.normal = settings.normalModel || settings.model;
+  routingModels["low-latency"] = settings.normalModel || settings.model;
+  routingModels.reasoning = settings.deepModel || settings.model;
+  routingModels.vision = settings.visionModel || settings.model;
+  answerModelRouter.setModels(routingModels);
+  answerModelRouter.setFallbackModel(settings.fallbackModel || settings.model);
+}
+
+type LlmTaskModelKey = "questionRecognitionModel" | "profileBuilderModel" | "questionBankModel" | "chatModel" | "postInterviewModel" | "preparationModel";
+type LlmRoleModelKey = "fastModel" | "normalModel" | "deepModel";
+function taskModel(settings: ProviderSettings, task: LlmTaskModelKey, fallback: LlmRoleModelKey): string {
+  return settings[task] || settings[fallback] || settings.model;
+}
 const answerAgent = new AnswerAgent(
   { fast: answerProvider, normal: answerProvider, "low-latency": answerProvider, reasoning: answerProvider, vision: answerProvider },
   answerModelRouter
@@ -152,30 +168,37 @@ const localQuestionClassifier = new LocalQuestionClassifier({
 });
 const questionDetector2 = new QuestionDetector2({
   localClassifier: localQuestionClassifier,
+  // The LLM is only a tie-breaker for medium-confidence utterances. Clear
+  // questions stay on the local/rules path so recognition does not add a
+  // second network request before every live answer.
   llmConfirmer: async (text, contextText) => {
     const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings;
     if (!settings.apiKey) throw new Error("LLM classifier is not configured");
-    const model = settings.fastModel || settings.model || configuredModel;
+    const model = taskModel(settings, "questionRecognitionModel", "fastModel");
     let output = "";
     for await (const delta of answerProvider.stream({
       model,
+      maxOutputTokens: 120,
+      maxRetries: 0,
       sections: [
-        { name: "system/base", content: "你是面试问题分类器。只返回 JSON，不要 Markdown。字段：label（QUESTION、FOLLOW_UP、STATEMENT、SMALL_TALK）、isQuestion（boolean）、confidence（0到1）、type（technical、project、behavior、follow_up、clarification、not_question）、reason。" },
+        { name: "system/base", content: "你是面试语音问题分类器。只返回 JSON，不要 Markdown。字段：label（QUESTION、FOLLOW_UP、STATEMENT、SMALL_TALK、INSTRUCTION、CONTROL）、isQuestion（boolean）、confidence（0到1）、type（technical、project、behavior、follow_up、clarification、not_question）、reason。" },
         { name: "recent-transcript", content: contextText || "无上下文" },
         { name: "question", content: text }
       ]
     })) output += delta;
     const json = output.match(/\{[\s\S]*\}/)?.[0];
     if (!json) throw new Error("LLM classifier returned invalid JSON");
-    const parsed = JSON.parse(json) as { label?: QuestionSpeechAct; isQuestion?: boolean; confidence?: number; type?: QuestionDetectionType; reason?: string };
-    const label = ["QUESTION", "FOLLOW_UP", "STATEMENT", "SMALL_TALK"].includes(parsed.label || "") ? parsed.label : undefined;
-    const type = ["technical", "project", "behavior", "follow_up", "clarification", "not_question"].includes(parsed.type || "") ? parsed.type : undefined;
+    const parsed = JSON.parse(json) as { label?: string; isQuestion?: boolean; confidence?: number; type?: string; reason?: string };
+    const label = ["QUESTION", "FOLLOW_UP", "STATEMENT", "SMALL_TALK", "INSTRUCTION", "CONTROL"].includes(parsed.label || "") ? parsed.label as "QUESTION" | "FOLLOW_UP" | "STATEMENT" | "SMALL_TALK" | "INSTRUCTION" | "CONTROL" : undefined;
+    const type = ["technical", "project", "behavior", "follow_up", "clarification", "not_question"].includes(parsed.type || "") ? parsed.type as "technical" | "project" | "behavior" | "follow_up" | "clarification" | "not_question" : undefined;
     return { isQuestion: Boolean(parsed.isQuestion ?? (label === "QUESTION" || label === "FOLLOW_UP")), confidence: Math.max(0, Math.min(1, Number(parsed.confidence ?? 0))), label, type, reason: parsed.reason };
   }
 });
 let interviewCoordinator: InterviewCoordinator | undefined;
+let writtenTestController: WrittenTestController | undefined;
 let profileRepository: SqliteProfileRepository | undefined;
 let knowledgeRepository: SqliteKnowledgeRepository | undefined;
+let questionBankRepository: SqliteQuestionBankRepository | undefined;
 let historyRepository: SqliteInterviewHistoryRepository | undefined;
 let projectRepository: SqliteProjectRepository | undefined;
 let profileBuilderRepository: SqliteProfileBuilderRepository | undefined;
@@ -191,6 +214,7 @@ let audioLogger: SafeLogger | undefined;
 let realtimeLogger: SafeLogger | undefined;
 let database: SqliteDatabase | undefined;
 let lastInterviewProfileId: string | undefined;
+let questionBankAnswerGeneration: Promise<import("./database").QuestionBankAnswerGenerationResult> | undefined;
 const preloadPath = join(__dirname, "../preload/index.mjs");
 const rendererFile = join(__dirname, "../renderer/index.html");
 const visualSmokeRequested = process.argv.includes("--visual-smoke");
@@ -215,6 +239,7 @@ const shutdownController = new ShutdownController([
   { name: "abort-chat", run: () => chatAbortControllers.forEach((controller) => controller.abort()) },
   { name: "wait-chat", run: async () => { await Promise.allSettled([...chatStreamPromises]); } },
   { name: "stop-interview", run: async () => { await interviewCoordinator?.stop("user"); } },
+  { name: "stop-written-test", run: () => { writtenTestController?.stop(); } },
   { name: "stop-audio", run: async () => { await audioManager.stop(); } },
   { name: "finalize-realtime", run: async () => { if (!interviewCoordinator?.running) await realtimeSession.finalize?.(1_000); } },
   { name: "disconnect-realtime", run: () => realtimeSession.disconnect() },
@@ -426,9 +451,11 @@ async function captureScreenshot(trigger = "screenshot-answer"): Promise<void> {
     const result = await screenshotManager.capturePrimaryDisplay();
     broadcast("screenshot:captured", result);
     broadcast("shortcut", trigger);
-    if (trigger === "screenshot-answer" && interviewCoordinator?.running) {
-      try { await interviewCoordinator.answerScreenshot(result.dataUrl); }
-      finally { await screenshotManager.cleanup(result); }
+    if (trigger === "screenshot-answer" && (interviewCoordinator?.running || writtenTestController?.running)) {
+      try {
+        if (interviewCoordinator?.running) await interviewCoordinator.answerScreenshot(result.dataUrl);
+        else await writtenTestController?.answerScreenshot(result.dataUrl);
+      } finally { await screenshotManager.cleanup(result); }
     }
   } catch (error) {
     broadcast("screenshot:error", userFacingError(error));
@@ -436,11 +463,12 @@ async function captureScreenshot(trigger = "screenshot-answer"): Promise<void> {
   }
 }
 
-async function answerCapturedScreenshot(): Promise<void> {
+async function answerCapturedScreenshot(mode: "interview" | "written-test" = "interview"): Promise<void> {
   const result = await screenshotManager.capturePrimaryDisplay();
   try {
     broadcast("screenshot:captured", result);
-    await coordinator().answerScreenshot(result.dataUrl);
+    if (mode === "written-test") await writtenTestController?.answerScreenshot(result.dataUrl);
+    else await coordinator().answerScreenshot(result.dataUrl);
   } finally {
     await screenshotManager.cleanup(result);
   }
@@ -739,7 +767,7 @@ async function runPostAnalysis(interviewId: string): Promise<void> {
   const settings = providerConfigStore?.get("llm");
   if (!snapshot || !settings?.apiKey || !settings.model || !historyRepository) return;
   try {
-    const analysis = await generatePostInterviewAnalysis(snapshot, answerProvider, settings.model);
+    const analysis = await generatePostInterviewAnalysis(snapshot, answerProvider, taskModel(settings, "postInterviewModel", "normalModel"));
     historyRepository.saveAnalysis(interviewId, analysis);
     broadcast("history:analysis-ready", { interviewId, analysis });
   } catch (error) {
@@ -775,7 +803,7 @@ function chatContext(profileId?: string, userMessage = ""): string {
     profile.jobDescription ? `JD：${profile.jobDescription.rawContent.slice(0, 8_000)}` : "JD：未上传",
     profile.instructions ? `Instructions：${profile.instructions}` : "",
     profile.skills.length ? `Skills：${profile.skills.map((skill) => `${skill.name}: ${skill.description}\n${skill.content}`).join("\n\n")}` : "",
-    retrieved.length ? `相关知识（${providerConfigStore?.get("embedding")?.apiKey ? "Hybrid Retrieval" : "Keyword Retrieval"}）：\n${retrieved.map((chunk) => `${chunk.metadata.filename}: ${chunk.text}`).join("\n\n")}` : "相关知识：无"
+    retrieved.length ? `相关知识（${providerConfigStore?.get("embedding")?.apiKey ? "Hybrid Retrieval" : "Keyword Retrieval"}）：\n${retrieved.map((chunk) => `${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`).join("\n\n")}` : "相关知识：无"
   ].filter(Boolean).join("\n\n");
 }
 
@@ -791,14 +819,15 @@ async function streamChat(conversationId: string, content: string): Promise<void
   }
   const history = buildConversationHistory(conversation.messages);
   const userMessage = conversationRepository.addMessage({ conversationId, role: "user", content, status: "completed" });
-  const assistantMessage = conversationRepository.addMessage({ conversationId, role: "assistant", content: "", status: "streaming", model: settings.model });
+  const selectedModel = taskModel(settings, "chatModel", "normalModel");
+  const assistantMessage = conversationRepository.addMessage({ conversationId, role: "assistant", content: "", status: "streaming", model: selectedModel });
   broadcast("chat:message-start", { conversationId, userMessage, assistantMessage });
   const controller = new AbortController();
   chatAbortControllers.set(conversationId, controller);
   let answer = "";
   try {
     const prompt = `${chatContext(conversation.conversation.profileId, content)}\n\n用户问题：${content}`;
-    for await (const delta of new OpenAICompatibleAnswerProvider(settings).stream({ model: settings.model, sections: [
+    for await (const delta of new OpenAICompatibleAnswerProvider(settings).stream({ model: selectedModel, sections: [
       { name: "system/base", content: "你是 Interview Copilot 面试助手。只根据提供的 Profile、Resume、JD 和知识回答；如果资料不足，请明确说明，不要编造经历。" },
       ...(history ? [{ name: "conversation-history" as const, content: history }] : []),
       { name: "question", content: prompt }
@@ -853,6 +882,8 @@ function registerIpc(): void {
    ipcMain.handle("overlay:show-all", () => { overlayManager?.showAll(); return true; });
    ipcMain.handle("overlay:hide-all", () => { overlayManager?.hideAll(); return true; });
    ipcMain.handle("overlay:toggle-all", () => { overlayManager?.toggleAll(); return true; });
+   ipcMain.handle("overlay:toggle-transcript", () => { overlayManager?.toggleTranscript(); return true; });
+   ipcMain.handle("overlay:toggle-answer", () => { overlayManager?.toggleAnswer(); return true; });
    ipcMain.handle("overlay:reset-layout", () => { overlayManager?.resetLayout(); return true; });
    ipcMain.handle("overlay:toggle-shortcuts", () => { overlayManager?.toggleShortcuts(); return true; });
    ipcMain.handle("overlay:get-state", () => overlayManager?.hudState);
@@ -955,6 +986,20 @@ function registerIpc(): void {
   ipcMain.handle("interview:get-state", () => ({ running: coordinator().running, interviewId: coordinator().interviewId, automationMode: coordinator().automationMode }));
   ipcMain.handle("interview:set-automation-mode", (_event, mode: "MANUAL" | "AUTO") => { const next = mode === "MANUAL" ? "MANUAL" : "AUTO"; overlaySettingsStore?.setAutomationMode(next); coordinator().setAutomationMode(next); return true; });
   ipcMain.handle("interview:set-answer-mode", (_event, mode: "FAST" | "NORMAL" | "DEEP") => { coordinator().setAnswerMode(mode); return true; });
+  ipcMain.handle("written-test:start", (_event, options: WrittenTestStartOptions) => {
+    if (!profileRepository?.get(options.profileId)) throw new Error("PROFILE_NOT_FOUND: 笔试档案不存在");
+    if (coordinator().running) throw new Error("INTERVIEW_RUNNING: 请先结束当前面试");
+    const llm = providerConfigStore?.get("llm") ?? environmentLlmSettings;
+    if (!llm.apiKey) throw new Error("LLM_NOT_CONFIGURED: 未配置 LLM API Key");
+    writtenTestController?.start({ profileId: options.profileId, answerMode: options.answerMode });
+    mainWindow?.hide();
+    overlayManager?.enterWrittenTestMode();
+    return true;
+  });
+  ipcMain.handle("written-test:stop", () => { stopWrittenTest(); return true; });
+  ipcMain.handle("written-test:answer-screenshot", () => answerCapturedScreenshot("written-test"));
+  ipcMain.handle("written-test:get-state", () => writtenTestController?.state ?? { running: false, answerMode: "NORMAL" as const });
+  ipcMain.handle("written-test:set-answer-mode", (_event, mode: "FAST" | "NORMAL" | "DEEP") => { writtenTestController?.setAnswerMode(mode); return true; });
   ipcMain.handle("chat:create-conversation", (_event, input: { profileId?: string; projectId?: string; title?: string }) => {
     if (!conversationRepository) throw new Error("Chat database is still initializing");
     return conversationRepository.create(input.profileId, input.projectId, input.title);
@@ -996,7 +1041,7 @@ function registerIpc(): void {
     if (settings?.apiKey && settings.model) {
       try {
         let generated = "";
-        for await (const delta of new OpenAICompatibleAnswerProvider(settings).stream({ model: settings.model, sections: [{ name: "system/base", content: "请把材料总结为真实、可核验的中文面试上下文，保留技能、职责和量化结果。只输出摘要。" }, { name: "question", content: parsed.text.slice(0, 12_000) }] })) generated += delta;
+        for await (const delta of new OpenAICompatibleAnswerProvider(settings).stream({ model: taskModel(settings, "profileBuilderModel", "normalModel"), sections: [{ name: "system/base", content: "请把材料总结为真实、可核验的中文面试上下文，保留技能、职责和量化结果。只输出摘要。" }, { name: "question", content: parsed.text.slice(0, 12_000) }] })) generated += delta;
         if (generated.trim()) summary = generated.trim();
       } catch (error) {
         appLogger?.warn("material summary failed", { error: String(error) });
@@ -1020,14 +1065,15 @@ function registerIpc(): void {
   ipcMain.handle("knowledge:rename-base", (_event, knowledgeBaseId: string, name: string) => knowledgeRepository?.renameKnowledgeBase(knowledgeBaseId, name));
   ipcMain.handle("knowledge:delete-base", (_event, knowledgeBaseId: string) => { knowledgeRepository?.deleteKnowledgeBase(knowledgeBaseId); return true; });
   ipcMain.handle("knowledge:list-documents", (_event, knowledgeBaseId?: string) => knowledgeRepository?.listDocuments(knowledgeBaseId) ?? []);
-  ipcMain.handle("knowledge:ingest", async (_event, input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array }) => {
+  ipcMain.handle("knowledge:ingest", async (_event, input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array; documentType?: KnowledgeDocumentTypeOption }) => {
     if (!knowledgeRepository) throw new Error("Knowledge database is still initializing");
     const knowledgeBase = input.knowledgeBaseId ? knowledgeRepository.listKnowledgeBases().find((base) => base.id === input.knowledgeBaseId) : knowledgeRepository.ensureKnowledgeBase();
     if (!knowledgeBase) throw new Error("Knowledge base not found");
     const parsed = await parseDocument({ documentId: `document-${Date.now()}`, filename: input.filename, mimeType: input.mimeType, bytes: input.bytes });
-    const document = knowledgeRepository.saveDocument({ id: parsed.documentId, ...parsed, knowledgeBaseId: knowledgeBase.id, status: "processing" });
+    const documentType = input.documentType && input.documentType !== "auto" ? input.documentType : inferKnowledgeDocumentType(parsed.filename, parsed.text);
+    const document = knowledgeRepository.saveDocument({ id: parsed.documentId, ...parsed, knowledgeBaseId: knowledgeBase.id, documentType, status: "processing" });
     try {
-      const chunks = chunkText(parsed.text, { documentId: parsed.documentId, filename: parsed.filename });
+      const chunks = chunkText(parsed.text, { documentId: parsed.documentId, filename: parsed.filename, documentType });
       const embeddingSettings = providerConfigStore?.get("embedding");
       if (embeddingSettings?.apiKey && embeddingSettings.model) {
         const embeddingProvider = new OpenAICompatibleEmbeddingProvider(embeddingSettings);
@@ -1044,12 +1090,13 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("knowledge:delete", (_event, documentId: string) => { knowledgeRepository?.deleteDocument(documentId); return true; });
+  ipcMain.handle("knowledge:update-type", (_event, documentId: string, documentType: KnowledgeDocumentType) => knowledgeRepository?.updateDocumentType(documentId, documentType));
   ipcMain.handle("knowledge:reindex", async (_event, documentId: string) => {
     if (!knowledgeRepository) throw new Error("Knowledge database is still initializing");
     const document = knowledgeRepository.getDocument(documentId);
     if (!document) throw new Error("Knowledge document not found");
     try {
-      const chunks = chunkText(document.text, { documentId: document.id, filename: document.filename });
+      const chunks = chunkText(document.text, { documentId: document.id, filename: document.filename, documentType: document.documentType });
       const embeddingSettings = providerConfigStore?.get("embedding");
       if (embeddingSettings?.apiKey && embeddingSettings.model) {
         const embeddingProvider = new OpenAICompatibleEmbeddingProvider(embeddingSettings);
@@ -1065,6 +1112,21 @@ function registerIpc(): void {
       return saved;
     }
   });
+  ipcMain.handle("question-bank:list", (_event, options?: { search?: string; type?: import("@interview-copilot/shared").QuestionBankType; limit?: number }) => questionBankRepository?.listQuestions(options) ?? []);
+  ipcMain.handle("question-bank:get", (_event, questionId: string) => questionBankRepository?.getQuestion(questionId));
+  ipcMain.handle("question-bank:save-question", (_event, input: Parameters<SqliteQuestionBankRepository["saveQuestion"]>[0]) => questionBankRepository?.saveQuestion(input));
+  ipcMain.handle("question-bank:delete-question", (_event, questionId: string) => { questionBankRepository?.deleteQuestion(questionId); return true; });
+  ipcMain.handle("question-bank:save-answer", (_event, input: Parameters<SqliteQuestionBankRepository["saveAnswerCard"]>[0]) => questionBankRepository?.saveAnswerCard(input));
+  ipcMain.handle("question-bank:delete-answer", (_event, answerCardId: string) => { questionBankRepository?.deleteAnswerCard(answerCardId); return true; });
+  ipcMain.handle("question-bank:list-skills", (_event, search?: string) => questionBankRepository?.listSkills(search) ?? []);
+  ipcMain.handle("question-bank:save-skill", (_event, input: Parameters<SqliteQuestionBankRepository["saveSkill"]>[0]) => questionBankRepository?.saveSkill(input));
+  ipcMain.handle("question-bank:save-skill-point", (_event, input: Parameters<SqliteQuestionBankRepository["saveSkillPoint"]>[0]) => questionBankRepository?.saveSkillPoint(input));
+  ipcMain.handle("question-bank:link-skill", (_event, questionId: string, skillId: string) => { questionBankRepository?.linkQuestionSkill(questionId, skillId); return true; });
+  ipcMain.handle("question-bank:list-jobs", () => questionBankRepository?.listJobProfiles() ?? []);
+  ipcMain.handle("question-bank:save-job", (_event, input: Parameters<SqliteQuestionBankRepository["saveJobProfile"]>[0]) => questionBankRepository?.saveJobProfile(input));
+  ipcMain.handle("question-bank:import-text", (_event, input: { text: string; filename?: string; includeProject?: boolean; includeBehavioral?: boolean }) => questionBankRepository?.importText(input.text, input.filename, { includeProject: input.includeProject, includeBehavioral: input.includeBehavioral }));
+  ipcMain.handle("question-bank:generate-answers", (_event, input?: { questionIds?: string[]; onlyUnanswered?: boolean }) => generateQuestionBankAnswers(input));
+  ipcMain.handle("question-bank:match", (_event, text: string) => questionBankRepository?.matchQuestion(text));
   ipcMain.handle("profile-builder:get", (_event, profileId: string) => profileBuilderService?.get(profileId));
   ipcMain.handle("profile-builder:rebuild", async (_event, profileId: string) => {
     if (!profileBuilderService) throw new Error("Profile Builder is still initializing");
@@ -1101,7 +1163,7 @@ function registerIpc(): void {
         const availableTools = registry.registeredTools();
         const prompt = `目标：${input.goal}\n历史：${JSON.stringify(input.history)}\n请只返回 JSON。若需要动作，格式为 {"type":"tool_call","tool":"get_profile","args":{},"rationale":"..."}；若完成，格式为 {"type":"final","summary":"..."}。本轮实际可用工具：${availableTools.join(", ")}`;
         let text = "";
-        for await (const delta of new OpenAICompatibleAnswerProvider(settings).stream({ model: settings.model, sections: [{ name: "system/base", content: "你是面试准备 Agent。所有写入或外部动作都必须由用户审批。" }, { name: "question", content: prompt }] }, signal)) text += delta;
+        for await (const delta of new OpenAICompatibleAnswerProvider(settings).stream({ model: taskModel(settings, "preparationModel", "normalModel"), sections: [{ name: "system/base", content: "你是面试准备 Agent。所有写入或外部动作都必须由用户审批。" }, { name: "question", content: prompt }] }, signal)) text += delta;
         const jsonText = text.match(/\{[\s\S]*\}/)?.[0];
         if (!jsonText) return { type: "final", summary: text || "模型没有返回结果" };
         try {
@@ -1136,14 +1198,28 @@ function registerIpc(): void {
     if (!providerConfigStore) throw new Error("Settings are still initializing");
     const result = providerConfigStore.update(section, input);
     providerPreflightCache.invalidate(section);
-    if (section === "llm") {
-      routingModels.fast = result.fastModel || result.model;
-      routingModels.normal = result.normalModel || result.model;
-      routingModels["low-latency"] = result.normalModel || result.model;
-      routingModels.reasoning = result.deepModel || result.model;
-      routingModels.vision = result.visionModel || result.model;
-      answerModelRouter.setModels(routingModels);
-    }
+    if (section === "llm") applyLlmRouting(result);
+    return result;
+  });
+  ipcMain.handle("settings:save-llm-profile", (_event, input: LlmModelProfileInput) => {
+    if (!providerConfigStore) throw new Error("Settings are still initializing");
+    const result = providerConfigStore.saveLlmProfile(input);
+    providerPreflightCache.invalidate("llm");
+    applyLlmRouting(result.llm);
+    return result;
+  });
+  ipcMain.handle("settings:activate-llm-profile", (_event, profileId: string) => {
+    if (!providerConfigStore) throw new Error("Settings are still initializing");
+    const result = providerConfigStore.activateLlmProfile(profileId);
+    providerPreflightCache.invalidate("llm");
+    applyLlmRouting(result.llm);
+    return result;
+  });
+  ipcMain.handle("settings:delete-llm-profile", (_event, profileId: string) => {
+    if (!providerConfigStore) throw new Error("Settings are still initializing");
+    const result = providerConfigStore.deleteLlmProfile(profileId);
+    providerPreflightCache.invalidate("llm");
+    applyLlmRouting(result.llm);
     return result;
   });
   ipcMain.handle("settings:test-connection", async (_event, section: ProviderSection) => {
@@ -1164,12 +1240,64 @@ function registerIpc(): void {
   ipcMain.handle("projects:delete", (_event, projectId: string) => { const project = projectRepository?.get(projectId); projectRepository?.delete(projectId); triggerProfileBuilder(project?.profileId); return true; });
 }
 
+async function generateQuestionBankAnswers(input: { questionIds?: string[]; onlyUnanswered?: boolean } = {}): Promise<import("./database").QuestionBankAnswerGenerationResult> {
+  if (questionBankAnswerGeneration) return questionBankAnswerGeneration;
+  const task = (async () => {
+    if (!questionBankRepository) throw new Error("QUESTION_BANK_NOT_READY: 题库仍在初始化");
+    const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings;
+    if (!settings.apiKey) throw new Error("LLM_NOT_CONFIGURED: 请先配置 LLM API Key，再生成题库答案");
+    const requestedQuestions = input.questionIds?.length
+      ? input.questionIds.map((questionId) => questionBankRepository?.getQuestion(questionId)).filter((question): question is NonNullable<typeof question> => Boolean(question))
+      : questionBankRepository.listQuestions({ limit: 5000 });
+    const targetQuestions = requestedQuestions.filter((question) => question.type !== "project" && !(input.onlyUnanswered && question.answerCards.some((card) => card.content.trim())));
+    let generated = 0;
+    let skipped = requestedQuestions.length - targetQuestions.length;
+    let failed = 0;
+    broadcast("question-bank:answer-generation-progress", { status: "started", total: targetQuestions.length, completed: 0, generated, skipped, failed });
+    for (const [index, question] of targetQuestions.entries()) {
+      try {
+        let content = "";
+        for await (const delta of answerProvider.stream({
+          model: taskModel(settings, "questionBankModel", "fastModel"),
+          maxOutputTokens: question.type === "code" ? 1_200 : 800,
+          sections: [
+            { name: "system/base", content: "你是嵌入式软件面试教练。只回答技术、概念、对比、故障排查、系统设计或代码题。不要编造候选人的项目经历，不要把项目经验写成事实。输出中文、可以直接在面试中口述的答案，先给结论，再讲原理/步骤，最后补充边界或常见误区。" },
+            { name: "question", content: `题目类型：${question.type}\n题目：${question.canonicalText}` }
+          ]
+        })) content += delta;
+        if (!content.trim()) throw new Error("EMPTY_ANSWER");
+        questionBankRepository.saveAnswerCard({ questionId: question.id, content: content.trim(), mode: question.type === "code" ? "code" : "standard", sourceType: "generated", verified: false });
+        generated += 1;
+        broadcast("question-bank:answer-generation-progress", { status: "running", total: targetQuestions.length, completed: index + 1, generated, skipped, failed, questionId: question.id });
+      } catch (error) {
+        failed += 1;
+        appLogger?.warn("question bank answer generation failed", { questionId: question.id, error: String(error) });
+        broadcast("question-bank:answer-generation-progress", { status: "running", total: targetQuestions.length, completed: index + 1, generated, skipped, failed, questionId: question.id, error: String(error) });
+      }
+    }
+    const result = { requested: requestedQuestions.length, generated, skipped, failed };
+    broadcast("question-bank:answer-generation-progress", { status: "completed", total: targetQuestions.length, completed: targetQuestions.length, ...result });
+    return result;
+  })();
+  questionBankAnswerGeneration = task;
+  try { return await task; } finally { questionBankAnswerGeneration = undefined; }
+}
+
+function stopWrittenTest(): void {
+  writtenTestController?.stop();
+  overlayManager?.exitWrittenTestMode();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+
 function registerShortcuts(): void {
   const shortcuts: Record<string, () => void> = {
-    [GLOBAL_SHORTCUTS.answerLatest]: () => void coordinator().answerLatest(),
+    [GLOBAL_SHORTCUTS.answerLatest]: () => { if (coordinator().running) void coordinator().answerLatest(); },
     [GLOBAL_SHORTCUTS.screenshotAnswer]: () => void captureScreenshot(),
     [GLOBAL_SHORTCUTS.toggleOverlay]: () => {
-      if (coordinator().running) {
+      if (coordinator().running || writtenTestController?.running) {
         if (overlayManager?.hudState.mode === "HIDDEN") overlayManager.showAll();
         else overlayManager?.hideAll();
       }
@@ -1182,12 +1310,14 @@ function registerShortcuts(): void {
       if (mode) broadcast("overlay:mode", mode);
     },
     [GLOBAL_SHORTCUTS.toggleAutomation]: () => {
+      if (!coordinator().running) return;
       const next = coordinator().automationMode === "AUTO" ? "MANUAL" : "AUTO";
       overlaySettingsStore?.setAutomationMode(next);
       coordinator().setAutomationMode(next);
     },
      [GLOBAL_SHORTCUTS.endInterview]: () => {
        if (coordinator().running) overlayManager?.requestEndInterviewConfirmation();
+       else if (writtenTestController?.running) overlayManager?.requestEndInterviewConfirmation();
      }
   };
   for (const [accelerator, handler] of Object.entries(shortcuts)) {
@@ -1217,6 +1347,8 @@ if (hasSingleInstanceLock) {
     database = await openAppDatabase(appDataPath);
     profileRepository = new SqliteProfileRepository(database);
     knowledgeRepository = new SqliteKnowledgeRepository(database);
+    knowledgeRepository.backfillDocumentTypes();
+    questionBankRepository = new SqliteQuestionBankRepository(database);
     projectRepository = new SqliteProjectRepository(database);
     profileBuilderRepository = new SqliteProfileBuilderRepository(database);
     conversationRepository = new SqliteConversationRepository(database);
@@ -1227,11 +1359,7 @@ if (hasSingleInstanceLock) {
     }
     overlaySettingsStore = new OverlaySettingsStore(database);
     const llm = providerConfigStore.get("llm");
-    routingModels.fast = llm.fastModel || llm.model;
-    routingModels.normal = llm.normalModel || llm.model;
-    routingModels["low-latency"] = llm.normalModel || llm.model;
-    routingModels.reasoning = llm.deepModel || llm.model;
-    routingModels.vision = llm.visionModel || llm.model;
+    applyLlmRouting(llm);
     answerModelRouter.setModels(routingModels);
   } catch (error) {
     appLogger.error("database initialization failed", { error: String(error) });
@@ -1246,10 +1374,73 @@ if (hasSingleInstanceLock) {
       knowledgeRepository,
       historyRepository,
       profileBuilderRepository,
-      { generate: (input) => createProfileBuilderModel(answerProvider, providerConfigStore?.get("llm") ?? environmentLlmSettings).generate(input) },
+      { generate: (input) => { const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings; return createProfileBuilderModel(answerProvider, { ...settings, model: taskModel(settings, "profileBuilderModel", "normalModel") }).generate(input); } },
       (record) => broadcast("profile-builder:updated", record)
     );
   }
+  const resumeChunkCache = new Map<string, { source: string; chunks: ReturnType<typeof chunkText> }>();
+  const embeddingCache = new Map<string, number[]>();
+  const rememberEmbedding = (key: string, vector: number[]): void => {
+    if (embeddingCache.size >= 64) embeddingCache.delete(embeddingCache.keys().next().value as string);
+    embeddingCache.set(key, vector);
+  };
+  const answerContextProvider = async (question: { text: string }, profileId: string, recentTranscript: string[] = []) => {
+    const profile = profileRepository?.get(profileId);
+    const normalizedQuestion = normalizeTechnicalTerms(question.text);
+    const artifactExperience = retrieveProfileExperience(normalizedQuestion, profileBuilderService?.get(profileId)?.artifact).map((hit) => hit.text);
+    // Profile Builder is asynchronous and may not exist yet on the first
+    // question. Retrieve relevant resume excerpts directly so the first
+    // answer is still grounded in the candidate's actual experience.
+    const rawResume = profile?.resume?.rawContent ? normalizeTechnicalTerms(profile.resume.rawContent) : "";
+    let resumeChunks: ReturnType<typeof chunkText> = [];
+    if (rawResume && profile) {
+      const cached = resumeChunkCache.get(profile.id);
+      if (cached?.source === rawResume) resumeChunks = cached.chunks;
+      else {
+        resumeChunks = chunkText(rawResume, { documentId: `resume-${profile.id}`, filename: "Resume" }, { maxTokens: 550, overlapTokens: 80 });
+        resumeChunkCache.set(profile.id, { source: rawResume, chunks: resumeChunks });
+      }
+    }
+    const resumeExperience = new HybridRetriever().search(normalizedQuestion, resumeChunks, { topK: 2, candidateK: 8 }).map((hit) => `Resume（相关经历）：${hit.text}`);
+    const experience = [...artifactExperience, ...resumeExperience].slice(0, 3);
+    const questionBankMatch = questionBankRepository?.matchQuestion(normalizedQuestion);
+    const preparedCard = questionBankMatch?.question.answerCards.find((card) => card.verified)
+      ?? questionBankMatch?.question.answerCards.find((card) => questionBankMatch.question.type === "code" ? card.mode === "code" : card.mode === "standard")
+      ?? questionBankMatch?.question.answerCards[0];
+    const preparedAnswer = preparedCard ? `题库参考答案（匹配度 ${Math.round((questionBankMatch?.score ?? 0) * 100)}%，仅作为已整理素材，不替代当前问题判断）：\n${preparedCard.content}${preparedCard.codeContent ? `\n代码：\n${preparedCard.codeContent}` : ""}${preparedCard.complexity ? `\n复杂度：${preparedCard.complexity}` : ""}${preparedCard.limitations ? `\n边界与限制：${preparedCard.limitations}` : ""}` : undefined;
+    const chunks = knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? [];
+    const retrievalOptions = { chunks, topK: 3, candidateK: 12, reranker: new KeywordReranker() };
+    let retrieved = await new HybridKnowledgeRetriever(retrievalOptions).search(normalizedQuestion);
+    const embeddingSettings = providerConfigStore?.get("embedding");
+    if (embeddingSettings?.apiKey && embeddingSettings.model && chunks.length > 0) {
+      const embeddingKey = `${embeddingSettings.baseUrl}|${embeddingSettings.model}|${normalizedQuestion.toLowerCase()}`;
+      const cachedVector = embeddingCache.get(embeddingKey);
+      if (cachedVector) {
+        retrieved = await new HybridKnowledgeRetriever({ ...retrievalOptions, embeddingProvider: { embed: () => cachedVector } }).search(normalizedQuestion);
+      } else {
+        // Keyword retrieval is returned immediately. The first embedding is
+        // prepared in the background for a later repeated/follow-up question
+        // instead of blocking the live answer's critical path.
+        void new OpenAICompatibleEmbeddingProvider(embeddingSettings).embed(normalizedQuestion)
+          .then((vector) => rememberEmbedding(embeddingKey, vector))
+          .catch(() => undefined);
+      }
+    }
+    return {
+      profileSummary: profile?.resume?.summary,
+      jobDescriptionSummary: profile?.jobDescription?.summary,
+      profileInstructions: profile?.instructions,
+      skills: (profile?.skills ?? []).map((skill) => ({ id: skill.id, name: skill.name, content: `${skill.description}\n${skill.content}` })),
+      experienceContext: experience,
+      preparedAnswer: preparedCard && questionBankMatch ? { content: preparedCard.content, score: questionBankMatch.score, verified: preparedCard.verified, source: "question-bank" } : undefined,
+      retrievedKnowledge: [
+        ...(preparedAnswer ? [preparedAnswer] : []),
+        ...retrieved.slice(0, preparedAnswer ? 2 : 3).map((chunk) => `${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`)
+      ],
+      recentTranscript: recentTranscript.slice(-8)
+    };
+  };
+
   interviewCoordinator = new InterviewCoordinator({
     audio: audioManager,
     asrManager: realtimeSession,
@@ -1270,29 +1461,12 @@ if (hasSingleInstanceLock) {
         url: settings?.baseUrl
       };
     },
-    contextProvider: async (question, profileId, recentTranscript) => {
-      const profile = profileRepository?.get(profileId);
-      const experience = retrieveProfileExperience(question.text, profileBuilderService?.get(profileId)?.artifact).map((hit) => hit.text);
-      const chunks = knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? [];
-      let retrieved = await new HybridKnowledgeRetriever({ chunks, topK: 5, candidateK: 20, reranker: new KeywordReranker() }).search(question.text);
-      const embeddingSettings = providerConfigStore?.get("embedding");
-      if (embeddingSettings?.apiKey && embeddingSettings.model && chunks.length > 0) {
-        try {
-          const vector = await new OpenAICompatibleEmbeddingProvider(embeddingSettings).embed(question.text);
-          retrieved = await new HybridKnowledgeRetriever({ chunks, topK: 5, candidateK: 20, embeddingProvider: { embed: () => vector }, reranker: new KeywordReranker() }).search(question.text);
-        } catch (error) {
-          broadcast("realtime:diagnostic", `RAG embedding unavailable; keyword retrieval used: ${String(error)}`);
-        }
-      }
-      return {
-        profileSummary: profile?.resume?.summary,
-        jobDescriptionSummary: profile?.jobDescription?.summary,
-        skills: (profile?.skills ?? []).map((skill) => ({ id: skill.id, name: skill.name, content: `${skill.description}\n${skill.content}` })),
-        experienceContext: experience,
-        retrievedKnowledge: retrieved.slice(0, 5).map((chunk) => `${chunk.metadata.filename}: ${chunk.text}`),
-        recentTranscript: recentTranscript.slice(-12)
-      };
-    }
+    contextProvider: answerContextProvider
+  });
+  writtenTestController = new WrittenTestController({
+    answerAgent,
+    initialAnswerMode: "NORMAL",
+    contextProvider: (question, profileId) => answerContextProvider(question, profileId, [])
   });
   const createdMainWindow = createMainWindow();
   overlayManager = new OverlayManager({
@@ -1346,6 +1520,12 @@ if (hasSingleInstanceLock) {
     if (event.type === "realtime_message") broadcast("realtime:message", event.message);
     if (event.type === "realtime_state") broadcast("realtime:state", event.state);
     if (event.type === "automation_mode") broadcast("interview:automation-mode", event.mode);
+    if (event.type === "answer_mode") broadcast("interview:answer-mode", event.mode);
+    if (event.type === "diagnostic") { realtimeLogger?.warn(String(event.message)); broadcast("realtime:diagnostic", event.message); }
+  });
+  writtenTestController?.on("event", (event: { type: string; [key: string]: unknown }) => {
+    if (event.type === "state") broadcast("written-test:state", event.state);
+    if (event.type === "realtime_message") broadcast("realtime:message", event.message);
     if (event.type === "answer_mode") broadcast("interview:answer-mode", event.mode);
     if (event.type === "diagnostic") { realtimeLogger?.warn(String(event.message)); broadcast("realtime:diagnostic", event.message); }
   });

@@ -6,6 +6,7 @@ import {
   InterviewBrain,
   InterviewMemory,
   InterviewHistoryStore,
+  normalizeTechnicalTerms,
   QuestionDetector,
   QuestionDetector2,
   SessionStateMachine,
@@ -14,12 +15,14 @@ import {
   type AnswerMode,
   type AnswerRecord,
   type AsrLanguage,
+  type ModelSnapshot,
   type InterviewRecord,
   type QuestionRecord,
   type QuestionCandidate,
   type QuestionEvent,
   type SessionState,
-  type TranscriptRecord
+  type TranscriptRecord,
+  type TranscriptUtterance
 } from "@interview-copilot/shared";
 import type { AudioStartOptions } from "./audio-manager";
 import type { RealtimeConnectOptions, RealtimeConnectionState } from "./realtime-session";
@@ -80,6 +83,8 @@ export interface InterviewCoordinatorOptions {
   interviewBrain?: InterviewBrain;
   now?: () => number;
   initialAutomationMode?: "MANUAL" | "AUTO";
+  /** Live interview confirmation debounce. Kept configurable for ASR providers with slower finalization. */
+  questionSilenceMs?: number;
 }
 
 export type InterviewCoordinatorEvent =
@@ -119,13 +124,21 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly recentTranscript: string[] = [];
   private readonly historyQuestionIds = new Map<string, string>();
   private questionFlushTimer: NodeJS.Timeout | undefined;
-  private finalQuestionSequence = 0;
+  private remoteAssemblyTimer: NodeJS.Timeout | undefined;
+  private remoteAssemblyStartedAt: number | undefined;
   private finalQuestionQueue: Promise<void> | undefined;
+  private readonly questionSilenceMs: number;
+  private answerGeneration = 0;
+  private answerTriggerTimer: NodeJS.Timeout | undefined;
+  private pendingAnswerQuestion: QuestionCandidate | undefined;
+  private activeModelSnapshot: ModelSnapshot | undefined;
+  private sessionGeneration = 0;
 
   constructor(private readonly options: InterviewCoordinatorOptions) {
     super();
     this.asr = options.asrManager ?? options.realtime ?? (() => { throw new Error("ASRManager is required"); })();
-    this.detector = options.detector ?? new QuestionDetector();
+    this.questionSilenceMs = Math.max(120, options.questionSilenceMs ?? 280);
+    this.detector = options.detector ?? new QuestionDetector({ silenceMs: this.questionSilenceMs });
     this.detector2 = options.questionDetector2 ?? new QuestionDetector2();
     this.brain = options.interviewBrain ?? new InterviewBrain();
     this.memory = options.memory ?? new InterviewMemory(10);
@@ -172,16 +185,20 @@ export class InterviewCoordinator extends EventEmitter {
       language: startOptions.language ?? "zh-CN",
       automationMode
     }, startedAt);
+    this.sessionGeneration += 1;
     this.activeInterviewId = record.id;
     this.activeOptions = { ...startOptions, automationMode };
     this.activeProfileId = startOptions.profileId;
     this.detector.reset();
     this.memory.reset();
+    this.clearAnswerTrigger();
+    this.activeModelSnapshot = this.options.answerAgent.getModelSnapshot();
     this.currentQuestion = undefined;
     this.historyQuestionIds.clear();
     this.questionConfirmedAt.clear();
     this.recentTranscript.length = 0;
     this.memory.reset();
+    this.clearRemoteAssemblyTimer();
     this.aggregator.clear();
     this.transition("CONNECTING");
     try {
@@ -200,8 +217,8 @@ export class InterviewCoordinator extends EventEmitter {
   async stop(reason: "user" | "error" = "user"): Promise<void> {
     const interviewId = this.activeInterviewId;
     if (!interviewId) return;
-    if (this.questionFlushTimer) clearTimeout(this.questionFlushTimer);
-    this.questionFlushTimer = undefined;
+    this.clearQuestionFlushTimer();
+    this.clearRemoteAssemblyTimer();
     this.cancelAnswer(reason === "error" ? "timeout" : "user");
     try { await Promise.resolve(this.options.audio.stop()); } catch (error) { this.emitDiagnostic(`Audio stop failed: ${String(error)}`); }
     try { await this.asr.finalize?.(1_000); } catch (error) { this.emitDiagnostic(`ASR finalize failed: ${String(error)}`); }
@@ -217,6 +234,13 @@ export class InterviewCoordinator extends EventEmitter {
     this.questionConfirmedAt.clear();
     this.recentTranscript.length = 0;
     this.aggregator.clear();
+    this.sessionGeneration += 1;
+    this.clearAnswerTrigger();
+    this.finalQuestionQueue = undefined;
+    this.detector.reset();
+    this.memory.reset();
+    this.historyQuestionIds.clear();
+    this.activeModelSnapshot = undefined;
   }
 
   async answerLatest(): Promise<void> {
@@ -252,7 +276,7 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   async answerQuestionText(text: string): Promise<void> {
-    const clean = text.trim();
+    const clean = normalizeTechnicalTerms(text);
     if (!clean) {
       await this.answerLatest();
       return;
@@ -276,6 +300,7 @@ export class InterviewCoordinator extends EventEmitter {
       return;
     }
     this.cancelAnswer("superseded");
+    const generation = this.answerGeneration;
     this.currentQuestion = question;
     this.detector.markAnswering(question.id);
     this.options.history?.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "answering");
@@ -284,10 +309,53 @@ export class InterviewCoordinator extends EventEmitter {
     const startedAt = this.now();
     this.accumulatedAnswerText = "";
     try {
-      const providerContext = await this.contextProvider(question, this.activeProfileId ?? "", [...this.recentTranscript]);
+      const providerContextResult = this.contextProvider(question, this.activeProfileId ?? "", [...this.recentTranscript]);
+      // Keep the default synchronous context path truly synchronous. This
+      // removes an avoidable microtask from consecutive-question handling;
+      // async profile/knowledge retrieval still remains cancellable below.
+      const isPromiseLike = (value: AnswerContextInput | Promise<AnswerContextInput>): value is Promise<AnswerContextInput> => Boolean(value && typeof (value as PromiseLike<AnswerContextInput>).then === "function");
+      const providerContext: AnswerContextInput = isPromiseLike(providerContextResult)
+        ? await providerContextResult
+        : providerContextResult;
+      if (controller.signal.aborted || generation !== this.answerGeneration) return;
+      const preparedAnswer = providerContext.preparedAnswer;
+      const isProjectQuestion = /项目|简历|经历|负责|做过|成果|业绩/.test(question.text);
+      if (preparedAnswer && preparedAnswer.verified && preparedAnswer.score >= 0.88 && !streamOptions.hasScreenshot && !isProjectQuestion) {
+        const answerId = `question-bank-answer-${question.id}-${startedAt}`;
+        const finishedAt = this.now();
+        this.answerId = answerId;
+        this.answerQuestionId = question.id;
+        this.answerMode = mode;
+        this.answerModel = "question-bank";
+        this.answerStartedAt = startedAt;
+        this.answerFirstTokenAt = finishedAt;
+        this.emit("event", { type: "realtime_message", message: { type: "answer_start", answerId, questionId: question.id, mode, model: "question-bank" } });
+        this.emit("event", { type: "realtime_message", message: { type: "answer_end", answerId, text: preparedAnswer.content } });
+        const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
+        this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: preparedAnswer.content, model: "question-bank", mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
+        this.memory.recordAnswer(preparedAnswer.content, { question: question.text, createdAt: finishedAt });
+        this.detector.markAnswered(question.id);
+        this.options.history?.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "answered");
+        this.answerId = undefined;
+        this.answerQuestionId = undefined;
+        this.answerMode = undefined;
+        this.answerModel = undefined;
+        this.answerStartedAt = undefined;
+        this.answerFirstTokenAt = undefined;
+        return;
+      }
       const context = { ...providerContext, recentTranscript: providerContext.recentTranscript ?? [...this.recentTranscript], interviewMemory: this.memory.snapshot() };
-      for await (const event of this.options.answerAgent.stream({ id: question.id, text: question.text }, mode, context, controller.signal, streamOptions)) {
-        if (controller.signal.aborted) return;
+      for await (const event of this.options.answerAgent.stream({ id: question.id, text: question.text }, mode, context, controller.signal, {
+        ...streamOptions,
+        directDisplay: true,
+        emitDeltas: false,
+        allowQualityRepair: false,
+        formatAnswer: false,
+        maxRetries: 1,
+        preferFastRoute: this.activeOptions?.automationMode === "AUTO" && !streamOptions.hasScreenshot,
+        modelOverride: this.activeModelSnapshot
+      })) {
+        if (controller.signal.aborted || generation !== this.answerGeneration) return;
         if (event.type === "answer_start") {
           this.answerId = event.answerId;
           this.answerQuestionId = question.id;
@@ -303,6 +371,10 @@ export class InterviewCoordinator extends EventEmitter {
         } else {
           const finishedAt = this.now();
           const answerText = event.text || this.accumulatedAnswerText;
+          // Direct-display mode has no partial token event. The answer becomes
+          // visible at completion, so record that point as the first visible
+          // response for latency diagnostics.
+          this.answerFirstTokenAt ??= finishedAt;
           this.emit("event", { type: "realtime_message", message: { type: "answer_end", answerId: event.answerId, text: answerText, quality: event.quality } });
           const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
           this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: answerText, model: this.answerModel ?? "configured", mode: this.answerMode ?? mode, startedAt: this.answerStartedAt ?? startedAt, firstTokenAt: this.answerFirstTokenAt, finishedAt, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
@@ -338,7 +410,8 @@ export class InterviewCoordinator extends EventEmitter {
       if (state === "reconnecting" && this.options.session.canTransition("RECONNECTING")) this.transition("RECONNECTING");
       if (state === "error" && this.running) this.emitDiagnostic("ASR connection failed; reconnect is still enabled");
     });
-    this.asr.on("transcript", (snapshot: unknown, segment: TranscriptSegment) => {
+    this.asr.on("transcript", (snapshot: unknown, rawSegment: TranscriptSegment) => {
+      const segment: TranscriptSegment = { ...rawSegment, text: normalizeTechnicalTerms(rawSegment.text) };
       this.emit("event", { type: "transcript", snapshot, segment });
       if (!this.activeInterviewId) return;
       if (segment.final) {
@@ -347,9 +420,12 @@ export class InterviewCoordinator extends EventEmitter {
         while (this.recentTranscript.length > 12) this.recentTranscript.shift();
       }
       // A candidate answer marks a hard turn boundary for the remote
-      // aggregator. Without this, two unrelated interviewer prompts inside
-      // the 1.8s ASR window can be merged into one question.
-      if (segment.final && segment.source === "mic") this.aggregator.flush("remote");
+      // aggregator. Flush and analyze the remote turn before starting the
+      // candidate answer; previously this flush discarded the last question.
+      if (segment.final && segment.source === "mic") {
+        this.clearRemoteAssemblyTimer();
+        this.flushRemoteUtterances();
+      }
       if (segment.source !== "remote") return;
       // Partials are used for early classification only. They never confirm
       // or answer by themselves; the final segment still owns confirmation.
@@ -358,25 +434,14 @@ export class InterviewCoordinator extends EventEmitter {
         this.scheduleQuestionFlush();
         return;
       }
+      // A provider final marks a stable ASR segment, not necessarily the end
+      // of the interviewer's sentence. Keep assembling until a short adaptive
+      // silence expires, then analyze the complete utterance exactly once.
       const utterance = this.aggregator.push(segment);
       if (!utterance) return;
-      const sequence = ++this.finalQuestionSequence;
-      // The synchronous compatibility path must start immediately so the
-      // 500ms debounce timer is scheduled against the same clock tick used by
-      // the ASR event. Only the real local/remote classifier path needs the
-      // serialized async queue below.
-      if (!this.detector2.hasLocalClassifier) {
-        void this.observeFinalQuestion(utterance, sequence).catch((error) => this.emitDiagnostic(`Question 2.0 analysis failed: ${String(error)}`));
-        return;
-      }
-      const run = () => this.observeFinalQuestion(utterance, sequence);
-      const next = this.finalQuestionQueue ? this.finalQuestionQueue.then(run) : run();
-      const tracked = next.catch((error) => this.emitDiagnostic(`Question 2.0 analysis failed: ${String(error)}`));
-      this.finalQuestionQueue = tracked;
-      void tracked.then(
-        () => { if (this.finalQuestionQueue === tracked) this.finalQuestionQueue = undefined; },
-        () => { if (this.finalQuestionQueue === tracked) this.finalQuestionQueue = undefined; }
-      );
+      this.clearQuestionFlushTimer();
+      this.drainCompletedRemoteUtterances();
+      this.scheduleRemoteAssembly(utterance, segment);
     });
     this.asr.on("message", (message: RealtimeServerMessage) => this.emitEvent({ type: "realtime_message", message }));
     this.asr.on("diagnostic", (message: string) => this.emitDiagnostic(message));
@@ -385,6 +450,9 @@ export class InterviewCoordinator extends EventEmitter {
   private emitQuestion(event: QuestionEvent): void {
       if (event.type === "question_confirmed" || event.type === "question_superseded") {
       this.currentQuestion = event.question;
+      // The renderer must never keep showing the previous answer under a new
+      // question while context retrieval or model generation is still pending.
+      this.emit("event", { type: "realtime_message", message: { type: "answer_reset", questionId: event.question.id } });
       this.memory.recordQuestion(event.question.text, { createdAt: event.question.detectedAt });
       if (this.activeInterviewId) {
         const stored = this.history.addQuestion({ interviewId: this.activeInterviewId, text: event.question.text, confidence: event.question.confidence, source: event.question.source, detectedAt: event.question.detectedAt, status: event.question.status });
@@ -400,12 +468,83 @@ export class InterviewCoordinator extends EventEmitter {
     this.emitEvent({ type: "question", event });
   }
 
-  private handleQuestionEvent(event: QuestionEvent): void {
-    this.emitQuestion(event);
-    if ((event.type === "question_confirmed" || event.type === "question_superseded") && this.activeOptions?.automationMode === "AUTO") void this.answer(event.question);
+  private enqueueFinalUtterance(utterance: TranscriptUtterance): void {
+    const sessionGeneration = this.sessionGeneration;
+    // Keep final utterances serialized when the local classifier is enabled.
+    // This prevents a later short fragment from overtaking the assembled
+    // question while ONNX classification is still running.
+    if (!this.detector2.hasLocalClassifier) {
+      void this.observeFinalQuestion(utterance, sessionGeneration).catch((error) => this.emitDiagnostic(`Question 2.0 analysis failed: ${String(error)}`));
+      return;
+    }
+    const run = () => this.observeFinalQuestion(utterance, sessionGeneration);
+    const next = this.finalQuestionQueue ? this.finalQuestionQueue.then(run) : run();
+    const tracked = next.catch((error) => this.emitDiagnostic(`Question 2.0 analysis failed: ${String(error)}`));
+    this.finalQuestionQueue = tracked;
+    void tracked.then(
+      () => { if (this.finalQuestionQueue === tracked) this.finalQuestionQueue = undefined; },
+      () => { if (this.finalQuestionQueue === tracked) this.finalQuestionQueue = undefined; }
+    );
   }
 
-  private async observeFinalQuestion(utterance: { text: string; startMs: number; endMs: number; final: true; confidence?: number }, sequence: number): Promise<void> {
+  private drainCompletedRemoteUtterances(): number {
+    const completed = this.aggregator.drainCompleted("remote");
+    if (!completed.length) return 0;
+    // The previous turn has now been closed by a semantic boundary. Do not
+    // let its assembly timer fire against the new turn.
+    this.clearRemoteAssemblyTimer();
+    completed.forEach((utterance) => this.enqueueFinalUtterance(utterance));
+    return completed.length;
+  }
+
+  private flushRemoteUtterances(): void {
+    this.aggregator.flush("remote").forEach((utterance) => this.enqueueFinalUtterance(utterance));
+  }
+
+  private scheduleRemoteAssembly(utterance: TranscriptUtterance, latest: TranscriptSegment): void {
+    if (this.remoteAssemblyTimer) clearTimeout(this.remoteAssemblyTimer);
+    this.remoteAssemblyStartedAt ??= this.now();
+    const elapsed = Math.max(0, this.now() - this.remoteAssemblyStartedAt);
+    const remaining = Math.max(120, 1_800 - elapsed);
+    const text = utterance.text.trim();
+    const incomplete = /(?:比如|例如|包括|以及|并且|而且|尤其|关于|针对|问题是|最后|然后|怎么|如何|哪些|什么|是否|能否)[。！？?！；;，,、\s]*$/.test(text);
+    const notPunctuated = !/[?？!！。；;]$/.test(text);
+    // Completed questions stay fast; unfinished or continuation-shaped text
+    // gets a little more time for the next stable ASR segment.
+    const normalizedLength = text.replace(/[\s，。！？、,.!?；;:：]/g, "").length;
+    const shortContinuation = normalizedLength <= 8 && /(?:为什么|为何|怎么|如何|什么|哪个|哪里|能否|是否|说说|展开|继续|然后|最后|好|那|行|可以|嗯)[?？。.!！]?$/i.test(text);
+    const delay = shortContinuation
+      ? 460
+      : incomplete
+        ? 600
+      : /^(?:比如|例如|然后|最后|接着|隔离|以及|包括|在|其中)/.test(latest.text.trim())
+        ? 480
+        : notPunctuated ? 420 : 360;
+    this.remoteAssemblyTimer = setTimeout(() => {
+      this.remoteAssemblyTimer = undefined;
+      this.remoteAssemblyStartedAt = undefined;
+      this.flushRemoteUtterances();
+    }, Math.min(delay, remaining));
+  }
+
+  private clearRemoteAssemblyTimer(): void {
+    if (this.remoteAssemblyTimer) clearTimeout(this.remoteAssemblyTimer);
+    this.remoteAssemblyTimer = undefined;
+    this.remoteAssemblyStartedAt = undefined;
+  }
+
+  private clearQuestionFlushTimer(): void {
+    if (this.questionFlushTimer) clearTimeout(this.questionFlushTimer);
+    this.questionFlushTimer = undefined;
+  }
+
+  private handleQuestionEvent(event: QuestionEvent): void {
+    this.emitQuestion(event);
+    if ((event.type === "question_confirmed" || event.type === "question_superseded") && this.activeOptions?.automationMode === "AUTO") this.scheduleAnswer(event.question);
+  }
+
+  private async observeFinalQuestion(utterance: TranscriptUtterance, sessionGeneration = this.sessionGeneration): Promise<void> {
+    if (sessionGeneration !== this.sessionGeneration || !this.activeInterviewId) return;
     // Rules remain the first signal. When the local classifier is configured,
     // the async call adds the CPU-local ONNX speech-act signal. Test and
     // third-party integrations without that optional model retain the old
@@ -423,9 +562,8 @@ export class InterviewCoordinator extends EventEmitter {
     }
     // Elliptical follow-ups such as “好，说说” are promoted by
     // InterviewBrain immediately when a topic exists in memory.
-    if (!decision.isQuestion || !this.activeInterviewId) return;
+    if (!decision.isQuestion || !this.activeInterviewId || sessionGeneration !== this.sessionGeneration) return;
     const observed = decision.normalizedQuestion && decision.normalizedQuestion !== utterance.text ? { ...utterance, text: decision.normalizedQuestion } : utterance;
-    if (sequence !== this.finalQuestionSequence && this.finalQuestionSequence - sequence > 1) return;
     const effectiveAnalysis = analysis.isQuestion
       ? analysis
       : {
@@ -438,19 +576,61 @@ export class InterviewCoordinator extends EventEmitter {
         reason: decision.reason,
         score: { ...analysis.score, finalScore: Math.max(analysis.score.finalScore, decision.confidence), semanticScore: Math.max(analysis.score.semanticScore, decision.confidence) }
       };
-    this.detector.observe({ ...observed, analysis: effectiveAnalysis }, this.now()).forEach((event) => this.handleQuestionEvent(event));
-    this.scheduleQuestionFlush();
+    this.detector.observe({ ...observed, utteranceId: utterance.id, analysis: effectiveAnalysis }, this.now()).forEach((event) => this.handleQuestionEvent(event));
+    // The remote assembly timer already represents an end-of-speech silence.
+    // Flush the temporal detector immediately after the assembled utterance
+    // is classified instead of adding another 280ms debounce to every answer.
+    const normalizedLength = utterance.text.replace(/[\s，。！？、,.!?；;:：]/g, "").length;
+    const shortFollowUp = effectiveAnalysis.speechAct === "FOLLOW_UP" && normalizedLength <= 8;
+    // Remote assembly has already waited for the end-of-speech gap. For an
+    // elliptical follow-up, use that completed assembly delay as the hold and
+    // flush with the detector's completeness horizon immediately; adding a
+    // second timer here would make a confirmed short follow-up feel stale.
+    const flushAt = this.now() + this.questionSilenceMs + (shortFollowUp ? 220 : 0);
+    this.detector.flush(flushAt).forEach((event) => this.handleQuestionEvent(event));
   }
 
-  private scheduleQuestionFlush(): void {
-    if (this.questionFlushTimer) clearTimeout(this.questionFlushTimer);
+  private scheduleQuestionFlush(delay = this.questionSilenceMs, sessionGeneration = this.sessionGeneration): void {
+    this.clearQuestionFlushTimer();
+    const dueAt = this.now() + delay;
     this.questionFlushTimer = setTimeout(() => {
       this.questionFlushTimer = undefined;
-      this.detector.flush(this.now()).forEach((event) => this.handleQuestionEvent(event));
-    }, 500);
+      if (sessionGeneration !== this.sessionGeneration || !this.activeInterviewId) return;
+      // Use the scheduled due time as a lower bound. The production clock
+      // normally advances with the timer, while deterministic integrations
+      // may provide a manually controlled `now()` function.
+      this.detector.flush(Math.max(this.now(), dueAt)).forEach((event) => this.handleQuestionEvent(event));
+    }, delay);
+  }
+
+  private scheduleAnswer(question: QuestionCandidate): void {
+    this.clearAnswerTrigger();
+    const sessionGeneration = this.sessionGeneration;
+    // Completeness has already been established by the temporal detector.
+    // Do not add another post-confirmation delay, especially for short but
+    // complete follow-ups such as “为什么这样设计？”.
+    if (sessionGeneration === this.sessionGeneration && this.activeInterviewId) {
+      void this.answer(question);
+      return;
+    }
+    this.pendingAnswerQuestion = question;
+    this.answerTriggerTimer = setTimeout(() => {
+      this.answerTriggerTimer = undefined;
+      const pending = this.pendingAnswerQuestion;
+      this.pendingAnswerQuestion = undefined;
+      if (!pending || sessionGeneration !== this.sessionGeneration || !this.activeInterviewId) return;
+      void this.answer(pending);
+    }, 0);
+  }
+
+  private clearAnswerTrigger(): void {
+    if (this.answerTriggerTimer) clearTimeout(this.answerTriggerTimer);
+    this.answerTriggerTimer = undefined;
+    this.pendingAnswerQuestion = undefined;
   }
 
   private cancelAnswer(reason: "user" | "superseded" | "timeout"): void {
+    this.answerGeneration += 1;
     const answerId = this.answerId;
     const questionId = this.answerQuestionId;
     const now = this.now();

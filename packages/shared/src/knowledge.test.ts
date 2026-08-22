@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkText, DocumentMemoryCache, DocumentParserRegistry, HybridRetriever, plainTextDocumentParser } from "./knowledge";
+import { chunkText, DocumentMemoryCache, DocumentParserRegistry, HybridRetriever, inferKnowledgeDocumentType, plainTextDocumentParser } from "./knowledge";
 
 describe("knowledge preparation", () => {
   it("chunks long text with bounded size and overlap", () => {
@@ -18,6 +18,13 @@ describe("knowledge preparation", () => {
     const second = await cache.getOrParse({ ...input, bytes: new TextEncoder().encode("different") }, registry);
     expect(second).toBe(first);
     expect(first.sections[0]).toBe("Heading");
+  });
+
+  it("infers common interview document categories", () => {
+    expect(inferKnowledgeDocumentType("嵌入式简历.pdf", "教育经历\n项目经历\n求职方向")).toBe("resume");
+    expect(inferKnowledgeDocumentType("FOC项目说明.md", "项目目标\n技术栈\n项目职责")).toBe("project");
+    expect(inferKnowledgeDocumentType("嵌入式面试题.md", "面试官：请解释一下中断和任务的区别？")).toBe("interview-question");
+    expect(inferKnowledgeDocumentType("FreeRTOS技能卡.md", "技能知识\n任务通知\n工作原理")).toBe("skill");
   });
 });
 

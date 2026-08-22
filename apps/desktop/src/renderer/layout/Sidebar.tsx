@@ -20,7 +20,8 @@ const items: Array<{ page: AppPage; label: string; icon: string }> = [
   { page: "preparation", label: "面试准备", icon: "✦" },
   { page: "history", label: "面试记录", icon: "◷" },
   { page: "profiles", label: "档案", icon: "▱" },
-  { page: "knowledge", label: "知识库", icon: "▤" }
+  { page: "knowledge", label: "知识库", icon: "▤" },
+  { page: "question-bank", label: "题库", icon: "☷" }
 ];
 
 export function Sidebar({ page, profileName, projects, conversations, onNavigate, onNewConversation, onOpenConversation, onOpenProject, onRenameProject, onDeleteProject }: SidebarProps): JSX.Element {

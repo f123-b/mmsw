@@ -85,6 +85,15 @@ export class OverlayManager {
 
   /** Enter the desktop HUD mode and cover the active display work area. */
   enterInterviewMode(): BrowserWindow {
+    return this.enterHUDMode();
+  }
+
+  /** Enter the same HUD window for screenshot-only written-test mode. */
+  enterWrittenTestMode(): BrowserWindow {
+    return this.enterHUDMode();
+  }
+
+  private enterHUDMode(): BrowserWindow {
     // Every new interview starts click-through. Users can still reach the
     // toolbar because the renderer reports when the pointer enters a control
     // region, at which point only the native hit-test state is relaxed.
@@ -99,6 +108,15 @@ export class OverlayManager {
 
   /** Leave the desktop HUD mode and restore an interactive native window. */
   exitInterviewMode(): void {
+    this.exitHUDMode();
+  }
+
+  /** Leave the HUD window without coupling to the interview audio session. */
+  exitWrittenTestMode(): void {
+    this.exitHUDMode();
+  }
+
+  private exitHUDMode(): void {
     this.transition({ type: "stop" });
     this.mode = "interactive";
     this.interactiveRegion = false;
@@ -109,6 +127,8 @@ export class OverlayManager {
   showAll(): void { this.transition({ type: "show-all" }); }
   hideAll(): void { this.transition({ type: "hide-all" }); }
   toggleAll(): void { this.transition({ type: "toggle-panels" }); }
+  toggleTranscript(): void { this.transition({ type: "toggle-transcript" }); }
+  toggleAnswer(): void { this.transition({ type: "toggle-answer" }); }
   resetLayout(): void {
     this.refreshLayout(this.currentWindow?.getBounds() ?? this.targetMonitorBounds());
   }

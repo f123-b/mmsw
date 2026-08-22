@@ -1,6 +1,36 @@
+import { normalizeTechnicalTerms } from "./terminology";
+
+export const KNOWLEDGE_DOCUMENT_TYPES = ["resume", "project", "interview-question", "skill", "job-description", "technical-doc", "other"] as const;
+export type KnowledgeDocumentType = typeof KNOWLEDGE_DOCUMENT_TYPES[number];
+export type KnowledgeDocumentTypeOption = KnowledgeDocumentType | "auto";
+
+export const KNOWLEDGE_DOCUMENT_TYPE_LABELS: Record<KnowledgeDocumentType, string> = {
+  resume: "简历",
+  project: "项目经历",
+  "interview-question": "面试题",
+  skill: "技能知识",
+  "job-description": "岗位 JD",
+  "technical-doc": "技术文档",
+  other: "其他"
+};
+
+/** Infer a document category for the upload flow; users can always override it. */
+export function inferKnowledgeDocumentType(filename: string, text: string): KnowledgeDocumentType {
+  const name = filename.toLowerCase();
+  const content = text.toLowerCase();
+  if (/简历|resume|cv/.test(name) || /求职方向|教育经历|工作经历|项目经历/.test(content)) return "resume";
+  if (/岗位|职位|jd|job-description|招聘/.test(name) || /任职要求|岗位职责|职位描述/.test(content)) return "job-description";
+  if (/面试题|题库|question|q&a|问答/.test(name) || /面试官|请解释一下|常见问题|参考答案/.test(content)) return "interview-question";
+  if (/技能|skill|knowledge|知识点/.test(name) || /技能要求|知识点|基础概念|工作原理/.test(content)) return "skill";
+  if (/项目|project|foc|rk3506/.test(name) || /项目背景|项目目标|项目职责|技术栈|系统架构/.test(content)) return "project";
+  if (/技术|architecture|design|spec|api|doc/.test(name) || /系统设计|接口说明|技术方案|实现原理/.test(content)) return "technical-doc";
+  return "other";
+}
+
 export interface DocumentMetadata {
   documentId: string;
   filename: string;
+  documentType?: KnowledgeDocumentType;
   section?: string;
   page?: number;
 }
@@ -37,7 +67,7 @@ export function chunkText(text: string, metadata: DocumentMetadata, options: Chu
   const overlapTokens = Math.min(options.overlapTokens ?? 120, maxTokens - 1);
   const maxChars = maxTokens * TOKEN_CHARS;
   const overlapChars = overlapTokens * TOKEN_CHARS;
-  const normalized = text.replace(/\r\n/g, "\n").trim();
+  const normalized = normalizeTechnicalTerms(text.replace(/\r\n/g, "\n"));
   if (!normalized) return [];
   const chunks: KnowledgeChunk[] = [];
   let start = 0;

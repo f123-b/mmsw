@@ -1,3 +1,5 @@
+import { normalizeTechnicalTerms } from "./terminology";
+
 export const SESSION_STATES = [
   "IDLE",
   "CREATING",
@@ -72,6 +74,26 @@ import { classifyQuestion, questionFingerprint, type QuestionCategory } from "./
 import type { QuestionAnalysis, QuestionDetectionType, QuestionScore, QuestionSpeechAct } from "./question/types";
 
 export { classifyQuestion, questionFingerprint } from "./question-classifier";
+export {
+  QUESTION_BANK_TYPES,
+  QUESTION_BANK_TYPE_LABELS,
+  inferQuestionBankType,
+  normalizeQuestionBankText,
+  parseQuestionBankText,
+  questionBankSimilarity
+} from "./question-bank";
+export type {
+  QuestionBankAnswerCardRecord,
+  QuestionBankAnswerMode,
+  QuestionBankJobProfileRecord,
+  QuestionBankMatch,
+  QuestionBankQuestionRecord,
+  ParsedQuestionBankEntry,
+  QuestionBankSkillPointRecord,
+  QuestionBankSkillRecord,
+  QuestionBankSourceType,
+  QuestionBankType
+} from "./question-bank";
 export type { QuestionCategory, QuestionClassification } from "./question-classifier";
 
 export interface TranscriptSnapshot {
@@ -86,7 +108,7 @@ export interface TranscriptUpdate {
 }
 
 function normalizeTranscriptText(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
+  return normalizeTechnicalTerms(text);
 }
 
 export class TranscriptStabilizer {
@@ -218,7 +240,7 @@ export interface QuestionDetectorOptions {
 const QUESTION_WORDS = /为什么|为何|怎么|如何|能不能|可不可以|什么|哪个|哪里|哪几种|哪一类|是否|有没有|请问|解释|解释一下|说明|说明一下|介绍|说一下|说说|讲一下|讲讲|展开|继续|优势|优缺点|区别|原理|原因|怎么解决|怎么验证|第一步|先看什么|那如果|再说说|自我介绍|常见误区|时序|吗[？?。.!！]?|呢[？?。.!！]?/i;
 
 function normalizeQuestionText(text: string): string {
-  return text.replace(/[\s，。！？、,.!?]+/g, "").toLowerCase();
+  return normalizeTechnicalTerms(text).replace(/[\s，。！？、,.!?]+/g, "").toLowerCase();
 }
 
 function tokenSet(text: string): Set<string> {
@@ -253,6 +275,11 @@ function scoreFromAnalysis(analysis: QuestionAnalysis): { score: number; confide
   return { score, confidence: score >= 0.88 ? "high" : score >= 0.65 ? "medium" : "low" };
 }
 
+function isDeferredShortFollowUp(candidate: QuestionCandidate): boolean {
+  if (candidate.speechAct !== "FOLLOW_UP") return false;
+  return normalizeQuestionText(candidate.text).length <= 8;
+}
+
 export class QuestionDetector {
   private stateValue: QuestionState = "IDLE";
   private currentText = "";
@@ -260,6 +287,7 @@ export class QuestionDetector {
   private lastObservedAtMs = 0;
   private lastAudioEndMs = 0;
   private currentCandidate: QuestionCandidate | undefined;
+  private currentUtteranceId: string | undefined;
   private questionCounter = 0;
   private answeringQuestionId: string | undefined;
   private readonly confirmed: QuestionCandidate[] = [];
@@ -292,16 +320,21 @@ export class QuestionDetector {
     this.resetBuffer();
   }
 
-  observe(input: { text: string; final: boolean; startMs: number; endMs: number; confidence?: number; analysis?: QuestionAnalysis }, observedAtMs = Date.now()): QuestionEvent[] {
+  observe(input: { text: string; final: boolean; startMs: number; endMs: number; confidence?: number; analysis?: QuestionAnalysis; utteranceId?: string }, observedAtMs = Date.now()): QuestionEvent[] {
     const text = input.text.trim();
     if (!text) return [];
-    const newUtterance = !this.currentText || input.startMs > this.lastAudioEndMs + this.silenceMs;
+    const sameUtterance = Boolean(input.utteranceId && this.currentUtteranceId === input.utteranceId);
+    const newUtterance = Boolean(this.currentUtteranceId && input.utteranceId && this.currentUtteranceId !== input.utteranceId)
+      || (!sameUtterance && (!this.currentText || input.startMs > this.lastAudioEndMs + this.silenceMs));
+    const boundaryEvents = newUtterance ? this.finalizePendingCandidateAtBoundary(observedAtMs) : [];
     if (newUtterance) {
       this.currentText = text;
       this.currentStartMs = input.startMs;
       this.currentCandidate = undefined;
+      this.currentUtteranceId = input.utteranceId;
     } else {
       this.currentText = input.final ? text : text;
+      if (input.utteranceId) this.currentUtteranceId = input.utteranceId;
     }
     this.lastObservedAtMs = observedAtMs;
     this.lastAudioEndMs = input.endMs;
@@ -313,12 +346,12 @@ export class QuestionDetector {
     const scored = input.analysis ? scoreFromAnalysis(input.analysis) : scoreQuestion(this.currentText, input.final, contextText);
     if (!(input.analysis?.isQuestion ?? classification.isQuestion)) {
       if (input.final) this.currentCandidate = undefined;
-      return [{ type: "question_diagnostic", text: this.currentText, questionScore: scored.score, confidence: input.analysis?.confidence ?? classification.confidence, candidate: false, confirmed: false, reason: input.analysis?.reason ?? classification.reason, category: classification.category, detectionType: input.analysis?.type, speechAct: input.analysis?.speechAct, fingerprint: questionFingerprint(this.currentText) }];
+      return [...boundaryEvents, { type: "question_diagnostic", text: this.currentText, questionScore: scored.score, confidence: input.analysis?.confidence ?? classification.confidence, candidate: false, confirmed: false, reason: input.analysis?.reason ?? classification.reason, category: classification.category, detectionType: input.analysis?.type, speechAct: input.analysis?.speechAct, fingerprint: questionFingerprint(this.currentText) }];
     }
     const candidate = this.makeCandidate(this.currentText, scored, classification, observedAtMs, input.final, input.analysis, input.confidence);
     this.currentCandidate = candidate;
     this.stateValue = scored.score >= this.completenessThreshold ? "WAITING_COMPLETION" : "POSSIBLE_QUESTION";
-    return [{ type: "question_candidate", question: candidate }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, confidence: input.analysis?.confidence ?? classification.confidence, candidate: true, confirmed: false, reason: input.analysis?.reason ?? classification.reason, category: classification.category, detectionType: input.analysis?.type, speechAct: input.analysis?.speechAct, fingerprint: candidate.fingerprint }];
+    return [...boundaryEvents, { type: "question_candidate", question: candidate }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, confidence: input.analysis?.confidence ?? classification.confidence, candidate: true, confirmed: false, reason: input.analysis?.reason ?? classification.reason, category: classification.category, detectionType: input.analysis?.type, speechAct: input.analysis?.speechAct, fingerprint: candidate.fingerprint }];
   }
 
   flush(observedAtMs = Date.now()): QuestionEvent[] {
@@ -328,9 +361,26 @@ export class QuestionDetector {
       return [];
     }
     if (candidate.final === false) return [];
-    if (observedAtMs - this.lastObservedAtMs < this.silenceMs || candidate.score < this.completenessThreshold) {
+    // Keep elliptical follow-ups long enough to receive a trailing fragment,
+    // but do not turn a short complete question into a one-second wait.
+    const shortFollowUpHoldMs = isDeferredShortFollowUp(candidate) ? 220 : 0;
+    if (observedAtMs - this.lastObservedAtMs < this.silenceMs + shortFollowUpHoldMs || candidate.score < this.completenessThreshold) {
       return [{ type: "question_ignored", question: { ...candidate, status: "ignored" }, reason: "incomplete" }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, confidence: candidate.score, candidate: true, confirmed: false, reason: "incomplete", category: candidate.category, detectionType: candidate.detectionType, speechAct: candidate.speechAct, fingerprint: candidate.fingerprint, ignoredReason: "incomplete" }];
     }
+    return this.confirmCandidate(candidate, observedAtMs);
+  }
+
+  private finalizePendingCandidateAtBoundary(observedAtMs: number): QuestionEvent[] {
+    const candidate = this.currentCandidate;
+    // A new aggregated utterance is a hard boundary. If the previous final
+    // candidate is already complete, confirm it before the new utterance can
+    // replace the single temporal buffer. This covers short ASR gaps where
+    // wall-clock debounce has not reached 500ms yet.
+    if (!candidate || candidate.status !== "candidate" || candidate.final === false || candidate.score < this.completenessThreshold || isDeferredShortFollowUp(candidate)) return [];
+    return this.confirmCandidate(candidate, observedAtMs);
+  }
+
+  private confirmCandidate(candidate: QuestionCandidate, observedAtMs: number): QuestionEvent[] {
     const dedupeScore = this.confirmed.reduce((maximum, previous) => observedAtMs - previous.detectedAt < this.dedupeWindowMs ? Math.max(maximum, previous.fingerprint && candidate.fingerprint && previous.fingerprint === candidate.fingerprint ? 1 : questionSimilarity(previous.text, candidate.text)) : maximum, 0);
     if (dedupeScore >= this.similarityThreshold) {
       this.stateValue = "IDLE";
@@ -395,6 +445,7 @@ export class QuestionDetector {
     this.currentStartMs = 0;
     this.lastObservedAtMs = 0;
     this.lastAudioEndMs = 0;
+    this.currentUtteranceId = undefined;
     if (clearCandidate) this.context.clear();
     if (clearCandidate) this.currentCandidate = undefined;
   }
@@ -418,3 +469,4 @@ export * from "./interview-memory";
 export * from "./question";
 export * from "./profile-builder";
 export * from "./interview-brain";
+export * from "./terminology";

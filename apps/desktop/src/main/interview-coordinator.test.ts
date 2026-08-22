@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
-import { AnswerAgent, InterviewHistoryStore, ModelRouter, SessionStateMachine, type AnswerProvider } from "@interview-copilot/shared";
+import { AnswerAgent, InterviewHistoryStore, ModelRouter, QuestionDetector2, SessionStateMachine, type AnswerProvider } from "@interview-copilot/shared";
 import { InterviewCoordinator } from "./interview-coordinator";
 
 class FakeAudio extends EventEmitter {
@@ -50,13 +50,36 @@ describe("InterviewCoordinator software E2E", () => {
     for (let index = 0; index < 12; index += 1) await Promise.resolve();
     expect(messages).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "answer_start" }),
-      expect.objectContaining({ type: "answer_delta", delta: "核心回答" }),
       expect.objectContaining({ type: "answer_end", text: "核心回答。" })
     ]));
+    expect(messages.some((message) => (message as { type?: string }).type === "answer_delta")).toBe(false);
     await coordinator.stop();
     expect(coordinator.running).toBe(false);
     expect(interviewId).toMatch(/^interview-/);
     vi.useRealTimers();
+  });
+
+  it("uses a verified high-confidence question-bank answer without calling the model", async () => {
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    let modelCalled = false;
+    const provider: AnswerProvider = { stream: async function* () { modelCalled = true; yield "不应调用模型"; } };
+    const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
+    const coordinator = new InterviewCoordinator({
+      audio,
+      realtime,
+      session: new SessionStateMachine(),
+      answerAgent: agent,
+      contextProvider: async () => ({ preparedAnswer: { content: "volatile 用于告诉编译器变量可能被外部异步修改，不能依赖缓存值。", score: 0.96, verified: true } }),
+      now: () => 1_000
+    });
+    const messages: unknown[] = [];
+    coordinator.on("event", (event: { type: string; message?: unknown }) => { if (event.type === "realtime_message") messages.push(event.message); });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
+    await coordinator.answerQuestionText("volatile 的作用是什么？");
+    expect(modelCalled).toBe(false);
+    expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({ type: "answer_end", text: expect.stringContaining("volatile") })]));
+    await coordinator.stop();
   });
 
   it("uses a remote partial to prepare detection and confirms on the final transcript", async () => {
@@ -127,6 +150,78 @@ describe("InterviewCoordinator software E2E", () => {
     vi.advanceTimersByTime(500);
     for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
     expect(confirmed.some((text) => text.includes("volatile") && text.includes("关键字") && text.includes("常见误区"))).toBe(true);
+    await coordinator.stop();
+    vi.useRealTimers();
+  });
+
+  it("waits for trailing ASR fragments before answering a long interviewer question", async () => {
+    vi.useFakeTimers();
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    let clock = 1_000;
+    let requestedQuestion = "";
+    const provider: AnswerProvider = { stream: async function* (request) {
+      requestedQuestion = request.sections.find((section) => section.name === "question")?.content ?? "";
+      yield "完整回答";
+    } };
+    const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, now: () => clock });
+    const starts: unknown[] = [];
+    coordinator.on("event", (event: { type: string; message?: unknown }) => {
+      if (event.type === "realtime_message" && (event.message as { type?: string })?.type === "answer_start") starts.push(event.message);
+    });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "AUTO", answerMode: "NORMAL" });
+    const emit = (id: string, text: string, startMs: number, endMs: number) => realtime.emit("transcript", {}, { id, source: "remote", text, startMs, endMs, final: true });
+    emit("q1", "行，下一个，说说你遇到过最难定位的一个问题，比如。", 0, 1_000);
+    emit("q2", "急速抖动。", 1_020, 1_300);
+    emit("q3", "当时你怎么一步步排查的？关键转折点是什么？", 1_320, 2_000);
+    emit("q4", "最后。", 2_020, 2_160);
+    emit("q5", "怎么验证？", 2_180, 2_400);
+    expect(starts).toHaveLength(0);
+    clock = 1_600;
+    vi.advanceTimersByTime(500);
+    for (let turn = 0; turn < 24; turn += 1) await Promise.resolve();
+    expect(starts).toHaveLength(1);
+    expect(requestedQuestion).toContain("急速抖动");
+    expect(requestedQuestion).toContain("一步步排查");
+    expect(requestedQuestion).toContain("怎么验证");
+    await coordinator.stop();
+    vi.useRealTimers();
+  });
+
+  it("answers the substantive IIC question before trailing remote repair fragments", async () => {
+    vi.useFakeTimers();
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    let clock = 1_000;
+    const requestedQuestions: string[] = [];
+    const provider: AnswerProvider = { stream: async function* (request) {
+      requestedQuestions.push(request.sections.find((section) => section.name === "question")?.content ?? "");
+      yield "IIC 排查回答";
+    } };
+    const detector = new QuestionDetector2({
+      localClassifier: {
+        predict: async (text) => text.includes("怎么回答") ? { type: "FOLLOW_UP", confidence: 0.96 } : { type: "QUESTION", confidence: 0.96 }
+      }
+    });
+    const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, questionDetector2: detector, now: () => clock });
+    const starts: unknown[] = [];
+    coordinator.on("event", (event: { type: string; message?: unknown }) => { if (event.type === "realtime_message" && (event.message as { type?: string })?.type === "answer_start") starts.push(event.message); });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "AUTO", answerMode: "NORMAL" });
+    const emit = (id: string, text: string, startMs: number, endMs: number) => realtime.emit("transcript", {}, { id, source: "remote", text, startMs, endMs, final: true });
+    emit("iic-question", "好，那我问 IIC 吧。如果 IIC 通讯啊，偶发读不到数据或者总线被拉低卡死，你会怎么排查？", 0, 3_200);
+    emit("iic-detail", "比如说从硬件连接、上拉电阻、时序、地址、ACK、软件超时恢复这些角度。", 3_300, 5_200);
+    emit("ack", "那。", 5_600, 5_800);
+    emit("opinion", "你觉得呢？", 6_000, 6_300);
+    emit("meta", "怎么回答？", 6_500, 6_800);
+    emit("filler", "嗯。", 7_000, 7_100);
+    for (let turn = 0; turn < 40; turn += 1) await Promise.resolve();
+    clock = 1_600;
+    vi.advanceTimersByTime(500);
+    for (let turn = 0; turn < 40; turn += 1) await Promise.resolve();
+    expect(requestedQuestions[0]).toContain("IIC");
+    expect(starts).toHaveLength(1);
     await coordinator.stop();
     vi.useRealTimers();
   });
@@ -211,7 +306,7 @@ describe("InterviewCoordinator software E2E", () => {
     for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
     expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({ type: "answer_cancelled", reason: "superseded" }), expect.objectContaining({ type: "answer_end" })]));
     const snapshot = history.snapshot(coordinator.interviewId!);
-    expect(snapshot.answers.find((answer) => answer.cancelReason === "superseded")?.text).toBe("旧答案");
+    expect(snapshot.answers.find((answer) => answer.cancelReason === "superseded")?.text).toBe("");
     await coordinator.stop();
     vi.useRealTimers();
   });

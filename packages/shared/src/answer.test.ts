@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { AnswerAgent, ContextRouter, ModelRouter, PromptBuilder, StableAnswerStateMachine, type AnswerProvider } from "./answer";
+import { AnswerAgent, classifyAnswerQuestion, ContextRouter, ModelRouter, PromptBuilder, StableAnswerStateMachine, type AnswerProvider } from "./answer";
+import { InterviewAnswerFormatter } from "./answer/interview-answer-formatter";
 
 async function* chunks(values: string[]): AsyncGenerator<string> {
   for (const value of values) yield value;
@@ -8,6 +9,21 @@ async function* chunks(values: string[]): AsyncGenerator<string> {
 const provider: AnswerProvider = { stream: () => chunks(["核心回答。", "\n关键点：实时性。"]) };
 
 describe("Answer routing and generation", () => {
+  it("routes different question types to different answer strategies", () => {
+    expect(classifyAnswerQuestion("请写一个二叉树遍历，并说明复杂度")).toBe("code");
+    expect(classifyAnswerQuestion("设计一个高并发订单系统")).toBe("system-design");
+    expect(classifyAnswerQuestion("IIC 和 SPI 有什么区别？")).toBe("comparison");
+    expect(classifyAnswerQuestion("介绍一下你负责的项目")).toBe("project");
+    expect(classifyAnswerQuestion("你如何处理团队冲突？")).toBe("behavioral");
+  });
+
+  it("keeps code answers complete instead of slicing the tail", () => {
+    const code = "思路：双指针。\n```cpp\nint main() { return 0; }\n```\n复杂度 O(1)。";
+    expect(new InterviewAnswerFormatter().format(code, "NORMAL", "code")).toBe(code);
+    const output = new PromptBuilder().build({ id: "code", text: "请写代码实现二分查找" }, "NORMAL", new ContextRouter().route("请写代码实现二分查找"));
+    expect(output.find((section) => section.name === "output-format")?.content).toContain("完整代码");
+  });
+
   it("selects only the top three skills and separates prompt sections", async () => {
     const context = new ContextRouter().route("FOC 电流采样", {
       skills: [
@@ -19,7 +35,7 @@ describe("Answer routing and generation", () => {
       retrievedKnowledge: ["a", "b", "c", "d", "e", "f", "g"]
     });
     expect(context.skills[0]?.name).toBe("FOC");
-    expect(context.skills).toHaveLength(3);
+    expect(context.skills).toHaveLength(1);
     expect(new PromptBuilder().build({ id: "q1", text: "为什么要同步采样？" }, "FAST", context).map((section) => section.name)).toContain("question");
     const events = [];
     for await (const event of new AnswerAgent({ "fast": provider }).stream({ id: "q1", text: "为什么要同步采样？" }, "FAST", {})) events.push(event.type);
@@ -32,6 +48,16 @@ describe("Answer routing and generation", () => {
     expect(router.select("一个很长的问题".repeat(100), "NORMAL")).toEqual({ route: "normal", model: "normal-v1" });
     expect(router.select("解释系统设计", "DEEP").model).toBe("reasoning-v1");
     expect(router.select("识别截图中的代码", "FAST", true).route).toBe("vision");
+  });
+
+  it("supports a frozen per-session routing snapshot and fallback model", () => {
+    const router = new ModelRouter({ fast: "fast-v1", normal: "normal-v1" }, "fallback-v1");
+    const snapshot = router.snapshot();
+    router.setModels({ fast: "fast-v2", normal: "normal-v2" });
+    router.setFallbackModel("fallback-v2");
+    expect(router.select("普通问题", "NORMAL", false, snapshot).model).toBe("normal-v1");
+    expect(router.select("普通问题", "DEEP", false, snapshot).model).toBe("fallback-v1");
+    expect(router.select("普通问题", "DEEP").model).toBe("fallback-v2");
   });
 
   it("keeps a bounded recent transcript context for follow-up questions", () => {
@@ -48,16 +74,35 @@ describe("Answer routing and generation", () => {
     expect(calls).toBe(2);
     expect(final).toContain("我在项目中使用CAN");
   });
+
+  it("can return one stable completed answer without deltas or repair", async () => {
+    let calls = 0;
+    const directProvider: AnswerProvider = {
+      stream: async function* () { calls += 1; yield "不会被直接显示"; },
+      complete: async () => { calls += 1; return "首先，直接返回这一版。"; }
+    };
+    const events = [];
+    for await (const event of new AnswerAgent({ normal: directProvider }, new ModelRouter({ normal: "test-model" })).stream(
+      { id: "q-direct", text: "为什么使用CAN" },
+      "NORMAL",
+      { experienceContext: ["项目证据：使用 CAN 做实时通信"] },
+      undefined,
+      { directDisplay: true, emitDeltas: false, allowQualityRepair: false, formatAnswer: false }
+    )) events.push(event);
+    expect(calls).toBe(1);
+    expect(events.map((event) => event.type)).toEqual(["answer_start", "answer_end"]);
+    expect(events.at(-1)).toMatchObject({ type: "answer_end", text: "首先，直接返回这一版。" });
+  });
 });
 
 describe("StableAnswerStateMachine", () => {
-  it("keeps the previous answer until the first delta of the replacement arrives", () => {
+  it("clears the previous answer when a replacement answer starts", () => {
     const state = new StableAnswerStateMachine();
     state.start("a1");
     state.delta("a1", "旧答案");
     state.end("a1", "旧答案");
     state.start("a2");
-    expect(state.snapshot.displayedText).toBe("旧答案");
+    expect(state.snapshot.displayedText).toBe("");
     state.delta("a2", "新");
     expect(state.snapshot.displayedText).toBe("新");
     state.cancel("a2");

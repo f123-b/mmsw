@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectRepository } from "./database";
+import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectRepository, SqliteQuestionBankRepository } from "./database";
 
 describe("SQLite persistence", () => {
   it("persists profile CRUD, clone and active selection", async () => {
@@ -65,12 +65,16 @@ describe("SQLite persistence", () => {
       const knowledge = new SqliteKnowledgeRepository(database);
       const first = knowledge.createKnowledgeBase("项目");
       const second = knowledge.createKnowledgeBase("算法");
-      knowledge.saveDocument({ id: "doc-first", knowledgeBaseId: first.id, filename: "a.md", mimeType: "text/markdown", sha256: "a", text: "项目内容", sections: [], status: "ready" });
-      knowledge.replaceChunks("doc-first", [{ id: "chunk-first", text: "项目内容", metadata: { documentId: "doc-first", filename: "a.md" } }]);
+      knowledge.saveDocument({ id: "doc-first", knowledgeBaseId: first.id, filename: "a.md", mimeType: "text/markdown", sha256: "a", text: "项目内容", sections: [], documentType: "project", status: "ready" });
+      knowledge.replaceChunks("doc-first", [{ id: "chunk-first", text: "项目内容", metadata: { documentId: "doc-first", filename: "a.md", documentType: "project" } }]);
       knowledge.saveDocument({ id: "doc-second", knowledgeBaseId: second.id, filename: "b.md", mimeType: "text/markdown", sha256: "b", text: "算法内容", sections: [], status: "ready" });
       knowledge.replaceChunks("doc-second", [{ id: "chunk-second", text: "算法内容", metadata: { documentId: "doc-second", filename: "b.md" } }]);
       expect(knowledge.listChunks([first.id]).map((chunk) => chunk.text)).toEqual(["项目内容"]);
       expect(knowledge.listChunks([second.id]).map((chunk) => chunk.text)).toEqual(["算法内容"]);
+      expect(knowledge.listDocuments(first.id)[0]?.documentType).toBe("project");
+      knowledge.updateDocumentType("doc-first", "technical-doc");
+      expect(knowledge.listDocuments(first.id)[0]?.documentType).toBe("technical-doc");
+      expect(knowledge.listChunks([first.id])[0]?.metadata.documentType).toBe("technical-doc");
     } finally { database.close(); }
   });
 
@@ -105,6 +109,32 @@ describe("SQLite persistence", () => {
       expect(profiles.get(profile.id)?.name).toBe("画像测试");
       builder.invalidate(profile.id, 20);
       expect(builder.get(profile.id)?.status).toBe("partial");
+    } finally { database.close(); }
+  });
+
+  it("stores question bank answer cards and matches variants", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const questionBank = new SqliteQuestionBankRepository(database);
+      const question = questionBank.saveQuestion({ canonicalText: "IIC 通讯读不到数据时如何定位？", type: "troubleshooting", variants: ["I2C 总线没有数据怎么排查"] });
+      questionBank.saveAnswerCard({ questionId: question.id, content: "先检查硬件连接、上拉、电平、时序、地址和 ACK，再看超时恢复。", verified: true });
+      const match = questionBank.matchQuestion("iic通信读不到数据怎么排查");
+      expect(match?.question.id).toBe(question.id);
+      expect(match?.question.answerCards[0]?.verified).toBe(true);
+      expect(questionBank.listQuestions({ type: "troubleshooting" })).toHaveLength(1);
+    } finally { database.close(); }
+  });
+
+  it("imports consecutive question lists, filters project questions, and merges duplicates", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const questionBank = new SqliteQuestionBankRepository(database);
+      const result = questionBank.importText(`五、FreeRTOS\n1. 任务切换的时候上下文保存了哪些东西？\n2. 项目里的任务如何设计？\n3. volatile 的作用是什么？\n4. volatile 的作用是什么？`);
+      expect(result.recognizedQuestions).toBe(4);
+      expect(result.importedQuestions).toBe(2);
+      expect(result.filteredProjectQuestions).toBe(1);
+      expect(result.duplicatesMerged).toBe(1);
+      expect(questionBank.listQuestions({ limit: 5000 })).toHaveLength(2);
     } finally { database.close(); }
   });
 });

@@ -11,16 +11,17 @@ import type {
   ProfileProjectNode,
   ProfileSkillGraph
 } from "./types";
+import { normalizeTechnicalTerms } from "../terminology";
 
 const SKILL_CATALOG = [
   "C/C++", "Rust", "TypeScript", "JavaScript", "Python", "Electron", "RTOS", "FreeRTOS",
-  "FOC", "电机控制", "CAN", "UART", "SPI", "I2C", "DMA", "中断", "PWM", "编码器",
+  "FOC", "电机控制", "CAN", "UART", "SPI", "IIC", "I2C", "DMA", "中断", "PWM", "编码器",
   "SQLite", "RAG", "Embedding", "ASR", "VAD", "LLM", "Docker", "Git", "WebSocket",
   "消息队列", "异步消息", "微服务", "Linux", "Windows"
 ];
 
 function normalize(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
+  return normalizeTechnicalTerms(text);
 }
 
 function slug(text: string): string {
@@ -40,7 +41,7 @@ function excerpt(source: ProfileBuilderSource, term?: string, max = 220): string
 }
 
 function evidenceFor(sources: ProfileBuilderSource[], term: string): { ids: string[]; excerpts: string[] } {
-  const matches = sources.filter((source) => source.text.toLowerCase().includes(term.toLowerCase()));
+  const matches = sources.filter((source) => normalize(source.text).toLowerCase().includes(normalize(term).toLowerCase()));
   return { ids: matches.map((source) => source.id), excerpts: matches.slice(0, 2).map((source) => excerpt(source, term)).filter(Boolean) };
 }
 
@@ -191,4 +192,3 @@ export class ProfileBuilderAgent {
     }
   }
 }
-
