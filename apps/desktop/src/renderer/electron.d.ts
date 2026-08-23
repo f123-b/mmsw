@@ -10,9 +10,9 @@ import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
-import type { KnowledgeDocumentType, Profile, ProfileInput, ProviderSettings, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
+import type { KnowledgeDocumentType, Profile, ProfileInput, ProjectFact, ProjectMemorySnapshot, ProviderSettings, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput } from "../main/database";
+import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 
 declare global {
@@ -98,6 +98,20 @@ declare global {
       profileBuilder: {
         get(profileId: string): Promise<ProfileBuilderArtifactRecord | undefined>;
         rebuild(profileId: string): Promise<ProfileBuilderArtifactRecord>;
+      };
+      projectMemory: {
+        get(profileId: string): Promise<ProjectMemorySnapshot | undefined>;
+        stats(profileId: string): Promise<ProjectMemoryStats>;
+        listFacts(profileId: string, projectId?: string): Promise<ProjectFact[]>;
+        verifyFact(factId: string, verified: boolean): Promise<ProjectFact | undefined>;
+        analysisRuns(profileId: string): Promise<KnowledgeAnalysisRunRecord[]>;
+        rebuild(profileId: string): Promise<ProjectMemorySnapshot>;
+      };
+      jobTargets: {
+        list(profileId: string): Promise<JobTargetRecord[]>;
+      };
+      retrieval: {
+        list(profileId: string, limit?: number): Promise<RetrievalRunRecord[]>;
       };
       settings: {
         get(): Promise<ProviderCenterPublicConfig | undefined>;

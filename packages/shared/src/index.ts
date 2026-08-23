@@ -77,6 +77,7 @@ export { classifyQuestion, questionFingerprint } from "./question-classifier";
 export {
   QUESTION_BANK_TYPES,
   QUESTION_BANK_TYPE_LABELS,
+  QUESTION_BANK_SCOPES,
   inferQuestionBankType,
   normalizeQuestionBankText,
   parseQuestionBankText,
@@ -88,6 +89,7 @@ export type {
   QuestionBankJobProfileRecord,
   QuestionBankMatch,
   QuestionBankQuestionRecord,
+  QuestionBankScope,
   ParsedQuestionBankEntry,
   QuestionBankSkillPointRecord,
   QuestionBankSkillRecord,
@@ -470,3 +472,4 @@ export * from "./question";
 export * from "./profile-builder";
 export * from "./interview-brain";
 export * from "./terminology";
+export * from "./knowledge/index";

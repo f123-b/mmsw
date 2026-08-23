@@ -15,6 +15,8 @@ export const QUESTION_BANK_TYPES = [
 export type QuestionBankType = typeof QUESTION_BANK_TYPES[number];
 export type QuestionBankAnswerMode = "short" | "standard" | "deep" | "code";
 export type QuestionBankSourceType = "manual" | "imported" | "verified" | "generated";
+export const QUESTION_BANK_SCOPES = ["global", "profile", "project", "job"] as const;
+export type QuestionBankScope = typeof QUESTION_BANK_SCOPES[number];
 
 export interface ParsedQuestionBankEntry {
   question: string;
@@ -40,10 +42,17 @@ export interface QuestionBankQuestionRecord {
   canonicalText: string;
   normalizedText: string;
   type: QuestionBankType;
+  scope: QuestionBankScope;
+  profileId?: string;
+  projectId?: string;
+  jobProfileId?: string;
   difficulty: string;
   jobRole?: string;
   source: QuestionBankSourceType;
   status: "active" | "archived";
+  confidence: number;
+  verified: boolean;
+  embedding?: number[];
   variants: string[];
   answerCards: QuestionBankAnswerCardRecord[];
   skillIds: string[];

@@ -25,6 +25,7 @@ describe("knowledge preparation", () => {
     expect(inferKnowledgeDocumentType("FOC项目说明.md", "项目目标\n技术栈\n项目职责")).toBe("project");
     expect(inferKnowledgeDocumentType("嵌入式面试题.md", "面试官：请解释一下中断和任务的区别？")).toBe("interview-question");
     expect(inferKnowledgeDocumentType("FreeRTOS技能卡.md", "技能知识\n任务通知\n工作原理")).toBe("skill");
+    expect(inferKnowledgeDocumentType("foc2-codex-foc-studio-submit.zip", "文件：README.md\nFOC")).toBe("project");
   });
 });
 

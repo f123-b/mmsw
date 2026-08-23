@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import JSZip from "jszip";
 import { parseDocument } from "./document-parsers";
 
 describe("document parsers", () => {
@@ -14,5 +15,26 @@ describe("document parsers", () => {
     expect(document.text).toContain("职位");
     expect(document.text).toContain("嵌入式开发");
     expect(document.text).not.toContain("secret");
+  });
+
+  it("imports a GitHub-style source archive and keeps file boundaries", async () => {
+    const zip = new JSZip();
+    zip.file("foc2-codex-foc-studio-submit-main/README.md", "FOC motor controller");
+    zip.file("foc2-codex-foc-studio-submit-main/src/controller.c", "void current_loop(void) {}");
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const document = await parseDocument({ documentId: "repo-1", filename: "foc2-codex-foc-studio-submit.zip", mimeType: "application/x-zip", bytes: bytes.buffer });
+    expect(document.text).toContain("文件：foc2-codex-foc-studio-submit-main/README.md");
+    expect(document.text).toContain("文件：foc2-codex-foc-studio-submit-main/src/controller.c");
+    expect(document.sections).toContain("foc2-codex-foc-studio-submit-main/src/controller.c");
+  });
+
+  it("falls back to ZIP signature when Electron sends an unknown MIME or serialized bytes", async () => {
+    const zip = new JSZip();
+    zip.file("README", "repository readme");
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const serialized = Object.fromEntries(Array.from(bytes, (value, index) => [String(index), value]));
+    const document = await parseDocument({ documentId: "repo-2", filename: "download", mimeType: "application/x-zip", bytes: serialized });
+    expect(document.mimeType).toBe("application/zip");
+    expect(document.text).toContain("repository readme");
   });
 });

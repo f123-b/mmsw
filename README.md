@@ -13,6 +13,7 @@ Interview Copilot 是 Windows 优先的实时 AI 面试辅助桌面应用：它�
 - Provider Center 支持 LLM、ASR、Embedding 和可选 Reranker 配置；API Key 通过 Windows `safeStorage` 保存，不返回 Renderer、不写入日志。
 - Profiles、Resume/JD、Skill、Knowledge Base、Interview History 均使用 `%APPDATA%/InterviewCopilot/interview-copilot.sqlite`；密钥单独保存到同目录的安全存储文件。
 - Resume/JD 支持 TXT、MD、PDF、DOCX、HTML；知识库支持 TXT、MD、PDF、DOCX、HTML、PPTX、XLSX，文档会被分块保存，可选 embedding 后先取 16 个候选再收敛到 6 个上下文片段。
+- Personal Engineering Memory 会在 Resume、项目资料或 GitHub 仓库 ZIP 导入后生成结构化项目、模块、技术点、问题解决过程和项目面试问题；项目题回答优先使用这些真实证据，并通过第一人称和技术事实校验。
 - Preparation Agent 使用最多 40 步的模型/工具循环，写入和外部动作需要用户批准；事件会实时显示在 Preparation 页面。
 - `Ctrl+Alt+A` 重新回答当前问题，`Ctrl+Alt+S` 截图并请求 Vision Provider，`Ctrl+Alt+D` 显示悬浮窗，`Ctrl+Alt+P` 切换悬浮窗模式，`Ctrl+Alt+Q` 结束面试。
 - 更新包校验 SHA-256 和 RSA 签名；应用、音频、Realtime 日志分别写入 `%APPDATA%/InterviewCopilot/logs`，自动脱敏并轮转。
@@ -79,6 +80,8 @@ packages/shared    状态机、问题检测、回答、RAG、Agent、历史领�
 crates/audio-sidecar Rust WASAPI / CPAL 双通道采集 Sidecar
 docs               架构、验证和发布记录
 ```
+
+个人工程经验架构说明见 [`docs/personal-engineering-memory.md`](docs/personal-engineering-memory.md)，数据库迁移脚本见 [`docs/migrations/009_project_memory.sql`](docs/migrations/009_project_memory.sql)。
 
 ## 当前验收边界
 

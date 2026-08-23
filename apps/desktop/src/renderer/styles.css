@@ -152,6 +152,37 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .shortcut-panel { width: 300px !important; }.shortcut-card { width: 300px !important; border: 1px solid rgba(255,255,255,.86); border-radius: 18px; background: rgba(255,255,255,.78); box-shadow: 0 10px 40px rgba(0,0,0,.12); backdrop-filter: blur(20px); color: #344054; }.shortcut-card header button { background: rgba(31,41,55,.06); color: #687386; }.shortcut-actions button { color: #344054; }.shortcut-actions button:hover { background: rgba(31,41,55,.06); color: #182233; }.shortcut-card kbd { border-color: rgba(31,41,55,.14); background: rgba(255,255,255,.8); color: #687386; }.shortcut-static { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px; color: #687386; font-size: 11px; }
 .hud-protection-indicator { color: #8b97a8; }
 
+.memory-governance-panel { border-top: 1px solid #ece9e6; padding-top: 28px; }
+.memory-governance-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(280px, .8fr); gap: 16px; margin: 18px 0; }
+.governance-card { min-height: 180px; }
+.governance-card h2, .governance-facts h2 { margin: 0 0 10px; color: #252525; font-size: 18px; }
+.governance-card > strong { display: block; margin-bottom: 8px; font-size: 16px; }
+.governance-card > p { margin: 0 0 12px; color: #777; font-size: 13px; line-height: 1.6; }
+.governance-requirements { display: flex; flex-wrap: wrap; gap: 7px; }
+.governance-requirement { display: inline-flex; border: 1px solid #e5e1dc; border-radius: 999px; padding: 6px 9px; background: #faf9f7; color: #666; font-size: 11px; line-height: 1.3; }
+.governance-requirement-high { border-color: #efcbc5; background: #fff5f2; color: #a14f45; }
+.governance-requirement-low { color: #8b8b8b; }
+.governance-status-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid #f0eeeb; padding: 10px 0; color: #777; font-size: 13px; }
+.governance-status-row:last-child { border-bottom: 0; }
+.governance-status-row strong { color: #bf8b39; font-weight: 600; }
+.governance-status-completed { color: #2b8b5b !important; }
+.governance-status-failed { color: #bd554d !important; }
+.governance-facts { margin-top: 16px; }
+.governance-facts-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.governance-facts-heading .page-note { margin: 0 0 14px; }
+.governance-facts-heading select { min-width: 150px; }
+.governance-fact-list { overflow: hidden; }
+.governance-fact-row { align-items: flex-start; gap: 16px; }
+.governance-fact-row.verified { border-left: 3px solid #4a9d6d; background: #fbfdfb; }
+.governance-fact-row > div { min-width: 0; flex: 1; }
+.governance-fact-row p { margin: 8px 0 7px; color: #565656; font-size: 13px; line-height: 1.65; white-space: pre-wrap; }
+.governance-fact-row small { color: #999; font-size: 11px; }
+.governance-fact-title { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.governance-fact-title strong { color: #2d2d2d; }
+.governance-fact-title > small { color: #7a7a7a; }
+
+@media (max-width: 860px) { .memory-governance-grid { grid-template-columns: 1fr; } .governance-facts-heading { flex-direction: column; } .governance-facts-heading select { width: 100%; } }
+
 /* Legacy interview control capsule block (overridden below). */
 .toolbar-panel { width: var(--hud-panel-width) !important; height: 58px !important; }
 .floating-toolbar { box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100% !important; height: 58px !important; padding: 0 12px; overflow: hidden; border: 2px solid rgba(255,255,255,.28); border-radius: 32px; background: rgba(78,66,73,.68); box-shadow: 0 10px 34px rgba(62,38,46,.38), inset 0 1px 1px rgba(255,255,255,.25); backdrop-filter: blur(22px) saturate(125%); color: #fffaf8; font-size: 14px; }
@@ -848,3 +879,23 @@ body { background: #f1f1ee; color: var(--text-primary); }
 #root .overlay-root .shortcut-actions button span, #root .overlay-root .shortcut-static span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #root .overlay-root .shortcut-card kbd { flex: 0 0 auto; padding: 3px 5px; font-size: 9px; }
 #root .overlay-root .shortcut-actions button:hover { background: #eef3fb; color: #2d466d; }
+/* Personal Engineering Memory */
+.personal-memory-stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0; }
+.personal-memory-stats span { min-width: 110px; padding: 14px 16px; border: 1px solid var(--line, #e3e7ed); border-radius: 14px; background: rgba(255,255,255,.72); color: #687386; }
+.personal-memory-stats strong { display: block; margin-top: 4px; color: #1f2b3d; font-size: 22px; }
+.personal-memory-projects { display: grid; gap: 18px; }
+.personal-memory-project { padding: 22px; border: 1px solid var(--line, #e3e7ed); border-radius: 18px; background: rgba(255,255,255,.78); box-shadow: 0 10px 30px rgba(31,43,61,.05); }
+.personal-memory-project header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.personal-memory-project h2 { margin: 0 0 6px; color: #1f2b3d; }
+.personal-memory-project header p { margin: 0; color: #687386; line-height: 1.6; }
+.personal-memory-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
+.personal-memory-meta span { padding: 12px; border-radius: 12px; background: #f6f8fb; color: #536074; line-height: 1.5; }
+.personal-memory-meta b, .personal-memory-columns h3 { display: block; margin-bottom: 5px; color: #28354a; }
+.personal-memory-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+.personal-memory-columns > div { min-width: 0; padding-top: 12px; border-top: 1px solid #edf0f4; }
+.personal-memory-columns h3 { font-size: 14px; }
+.personal-memory-columns p, .personal-memory-project details p { margin: 8px 0; color: #5f6c7f; line-height: 1.55; }
+.personal-memory-columns strong, .personal-memory-project details strong { color: #28354a; }
+.personal-memory-project details { margin-top: 16px; padding-top: 14px; border-top: 1px solid #edf0f4; }
+.personal-memory-project summary { cursor: pointer; color: #3d6eb8; font-weight: 600; }
+@media (max-width: 900px) { .personal-memory-meta, .personal-memory-columns { grid-template-columns: 1fr; } }

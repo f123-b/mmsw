@@ -17,6 +17,7 @@ export const KNOWLEDGE_DOCUMENT_TYPE_LABELS: Record<KnowledgeDocumentType, strin
 /** Infer a document category for the upload flow; users can always override it. */
 export function inferKnowledgeDocumentType(filename: string, text: string): KnowledgeDocumentType {
   const name = filename.toLowerCase();
+  if (/\.zip$|github|repository|repo/.test(name)) return "project";
   const content = text.toLowerCase();
   if (/简历|resume|cv/.test(name) || /求职方向|教育经历|工作经历|项目经历/.test(content)) return "resume";
   if (/岗位|职位|jd|job-description|招聘/.test(name) || /任职要求|岗位职责|职位描述/.test(content)) return "job-description";

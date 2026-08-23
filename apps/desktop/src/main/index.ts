@@ -9,10 +9,10 @@ import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, generatePostInterviewAnalysis, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionDetector2, retrieveProfileExperience, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings } from "@interview-copilot/shared";
+import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, generatePostInterviewAnalysis, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
-import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectRepository, SqliteQuestionBankRepository, type SqliteDatabase } from "./database";
+import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
 import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type ProviderSection } from "./settings-store";
 import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnection } from "./provider-preflight";
 import { parseDocument } from "./document-parsers";
@@ -21,6 +21,7 @@ import { buildConversationHistory } from "./chat-context";
 import { ShutdownController } from "./shutdown-controller";
 import { LocalAsrServiceManager } from "./local-asr-service-manager";
 import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
+import { createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
 
 if (process.env.INTERVIEW_COPILOT_DISABLE_GPU === "1") {
@@ -103,6 +104,19 @@ const localAsrServiceManager = new LocalAsrServiceManager({
   },
   log: (message) => realtimeLogger?.info("LOCAL_ASR_SERVICE", { message })
 });
+
+// Large repositories should become searchable immediately. Calling a remote
+// embedding endpoint once per chunk can otherwise keep an upload in
+// "processing" for minutes, so large imports use the keyword index first.
+const MAX_INLINE_EMBEDDING_CHUNKS = 128;
+
+async function embedKnowledgeChunks(chunks: ReturnType<typeof chunkText>, settings: ProviderSettings | undefined): Promise<boolean> {
+  if (!settings?.apiKey || !settings.model || chunks.length === 0 || chunks.length > MAX_INLINE_EMBEDDING_CHUNKS) return false;
+  const embeddingProvider = new OpenAICompatibleEmbeddingProvider(settings);
+  for (const chunk of chunks) chunk.embedding = await embeddingProvider.embed(chunk.text);
+  return true;
+}
+
 const screenshotManager = new ScreenshotManager({
   onDiagnostic: (message) => broadcast("screenshot:diagnostic", message),
   getOverlayWindow: () => overlayManager?.currentWindow,
@@ -150,7 +164,7 @@ function applyLlmRouting(settings: Pick<ProviderSettings, "model" | "fastModel" 
   answerModelRouter.setFallbackModel(settings.fallbackModel || settings.model);
 }
 
-type LlmTaskModelKey = "questionRecognitionModel" | "profileBuilderModel" | "questionBankModel" | "chatModel" | "postInterviewModel" | "preparationModel";
+type LlmTaskModelKey = "questionRecognitionModel" | "profileBuilderModel" | "projectAnalyzerModel" | "questionBankModel" | "chatModel" | "postInterviewModel" | "preparationModel";
 type LlmRoleModelKey = "fastModel" | "normalModel" | "deepModel";
 function taskModel(settings: ProviderSettings, task: LlmTaskModelKey, fallback: LlmRoleModelKey): string {
   return settings[task] || settings[fallback] || settings.model;
@@ -199,10 +213,15 @@ let writtenTestController: WrittenTestController | undefined;
 let profileRepository: SqliteProfileRepository | undefined;
 let knowledgeRepository: SqliteKnowledgeRepository | undefined;
 let questionBankRepository: SqliteQuestionBankRepository | undefined;
+let retrievalRepository: SqliteRetrievalRepository | undefined;
+let jobTargetRepository: SqliteJobTargetRepository | undefined;
+let knowledgeAnalysisRepository: SqliteKnowledgeAnalysisRepository | undefined;
 let historyRepository: SqliteInterviewHistoryRepository | undefined;
 let projectRepository: SqliteProjectRepository | undefined;
+let projectMemoryRepository: SqliteProjectMemoryRepository | undefined;
 let profileBuilderRepository: SqliteProfileBuilderRepository | undefined;
 let profileBuilderService: ProfileBuilderService | undefined;
+let projectMemoryService: ProjectMemoryService | undefined;
 let conversationRepository: SqliteConversationRepository | undefined;
 let preparationRuntime: PreparationAgentRuntime | undefined;
 let preparationAbortController: AbortController | undefined;
@@ -228,6 +247,7 @@ const rendererAppReadyWaiters = new Map<number, Set<() => void>>();
 function triggerProfileBuilder(profileId: string | undefined): void {
   if (!profileId || !profileBuilderService) return;
   void profileBuilderService.rebuild(profileId).catch((error) => appLogger?.warn("profile builder failed", { profileId, error: String(error) }));
+  void projectMemoryService?.rebuild(profileId).catch((error) => appLogger?.warn("project memory failed", { profileId, error: String(error) }));
 }
 
 function triggerProfilesForKnowledgeBase(knowledgeBaseId: string): void {
@@ -1070,15 +1090,14 @@ function registerIpc(): void {
     const knowledgeBase = input.knowledgeBaseId ? knowledgeRepository.listKnowledgeBases().find((base) => base.id === input.knowledgeBaseId) : knowledgeRepository.ensureKnowledgeBase();
     if (!knowledgeBase) throw new Error("Knowledge base not found");
     const parsed = await parseDocument({ documentId: `document-${Date.now()}`, filename: input.filename, mimeType: input.mimeType, bytes: input.bytes });
-    const documentType = input.documentType && input.documentType !== "auto" ? input.documentType : inferKnowledgeDocumentType(parsed.filename, parsed.text);
+    const isRepositoryArchive = parsed.mimeType === "application/zip" || /\.zip$/i.test(parsed.filename);
+    const requestedType = input.documentType && input.documentType !== "auto" ? input.documentType : undefined;
+    const documentType = requestedType && !(isRepositoryArchive && requestedType === "other") ? requestedType : inferKnowledgeDocumentType(parsed.filename, parsed.text);
     const document = knowledgeRepository.saveDocument({ id: parsed.documentId, ...parsed, knowledgeBaseId: knowledgeBase.id, documentType, status: "processing" });
     try {
       const chunks = chunkText(parsed.text, { documentId: parsed.documentId, filename: parsed.filename, documentType });
       const embeddingSettings = providerConfigStore?.get("embedding");
-      if (embeddingSettings?.apiKey && embeddingSettings.model) {
-        const embeddingProvider = new OpenAICompatibleEmbeddingProvider(embeddingSettings);
-        for (const chunk of chunks) chunk.embedding = await embeddingProvider.embed(chunk.text);
-      }
+      await embedKnowledgeChunks(chunks, embeddingSettings);
       knowledgeRepository.replaceChunks(document.id, chunks);
       const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, status: "ready" });
       triggerProfilesForKnowledgeBase(knowledgeBase.id);
@@ -1098,10 +1117,7 @@ function registerIpc(): void {
     try {
       const chunks = chunkText(document.text, { documentId: document.id, filename: document.filename, documentType: document.documentType });
       const embeddingSettings = providerConfigStore?.get("embedding");
-      if (embeddingSettings?.apiKey && embeddingSettings.model) {
-        const embeddingProvider = new OpenAICompatibleEmbeddingProvider(embeddingSettings);
-        for (const chunk of chunks) chunk.embedding = await embeddingProvider.embed(chunk.text);
-      }
+      await embedKnowledgeChunks(chunks, embeddingSettings);
       knowledgeRepository.replaceChunks(document.id, chunks);
       const saved = knowledgeRepository.saveDocument({ ...document, status: "ready", error: undefined });
       triggerProfilesForKnowledgeBase(document.knowledgeBaseId);
@@ -1131,6 +1147,17 @@ function registerIpc(): void {
   ipcMain.handle("profile-builder:rebuild", async (_event, profileId: string) => {
     if (!profileBuilderService) throw new Error("Profile Builder is still initializing");
     return profileBuilderService.rebuild(profileId);
+  });
+  ipcMain.handle("project-memory:get", (_event, profileId: string) => projectMemoryService?.get(profileId));
+  ipcMain.handle("project-memory:stats", (_event, profileId: string) => projectMemoryRepository?.stats(profileId) ?? { projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0 });
+  ipcMain.handle("project-memory:list-facts", (_event, profileId: string, projectId?: string) => projectMemoryRepository?.listFacts(profileId, projectId) ?? []);
+  ipcMain.handle("project-memory:verify-fact", (_event, factId: string, verified: boolean) => projectMemoryRepository?.setFactVerification(factId, verified));
+  ipcMain.handle("project-memory:analysis-runs", (_event, profileId: string) => knowledgeAnalysisRepository?.list(profileId) ?? []);
+  ipcMain.handle("job-targets:list", (_event, profileId: string) => jobTargetRepository?.list(profileId) ?? []);
+  ipcMain.handle("retrieval:list", (_event, profileId: string, limit?: number) => retrievalRepository?.list(profileId, limit) ?? []);
+  ipcMain.handle("project-memory:rebuild", async (_event, profileId: string) => {
+    if (!projectMemoryService) throw new Error("Project Memory is still initializing");
+    return projectMemoryService.rebuild(profileId);
   });
   ipcMain.handle("history:list", () => historyRepository?.listInterviews() ?? []);
   ipcMain.handle("history:get", (_event, interviewId: string) => historyRepository?.snapshot(interviewId));
@@ -1347,9 +1374,14 @@ if (hasSingleInstanceLock) {
     database = await openAppDatabase(appDataPath);
     profileRepository = new SqliteProfileRepository(database);
     knowledgeRepository = new SqliteKnowledgeRepository(database);
+    knowledgeRepository.recoverProcessingDocuments();
     knowledgeRepository.backfillDocumentTypes();
     questionBankRepository = new SqliteQuestionBankRepository(database);
+    retrievalRepository = new SqliteRetrievalRepository(database);
+    jobTargetRepository = new SqliteJobTargetRepository(database);
+    knowledgeAnalysisRepository = new SqliteKnowledgeAnalysisRepository(database);
     projectRepository = new SqliteProjectRepository(database);
+    projectMemoryRepository = new SqliteProjectMemoryRepository(database);
     profileBuilderRepository = new SqliteProfileBuilderRepository(database);
     conversationRepository = new SqliteConversationRepository(database);
     try {
@@ -1378,6 +1410,17 @@ if (hasSingleInstanceLock) {
       (record) => broadcast("profile-builder:updated", record)
     );
   }
+  if (profileRepository && knowledgeRepository && historyRepository && projectMemoryRepository) {
+    projectMemoryService = new ProjectMemoryService(
+      profileRepository,
+      knowledgeRepository,
+      historyRepository,
+      projectMemoryRepository,
+      { generate: (input) => { const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings; return createProjectMemoryModel(answerProvider, { ...settings, model: taskModel(settings, "projectAnalyzerModel", "normalModel") }).generate(input); } },
+      (profileId) => broadcast("project-memory:updated", { profileId, stats: projectMemoryRepository?.stats(profileId) }),
+      knowledgeAnalysisRepository
+    );
+  }
   const resumeChunkCache = new Map<string, { source: string; chunks: ReturnType<typeof chunkText> }>();
   const embeddingCache = new Map<string, number[]>();
   const rememberEmbedding = (key: string, vector: number[]): void => {
@@ -1387,6 +1430,14 @@ if (hasSingleInstanceLock) {
   const answerContextProvider = async (question: { text: string }, profileId: string, recentTranscript: string[] = []) => {
     const profile = profileRepository?.get(profileId);
     const normalizedQuestion = normalizeTechnicalTerms(question.text);
+    const projectSnapshot = projectMemoryService?.get(profileId) ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] };
+    const questionAnalysis = new QuestionAnalyzer().analyze(normalizedQuestion, projectSnapshot.projects.map((project) => project.name));
+    const knowledgeRoute = routeKnowledge(questionAnalysis);
+    const targetProjectId = questionAnalysis.project ? projectSnapshot.projects.find((project) => project.name.toLowerCase() === questionAnalysis.project?.toLowerCase())?.id : undefined;
+    const factMatches = projectMemoryRepository?.searchFacts(profileId, normalizedQuestion, { projectId: targetProjectId, limit: 5 }) ?? [];
+    const relevantFactMatches = (knowledgeRoute.useProjectMemory || (factMatches[0]?.score ?? 0) >= 0.28) ? factMatches : [];
+    const verifiedFactExperience = relevantFactMatches.filter((hit) => hit.fact.verified)
+      .map((hit) => `结构化项目事实（${hit.fact.type}，已确认，来源 ${hit.fact.sourceIds.join("、")}）：\n${hit.fact.title}\n${hit.fact.content}`);
     const artifactExperience = retrieveProfileExperience(normalizedQuestion, profileBuilderService?.get(profileId)?.artifact).map((hit) => hit.text);
     // Profile Builder is asynchronous and may not exist yet on the first
     // question. Retrieve relevant resume excerpts directly so the first
@@ -1402,12 +1453,24 @@ if (hasSingleInstanceLock) {
       }
     }
     const resumeExperience = new HybridRetriever().search(normalizedQuestion, resumeChunks, { topK: 2, candidateK: 8 }).map((hit) => `Resume（相关经历）：${hit.text}`);
-    const experience = [...artifactExperience, ...resumeExperience].slice(0, 3);
-    const questionBankMatch = questionBankRepository?.matchQuestion(normalizedQuestion);
-    const preparedCard = questionBankMatch?.question.answerCards.find((card) => card.verified)
+    const experience = knowledgeRoute.useProjectMemory
+      ? verifiedFactExperience.slice(0, 6)
+      : [...artifactExperience, ...resumeExperience].slice(0, 6);
+    const personalEvidence = knowledgeRoute.useProjectMemory ? verifiedFactExperience.slice(0, 6) : [];
+    const questionBankMatch = questionBankRepository?.matchQuestion(normalizedQuestion, {
+      ...(questionAnalysis.type === "project" || questionAnalysis.type === "behavioral" || questionAnalysis.type === "follow-up" ? {} : { scope: "global" }),
+      profileId,
+      ...(targetProjectId ? { projectId: targetProjectId } : {})
+    });
+    const candidateCard = questionBankMatch?.question.answerCards.find((card) => card.verified)
       ?? questionBankMatch?.question.answerCards.find((card) => questionBankMatch.question.type === "code" ? card.mode === "code" : card.mode === "standard")
       ?? questionBankMatch?.question.answerCards[0];
+    const preparedCard = candidateCard && (questionBankMatch?.question.scope !== "project" || candidateCard.verified)
+      ? candidateCard
+      : undefined;
     const preparedAnswer = preparedCard ? `题库参考答案（匹配度 ${Math.round((questionBankMatch?.score ?? 0) * 100)}%，仅作为已整理素材，不替代当前问题判断）：\n${preparedCard.content}${preparedCard.codeContent ? `\n代码：\n${preparedCard.codeContent}` : ""}${preparedCard.complexity ? `\n复杂度：${preparedCard.complexity}` : ""}${preparedCard.limitations ? `\n边界与限制：${preparedCard.limitations}` : ""}` : undefined;
+    const jobMatches = jobTargetRepository?.searchRequirements(profileId, normalizedQuestion, 4) ?? [];
+    const jobContext = jobMatches.map((hit) => `岗位要求（${hit.requirement.importance}，匹配度 ${Math.round(hit.score * 100)}%）：${hit.requirement.requirement}`);
     const chunks = knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? [];
     const retrievalOptions = { chunks, topK: 3, candidateK: 12, reranker: new KeywordReranker() };
     let retrieved = await new HybridKnowledgeRetriever(retrievalOptions).search(normalizedQuestion);
@@ -1426,15 +1489,28 @@ if (hasSingleInstanceLock) {
           .catch(() => undefined);
       }
     }
+    retrievalRepository?.record({
+      profileId,
+      query: normalizedQuestion,
+      route: knowledgeRoute.reason,
+      hits: [
+        ...(questionBankMatch ? [{ resultType: "question" as const, resultId: questionBankMatch.question.id, score: questionBankMatch.score, verified: questionBankMatch.question.verified, preview: questionBankMatch.question.canonicalText, metadata: { scope: questionBankMatch.question.scope, type: questionBankMatch.question.type } }] : []),
+        ...factMatches.map((hit) => ({ resultType: "project-fact" as const, resultId: hit.fact.id, score: hit.score, verified: hit.fact.verified, preview: `${hit.fact.title}: ${hit.fact.content}`, metadata: { projectId: hit.fact.projectId, type: hit.fact.type } })),
+        ...jobMatches.map((hit) => ({ resultType: "job-requirement" as const, resultId: hit.requirement.id, score: hit.score, verified: hit.requirement.verified, preview: hit.requirement.requirement, metadata: { category: hit.requirement.category, importance: hit.requirement.importance } })),
+        ...retrieved.slice(0, 3).map((hit) => ({ resultType: "document-chunk" as const, resultId: hit.id, score: hit.score, preview: hit.text, metadata: hit.metadata as unknown as Record<string, unknown> }))
+      ]
+    });
     return {
       profileSummary: profile?.resume?.summary,
       jobDescriptionSummary: profile?.jobDescription?.summary,
       profileInstructions: profile?.instructions,
       skills: (profile?.skills ?? []).map((skill) => ({ id: skill.id, name: skill.name, content: `${skill.description}\n${skill.content}` })),
       experienceContext: experience,
+      personalMemoryEvidence: personalEvidence,
       preparedAnswer: preparedCard && questionBankMatch ? { content: preparedCard.content, score: questionBankMatch.score, verified: preparedCard.verified, source: "question-bank" } : undefined,
       retrievedKnowledge: [
         ...(preparedAnswer ? [preparedAnswer] : []),
+        ...jobContext,
         ...retrieved.slice(0, preparedAnswer ? 2 : 3).map((chunk) => `${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`)
       ],
       recentTranscript: recentTranscript.slice(-8)

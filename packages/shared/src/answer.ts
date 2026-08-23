@@ -2,6 +2,7 @@ import type { InterviewMemorySnapshot } from "./interview-memory";
 import { AnswerQualityChecker, type AnswerQualityResult } from "./answer/answer-quality-checker";
 import { InterviewAnswerFormatter } from "./answer/interview-answer-formatter";
 import { normalizeTechnicalTerms } from "./terminology";
+import { PersonalAnswerValidator, QuestionAnalyzer } from "./knowledge/index";
 
 export type AnswerMode = "FAST" | "NORMAL" | "DEEP";
 
@@ -37,6 +38,7 @@ export interface AnswerContextInput {
   profileInstructions?: string;
   skills?: AnswerSkillContext[];
   experienceContext?: string[];
+  personalMemoryEvidence?: string[];
   retrievedKnowledge?: string[];
   preparedAnswer?: { content: string; score: number; verified: boolean; source?: string };
   recentTranscript?: string[];
@@ -49,6 +51,7 @@ export interface ContextPack {
   profileInstructions?: string;
   skills: AnswerSkillContext[];
   experienceContext: string[];
+  personalMemoryEvidence: string[];
   retrievedKnowledge: string[];
   preparedAnswer?: { content: string; score: number; verified: boolean; source?: string };
   recentTranscript: string[];
@@ -74,7 +77,7 @@ export function classifyAnswerQuestion(text: string, hint?: string): AnswerQuest
   if (/区别|对比|比较|优缺点|取舍|权衡|为什么不用|选型|差异/.test(normalized)) return "comparison";
   if (/排查|定位|故障|报错|异常|线上问题|怎么解决|如何解决|怎么验证|监控|告警/.test(normalized)) return "troubleshooting";
   if (/团队|冲突|压力|困难|失败|沟通|协作|领导|决策|优势|缺点|成长/.test(normalized) && /你|我|经历|遇到|如何/.test(normalized)) return "behavioral";
-  if (/项目|负责|主导|经历|做过|落地|交付|简历|成果|业绩/.test(normalized)) return "project";
+  if (/项目|负责|主导|经历|做过|落地|交付|简历|成果|业绩|为什么.*设计|怎么.*实现|遇到什么问题|怎么解决|具体实现/.test(normalized)) return "project";
   if (/上一题|刚才|继续|具体一点|展开|那如果|然后|还有/.test(normalized) && normalized.length < 34) return "follow-up";
   if (/具体一点|什么意思|没听清|再说一遍|能展开|详细一点|指的是|怎么理解/.test(normalized)) return "clarification";
   if (/什么是|原理|定义|作用|为什么|如何|怎么|怎样|是什么/.test(normalized)) return "concept";
@@ -111,6 +114,7 @@ export class ContextRouter {
       profileInstructions: input.profileInstructions,
       skills,
       experienceContext: (input.experienceContext ?? []).slice(0, 5),
+      personalMemoryEvidence: (input.personalMemoryEvidence ?? []).slice(0, 5),
       retrievedKnowledge: (input.retrievedKnowledge ?? []).slice(0, 6),
       preparedAnswer: input.preparedAnswer,
       recentTranscript,
@@ -128,13 +132,14 @@ export class PromptBuilder {
   build(question: AnswerQuestion, mode: AnswerMode, context: ContextPack): PromptSection[] {
     const kind = classifyAnswerQuestion(question.text, question.kind);
     const sections: PromptSection[] = [
-      { name: "system/base", content: "你是实时面试辅助。先判断题型，再按题型回答。回答必须真实、直接、便于快速阅读；只有问题明确要求个人经历时才使用项目经历，严禁虚构用户经历。" },
+      { name: "system/base", content: `你是实时面试辅助。先判断题型，再按题型回答。回答必须真实、直接、便于快速阅读；只有问题明确要求个人经历时才使用项目经历，严禁虚构用户经历。${["project", "behavioral", "follow-up"].includes(kind) ? "当前是个人经历问题：你现在要以候选人本人第一人称回答，优先使用个人工程经验；资料中没有的内容必须明确说没有证据。" : "当前不是个人经历问题：不要为了个性化而虚构候选人经历。"}` },
       { name: "interview-style", content: `题型：${kind}。回答模式：${mode}。${new InterviewAnswerFormatter().instructions(mode, kind)}` }
     ];
     const experienceRequested = ["project", "behavioral", "follow-up", "clarification"].includes(kind)
       || /项目|经历|做过|负责|简历|实际|结合.*经验/.test(question.text);
     if (context.profileSummary || context.jobDescriptionSummary || context.profileInstructions) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary, context.profileInstructions ? `候选人回答偏好：${context.profileInstructions}` : ""].filter(Boolean).join("\n") });
     if (context.skills.length > 0) sections.push({ name: "skill-context", content: context.skills.map((skill) => `${skill.name}: ${skill.content}`).join("\n") });
+    if (context.personalMemoryEvidence.length > 0) sections.push({ name: "experience-context", content: `以下是优先级最高的个人工程经验。必须用第一人称，只使用其中有证据的内容；没有记录的内容明确说资料不足：\n${context.personalMemoryEvidence.join("\n---\n")}` });
     if (experienceRequested && context.experienceContext.length > 0) sections.push({ name: "experience-context", content: `以下是真实经历素材。只使用与问题直接相关的内容，不能补写未出现的事实：\n${context.experienceContext.join("\n---\n")}` });
     if (context.retrievedKnowledge.length > 0) sections.push({ name: "retrieval-context", content: context.retrievedKnowledge.join("\n---\n") });
     if (context.recentTranscript.length > 0) sections.push({ name: "recent-transcript", content: `最近必要对话：\n${context.recentTranscript.join("\n")}` });
@@ -152,7 +157,7 @@ export class PromptBuilder {
       "system-design": "按需求和约束、整体架构、核心链路、数据一致性/稳定性、扩展性和权衡回答；只有明确问到项目时才引用项目。",
       comparison: "先给结论，再按核心差异、适用场景、优缺点和选型依据对比，不要强行加入项目经历。",
       troubleshooting: "按现象、可能原因、定位步骤、修复方案和验证方式回答；不要把排查方案包装成候选人已经做过的经历。",
-      project: "只使用提供的简历、项目和面试素材，按背景、个人职责、关键难点、结果和复盘回答；资料没有的内容明确说没有证据。",
+      project: "只使用提供的简历、项目和面试素材，按‘核心回答、项目经历、具体实现、问题解决’组织，但要像面试口述一样自然，不要机械套模板；资料没有的内容明确说没有证据。",
       behavioral: "使用真实经历回答，按情境、任务、行动、结果和反思组织；没有对应经历就说明资料不足，不要编造。",
       "follow-up": "承接上一轮上下文，只补充面试官追问的新增信息，不重复整段答案。",
       clarification: "先直接解释被追问的概念，再用一个简短例子说明。",
@@ -281,8 +286,12 @@ export class AnswerAgent {
       }
     }
     let formattedText = options.formatAnswer === false ? text.trim() : this.formatter.format(text, mode, kind);
-    const groundingText = [context.profileSummary, context.jobDescriptionSummary, ...context.skills.map((skill) => skill.content), ...context.experienceContext, ...context.retrievedKnowledge].filter(Boolean).join("\n");
+    const groundingText = [context.profileSummary, context.jobDescriptionSummary, ...context.skills.map((skill) => skill.content), ...context.personalMemoryEvidence, ...context.experienceContext, ...context.retrievedKnowledge].filter(Boolean).join("\n");
     let quality = this.qualityChecker.check({ question: routedQuestion.text, answer: formattedText, mode, kind, groundingText });
+    if (context.personalMemoryEvidence.length > 0 || kind === "project" || kind === "behavioral") {
+      const validation = new PersonalAnswerValidator().validate({ question: routedQuestion.text, answer: formattedText, analysis: new QuestionAnalyzer().analyze(routedQuestion.text), evidence: context.personalMemoryEvidence.length > 0 ? context.personalMemoryEvidence : context.experienceContext });
+      quality = { ...quality, score: Math.min(quality.score, validation.score), issues: [...quality.issues, ...validation.issues], suggestions: [...quality.suggestions, ...validation.suggestions], needsRepair: quality.needsRepair || !validation.valid };
+    }
     // Repair only when grounded profile material exists. This keeps the
     // realtime path low-latency for generic answers while preventing a
     // clearly poor or ungrounded answer from being shown as final.

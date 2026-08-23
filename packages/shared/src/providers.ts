@@ -17,6 +17,7 @@ export interface ProviderSettings {
   fallbackModel?: string;
   questionRecognitionModel?: string;
   profileBuilderModel?: string;
+  projectAnalyzerModel?: string;
   questionBankModel?: string;
   chatModel?: string;
   postInterviewModel?: string;

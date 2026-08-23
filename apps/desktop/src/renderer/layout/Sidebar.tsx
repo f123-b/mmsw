@@ -21,6 +21,7 @@ const items: Array<{ page: AppPage; label: string; icon: string }> = [
   { page: "history", label: "面试记录", icon: "◷" },
   { page: "profiles", label: "档案", icon: "▱" },
   { page: "knowledge", label: "知识库", icon: "▤" },
+  { page: "personal-memory", label: "个人知识", icon: "⌘" },
   { page: "question-bank", label: "题库", icon: "☷" }
 ];
 

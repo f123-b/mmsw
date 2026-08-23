@@ -1,1 +1,1 @@
-export type AppPage = "home" | "interview" | "preparation" | "profiles" | "knowledge" | "question-bank" | "history" | "settings";
+export type AppPage = "home" | "interview" | "preparation" | "profiles" | "knowledge" | "personal-memory" | "question-bank" | "history" | "settings";

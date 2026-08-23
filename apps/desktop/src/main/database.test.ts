@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectRepository, SqliteQuestionBankRepository } from "./database";
+import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository } from "./database";
 
 describe("SQLite persistence", () => {
   it("persists profile CRUD, clone and active selection", async () => {
@@ -19,6 +19,17 @@ describe("SQLite persistence", () => {
     } finally {
       database.close();
     }
+  });
+
+  it("normalizes the active JD into a searchable job target", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profile = new SqliteProfileRepository(database).save({ name: "JD 测试", language: "zh-CN", jobDescription: { rawContent: "岗位职责：负责 C++ 和 FreeRTOS 开发\n任职要求：熟悉嵌入式系统和 CAN 通信", summary: "嵌入式开发工程师" }, skills: [], knowledgeBaseIds: [] }, 10);
+      const jobs = new SqliteJobTargetRepository(database);
+      expect(jobs.get(`job-target-${profile.id}`)).toMatchObject({ profileId: profile.id, name: "嵌入式开发工程师", status: "active" });
+      expect(jobs.get(`job-target-${profile.id}`)?.requirements.map((item) => item.requirement)).toEqual(expect.arrayContaining([expect.stringContaining("FreeRTOS")]));
+      expect(jobs.searchRequirements(profile.id, "FreeRTOS 开发").length).toBeGreaterThan(0);
+    } finally { database.close(); }
   });
 
   it("stores interview transcripts, questions and answers in the same database", async () => {
@@ -109,6 +120,35 @@ describe("SQLite persistence", () => {
       expect(profiles.get(profile.id)?.name).toBe("画像测试");
       builder.invalidate(profile.id, 20);
       expect(builder.get(profile.id)?.status).toBe("partial");
+    } finally { database.close(); }
+  });
+
+  it("persists structured project memory in the migration tables", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      new SqliteProfileRepository(database).save({ id: "profile-1", name: "项目记忆", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
+      const memory = new SqliteProjectMemoryRepository(database);
+      const snapshot = memory.replaceSnapshot("profile-1", {
+        projects: [{ id: "memory-project-foc", profileId: "profile-1", name: "FOC", description: "电机控制", role: "负责固件", hardware: ["STM32F405"], software: ["FreeRTOS"], technologyStack: ["FOC", "DMA"], sourceIds: ["doc-1"], confidence: 0.9 }],
+        modules: [{ id: "module-1", projectId: "memory-project-foc", moduleName: "电流环", description: "PWM同步采样", sourceIds: ["doc-1"] }],
+        technicalPoints: [{ id: "point-1", projectId: "memory-project-foc", topic: "ADC", content: "DMA搬运采样数据", importance: "high", sourceIds: ["doc-1"] }],
+        problems: [{ id: "problem-1", projectId: "memory-project-foc", problem: "低速抖动", cause: "量化噪声", solution: "速度观测器", result: "运行稳定", sourceIds: ["doc-1"] }],
+        interviewQuestions: [{ id: "question-1", projectId: "memory-project-foc", question: "为什么这么设计？", answerPoints: ["基于实时性约束"], keywords: ["设计"], sourceIds: ["doc-1"] }]
+      });
+      expect(snapshot.projects[0]?.technologyStack).toEqual(["FOC", "DMA"]);
+      expect(memory.stats("profile-1")).toEqual({ projects: 1, modules: 1, technicalPoints: 1, problems: 1, interviewQuestions: 1 });
+      expect(memory.listFacts("profile-1").some((fact) => fact.type === "challenge" && fact.title === "低速抖动")).toBe(true);
+      expect(memory.searchFacts("profile-1", "DMA 采样").some((item) => item.fact.title === "ADC" || item.fact.content.includes("DMA"))).toBe(true);
+      const questionBank = new SqliteQuestionBankRepository(database);
+      expect(questionBank.getQuestion("question-1")).toMatchObject({ scope: "project", profileId: "profile-1", projectId: "memory-project-foc", source: "generated" });
+      expect(questionBank.getQuestion("question-1")?.answerCards[0]?.keyPoints).toEqual(["基于实时性约束"]);
+      const retrievals = new SqliteRetrievalRepository(database);
+      const run = retrievals.record({ profileId: "profile-1", query: "DMA 采样", route: "personal-evidence-first", hits: [{ resultType: "project-fact", resultId: "point-1-fact", score: 0.9, preview: "DMA搬运采样数据", verified: false }], now: 20 });
+      expect(retrievals.get(run.id)?.hits[0]).toMatchObject({ resultType: "project-fact", resultId: "point-1-fact", rank: 1, score: 0.9 });
+      const analyses = new SqliteKnowledgeAnalysisRepository(database);
+      analyses.record({ id: "analysis-1", profileId: "profile-1", runType: "project-memory", inputHash: "hash-1", status: "completed", inputSnapshot: { sourceIds: ["doc-1"] }, output: snapshot, now: 30 });
+      expect(analyses.list("profile-1")[0]).toMatchObject({ id: "analysis-1", status: "completed", inputHash: "hash-1" });
+      expect(memory.getSnapshot("other").projects).toHaveLength(0);
     } finally { database.close(); }
   });
 

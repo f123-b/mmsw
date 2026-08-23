@@ -12,9 +12,9 @@ import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
-import type { Profile, ProfileInput, ProviderSettings, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
+import type { Profile, ProfileInput, ProjectFact, ProviderSettings, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput } from "../main/database";
+import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 
 const api = {
@@ -98,6 +98,20 @@ const api = {
   profileBuilder: {
     get: (profileId: string): Promise<ProfileBuilderArtifactRecord | undefined> => ipcRenderer.invoke("profile-builder:get", profileId),
     rebuild: (profileId: string): Promise<ProfileBuilderArtifactRecord> => ipcRenderer.invoke("profile-builder:rebuild", profileId)
+  },
+  projectMemory: {
+    get: (profileId: string) => ipcRenderer.invoke("project-memory:get", profileId),
+    stats: (profileId: string) => ipcRenderer.invoke("project-memory:stats", profileId),
+    listFacts: (profileId: string, projectId?: string): Promise<ProjectFact[]> => ipcRenderer.invoke("project-memory:list-facts", profileId, projectId),
+    verifyFact: (factId: string, verified: boolean): Promise<ProjectFact | undefined> => ipcRenderer.invoke("project-memory:verify-fact", factId, verified),
+    analysisRuns: (profileId: string): Promise<KnowledgeAnalysisRunRecord[]> => ipcRenderer.invoke("project-memory:analysis-runs", profileId),
+    rebuild: (profileId: string) => ipcRenderer.invoke("project-memory:rebuild", profileId)
+  },
+  jobTargets: {
+    list: (profileId: string): Promise<JobTargetRecord[]> => ipcRenderer.invoke("job-targets:list", profileId)
+  },
+  retrieval: {
+    list: (profileId: string, limit?: number): Promise<RetrievalRunRecord[]> => ipcRenderer.invoke("retrieval:list", profileId, limit)
   },
   settings: {
     get: (): Promise<ProviderCenterPublicConfig | undefined> => ipcRenderer.invoke("settings:get"),
