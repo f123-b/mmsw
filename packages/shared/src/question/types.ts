@@ -1,8 +1,9 @@
 import type { InterviewMemorySnapshot } from "../interview-memory";
 import type { QuestionCategory, QuestionClassification } from "../question-classifier";
+import type { InterviewSpeechAct, SpeechActAnchorContext } from "../interview/speech-act-classifier";
 
 export type QuestionDetectionType = "technical" | "project" | "behavior" | "follow_up" | "clarification" | "not_question";
-export type QuestionSpeechAct = "QUESTION" | "FOLLOW_UP" | "STATEMENT" | "SMALL_TALK" | "INSTRUCTION" | "CONTROL";
+export type QuestionSpeechAct = InterviewSpeechAct | "SMALL_TALK" | "INSTRUCTION";
 
 export interface QuestionScore {
   ruleScore: number;
@@ -25,6 +26,8 @@ export interface QuestionDetectionContext {
   memory?: InterviewMemorySnapshot;
   recentTranscript?: string[];
   contextText?: string;
+  latestAnchor?: SpeechActAnchorContext;
+  pendingCodeContext?: boolean;
 }
 
 export interface QuestionAnalysisSnapshot {
@@ -50,4 +53,8 @@ export interface QuestionAnalysis extends QuestionDetectionResult {
   text: string;
   classification: QuestionClassification;
   legacyCategory: QuestionCategory;
+  shouldAnswer?: boolean;
+  codeContext?: boolean;
+  topicAnchor?: boolean;
+  anchorUsedId?: string;
 }

@@ -17,18 +17,14 @@ import {
   LocalFunASRProvider,
   StereoAsrChannelRouter,
   TranscriptStabilizer,
-  createVADProvider,
-  type VADDiagnostic,
-  type VADProvider,
-  type VADResult,
   type AsrLanguage,
   type AsrProviderType,
   type ProviderSettings,
   type StreamingAsrSocket,
   type TranscriptSnapshot,
-  SileroVADProvider,
   splitStereoPcm
 } from "@interview-copilot/shared";
+import { createVADProvider, type VADDiagnostic, type VADProvider, type VADResult } from "@interview-copilot/shared/vad";
 import type { LocalAsrServiceManager } from "./local-asr-service-manager";
 
 export type RealtimeConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting" | "error";

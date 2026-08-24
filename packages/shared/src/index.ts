@@ -257,6 +257,10 @@ export interface QuestionCandidate {
   /** Stable conversation-thread links for follow-up questions. */
   parentQuestionId?: string;
   rootQuestionId?: string;
+  shouldAnswer?: boolean;
+  codeContext?: boolean;
+  anchorId?: string;
+  canonicalQuestion?: string;
 }
 
 export type QuestionEvent =
@@ -430,7 +434,7 @@ export class QuestionDetector {
       // (“围绕…针对…追问：…”). Containment is useful for ASR revisions, but
       // must not collapse a real follow-up into its parent turn.
       const parentContextFollowUp = candidate.speechAct === "FOLLOW_UP"
-        && previous.speechAct !== "FOLLOW_UP"
+        && candidate.fingerprint !== previous.fingerprint
         && /(?:围绕|追问：|追问:)/.test(candidate.text);
       if (parentContextFollowUp) return maximum;
       return Math.max(maximum, previous.fingerprint && candidate.fingerprint && previous.fingerprint === candidate.fingerprint ? 1 : questionSimilarity(previous.text, candidate.text));
@@ -489,7 +493,10 @@ export class QuestionDetector {
       asrConfidence,
       fingerprint: questionFingerprint(text),
       final,
-      triggerReason: analysis?.reason ?? classification.reason
+      triggerReason: analysis?.reason ?? classification.reason,
+      shouldAnswer: analysis?.shouldAnswer,
+      codeContext: analysis?.codeContext,
+      canonicalQuestion: analysis?.normalizedQuestion
     };
   }
 
@@ -518,9 +525,11 @@ export * from "./providers";
 export * from "./asr";
 export * from "./asr/index";
 export * from "./analysis";
-export * from "./vad";
 export * from "./question-detector-2";
 export * from "./interview-memory";
+export * from "./interview/speech-act-classifier";
+export * from "./interview/context-anchor-store";
+export * from "./interview/context-anchor-resolver";
 export * from "./question-trace";
 export * from "./question";
 export * from "./profile-builder";

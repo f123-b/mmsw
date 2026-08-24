@@ -1671,6 +1671,7 @@ if (hasSingleInstanceLock) {
     if (event.type === "realtime_state") broadcast("realtime:state", event.state);
     if (event.type === "automation_mode") broadcast("interview:automation-mode", event.mode);
     if (event.type === "answer_mode") broadcast("interview:answer-mode", event.mode);
+    if (event.type === "telemetry") realtimeLogger?.info(String(event.name), (event.fields ?? {}) as Record<string, unknown>);
     if (event.type === "diagnostic") { realtimeLogger?.warn(String(event.message)); broadcast("realtime:diagnostic", event.message); }
   });
   writtenTestController?.on("event", (event: { type: string; [key: string]: unknown }) => {

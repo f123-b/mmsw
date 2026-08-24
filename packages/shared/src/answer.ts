@@ -138,15 +138,16 @@ export interface PromptSection {
 export class PromptBuilder {
   build(question: AnswerQuestion, mode: AnswerMode, context: ContextPack): PromptSection[] {
     const kind = classifyAnswerQuestion(question.text, question.kind);
+    const personalContextRequested = ["project", "behavioral"].includes(kind)
+      || /项目|简历|经历|负责|做过|成果|业绩|实际|结合(?:你的|自己|个人).*(?:项目|经验)|你的经验|你在项目中/.test(question.text);
     const sections: PromptSection[] = [
-      { name: "system/base", content: `你是实时面试辅助。先判断题型，再按题型回答。回答必须真实、直接、便于候选人马上口述；第一句必须回应面试官当前问题，不能输出“面试策略”或“面试官一般喜欢”。不要输出“题库参考答案”“Resume”“岗位要求”“结构化项目事实”等资料标签，也不要评价面试官。嵌入式问题要使用标准专业术语，并根据上下文区分 Cortex-M、ARM32、ARM64、RTOS、Embedded Linux 等语境，不能把不同平台的概念混为一谈。只有问题明确要求个人经历时才使用项目经历，严禁虚构用户经历。${["project", "behavioral", "follow-up"].includes(kind) ? "当前是个人经历问题：你现在要以候选人本人第一人称回答，优先使用个人工程经验；资料中没有的内容必须明确说没有证据。" : "当前不是个人经历问题：不要为了个性化而虚构候选人经历。"}` },
+      { name: "system/base", content: `你是实时面试辅助。先判断题型，再按题型回答。回答必须真实、直接、便于候选人马上口述；第一句必须回应面试官当前问题，不能输出“面试策略”或“面试官一般喜欢”。不要输出“题库参考答案”“Resume”“岗位要求”“结构化项目事实”等资料标签，也不要评价面试官。嵌入式问题要使用标准专业术语，并根据上下文区分 Cortex-M、ARM32、ARM64、RTOS、Embedded Linux 等语境，不能把不同平台的概念混为一谈。只有问题明确要求个人经历时才使用项目经历，严禁虚构用户经历。${personalContextRequested ? "当前是个人经历问题：你现在要以候选人本人第一人称回答，优先使用个人工程经验；资料中没有的内容必须明确说没有证据。" : "当前不是个人经历问题：不要为了个性化而虚构候选人经历。"}` },
       { name: "interview-style", content: `题型：${kind}。回答模式：${mode}。${new InterviewAnswerFormatter().instructions(mode, kind)}` }
     ];
-    const experienceRequested = ["project", "behavioral", "follow-up", "clarification"].includes(kind)
-      || /项目|经历|做过|负责|简历|实际|结合.*经验/.test(question.text);
-    if (context.profileSummary || context.jobDescriptionSummary || context.profileInstructions) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary, context.profileInstructions ? `候选人回答偏好：${context.profileInstructions}` : ""].filter(Boolean).join("\n") });
+    const experienceRequested = personalContextRequested;
+    if (personalContextRequested && (context.profileSummary || context.jobDescriptionSummary || context.profileInstructions)) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary, context.profileInstructions ? `候选人回答偏好：${context.profileInstructions}` : ""].filter(Boolean).join("\n") });
     if (context.skills.length > 0) sections.push({ name: "skill-context", content: context.skills.map((skill) => `${skill.name}: ${skill.content}`).join("\n") });
-    if (context.personalMemoryEvidence.length > 0) sections.push({ name: "experience-context", content: `以下是优先级最高的个人工程经验。必须用第一人称，只使用其中有证据的内容；没有记录的内容明确说资料不足：\n${context.personalMemoryEvidence.join("\n---\n")}` });
+    if (personalContextRequested && context.personalMemoryEvidence.length > 0) sections.push({ name: "experience-context", content: `以下是优先级最高的个人工程经验。必须用第一人称，只使用其中有证据的内容；没有记录的内容明确说资料不足：\n${context.personalMemoryEvidence.join("\n---\n")}` });
     if (experienceRequested && context.experienceContext.length > 0) sections.push({ name: "experience-context", content: `以下是真实经历素材。只使用与问题直接相关的内容，不能补写未出现的事实：\n${context.experienceContext.join("\n---\n")}` });
     if (context.retrievedKnowledge.length > 0) sections.push({ name: "retrieval-context", content: context.retrievedKnowledge.join("\n---\n") });
     if (context.followUpContext) {
@@ -310,9 +311,16 @@ export class AnswerAgent {
     }
     const completedText = options.directDisplay && provider.complete ? sanitizeStreamingAnswer(text) : sanitizer.finalize();
     let formattedText = options.formatAnswer === false ? completedText.trim() : this.formatter.format(completedText, mode, kind);
-    const groundingText = [context.profileSummary, context.jobDescriptionSummary, ...context.skills.map((skill) => skill.content), ...context.personalMemoryEvidence, ...context.experienceContext, ...context.retrievedKnowledge].filter(Boolean).join("\n");
+    const personalContextRequested = ["project", "behavioral"].includes(kind)
+      || /项目|简历|经历|负责|做过|成果|业绩|实际|结合(?:你的|自己|个人).*(?:项目|经验)|你的经验|你在项目中/.test(routedQuestion.text);
+    const explicitlyProvidedExperience = context.personalMemoryEvidence.length > 0 || context.experienceContext.length > 0;
+    const groundingText = [
+      ...(personalContextRequested || explicitlyProvidedExperience ? [context.profileSummary, context.jobDescriptionSummary, ...context.personalMemoryEvidence, ...context.experienceContext] : []),
+      ...context.skills.map((skill) => skill.content),
+      ...context.retrievedKnowledge
+    ].filter(Boolean).join("\n");
     let quality = this.qualityChecker.check({ question: routedQuestion.text, answer: formattedText, mode, kind, groundingText });
-    if (context.personalMemoryEvidence.length > 0 || kind === "project" || kind === "behavioral") {
+    if (personalContextRequested && (context.personalMemoryEvidence.length > 0 || kind === "project" || kind === "behavioral")) {
       const validation = new PersonalAnswerValidator().validate({ question: routedQuestion.text, answer: formattedText, analysis: new QuestionAnalyzer().analyze(routedQuestion.text), evidence: context.personalMemoryEvidence.length > 0 ? context.personalMemoryEvidence : context.experienceContext });
       quality = { ...quality, score: Math.min(quality.score, validation.score), issues: [...quality.issues, ...validation.issues], suggestions: [...quality.suggestions, ...validation.suggestions], needsRepair: quality.needsRepair || !validation.valid };
     }

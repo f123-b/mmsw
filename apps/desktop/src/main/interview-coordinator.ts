@@ -8,6 +8,10 @@ import {
   InterviewMemory,
   InterviewHistoryStore,
   normalizeTechnicalTerms,
+  resolveContextualTerminology,
+  ContextAnchorResolver,
+  ContextAnchorStore,
+  SpeechActClassifier,
   QuestionTrace,
   QuestionDetector,
   QuestionDetector2,
@@ -104,7 +108,8 @@ export type InterviewCoordinatorEvent =
   | { type: "realtime_state"; state: RealtimeConnectionState }
   | { type: "automation_mode"; mode: "MANUAL" | "AUTO" }
   | { type: "answer_mode"; mode: AnswerMode }
-  | { type: "diagnostic"; message: string };
+  | { type: "diagnostic"; message: string }
+  | { type: "telemetry"; name: string; fields: Record<string, unknown> };
 
 export class InterviewCoordinator extends EventEmitter {
   private readonly detector: QuestionDetector;
@@ -115,6 +120,9 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly aggregator: TranscriptAggregator;
   private readonly history: InterviewHistoryPort;
   private readonly now: () => number;
+  private readonly speechActClassifier = new SpeechActClassifier();
+  private readonly anchorResolver = new ContextAnchorResolver();
+  private readonly anchorStore: ContextAnchorStore;
   private readonly contextProvider: (question: QuestionCandidate, profileId: string, recentTranscript: string[], context?: InterviewContextSelection) => AnswerContextInput | Promise<AnswerContextInput>;
   private defaultAutomationMode: "MANUAL" | "AUTO";
   private activeInterviewId: string | undefined;
@@ -160,6 +168,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.aggregator = options.aggregator ?? new TranscriptAggregator();
     this.history = options.history ?? new InterviewHistoryStore();
     this.now = options.now ?? (() => Date.now());
+    this.anchorStore = new ContextAnchorStore(this.now);
     this.contextProvider = options.contextProvider ?? (() => ({}));
     this.defaultAutomationMode = options.initialAutomationMode ?? "AUTO";
     this.bindPorts();
@@ -207,6 +216,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.activeOptions = { ...startOptions, automationMode };
     this.activeProfileId = startOptions.profileId;
     this.detector.reset();
+    this.anchorStore.reset();
     this.memory.reset();
     this.clearAnswerTrigger();
     this.activeModelSnapshot = this.options.answerAgent.getModelSnapshot();
@@ -259,6 +269,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.clearAnswerTrigger();
     this.finalQuestionQueue = undefined;
     this.detector.reset();
+    this.anchorStore.reset();
     this.memory.reset();
     this.historyQuestionIds.clear();
     this.activeModelSnapshot = undefined;
@@ -347,7 +358,10 @@ export class InterviewCoordinator extends EventEmitter {
         ? this.followUpContextResolver.resolve(
           { id: question.id, parentQuestionId: question.parentQuestionId, rootQuestionId: question.rootQuestionId, text: question.text },
           memorySnapshot,
-          { relatedProject: this.activeOptions?.projectId, relatedTechnicalTopic: memorySnapshot.currentTopic }
+          {
+            relatedProject: /项目|简历|经历|负责|做过|成果|业绩/.test(question.text) ? this.activeOptions?.projectId : undefined,
+            relatedTechnicalTopic: memorySnapshot.currentTopic
+          }
         )
         : undefined;
       const preparedAnswer = providerContext.preparedAnswer;
@@ -500,13 +514,15 @@ export class InterviewCoordinator extends EventEmitter {
     if (event.type === "question_confirmed" || event.type === "question_superseded") {
       this.currentQuestion = event.question;
       const trace = this.pendingQuestionTrace ?? new QuestionTrace({ questionTraceId: `question-trace-${event.question.id}`, questionScore: event.question.score, questionType: event.question.detectionType, followUp: event.question.speechAct === "FOLLOW_UP", projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId });
-      trace.mark("questionDetected", this.now()).mark("questionConfirmed", this.now());
+      if (trace.snapshot().questionDetectedAt === undefined) trace.mark("questionDetected", this.now());
+      trace.mark("questionConfirmed", this.now());
       this.currentQuestionTrace = trace;
       this.pendingQuestionTrace = undefined;
       // The renderer must never keep showing the previous answer under a new
       // question while context retrieval or model generation is still pending.
       this.emit("event", { type: "realtime_message", message: { type: "answer_reset", questionId: event.question.id } });
       this.memory.recordQuestion(event.question.text, { questionId: event.question.id, parentQuestionId: event.question.parentQuestionId, rootQuestionId: event.question.rootQuestionId, createdAt: event.question.detectedAt });
+      this.anchorStore.recordConfirmedQuestion({ id: event.question.id, text: event.question.text, confidence: event.question.score, topic: this.memory.snapshot().currentTopic, createdAt: event.question.detectedAt });
       if (this.activeInterviewId) {
         const stored = this.history.addQuestion({
           interviewId: this.activeInterviewId,
@@ -642,12 +658,66 @@ export class InterviewCoordinator extends EventEmitter {
     // a short standalone question is not mistaken for a follow-up to itself.
     const previousTranscript = this.recentTranscript.slice(0, -1);
     const contextText = this.memory.contextText(previousTranscript);
-    const detectionContext = { memory: this.memory.snapshot(), recentTranscript: previousTranscript };
-    let analysis = this.detector2.analyzeSync(utterance.text, contextText, true, detectionContext);
-    let decision = this.brain.analyze({ text: utterance.text, analysis, memory: detectionContext.memory, recentTranscript: previousTranscript });
+    const anchorSnapshot = this.anchorStore.snapshot(detectionStartedAt);
+    const terminology = resolveContextualTerminology(utterance.text, {
+      contextText,
+      entities: this.memory.snapshot().entities,
+      topics: [anchorSnapshot.currentTopic].filter((topic): topic is string => Boolean(topic))
+    });
+    const correctedText = terminology.text;
+    const speech = this.speechActClassifier.classify(correctedText, {
+      memory: this.memory.snapshot(),
+      recentTranscript: previousTranscript,
+      currentTopic: anchorSnapshot.currentTopic,
+      latestAnchor: anchorSnapshot.latestAnchor,
+      pendingCodeContext: Boolean(anchorSnapshot.pendingCodeContext),
+      now: detectionStartedAt
+    });
+    const promotesStatement = speech.speechAct === "STATEMENT" && Boolean(speech.topic || speech.entities.length);
+    if (!speech.shouldAnswer) {
+      if (speech.speechAct === "TOPIC_ANCHOR" || promotesStatement) {
+        const anchor = this.anchorStore.addAnchor({
+          text: correctedText,
+          speechAct: speech.codeContext ? "CODE_CONTEXT" : "TOPIC_ANCHOR",
+          confidence: speech.confidence,
+          topic: speech.topic,
+          entities: speech.entities,
+          createdAt: detectionStartedAt,
+          ttlMs: speech.codeContext ? 12_000 : 7_000
+        });
+        this.memory.recordQuestion(anchor.text, { questionId: anchor.id, topic: anchor.topic, createdAt: anchor.createdAt });
+      }
+      if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
+      return;
+    }
+    const resolved = this.anchorResolver.resolve({ text: correctedText, speechAct: speech.speechAct, anchors: anchorSnapshot });
+    const canonicalQuestion = resolved.canonicalQuestion;
+    const detectionContext = {
+      memory: this.memory.snapshot(),
+      recentTranscript: previousTranscript,
+      latestAnchor: anchorSnapshot.latestAnchor,
+      pendingCodeContext: Boolean(anchorSnapshot.pendingCodeContext)
+    };
+    let analysis = this.detector2.analyzeSync(canonicalQuestion, contextText, true, detectionContext);
+    analysis = {
+      ...analysis,
+      text: canonicalQuestion,
+      isQuestion: true,
+      type: speech.speechAct === "FOLLOW_UP" ? "follow_up" : analysis.type === "not_question" ? "technical" : analysis.type,
+      speechAct: speech.speechAct,
+      shouldAnswer: true,
+      normalizedQuestion: canonicalQuestion,
+      anchorUsedId: resolved.anchorUsed?.id,
+      score: { ...analysis.score, finalScore: Math.max(analysis.score.finalScore, speech.confidence, 0.86), semanticScore: Math.max(analysis.score.semanticScore, speech.confidence) },
+      confidence: Math.max(analysis.confidence, speech.confidence, 0.86),
+      reason: `${speech.reason}+${resolved.reason}`,
+      ...(speech.codeContext ? { codeContext: true } : {})
+    };
+    let decision = this.brain.analyze({ text: canonicalQuestion, analysis, memory: detectionContext.memory, recentTranscript: previousTranscript });
     if (this.detector2.hasLocalClassifier || (!decision.isQuestion && analysis.score.finalScore >= 0.5)) {
-      analysis = await this.detector2.analyze(utterance.text, contextText, true, detectionContext);
-      decision = this.brain.analyze({ text: utterance.text, analysis, memory: detectionContext.memory, recentTranscript: previousTranscript });
+      analysis = await this.detector2.analyze(canonicalQuestion, contextText, true, detectionContext);
+      analysis = { ...analysis, text: canonicalQuestion, isQuestion: true, type: speech.speechAct === "FOLLOW_UP" ? "follow_up" : analysis.type === "not_question" ? "technical" : analysis.type, speechAct: speech.speechAct, shouldAnswer: true, normalizedQuestion: canonicalQuestion, anchorUsedId: resolved.anchorUsed?.id, score: { ...analysis.score, finalScore: Math.max(analysis.score.finalScore, speech.confidence, 0.86), semanticScore: Math.max(analysis.score.semanticScore, speech.confidence) }, confidence: Math.max(analysis.confidence, speech.confidence, 0.86), reason: `${speech.reason}+${resolved.reason}`, ...(speech.codeContext ? { codeContext: true } : {}) };
+      decision = this.brain.analyze({ text: canonicalQuestion, analysis, memory: detectionContext.memory, recentTranscript: previousTranscript });
     }
     // Elliptical follow-ups such as “好，说说” are promoted by
     // InterviewBrain immediately when a topic exists in memory.
@@ -655,7 +725,7 @@ export class InterviewCoordinator extends EventEmitter {
       if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
       return;
     }
-    const observed = decision.normalizedQuestion && decision.normalizedQuestion !== utterance.text ? { ...utterance, text: decision.normalizedQuestion } : utterance;
+    const observed = { ...utterance, text: decision.normalizedQuestion || canonicalQuestion };
     const effectiveAnalysis = analysis.isQuestion
       ? analysis
       : {
@@ -673,7 +743,21 @@ export class InterviewCoordinator extends EventEmitter {
       questionType: effectiveAnalysis.type,
       followUp: effectiveAnalysis.speechAct === "FOLLOW_UP"
     }).mark("questionDetected", this.now());
-    this.detector.observe({ ...observed, utteranceId: utterance.id, analysis: effectiveAnalysis }, this.now()).forEach((event) => this.handleQuestionEvent(event));
+    const enrichEvent = (event: QuestionEvent): QuestionEvent => {
+      if (!("question" in event)) return event;
+      return {
+        ...event,
+        question: {
+          ...event.question,
+          text: canonicalQuestion,
+          canonicalQuestion,
+          ...(resolved.parentQuestionId ? { parentQuestionId: resolved.parentQuestionId } : {}),
+          ...(resolved.rootQuestionId ? { rootQuestionId: resolved.rootQuestionId } : {}),
+          ...(resolved.anchorUsed ? { anchorId: resolved.anchorUsed.id } : {})
+        }
+      } as QuestionEvent;
+    };
+    this.detector.observe({ ...observed, utteranceId: utterance.id, analysis: effectiveAnalysis }, this.now()).map(enrichEvent).forEach((event) => this.handleQuestionEvent(event));
     // The remote assembly timer already represents an end-of-speech silence.
     // Flush the temporal detector immediately after the assembled utterance
     // is classified instead of adding another 280ms debounce to every answer.
@@ -684,7 +768,7 @@ export class InterviewCoordinator extends EventEmitter {
     // flush with the detector's completeness horizon immediately; adding a
     // second timer here would make a confirmed short follow-up feel stale.
     const flushAt = this.now() + this.questionSilenceMs + (shortFollowUp ? 220 : 0);
-    this.detector.flush(flushAt).forEach((event) => this.handleQuestionEvent(event));
+    this.detector.flush(flushAt).map(enrichEvent).forEach((event) => this.handleQuestionEvent(event));
   }
 
   private scheduleQuestionFlush(delay = this.questionSilenceMs, sessionGeneration = this.sessionGeneration): void {
@@ -755,7 +839,7 @@ export class InterviewCoordinator extends EventEmitter {
   private emitQuestionTrace(): void {
     const trace = this.currentQuestionTrace;
     if (!trace) return;
-    this.emitDiagnostic(`QUESTION_TRACE ${JSON.stringify(trace.snapshot())}`);
+    this.emitTelemetry("QUESTION_TRACE", { ...trace.snapshot() });
     this.currentQuestionTrace = undefined;
   }
 
@@ -764,6 +848,8 @@ export class InterviewCoordinator extends EventEmitter {
     if (this.activeInterviewId) this.history.endInterview(this.activeInterviewId, "error", this.now());
     if (this.options.session.canTransition("ERROR")) this.transition("ERROR");
     this.activeInterviewId = undefined;
+    this.anchorStore.reset();
+    this.memory.reset();
   }
 
   private transition(state: SessionState): void {
@@ -777,5 +863,9 @@ export class InterviewCoordinator extends EventEmitter {
 
   private emitDiagnostic(message: string): void {
     this.emitEvent({ type: "diagnostic", message });
+  }
+
+  private emitTelemetry(name: string, fields: Record<string, unknown>): void {
+    this.emitEvent({ type: "telemetry", name, fields });
   }
 }

@@ -29,7 +29,8 @@ export class QuestionAnalyzer {
         : /上一题|刚才|继续|展开|具体一点|然后|还有|那如果/.test(normalized) && normalized.length < 42
           ? "follow-up"
           : "technical";
-    return { type, ...(project ? { project } : {}), topic: keywords(normalized).slice(-5).join(" "), keywords: keywords(normalized), requiresPersonalEvidence: type === "project" || type === "behavioral" || type === "follow-up", confidence: project || type === "project" ? 0.92 : type === "technical" ? 0.78 : 0.84 };
+    const explicitPersonalFollowUp = type === "follow-up" && /项目|简历|经历|负责|做过|实际|你的|结合.*经验|结合.*项目/.test(normalized);
+    return { type, ...(project ? { project } : {}), topic: keywords(normalized).slice(-5).join(" "), keywords: keywords(normalized), requiresPersonalEvidence: type === "project" || type === "behavioral" || explicitPersonalFollowUp, confidence: project || type === "project" ? 0.92 : type === "technical" ? 0.78 : 0.84 };
   }
 }
 
@@ -68,6 +69,6 @@ export interface KnowledgeRoute {
 }
 
 export function routeKnowledge(analysis: PersonalQuestionAnalysis): KnowledgeRoute {
-  if (analysis.type === "project" || analysis.type === "behavioral" || analysis.type === "follow-up") return { useProjectMemory: true, useTechnicalKnowledge: true, reason: "personal-evidence-first" };
+  if (analysis.requiresPersonalEvidence && (analysis.type === "project" || analysis.type === "behavioral" || analysis.type === "follow-up")) return { useProjectMemory: true, useTechnicalKnowledge: true, reason: "personal-evidence-first" };
   return { useProjectMemory: false, useTechnicalKnowledge: true, reason: "technical-knowledge-first" };
 }

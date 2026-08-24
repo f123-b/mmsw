@@ -44,6 +44,13 @@ describe("Interview Copilot core upgrade", () => {
     expect(formatter.format("首先，这个项目需要进行优化。因此要关注实时性。", "NORMAL")).toContain("我一般先");
   });
 
+  it("preserves readable answer blocks instead of flattening all newlines", () => {
+    const formatter = new InterviewAnswerFormatter();
+    const formatted = formatter.format("结论是先看时序。然后确认中断是否按预期触发。\n\n最后再做压力验证。", "NORMAL");
+    expect(formatted).toContain("\n\n");
+    expect(formatted).toContain("然后确认中断是否按预期触发");
+  });
+
   it("runs candidate retrieval, reranking and returns top five", async () => {
     const chunks: KnowledgeChunk[] = Array.from({ length: 24 }, (_, index) => ({
       id: `chunk-${index}`,

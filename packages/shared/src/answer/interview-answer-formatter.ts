@@ -15,10 +15,14 @@ const CODE_LENGTH_POLICY: Record<AnswerMode, { min: number; max: number }> = {
 
 function cleanMarkdown(text: string): string {
   return text
+    .replace(/\r\n?/g, "\n")
     .replace(/^\s*#{1,6}\s+[^\n]*$/gm, "")
     .replace(/^\s*[-*•]\s+/gm, "")
     .replace(/^\s*\d+[.)]\s+/gm, "")
-    .replace(/\s+/g, " ")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
@@ -32,8 +36,28 @@ function naturalize(text: string): string {
     .replace(/该项目/g, "这个项目")
     .replace(/本项目/g, "我的项目")
     .replace(/进行(了)?/g, "做了")
-    .replace(/\s+/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/[ \t]*\n[ \t]*/g, "\n")
     .trim();
+}
+
+function sentenceParts(text: string): string[] {
+  const compact = text.replace(/\n+/g, " ").replace(/[ \t]+/g, " ").trim();
+  if (!compact) return [];
+  return (compact.match(/[^。！？!?；;]+(?:[。！？!?；;]|$)/g) ?? [compact])
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+}
+
+function groupSpokenBlocks(text: string, mode: AnswerMode): string {
+  const sentences = text.split(/\n{2,}/).flatMap(sentenceParts);
+  if (sentences.length <= 1) return text.trim();
+  const targetBlocks = mode === "FAST" ? 2 : mode === "DEEP" ? 6 : 4;
+  const blockCount = Math.min(targetBlocks, sentences.length);
+  const perBlock = Math.ceil(sentences.length / blockCount);
+  const blocks: string[] = [];
+  for (let index = 0; index < sentences.length; index += perBlock) blocks.push(sentences.slice(index, index + perBlock).join(""));
+  return blocks.join("\n\n").trim();
 }
 
 /** Converts provider output into compact, spoken interview language at the final boundary. */
@@ -57,6 +81,6 @@ export class InterviewAnswerFormatter {
     // The provider receives an explicit output-token budget. Do not slice the
     // final answer here: slicing is what previously removed the tail of a
     // valid explanation and could leave the user with an incomplete answer.
-    return clean;
+    return groupSpokenBlocks(clean, mode);
   }
 }

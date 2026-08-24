@@ -17,6 +17,9 @@ export interface TerminologyCorrection {
   raw: string;
   canonical: string;
   source: "embedded" | "general" | "project";
+  confidence?: number;
+  reason?: string;
+  context?: string;
 }
 
 export interface TerminologyDictionary {
@@ -32,6 +35,7 @@ export interface TerminologyDictionary {
  * path. Project-specific terms can be layered on top by callers later.
  */
 export const EMBEDDED_TERMINOLOGY_RULES: readonly TerminologyRule[] = [
+  { canonical: "堆和栈", pattern: /(?:杯和盏|杯和栈|堆和盏|追和栈)/g, priority: 120 },
   { canonical: "堆和栈", pattern: /(?:追|堆)\s*(?:和|与|跟)\s*栈/g },
   { canonical: "堆", pattern: /追(?=\s*(?:栈|和|与|、)?\s*(?:栈|内存|管理|溢出|分配|malloc|free))/gi },
   { canonical: "CAN FD", pattern: /c\s*a\s*n\s*(?:f\s*d|fd)/gi },
@@ -46,6 +50,8 @@ export const EMBEDDED_TERMINOLOGY_RULES: readonly TerminologyRule[] = [
   { canonical: "ARMv7-M", pattern: /arm\s*v?\s*7\s*[- ]?\s*m/gi },
   { canonical: "ARMv8-M", pattern: /arm\s*v?\s*8\s*[- ]?\s*m/gi },
   { canonical: "STM32", pattern: /s\s*t\s*m\s*32/gi },
+  { canonical: "STM32", pattern: /s\s*t\s*m\s*(?:三二|3\s*2)/gi, priority: 120 },
+  { canonical: "EEPROM", pattern: /(?:e\s*p\s*room|e\s*p\s*rom|e\s*e\s*p\s*r\s*o\s*m|eeprom)/gi, priority: 120 },
   { canonical: "ESP32", pattern: /e\s*s\s*p\s*32/gi },
   { canonical: "MCU", pattern: /\bm\s*c\s*u\b/gi },
   { canonical: "SoC", pattern: /\bs\s*o\s*c\b/gi },
@@ -151,7 +157,13 @@ function applyRules(text: string, rules: readonly TerminologyRule[], source: Ter
         const flags = rule.context.flags.replace(/g/g, "");
         if (!new RegExp(rule.context.source, flags).test(normalized)) return raw;
       }
-      if (raw !== rule.canonical) corrections.push({ raw, canonical: rule.canonical, source });
+      if (raw !== rule.canonical) corrections.push({
+        raw,
+        canonical: rule.canonical,
+        source,
+        confidence: (rule.priority ?? 0) >= 100 ? 0.99 : source === "embedded" ? 0.96 : source === "project" ? 0.95 : 0.9,
+        reason: rule.context ? "contextual-rule" : "terminology-rule"
+      });
       return rule.canonical;
     });
   }
@@ -165,6 +177,30 @@ export function normalizeTechnicalTermsWithCorrections(text: string, projectRule
   normalized = applyRules(normalized, EMBEDDED_TERMINOLOGY_RULES, "embedded", corrections);
   normalized = applyRules(normalized, INTERVIEW_TERMINOLOGY_RULES, "general", corrections);
   return { text: normalized, corrections };
+}
+
+export interface ContextualTerminologyOptions {
+  contextText?: string;
+  entities?: readonly string[];
+  topics?: readonly string[];
+}
+
+/**
+ * Resolve ASR homophones whose meaning cannot be inferred safely in isolation.
+ * In particular, “约函数/余函数” is only rewritten when nearby speech clearly
+ * establishes a C++/OOP/polymorphism context.
+ */
+export function resolveContextualTerminology(text: string, options: ContextualTerminologyOptions = {}): { text: string; corrections: TerminologyCorrection[] } {
+  const base = normalizeTechnicalTermsWithCorrections(text);
+  const context = [options.contextText, ...(options.entities ?? []), ...(options.topics ?? [])].filter(Boolean).join(" ");
+  const cppContext = /C\+\+|面向对象|多态|继承|虚函数|override|virtual|类|对象/i.test(context);
+  if (!cppContext || !/(?:约|余)\s*函数/.test(base.text)) return base;
+  const corrections = [...base.corrections];
+  const resolved = base.text.replace(/(?:约|余)\s*函数/g, (raw) => {
+    corrections.push({ raw, canonical: "虚函数", source: "embedded", confidence: 0.97, reason: "cpp-oop-context", context: "C++/OOP/polymorphism" });
+    return "虚函数";
+  });
+  return { text: resolved, corrections };
 }
 
 export function normalizeTechnicalTerms(text: string): string {

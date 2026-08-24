@@ -59,6 +59,21 @@ describe("InterviewCoordinator software E2E", () => {
     vi.useRealTimers();
   });
 
+  it("keeps QUESTION_TRACE telemetry out of renderer diagnostics", async () => {
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    const provider: AnswerProvider = { stream: async function* () { yield "直接回答。"; } };
+    const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, now: () => 1_000 });
+    const events: Array<{ type: string; name?: string; message?: string }> = [];
+    coordinator.on("event", (event: { type: string; name?: string; message?: string }) => events.push(event));
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
+    await coordinator.answerQuestionText("同步机制的作用是什么？");
+    expect(events.some((event) => event.type === "telemetry" && event.name === "QUESTION_TRACE")).toBe(true);
+    expect(events.some((event) => event.type === "diagnostic" && event.message?.startsWith("QUESTION_TRACE"))).toBe(false);
+    await coordinator.stop();
+  });
+
   it("uses a verified high-confidence question-bank answer without calling the model", async () => {
     const audio = new FakeAudio();
     const realtime = new FakeRealtime();

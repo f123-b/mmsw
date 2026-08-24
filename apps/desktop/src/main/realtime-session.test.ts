@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { RealtimeSession, type RealtimeSocket } from "./realtime-session";
-import type { ProviderSettings, StreamingAsrSocket, VADProvider } from "@interview-copilot/shared";
+import type { ProviderSettings, StreamingAsrSocket } from "@interview-copilot/shared";
+import type { VADProvider } from "@interview-copilot/shared/vad";
 
 class FakeSocket implements RealtimeSocket {
   readonly sent: Array<string | Uint8Array> = [];

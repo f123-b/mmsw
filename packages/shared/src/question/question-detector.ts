@@ -2,6 +2,7 @@ import { classifyNonQuestionSpeechAct, classifyQuestion, type QuestionCategory, 
 import type { LocalQuestionModel, LocalQuestionResult } from "./local-classifier";
 import type { QuestionAnalysis, QuestionDetectionContext, QuestionDetectionType, QuestionLLMConfirmer, QuestionScore, QuestionSpeechAct } from "./types";
 import { normalizeTechnicalTerms } from "../terminology";
+import { classifyInterviewSpeechAct } from "../interview/speech-act-classifier";
 
 const RULE_KEYWORDS = /什么|为什么|为何|怎么|如何|介绍|原理|区别|优化|请问|能不能|是否|有没有|哪些|哪种|哪个|哪里|解释|说明|讲一下|说一下|说说|展开|常见误区|作用|困难|挑战|设计|架构|系统|如果.*(重新|改|换|设计)/;
 const ROBUST_QUESTION_FORM = /为什么|为何|什么是|哪些|哪种|区别|原理|介绍|解释|说明|常见误区|作用|请问|怎么(?:排查|解决|定位|判断|验证|设计|优化)|如何(?:排查|解决|定位|判断|验证|设计|优化)|如果.*(?:重新|改|换|设计)|会怎么优化|设计.*(?:系统|架构|方案|模块)/;
@@ -136,9 +137,20 @@ function buildAnalysisWithClassifier(
 ): QuestionAnalysis {
   const normalized = normalize(text).replace(/^(?:面试官|interviewer)\s*[:：]\s*/i, "");
   const contextText = normalize(context.contextText || [context.memory?.currentTopic, ...(context.recentTranscript || [])].filter(Boolean).join(" "));
+  const contextTopic = context.memory?.currentTopic
+    ?? context.latestAnchor?.topic
+    ?? contextText.match(/(?:STL|TCP|UDP|IIC|I2C|SPI|UART|CAN|FOC|DMA|PWM|ADC|FreeRTOS|RTOS|C\+\+|虚函数|堆和栈|EEPROM|Flash|链表|进程间通信|三次握手|四次挥手)/i)?.[0]
+    ?? (contextText.length >= 4 ? contextText.replace(/^(?:面试官|候选人|我)\s*[:：]\s*/i, "").slice(0, 32) : undefined);
+  const speech = classifyInterviewSpeechAct(normalized, {
+    memory: context.memory,
+    recentTranscript: context.recentTranscript,
+    currentTopic: contextTopic,
+    latestAnchor: context.latestAnchor ?? (contextTopic ? { text: contextTopic, topic: contextTopic, speechAct: "TOPIC_ANCHOR" } : undefined),
+    pendingCodeContext: context.pendingCodeContext
+  });
   const classification = { ...classifier.classify(normalized, contextText, final) };
   const nonQuestionAct = classifyNonQuestionSpeechAct(normalized);
-  if (nonQuestionAct) {
+  if (nonQuestionAct && speech.speechAct !== "ANSWER_REQUEST" && speech.speechAct !== "CODE_REQUEST" && speech.speechAct !== "QUESTION" && speech.speechAct !== "FOLLOW_UP") {
     const ruleScore = ruleScoreFor(normalized, final);
     const nonQuestionClassification = { ...classification, isQuestion: false, confidence: 0, reason: nonQuestionAct === "CONTROL" ? "control-speech" : "answer-instruction" };
     return {
@@ -152,12 +164,37 @@ function buildAnalysisWithClassifier(
       score: { ruleScore, semanticScore: 0, llmScore: 0, finalScore: 0 },
       llmUsed: Boolean(llm),
       classification: nonQuestionClassification,
-      legacyCategory: nonQuestionClassification.category
+      legacyCategory: nonQuestionClassification.category,
+      shouldAnswer: false,
+      ...(speech.codeContext ? { codeContext: true } : {})
+    };
+  }
+  if (!speech.shouldAnswer) {
+    const nonQuestionClassification = { ...classification, isQuestion: false, confidence: 0, reason: speech.reason };
+    const isFiller = speech.speechAct === "ACKNOWLEDGEMENT" || speech.speechAct === "CONTROL" || speech.speechAct === "META_CONVERSATION";
+    const ruleScore = isFiller ? 0 : ruleScoreFor(normalized, final);
+    return {
+      text: normalized,
+      isQuestion: false,
+      type: "not_question",
+      speechAct: speech.speechAct,
+      confidence: isFiller ? 0 : speech.confidence,
+      normalizedQuestion: normalized,
+      reason: speech.reason,
+      score: { ruleScore, semanticScore: 0, llmScore: 0, finalScore: 0 },
+      llmUsed: Boolean(llm),
+      classification: nonQuestionClassification,
+      legacyCategory: nonQuestionClassification.category,
+      shouldAnswer: false,
+      topicAnchor: speech.speechAct === "TOPIC_ANCHOR",
+      ...(speech.codeContext ? { codeContext: true } : {})
     };
   }
   if (classification.isQuestion && RULE_KEYWORDS.test(normalized) && normalized.length >= 6) classification.confidence = Math.max(classification.confidence, 0.9);
   const contextualFollowUp = isFollowUp(normalized, contextText, context.memory);
   const shortFollowUpQuestion = contextualFollowUp && (SHORT_FOLLOW_UP_FORM.test(normalized) || (normalized.length <= 12 && /[？?]/.test(normalized)));
+  const standaloneCompleteForm = /(?:在哪|哪里|是什么|哪些|哪种|哪个|多少|几个|几路|上限|容量)/.test(normalized);
+  const effectiveSpeechAct: QuestionSpeechAct = speech.speechAct === "QUESTION" && contextualFollowUp && !standaloneCompleteForm ? "FOLLOW_UP" : speech.speechAct;
   const ruleScore = ruleScoreFor(normalized, final);
   const semanticScore = classification.isQuestion ? clamp(classification.confidence) : 0;
   // A negative/low-confidence LLM confirmation must not erase a clear local
@@ -174,23 +211,31 @@ function buildAnalysisWithClassifier(
   const finalScore = robustRuleQuestion || followUpRescue ? Math.max(rawFinalScore, 0.86) : rawFinalScore;
   const candidateQuestion = !FILLER_ONLY.test(normalized) && !SMALL_TALK.test(normalized) && !META_PROMPT_ONLY.test(normalized);
   const llmRescue = Boolean(llm?.isQuestion && llm.confidence >= 0.82 && (ruleScore >= 0.35 || contextualFollowUp));
-  const isQuestion = candidateQuestion
+  const legacyIsQuestion = candidateQuestion
     && (robustRuleQuestion || followUpRescue || (llm?.isQuestion ?? classification.isQuestion))
     && (finalScore >= threshold || llmRescue || robustRuleQuestion);
-  const type = llm?.type && isQuestion ? llm.type : inferType(normalized, classification.category, contextualFollowUp);
-  const speechAct = llm?.label && isQuestion ? llm.label : inferSpeechAct(normalized, isQuestion, contextualFollowUp);
+  const isQuestion = speech.shouldAnswer || legacyIsQuestion;
+  const type = effectiveSpeechAct === "FOLLOW_UP"
+    ? "follow_up"
+    : llm?.type && isQuestion
+      ? llm.type
+      : inferType(normalized, classification.category, contextualFollowUp);
+  const speechAct = effectiveSpeechAct || (llm?.label && isQuestion ? llm.label : inferSpeechAct(normalized, isQuestion, contextualFollowUp));
+  const effectiveFinalScore = speech.shouldAnswer ? Math.max(finalScore, speech.confidence, speech.speechAct === "CODE_REQUEST" || speech.speechAct === "ANSWER_REQUEST" ? 0.9 : 0.86) : finalScore;
   return {
     text: normalized,
     isQuestion,
     type: isQuestion ? type : "not_question",
     speechAct: isQuestion ? speechAct : SMALL_TALK.test(normalized) ? "SMALL_TALK" : "STATEMENT",
-    confidence: finalScore,
+    confidence: effectiveFinalScore,
     normalizedQuestion: isQuestion ? normalized.replace(/[。！!]+$/, "") : normalized,
-    reason: llm?.reason || classification.reason,
-    score: { ruleScore, semanticScore, llmScore, finalScore },
+    reason: speech.reason || llm?.reason || classification.reason,
+    score: { ruleScore, semanticScore, llmScore, finalScore: effectiveFinalScore },
     llmUsed: Boolean(llm),
     classification,
-    legacyCategory: classification.category
+    legacyCategory: classification.category,
+    shouldAnswer: speech.shouldAnswer,
+    ...(speech.codeContext ? { codeContext: true } : {})
   };
 }
 

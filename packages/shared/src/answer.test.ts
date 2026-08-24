@@ -19,6 +19,18 @@ describe("Answer routing and generation", () => {
     expect(classifyAnswerQuestion("你如何处理团队冲突？")).toBe("behavioral");
   });
 
+  it("does not inject personal profile or project evidence into generic technical prompts", () => {
+    const context = new ContextRouter().route("同步机制的作用是什么？", {
+      profileSummary: "候选人简历和项目履历",
+      experienceContext: ["个人项目证据"],
+      personalMemoryEvidence: ["个人记忆证据"]
+    });
+    const sections = new PromptBuilder().build({ id: "generic", text: "同步机制的作用是什么？" }, "NORMAL", context);
+    expect(sections.some((section) => section.name === "profile-context")).toBe(false);
+    expect(sections.some((section) => section.name === "experience-context")).toBe(false);
+    expect(sections.map((section) => section.content).join("\n")).not.toContain("个人项目证据");
+  });
+
   it("keeps code answers complete instead of slicing the tail", () => {
     const code = "思路：双指针。\n```cpp\nint main() { return 0; }\n```\n复杂度 O(1)。";
     expect(new InterviewAnswerFormatter().format(code, "NORMAL", "code")).toBe(code);
