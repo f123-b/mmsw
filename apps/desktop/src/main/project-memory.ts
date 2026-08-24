@@ -1,5 +1,5 @@
 import type { AnswerProvider, ProjectMemoryAnalysisInput, ProjectMemoryModel, ProjectMemorySource, ProjectMemorySnapshot } from "@interview-copilot/shared";
-import { analyzeCodeFile, extractResumeProjectSections, languageForFilename, ProjectAnalyzerAgent as ProjectAnalyzerAgentClass, resolveProjectAssignment, resolveProjectIdentity } from "@interview-copilot/shared";
+import { analyzeCodeFile, extractResumeProjectSections, languageForFilename, parseMarkdownProjectDocument, ProjectAnalyzerAgent as ProjectAnalyzerAgentClass, resolveProjectAssignment, resolveProjectIdentity } from "@interview-copilot/shared";
 import { createHash } from "node:crypto";
 import { SqliteInterviewHistoryRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectMemoryRepository } from "./database";
 
@@ -22,7 +22,8 @@ export class ProjectMemoryService {
     private readonly model?: ProjectMemoryModel,
     private readonly onUpdated?: (profileId: string, projectId?: string) => void,
     private readonly analysisRuns?: SqliteKnowledgeAnalysisRepository,
-    private readonly embedFacts?: (profileId: string, projectId?: string) => Promise<void>
+    private readonly embedFacts?: (profileId: string, projectId?: string) => Promise<void>,
+    private readonly onTrace?: (event: string, fields: Record<string, unknown>) => void
   ) {}
 
   get(profileId: string): ProjectMemorySnapshot { return this.memories.getSnapshot(profileId); }
@@ -136,6 +137,7 @@ export class ProjectMemoryService {
     this.analysisRuns?.setProjectState({ projectId: project.id, latestAnalysisId: runId, status: "running", snapshotVersion });
     try {
       const snapshot = await new ProjectAnalyzerAgentClass(this.model).analyze(input);
+      this.onTrace?.("PROJECT_PARSE_TRACE", { projectId, sourceCount: sources.length, factCount: snapshot.facts?.length ?? 0, moduleCount: snapshot.modules.length, problemCount: snapshot.problems.length, questionCount: snapshot.interviewQuestions.length, sourceIds: sources.map((source) => source.id) });
       const saved = this.memories.replaceSnapshot(project.profileId, snapshot, Date.now(), project.id);
       await this.embedFacts?.(project.profileId, project.id);
       this.analysisRuns?.record({ id: runId, profileId: project.profileId, projectId: project.id, runType: "project-memory", inputHash, status: "completed", inputSnapshot, output: saved, snapshotVersion });
@@ -155,12 +157,16 @@ export function createProjectMemoryModel(answerProvider: AnswerProvider, setting
     async generate(input) {
       if (!settings.apiKey) throw new Error("LLM_NOT_CONFIGURED");
       let output = "";
-      const sources = input.sources.map((source) => ({ id: source.id, kind: source.kind, title: source.title, filePath: source.filePath, language: source.language, locator: source.locator, text: source.text.slice(0, 12_000) }));
+      const sources = input.sources.map((source) => {
+        const structure = parseMarkdownProjectDocument(source.text);
+        const sections = structure.sections.slice(0, 20).map((section) => ({ path: section.path, title: section.title, paragraphs: section.paragraphs.slice(0, 6), bullets: section.bullets.slice(0, 12), tables: section.tables.slice(0, 4) }));
+        return { id: source.id, kind: source.kind, title: source.title, filePath: source.filePath, language: source.language, locator: source.locator, markdownTitle: structure.title, sections };
+      });
       for await (const delta of answerProvider.stream({ model: settings.model, maxOutputTokens: 4_000, sections: [
-        { name: "system/base", content: "你是 Project Fact Extractor。输入已经绑定到一个项目，只能提取有 source id 和 quote 的原子事实。禁止把 Resume 整体、其他项目、面试 AI 回答或通用技能写入当前项目。事实不确定就省略。" },
+        { name: "system/base", content: "你是 Project Fact Extractor。输入已经绑定到一个项目，只能提取有 source id、quote 且能在对应资料中逐字定位的原子事实。禁止把 Resume 整体、其他项目、面试 AI 回答或通用技能写入当前项目。项目职责只能来自明确的项目级职责字段；时间只能是日期范围、持续周期或明确未知。不要把‘同步’‘划分’‘平台’等普通句子片段当成字段值。" },
         { name: "profile-context", content: JSON.stringify({ profileId: input.profileId, projectId: input.projectId, projectName: input.projectName, sources }) },
-        { name: "output-format", content: "先输出事实 JSON：{facts:[{id,projectId,factType,title,content,confidence,sources:[{sourceId,quote,locator}]}],projects:[{id,name,description,role,hardware,software,technologyStack,time,confidence}],modules:[],technicalPoints:[],problems:[],interviewQuestions:[]}。不要输出没有证据的事实。" },
-        { name: "question", content: "Question Generation 只能根据已验证或有证据的 Project Facts 生成题目；每道题返回 factIds。" }
+        { name: "output-format", content: "只输出一个 JSON 对象，不要 Markdown，不要解释：{facts:[{id,factType,title,content,confidence,scope,evidenceLevel,sources:[{sourceId,quote,locator}]}]}。factType 必须属于 background/goal/responsibility/hardware/software/architecture/module/technology/technical_decision/challenge/decision/cause/solution/result/metric/application/timeline/limitation。scope 只能是 project/module/problem/architecture。项目事实必须原子化；没有逐字 quote 的候选不要输出；不要生成 projects、modules、technicalPoints、problems 或 interviewQuestions。" },
+        { name: "question", content: "本轮不生成面试题；题目由已合并且带证据的 Project Facts 在本地生成。" }
       ] })) output += delta;
       return output;
     }

@@ -23,6 +23,7 @@
     "verify:package": "node apps/desktop/scripts/verify-package.mjs",
     "test": "npm run test --workspaces --if-present",
     "benchmark:question": "npm --workspace @interview-copilot/shared run benchmark:question",
+    "benchmark:project-analysis": "npm --workspace @interview-copilot/shared run benchmark:project-analysis",
     "benchmark:real-interview": "npm --workspace @interview-copilot/shared run benchmark:real-interview",
     "test:soak": "npm --workspace @interview-copilot/desktop run test:soak",
     "typecheck": "npm run typecheck --workspaces --if-present",

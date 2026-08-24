@@ -1630,7 +1630,8 @@ if (hasSingleInstanceLock) {
         const embeddingProvider = new OpenAICompatibleEmbeddingProvider(settings);
         const result = await projectMemoryRepository.embedFacts(profileId, (text) => embeddingProvider.embed(text), { projectId, model: settings.model, version: "project-facts-v1", concurrency: 4 });
         if (result.failed > 0) appLogger?.warn("PROJECT_MEMORY_EMBEDDING_PARTIAL", { profileId, ...result });
-      }
+      },
+      (event, fields) => appLogger?.info(event, fields)
     );
   }
   const resumeChunkCache = new Map<string, { source: string; chunks: ReturnType<typeof chunkText> }>();

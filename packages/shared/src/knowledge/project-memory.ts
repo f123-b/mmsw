@@ -1,76 +1,69 @@
 import { normalizeTechnicalTerms } from "../terminology";
 import { extractProjectFacts, ProjectFactConflictResolver, ProjectFactValidator } from "./project-facts";
+import { parseMarkdownProjectDocument } from "./project-document-parser";
+import { isUsableProjectTimeline } from "./project-timeline";
 import { resolveProjectIdentity } from "./project-identity";
-import type { ProjectFact, ProjectMemoryAnalysisInput, ProjectInterviewQuestion, ProjectMemoryModel, ProjectMemoryModule, ProjectMemoryProject, ProjectMemorySnapshot, ProjectProblem, ProjectTechnicalPoint } from "./types";
+import { PROJECT_FACT_TYPES, type ProjectFact, type ProjectFactEvidence, type ProjectFactType, type ProjectMemoryAnalysisInput, type ProjectInterviewQuestion, type ProjectMemoryModel, type ProjectMemoryModule, type ProjectMemoryProject, type ProjectMemorySnapshot, type ProjectProblem, type ProjectTechnicalPoint } from "./types";
 
 function unique(values: string[]): string[] { return [...new Set(values.map((value) => value.trim()).filter(Boolean))]; }
 function slug(text: string): string { return normalizeTechnicalTerms(text).toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/gi, "-").replace(/^-|-$/g, "").slice(0, 48) || "project"; }
-function lines(text: string): string[] { return text.split(/\n+/).map((line) => line.replace(/^[-*•\d.)、]+\s*/, "").trim()).filter((line) => line.length >= 2); }
-function afterLabel(text: string, labels: string[]): string[] {
-  const pattern = new RegExp(`(?:${labels.join("|")})\\s*[:：]?\\s*([^\\n。；;]+)`, "gi");
-  return [...text.matchAll(pattern)].flatMap((match) => String(match[1] ?? "").split(/[、,，/|]/)).map((item) => item.trim()).filter(Boolean);
-}
-function matchingLines(text: string, pattern: RegExp): string[] { return lines(text).filter((line) => pattern.test(line)); }
+function projectName(source: ProjectMemoryAnalysisInput["sources"][number]): string { return source.projectName?.trim() || resolveProjectIdentity(source).name || "待确认项目"; }
+function sourceLines(text: string): string[] { return text.replace(/\r/g, "").split("\n"); }
 
-function projectName(source: ProjectMemoryAnalysisInput["sources"][number]): string {
-  return source.projectName?.trim() || resolveProjectIdentity(source).name || "待确认项目";
+function factsForSource(source: ProjectMemoryAnalysisInput["sources"][number], projectId: string, projectNameValue: string, profileId?: string): ProjectFact[] {
+  return extractProjectFacts({ profileId, projectId, projectName: projectNameValue, sources: [source] });
 }
 
 function buildProject(source: ProjectMemoryAnalysisInput["sources"][number], profileId?: string): ProjectMemoryProject {
-  const text = normalizeTechnicalTerms(source.text);
-  const scopedFacts = extractProjectFacts({ profileId, projectId: `memory-project-${slug(projectName(source))}`, projectName: projectName(source), sources: [source] });
-  const hardware = unique(scopedFacts.filter((item) => item.type === "hardware").map((item) => item.title));
-  const software = unique(scopedFacts.filter((item) => item.type === "software").map((item) => item.title));
-  const technologyStack = unique(scopedFacts.filter((item) => item.type === "technology" || item.type === "technical_decision").map((item) => item.title));
-  const role = scopedFacts.find((item) => item.type === "responsibility")?.content ?? "资料未明确记录";
-  const time = scopedFacts.find((item) => item.type === "timeline")?.content;
-  const description = scopedFacts.find((item) => item.type === "background" || item.type === "goal")?.content ?? matchingLines(text, /项目背景|项目目标|项目介绍/)[0] ?? lines(text).slice(0, 2).join(" ");
-  const projectId = source.projectId ?? `memory-project-${slug(projectName(source))}`;
-  return { id: projectId, profileId, name: projectName(source), description: description.slice(0, 800), role: role.slice(0, 400), hardware, software, technologyStack, ...(time ? { time } : {}), sourceIds: [source.id], confidence: source.kind === "repository" ? 0.68 : 0.76 };
+  const name = projectName(source);
+  const projectId = source.projectId ?? `memory-project-${slug(name)}`;
+  const facts = factsForSource(source, projectId, name, profileId);
+  const hardware = unique(facts.filter((item) => item.type === "hardware").map((item) => item.title));
+  const software = unique(facts.filter((item) => item.type === "software").map((item) => item.title));
+  const technologyStack = unique(facts.filter((item) => item.type === "technology" || item.type === "technical_decision" || item.type === "architecture").map((item) => item.title));
+  const roles = facts.filter((item) => item.type === "responsibility" && (item.scope ?? "project") === "project").map((item) => item.content).filter((value) => ProjectFactValidator.validateRole(value).status === "accepted");
+  const role = unique(roles).join("；") || "资料未明确记录";
+  const timeline = facts.find((item) => item.type === "timeline" && item.title === "项目时间" && isUsableProjectTimeline(item.content))?.content;
+  const description = facts.map((item) => item.type === "background" || item.type === "goal" ? item.content : "").find((value) => value.trim().length >= 15) ?? "资料未明确记录";
+  return { id: projectId, profileId, name, description: description.slice(0, 800), role: role.slice(0, 700), hardware, software, technologyStack, ...(timeline ? { time: timeline } : {}), sourceIds: [source.id], confidence: source.kind === "repository" ? 0.68 : 0.76 };
 }
 
 function buildModules(project: ProjectMemoryProject, source: ProjectMemoryAnalysisInput["sources"][number]): ProjectMemoryModule[] {
-  const result: ProjectMemoryModule[] = [];
-  const sourceLines = lines(source.text);
-  const candidates = sourceLines.filter((line) => /模块|负责|controller|service|manager|driver|通信|控制|数据|ota|web|ui|架构/i.test(line));
-  for (const [index, line] of candidates.slice(0, 24).entries()) {
-    const [name, description] = line.split(/[:：]/, 2);
-    const moduleName = (description ? name : line).trim().slice(0, 80);
-    if (!moduleName || result.some((item) => item.moduleName === moduleName)) continue;
-    result.push({ id: `${project.id}-module-${index + 1}`, projectId: project.id, moduleName, description: (description ?? line).trim().slice(0, 500), ...(source.filePath ? { filePath: source.filePath } : {}), sourceIds: [source.id] });
-  }
-  return result;
+  const facts = factsForSource(source, project.id, project.name);
+  const moduleFacts = facts.filter((item) => item.type === "module");
+  const structure = parseMarkdownProjectDocument(source.text);
+  const headingModules = structure.sections.filter((section) => /模块|子系统|驱动|控制环|通信|数据采集|状态机/i.test(section.title)).flatMap((section) => [...section.paragraphs, ...section.bullets].map((content) => ({ title: section.title, content })));
+  const candidates = [...moduleFacts.map((item) => ({ title: item.title, content: item.content })), ...headingModules];
+  return candidates.slice(0, 24).filter((item, index, all) => item.title && all.findIndex((other) => other.title === item.title && other.content === item.content) === index).map((item, index) => ({ id: `${project.id}-module-${index + 1}`, projectId: project.id, moduleName: item.title.slice(0, 80), description: item.content.slice(0, 500), ...(source.filePath ? { filePath: source.filePath } : {}), sourceIds: [source.id] }));
 }
 
 function buildTechnicalPoints(project: ProjectMemoryProject, source: ProjectMemoryAnalysisInput["sources"][number]): ProjectTechnicalPoint[] {
-  const terms = ["ADC", "DMA", "PWM", "SVPWM", "FOC", "CAN", "UART", "MQTT", "线程", "任务", "状态机", "数据同步", "OTA", "缓存", "中断", "编码器", "PID"];
-  const sourceLines = lines(source.text);
+  const facts = factsForSource(source, project.id, project.name);
+  const terms = ["ADC", "DMA", "PWM", "SVPWM", "FOC", "CAN", "UART", "MQTT", "线程", "任务", "状态机", "数据同步", "OTA", "缓存", "中断", "编码器", "PID", "SocketCAN", "Modbus RTU", "NTP"];
+  const candidates = facts.filter((item) => ["technology", "hardware", "software", "architecture", "technical_decision", "module"].includes(item.type));
   return terms.flatMap((term) => {
-    const text = sourceLines.find((line) => line.toLowerCase().includes(term.toLowerCase()));
-    return text ? [{ term, text }] : [];
-  }).slice(0, 24).map(({ term, text }, index) => {
-    return { id: `${project.id}-point-${index + 1}`, projectId: project.id, topic: term, content: text.slice(0, 600), importance: /ADC|DMA|PWM|FOC|架构|同步|状态机/.test(term) ? "high" : "medium", sourceIds: [source.id] };
-  });
+    const match = candidates.find((item) => `${item.title} ${item.content}`.toLowerCase().includes(term.toLowerCase()));
+    return match ? [{ term, text: match.content, sourceIds: match.sourceIds }] : [];
+  }).slice(0, 24).map(({ term, text, sourceIds }, index) => ({ id: `${project.id}-point-${index + 1}`, projectId: project.id, topic: term, content: text.slice(0, 600), importance: /ADC|DMA|PWM|FOC|架构|同步|状态机/.test(term) ? "high" : "medium", sourceIds }));
 }
 
 function buildProblems(project: ProjectMemoryProject, source: ProjectMemoryAnalysisInput["sources"][number]): ProjectProblem[] {
-  const problemLines = matchingLines(source.text, /问题|难点|故障|抖动|噪声|超时|崩溃|异常|定位|排查|解决|优化/);
-  return problemLines.slice(0, 20).map((line, index) => {
-    const solution = line.match(/(?:解决|方案|通过|后来|优化)\s*[:：]?\s*(.*)/)?.[1] ?? "资料未明确记录解决方案";
-    return { id: `${project.id}-problem-${index + 1}`, projectId: project.id, problem: line.slice(0, 500), cause: line.match(/(?:原因|由于|因为)\s*[:：]?\s*(.*)/)?.[1] ?? "资料未明确记录原因", solution: solution.slice(0, 600), result: line.match(/(?:结果|最终|效果)\s*[:：]?\s*(.*)/)?.[1] ?? "资料未明确记录结果", sourceIds: [source.id] };
+  const facts = factsForSource(source, project.id, project.name);
+  const challenges = facts.filter((item) => item.type === "challenge");
+  return challenges.slice(0, 20).map((challenge, index) => {
+    const sameSection = (fact: ProjectFact): boolean => Boolean(challenge.sectionPath?.join("/") && fact.sectionPath?.join("/") === challenge.sectionPath?.join("/"));
+    const pick = (type: ProjectFactType): string => facts.find((item) => item.type === type && sameSection(item))?.content ?? facts.find((item) => item.type === type)?.content ?? "资料未明确记录";
+    return { id: `${project.id}-problem-${index + 1}`, projectId: project.id, problem: challenge.content.slice(0, 500), cause: pick("cause").slice(0, 500), solution: pick("solution").slice(0, 600), result: pick("result").slice(0, 500), sourceIds: challenge.sourceIds };
   });
 }
 
 function buildInterviewQuestions(project: ProjectMemoryProject, points: ProjectTechnicalPoint[], problems: ProjectProblem[], facts: ProjectFact[]): ProjectInterviewQuestion[] {
   const factIds = (types: string[]) => facts.filter((item) => types.includes(item.type)).map((item) => item.id);
-  const factIdsForTopic = (topic: string) => facts
-    .filter((item) => ["technology", "hardware", "software", "module"].includes(item.type))
-    .filter((item) => {
-      const factTitle = normalizeTechnicalTerms(item.title).toLowerCase();
-      const normalizedTopic = normalizeTechnicalTerms(topic).toLowerCase();
-      return factTitle === normalizedTopic || factTitle.includes(normalizedTopic) || normalizedTopic.includes(factTitle);
-    })
-    .map((item) => item.id);
+  const factIdsForTopic = (topic: string) => facts.filter((item) => ["technology", "hardware", "software", "module"].includes(item.type)).filter((item) => {
+    const factTitle = normalizeTechnicalTerms(item.title).toLowerCase();
+    const normalizedTopic = normalizeTechnicalTerms(topic).toLowerCase();
+    return factTitle === normalizedTopic || factTitle.includes(normalizedTopic) || normalizedTopic.includes(factTitle);
+  }).map((item) => item.id);
   const result: ProjectInterviewQuestion[] = [];
   const designFactIds = factIds(["background", "goal", "responsibility", "architecture", "technical_decision"]);
   if (designFactIds.length) result.push({ id: `${project.id}-question-design`, projectId: project.id, question: `你在${project.name}里面为什么这么设计？`, answerPoints: [`我的设计依据是${project.technologyStack.slice(0, 4).join("、") || "资料中记录的项目约束"}。`, project.description, `我个人负责的部分是${project.role}。`].filter(Boolean), keywords: unique([project.name, ...project.technologyStack, "设计", "取舍"]), sourceIds: project.sourceIds, factIds: designFactIds });
@@ -98,15 +91,76 @@ export function buildDeterministicProjectMemory(input: ProjectMemoryAnalysisInpu
     const groupInput = { ...input, projectId: input.projectId ?? first.projectId, projectName: input.projectName ?? first.projectName, sources: group };
     const project = buildProject({ ...first, projectId: groupInput.projectId, projectName: groupInput.projectName }, input.profileId);
     project.sourceIds = group.map((source) => source.id);
-    projects.push(project);
     const groupFacts = new ProjectFactConflictResolver().resolve(extractProjectFacts({ ...groupInput, projectId: project.id, projectName: project.name }), group);
+    projects.push(project);
     facts = [...facts, ...groupFacts];
     modules.push(...group.flatMap((source) => buildModules(project, source)));
     technicalPoints.push(...group.flatMap((source) => buildTechnicalPoints(project, source)));
     problems.push(...group.flatMap((source) => buildProblems(project, source)));
   }
-  const interviewQuestions = projects.flatMap((project) => buildInterviewQuestions(project, technicalPoints.filter((item) => item.projectId === project.id), problems.filter((item) => item.projectId === project.id), facts.filter((item) => item.projectId === project.id)));
+  const interviewQuestions = projects.flatMap((project) => buildInterviewQuestions(project, technicalPoints.filter((item) => item.projectId === project.id), problems.filter((item) => item.projectId === project.id), facts.filter((fact) => fact.projectId === project.id)));
   return { projects, modules, technicalPoints, problems, interviewQuestions, facts: facts.filter((fact) => ProjectFactValidator.validate(fact).status !== "rejected") };
+}
+
+interface CandidateEvidence { sourceId?: string; quote?: string; locator?: string; }
+interface CandidateFact { id?: string; projectId?: string; factType?: string; type?: string; title?: string; content?: string; confidence?: number; scope?: string; evidenceLevel?: string; sources?: CandidateEvidence[]; evidence?: CandidateEvidence[]; }
+
+function parseJsonOutput(raw: string): Record<string, unknown> | undefined {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] ?? raw;
+  const start = fenced.indexOf("{");
+  const end = fenced.lastIndexOf("}");
+  if (start < 0 || end <= start) return undefined;
+  try { const value: unknown = JSON.parse(fenced.slice(start, end + 1)); return value && typeof value === "object" ? value as Record<string, unknown> : undefined; } catch { return undefined; }
+}
+
+function compact(value: string): string { return value.replace(/[\s\u3000]+/g, " ").trim(); }
+function evidenceExists(sourceText: string, quote: string): boolean { return compact(sourceText).includes(compact(quote)) || compact(sourceText).includes(compact(quote).replace(/[|｜]/g, " ")); }
+
+function parseCandidateFacts(raw: string, input: ProjectMemoryAnalysisInput): ProjectFact[] {
+  const parsed = parseJsonOutput(raw);
+  const candidates = Array.isArray(parsed?.facts) ? parsed.facts as CandidateFact[] : [];
+  const sources = new Map(input.sources.map((source) => [source.id, source]));
+  const projectId = input.projectId ?? `project-${slug(input.projectName ?? "unknown")}`;
+  const result: ProjectFact[] = [];
+  for (const candidate of candidates) {
+    const type = candidate.factType ?? candidate.type;
+    if (!type || !PROJECT_FACT_TYPES.includes(type as ProjectFactType) || !candidate.title?.trim() || !candidate.content?.trim()) continue;
+    const candidateEvidence = [...(candidate.sources ?? []), ...(candidate.evidence ?? [])];
+    const evidenceItems: ProjectFactEvidence[] = [];
+    for (const item of candidateEvidence) {
+      const source = item.sourceId ? sources.get(item.sourceId) : undefined;
+      if (!source || !item.quote?.trim() || !evidenceExists(source.text, item.quote)) continue;
+      evidenceItems.push({ sourceId: source.id, quote: item.quote.trim().slice(0, 800), ...(item.locator ? { locator: item.locator } : {}) });
+    }
+    if (!evidenceItems.length) continue;
+    const firstSource = sources.get(evidenceItems[0]?.sourceId ?? "");
+    if (!firstSource) continue;
+    const evidenceLevel = ["confirmed-user", "confirmed-code", "inferred", "pending", "risk", "not-measured"].includes(String(candidate.evidenceLevel)) ? candidate.evidenceLevel as ProjectFact["evidenceLevel"] : undefined;
+    const candidateFact: ProjectFact = {
+      id: candidate.id?.trim() || `${projectId}-llm-fact-${slug(candidate.title)}-${slug(candidate.content).slice(0, 18)}`,
+      projectId,
+      type: type as ProjectFactType,
+      factType: type as ProjectFactType,
+      title: candidate.title.trim().slice(0, 120),
+      content: candidate.content.trim().slice(0, 1_000),
+      confidence: Math.max(0, Math.min(1, Number(candidate.confidence) || 0.65)),
+      verified: false,
+      sourceIds: [...new Set(evidenceItems.map((item) => item.sourceId))],
+      evidence: evidenceItems,
+      scope: candidate.scope === "module" || candidate.scope === "problem" || candidate.scope === "architecture" ? candidate.scope : "project",
+      ...(evidenceLevel ? { evidenceLevel } : {}),
+      status: "pending_review"
+    };
+    const sanitized = ProjectFactValidator.sanitize(candidateFact);
+    if (sanitized) result.push(sanitized);
+  }
+  return result;
+}
+
+function mergeSnapshots(base: ProjectMemorySnapshot, candidates: ProjectFact[], input: ProjectMemoryAnalysisInput): ProjectMemorySnapshot {
+  if (!candidates.length) return base;
+  const facts = new ProjectFactConflictResolver().resolve([...(base.facts ?? []), ...candidates], input.sources);
+  return { ...base, facts };
 }
 
 export class ProjectMemoryAgent {
@@ -116,10 +170,8 @@ export class ProjectMemoryAgent {
     const fallback = buildDeterministicProjectMemory(input);
     if (!this.model || input.sources.length === 0) return fallback;
     try {
-      // Keep the model call for provider compatibility and telemetry, but do
-      // not let unvalidated prose overwrite the evidence-grounded snapshot.
-      await this.model.generate(input);
-      return fallback;
+      const raw = await this.model.generate(input);
+      return mergeSnapshots(fallback, parseCandidateFacts(raw, input), input);
     } catch {
       return fallback;
     }

@@ -72,6 +72,9 @@ export interface ProjectFactEvidence {
   locator?: string;
 }
 
+export type ProjectFactScope = "project" | "module" | "problem" | "architecture";
+export type ProjectFactEvidenceLevel = "confirmed-user" | "confirmed-code" | "inferred" | "pending" | "risk" | "not-measured";
+
 export interface ProjectFact {
   id: string;
   projectId: string;
@@ -83,6 +86,10 @@ export interface ProjectFact {
   verified: boolean;
   sourceIds: string[];
   evidence?: ProjectFactEvidence[];
+  scope?: ProjectFactScope;
+  sectionPath?: string[];
+  evidenceLevel?: ProjectFactEvidenceLevel;
+  subtype?: string;
   factType?: ProjectFactType;
   status?: "active" | "pending_review" | "rejected" | "conflicting";
   conflictStatus?: "confirmed" | "conflicting" | "pending_review";
