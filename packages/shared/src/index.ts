@@ -512,6 +512,9 @@ export class QuestionDetector {
 }
 
 export * from "./answer";
+export * from "./chat";
+export * from "./chat-response";
+export * from "./question-bank-coverage";
 export * from "./answer/interview-answer-formatter";
 export * from "./answer/answer-quality-checker";
 export * from "./answer/streaming-answer-sanitizer";
@@ -535,4 +538,5 @@ export * from "./question";
 export * from "./profile-builder";
 export * from "./interview-brain";
 export * from "./terminology";
+export * from "./chat-intent";
 export * from "./knowledge/index";

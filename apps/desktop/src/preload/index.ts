@@ -12,9 +12,9 @@ import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
-import type { Profile, ProfileInput, ProjectFact, ProviderSettings, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
+import type { ChatAction, Profile, ProfileInput, ProjectFact, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
+import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 
 const api = {
@@ -82,7 +82,9 @@ const api = {
     listConversations: (profileId?: string): Promise<ConversationRecord[]> => ipcRenderer.invoke("chat:list-conversations", profileId),
     getConversation: (conversationId: string): Promise<{ conversation: ConversationRecord; messages: ConversationMessageRecord[] } | undefined> => ipcRenderer.invoke("chat:get-conversation", conversationId),
     sendMessage: (conversationId: string, content: string): Promise<boolean> => ipcRenderer.invoke("chat:send-message", { conversationId, content }),
-    cancel: (conversationId: string): Promise<boolean> => ipcRenderer.invoke("chat:cancel", conversationId),
+    continueMessage: (conversationId: string, messageId: string): Promise<boolean> => ipcRenderer.invoke("chat:continue-message", { conversationId, messageId }),
+    cancel: (conversationId: string, reason: "user_stop" | "navigation" | "shutdown" | "superseded" | "provider_abort" | "timeout" = "user_stop"): Promise<boolean> => ipcRenderer.invoke("chat:cancel", { conversationId, reason }),
+    approveAction: (input: { conversationId: string; messageId: string; action: ChatAction }): Promise<{ actionId: string; status: "approved"; result: unknown }> => ipcRenderer.invoke("chat:approve-action", input),
     deleteConversation: (conversationId: string): Promise<boolean> => ipcRenderer.invoke("chat:delete-conversation", conversationId)
   },
   profiles: {
@@ -105,6 +107,9 @@ const api = {
     stats: (profileId: string) => ipcRenderer.invoke("project-memory:stats", profileId),
     listFacts: (profileId: string, projectId?: string): Promise<ProjectFact[]> => ipcRenderer.invoke("project-memory:list-facts", profileId, projectId),
     verifyFact: (factId: string, verified: boolean): Promise<ProjectFact | undefined> => ipcRenderer.invoke("project-memory:verify-fact", factId, verified),
+    reviewFact: (factId: string, status: "active" | "pending_review" | "rejected" | "conflicting"): Promise<ProjectFact | undefined> => ipcRenderer.invoke("project-memory:review-fact", factId, status),
+    sources: (projectId: string): Promise<unknown[]> => ipcRenderer.invoke("project-memory:sources", projectId),
+    completeness: (profileId: string, projectId: string): Promise<unknown> => ipcRenderer.invoke("project-memory:completeness", profileId, projectId),
     analysisRuns: (profileId: string): Promise<KnowledgeAnalysisRunRecord[]> => ipcRenderer.invoke("project-memory:analysis-runs", profileId),
     rebuild: (profileId: string) => ipcRenderer.invoke("project-memory:rebuild", profileId)
   },
@@ -141,7 +146,11 @@ const api = {
     reindex: (documentId: string) => ipcRenderer.invoke("knowledge:reindex", documentId)
   },
   questionBank: {
-    list: (options?: { search?: string; type?: QuestionBankType; limit?: number }): Promise<QuestionBankQuestionRecord[]> => ipcRenderer.invoke("question-bank:list", options),
+    list: (options?: QuestionBankListOptions): Promise<QuestionBankQuestionRecord[]> => ipcRenderer.invoke("question-bank:list", options),
+    count: (options?: Omit<QuestionBankListOptions, "limit" | "offset" | "sort">): Promise<number> => ipcRenderer.invoke("question-bank:count", options),
+    bulkUpdate: (questionIds: string[], patch: QuestionBankBulkPatch): Promise<number> => ipcRenderer.invoke("question-bank:bulk-update", { questionIds, patch }),
+    duplicates: (limit?: number): Promise<QuestionBankDuplicateCluster[]> => ipcRenderer.invoke("question-bank:duplicates", limit),
+    mergeDuplicates: (canonicalId: string, duplicateIds: string[]): Promise<QuestionBankQuestionRecord | undefined> => ipcRenderer.invoke("question-bank:merge-duplicates", { canonicalId, duplicateIds }),
     get: (questionId: string): Promise<QuestionBankQuestionRecord | undefined> => ipcRenderer.invoke("question-bank:get", questionId),
     saveQuestion: (input: QuestionBankQuestionInput): Promise<QuestionBankQuestionRecord | undefined> => ipcRenderer.invoke("question-bank:save-question", input),
     deleteQuestion: (questionId: string): Promise<boolean> => ipcRenderer.invoke("question-bank:delete-question", questionId),
@@ -152,6 +161,7 @@ const api = {
     saveSkillPoint: (input: QuestionBankSkillPointInput): Promise<unknown> => ipcRenderer.invoke("question-bank:save-skill-point", input),
     linkSkill: (questionId: string, skillId: string): Promise<boolean> => ipcRenderer.invoke("question-bank:link-skill", questionId, skillId),
     listJobs: (): Promise<QuestionBankJobProfileRecord[]> => ipcRenderer.invoke("question-bank:list-jobs"),
+    coverage: (jobProfileId?: string): Promise<QuestionBankCoverageResult> => ipcRenderer.invoke("question-bank:coverage", jobProfileId),
     saveJob: (input: QuestionBankJobProfileInput): Promise<QuestionBankJobProfileRecord | undefined> => ipcRenderer.invoke("question-bank:save-job", input),
     importText: (input: { text: string; filename?: string; includeProject?: boolean; includeBehavioral?: boolean }): Promise<QuestionBankImportResult | undefined> => ipcRenderer.invoke("question-bank:import-text", input),
     generateAnswers: (input?: { questionIds?: string[]; onlyUnanswered?: boolean }): Promise<QuestionBankAnswerGenerationResult> => ipcRenderer.invoke("question-bank:generate-answers", input),
@@ -310,6 +320,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
       ipcRenderer.on("chat:error", handler);
       return () => ipcRenderer.removeListener("chat:error", handler);
+    },
+    onChatCancelled: (listener: (event: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+      ipcRenderer.on("chat:cancelled", handler);
+      return () => ipcRenderer.removeListener("chat:cancelled", handler);
     },
     onProfileBuilderUpdated: (listener: (event: ProfileBuilderArtifactRecord) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, payload: ProfileBuilderArtifactRecord) => listener(payload);

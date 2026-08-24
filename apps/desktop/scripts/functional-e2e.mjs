@@ -76,7 +76,8 @@ const mockServer = createServer(async (request, response) => {
   const serializedMessages = JSON.stringify(payload.messages ?? []);
   const isChatFirstTurn = messageContents.includes("用户问题：帮我分析 FOC 项目");
   const isChatSecondTurn = messageContents.includes("用户问题：把你刚才第二点详细展开");
-  if (isChatFirstTurn || isChatSecondTurn) {
+  const isChatStructured = messageContents.includes("用户问题：结构化卡片与动作审批 E2E");
+  if (isChatFirstTurn || isChatSecondTurn || isChatStructured) {
     chatRequests.push(payload);
     if (isChatSecondTurn && serializedMessages.includes("帮我分析 FOC 项目") && serializedMessages.includes("第一点 xxx；第二点是电流环与采样同步。")) chatSecondTurnContextObserved = true;
   }
@@ -92,7 +93,7 @@ const mockServer = createServer(async (request, response) => {
     return;
   }
   if (payload.stream === false) {
-    if (!isChatFirstTurn && !isChatSecondTurn) answerRequests.push(payload);
+    if (!isChatFirstTurn && !isChatSecondTurn && !isChatStructured) answerRequests.push(payload);
     const answer = imageMessage
       ? "Mock vision answer... 已分析截图内容。"
       : messageContents.includes("Mock manual question") ? "Mock LLM answer for manual question..." : "Mock LLM answer... 已使用 Profile 和当前问题生成。";
@@ -108,9 +109,12 @@ const mockServer = createServer(async (request, response) => {
     response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: preparationAnswer } }] })}\n\ndata: [DONE]\n\n`);
     return;
   }
-  if (!isChatFirstTurn && !isChatSecondTurn) answerRequests.push(payload);
+  if (!isChatFirstTurn && !isChatSecondTurn && !isChatStructured) answerRequests.push(payload);
   const slow = messageContents.includes("中断服务程序");
-  const answer = isChatFirstTurn
+  const structuredAnswer = JSON.stringify({ text: "结构化缺口已识别", sources: [{ id: "e2e-source", label: "E2E 题库资料", kind: "question-bank" }], cards: [{ id: "e2e-coverage-card", kind: "coverage", title: "题库覆盖", body: "建议补充一张可核验答案卡。", data: { coverage: 50 } }], actions: [{ id: "e2e-create-question", type: "create_question", label: "加入题库", rationale: "保留为下一轮复习题。", payload: { canonicalText: "结构化覆盖 E2E 题" }, requiresConfirmation: true }] });
+  const answer = isChatStructured
+    ? structuredAnswer
+    : isChatFirstTurn
     ? "第一点 xxx；第二点是电流环与采样同步。"
     : isChatSecondTurn
       ? "第二点展开：电流环与采样同步需要统一采样时序。"
@@ -285,6 +289,23 @@ try {
   await screenshot("03-chat-streaming.png");
   evidence.push("Chat Streaming: PASS; Persistence: PASS; CHAT_MULTI_TURN_CONTEXT: PASS; CHAT_SECOND_TURN_INCLUDES_USER_HISTORY: PASS; CHAT_SECOND_TURN_INCLUDES_ASSISTANT_HISTORY: PASS; CHAT_STREAMING_MESSAGE_NOT_INCLUDED: PASS; CHAT_HISTORY_CHAR_BUDGET: PASS");
 
+  await fillSelector("textarea[aria-label='面试准备问题']", "结构化卡片与动作审批 E2E");
+  await clickSelector("button[aria-label='发送']");
+  await waitFor(() => document.body.innerText.includes("结构化缺口") && document.body.innerText.includes("题库覆盖"), 15_000);
+  await clickText("确认并执行");
+  await waitFor(() => document.body.innerText.includes("操作已确认并写入本地数据"), 15_000);
+  const structuredQuestion = await main.evaluate("window.interviewCopilot.questionBank.match('结构化覆盖 E2E 题')");
+  if (!structuredQuestion?.question) throw new Error("Structured action did not create question");
+  evidence.push("CHAT_STRUCTURED_CARDS: PASS; CHAT_ACTION_APPROVAL: PASS; CHAT_ACTION_PERSISTENCE: PASS");
+
+  const coverageSeed = await main.evaluate(`(async () => { const skill = await window.interviewCopilot.questionBank.saveSkill({ name: 'E2E Coverage Skill', description: 'functional coverage' }); if (!skill) throw new Error('coverage skill missing'); await window.interviewCopilot.questionBank.saveSkillPoint({ skillId: skill.id, title: 'E2E fundamentals', content: 'verified coverage point', verified: true }); const question = await window.interviewCopilot.questionBank.saveQuestion({ canonicalText: 'E2E fundamentals 如何定位？', verified: true }); if (!question) throw new Error('coverage question missing'); await window.interviewCopilot.questionBank.linkSkill(question.id, skill.id); await window.interviewCopilot.questionBank.saveAnswer({ questionId: question.id, content: '先确认边界、现象和复现路径。', verified: true }); return true; })()`);
+  if (!coverageSeed) throw new Error("Coverage seed failed");
+  await clickText("通用题库");
+  await waitFor(() => document.body.innerText.includes("题库") && document.body.innerText.includes("技能资料"));
+  await clickText("技能覆盖分析");
+  await waitFor(() => document.body.innerText.includes("题库技能覆盖分析") && document.body.innerText.includes("整体覆盖 100%"), 15_000);
+  evidence.push("QUESTION_BANK_SKILL_COVERAGE: PASS; QUESTION_BANK_SKILL_POINT_COVERAGE: PASS");
+
   await clickText("面试准备");
   await clickText("开始准备");
   await waitFor(() => document.body.innerText.includes("approval_required"), 15_000);
@@ -335,6 +356,8 @@ try {
   if (answerRequests.length !== beforeManualMode) throw new Error("MANUAL_NO_AUTO_ANSWER failed");
   evidence.push("MANUAL_NO_AUTO_ANSWER: PASS");
   await main.evaluate("window.interviewCopilot.interview.setAutomationMode('AUTO')");
+  await waitFor(() => window.interviewCopilot.interview.getState().then((state) => state.automationMode === "AUTO"), 5_000);
+  await sleep(300);
   requireQuestion("为什么自动切换后应该立即回答？", "q5", 8_000);
   await waitForNode(() => answerRequests.length > beforeManualMode, 15_000);
   evidence.push("AUTOMATION_RUNTIME_SWITCH: PASS; Overlay AUTO/MANUAL Sync: PASS");

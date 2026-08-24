@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { RootErrorBoundary } from "./components/ErrorBoundary";
 import "./styles.css";
 
 function FatalStartupError() {
@@ -27,7 +28,7 @@ if (rootElement) {
   const root = createRoot(rootElement);
   root.render(window.interviewCopilot ? (
     <StrictMode>
-      <App />
+      <RootErrorBoundary><App /></RootErrorBoundary>
     </StrictMode>
   ) : <FatalStartupError />);
   document.documentElement.dataset.appReady = "true";

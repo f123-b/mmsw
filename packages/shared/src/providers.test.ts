@@ -43,6 +43,20 @@ describe("OpenAICompatibleAnswerProvider", () => {
     expect(deltas).toEqual(["完成"]);
   });
 
+  it("fails closed when an SSE gateway closes without a terminal frame", async () => {
+    const provider = new OpenAICompatibleAnswerProvider({ providerName: "test", baseUrl: "https://llm.test", apiKey: "secret", model: "test-model", timeoutMs: 5_000, maxRetries: 0 }, async () => streamResponse(["data: {\"choices\":[{\"delta\":{\"content\":\"半截\"}}]}\n\n"]));
+    const deltas: string[] = [];
+    await expect((async () => { for await (const delta of provider.stream({ model: "test-model", sections: [{ name: "question", content: "问题" }] })) deltas.push(delta); })()).rejects.toThrow("closed before completion");
+    expect(deltas).toEqual(["半截"]);
+  });
+
+  it("extracts content arrays used by newer OpenAI-compatible gateways", async () => {
+    const provider = new OpenAICompatibleAnswerProvider({ providerName: "test", baseUrl: "https://llm.test", apiKey: "secret", model: "test-model", timeoutMs: 5_000, maxRetries: 0 }, async () => streamResponse(["data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"数组\"}]}}]}\n\ndata: [DONE]\n\n"]));
+    const deltas: string[] = [];
+    for await (const delta of provider.stream({ model: "test-model", sections: [{ name: "question", content: "问题" }] })) deltas.push(delta);
+    expect(deltas).toEqual(["数组"]);
+  });
+
   it("uses the DeepSeek chat endpoint and disables thinking for low-latency modes", async () => {
     let requestUrl = "";
     let requestBody: Record<string, unknown> | undefined;

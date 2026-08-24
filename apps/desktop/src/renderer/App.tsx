@@ -3,9 +3,9 @@ import type { JSX } from "react";
 import { create } from "zustand";
 import type { AudioDevices, AudioDrift, AudioSidecarEvent, ProbeResult, RealtimeServerMessage } from "@interview-copilot/protocol";
 import { QUESTION_BANK_TYPE_LABELS, QUESTION_BANK_TYPES } from "@interview-copilot/shared";
-import type { AsrProviderType, ProjectFact, ProjectMemorySnapshot, QuestionBankQuestionRecord, QuestionBankSkillRecord, QuestionBankType, QuestionCandidate, QuestionEvent, SessionState, TranscriptSnapshot } from "@interview-copilot/shared";
+import type { AsrProviderType, ChatAction, ChatResponse, ProjectFact, ProjectMemorySnapshot, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankSkillRecord, QuestionBankType, QuestionCandidate, QuestionEvent, SessionState, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { Profile } from "@interview-copilot/shared";
-import type { JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectMemoryStats, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankImportResult, QuestionBankQuestionInput, QuestionBankSkillInput, RetrievalRunRecord } from "../main/database";
+import type { JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectMemoryStats, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, RetrievalRunRecord } from "../main/database";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import { normalizeMeter, StableAnswerStateMachine } from "@interview-copilot/shared";
 import type { CaptureProtectionState, HUDState, OverlayMode } from "../main/overlay-manager";
@@ -19,6 +19,7 @@ import { WelcomeScreen } from "./chat/WelcomeScreen";
 import { ChatComposer } from "./chat/ChatComposer";
 import { OverlayRoot } from "./overlay/OverlayRoot";
 import { AppDialog, type DialogState } from "./dialogs/AppDialog";
+import { PageErrorBoundary } from "./components/ErrorBoundary";
 import { KNOWLEDGE_DOCUMENT_TYPES, KNOWLEDGE_DOCUMENT_TYPE_LABELS, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption } from "@interview-copilot/shared";
 
 interface ChatMessage {
@@ -28,6 +29,11 @@ interface ChatMessage {
   content: string;
   status: string;
   model?: string;
+  cancelReason?: string;
+  errorCode?: string;
+  charactersGenerated?: number;
+  durationMs?: number;
+  structuredResponse?: ChatResponse;
   createdAt: number;
 }
 
@@ -107,6 +113,44 @@ interface JobTargetsPageProps {
   onOpenProfile: () => void;
 }
 
+interface ProjectLibraryManagerProps extends ProjectLibraryPageProps {
+  profileId: string;
+  onReviewFact: (factId: string, status: "active" | "pending_review" | "rejected" | "conflicting") => Promise<void>;
+}
+
+function ProjectLibraryManager(props: ProjectLibraryManagerProps): JSX.Element {
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(props.memory.projects[0]?.id ?? "");
+  const [tab, setTab] = useState<"overview" | "facts" | "sources" | "questions">("overview");
+  const [completeness, setCompleteness] = useState<Record<string, unknown>>();
+  const [sources, setSources] = useState<Array<Record<string, unknown>>>([]);
+  const [selectedEvidence, setSelectedEvidence] = useState<ProjectFact>();
+  const selectedProject = props.memory.projects.find((project) => project.id === selectedProjectId) ?? props.memory.projects[0];
+  useEffect(() => {
+    if (!selectedProject) return;
+    setSelectedProjectId(selectedProject.id);
+    void window.interviewCopilot.projectMemory.completeness(props.profileId, selectedProject.id).then((value) => setCompleteness(value as Record<string, unknown> | undefined)).catch(() => setCompleteness(undefined));
+    void window.interviewCopilot.projectMemory.sources(selectedProject.id).then((value) => setSources(value as Array<Record<string, unknown>>)).catch(() => setSources([]));
+  }, [props.profileId, selectedProject?.id]);
+  const projectFacts = selectedProject ? props.facts.filter((fact) => fact.projectId === selectedProject.id) : [];
+  const dimensions = Array.isArray(completeness?.dimensions) ? completeness.dimensions as Array<Record<string, unknown>> : [];
+  const projectQuestions = selectedProject ? props.memory.interviewQuestions.filter((question) => question.projectId === selectedProject.id) : [];
+  const statusText = (fact: ProjectFact): string => fact.status === "rejected" ? "已拒绝" : fact.status === "conflicting" ? "冲突" : fact.verified ? "已确认" : "待确认";
+  const sourceTitle = (sourceId: string): string => String(sources.find((source) => source.sourceId === sourceId)?.title ?? sourceId);
+  return <section className="simple-page project-library-manager">
+    <div className="page-heading"><div><span className="page-kicker">PROJECT LIBRARY</span><h1>项目库</h1><p className="page-note">围绕项目背景、职责、证据和面试准备管理个人工程经验。</p></div><div className="detail-actions"><label className="dark-pill upload-project-action">导入项目资料<input type="file" accept=".zip,.txt,.md,.pdf,.docx" onChange={(event) => { const file = event.target.files?.[0]; if (file) void props.onUploadProject(file); event.target.value = ""; }} /></label><button className="outline-pill" disabled={props.rebuilding} onClick={props.onRebuild}>{props.rebuilding ? "分析中…" : "重新分析"}</button></div></div>
+    <div className="project-library-summary"><span>项目 <strong>{props.memory.projects.length}</strong></span><span>待确认事实 <strong>{props.facts.filter((fact) => !fact.verified && fact.status !== "rejected").length}</strong></span><span>冲突 <strong>{props.facts.filter((fact) => fact.status === "conflicting").length}</strong></span><span>项目题 <strong>{props.stats.interviewQuestions}</strong></span></div>
+    <div className="project-library-switcher">{props.memory.projects.map((project) => <button className={project.id === selectedProject?.id ? "selected" : ""} key={project.id} onClick={() => { setSelectedProjectId(project.id); setTab("overview"); }}><strong>{project.name}</strong><small>{project.description || "项目背景待补充"}</small></button>)}{props.memory.projects.length === 0 && <div className="knowledge-empty"><strong>还没有结构化项目</strong><span>上传项目文档后重新分析。</span></div>}</div>
+    {selectedProject && <>
+      <header className="project-detail-heading"><div><span className="page-kicker">PROJECT DETAIL</span><h2>{selectedProject.name}</h2><p>{selectedProject.description || "项目背景待补充"}</p></div><span className="project-completeness-score">{String(completeness?.completeness ?? "—")}%<small>完整度</small></span></header>
+      <nav className="project-detail-tabs" aria-label="项目详情"><button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>项目概览</button><button className={tab === "facts" ? "active" : ""} onClick={() => setTab("facts")}>项目事实 <small>{projectFacts.length}</small></button><button className={tab === "sources" ? "active" : ""} onClick={() => setTab("sources")}>资料与证据 <small>{sources.length}</small></button><button className={tab === "questions" ? "active" : ""} onClick={() => setTab("questions")}>项目面试题 <small>{projectQuestions.length}</small></button></nav>
+      {tab === "overview" && <div className="project-overview-grid"><article className="detail-sheet"><h3>项目背景</h3><p>{selectedProject.description || "待补充"}</p><h3>个人职责</h3><p>{selectedProject.role || "待确认"}</p><h3>项目时间</h3><p>{selectedProject.time || "待补充"}</p></article><article className="detail-sheet"><h3>技术栈</h3><div className="tag-list">{selectedProject.technologyStack.map((item) => <span key={item}>{item}</span>)}{selectedProject.technologyStack.length === 0 && <small>待补充</small>}</div><h3>硬件</h3><div className="tag-list">{selectedProject.hardware.map((item) => <span key={item}>{item}</span>)}{selectedProject.hardware.length === 0 && <small>待补充</small>}</div><h3>软件</h3><div className="tag-list">{selectedProject.software.map((item) => <span key={item}>{item}</span>)}{selectedProject.software.length === 0 && <small>待补充</small>}</div></article><article className="detail-sheet completeness-card"><h3>项目还缺什么</h3>{dimensions.map((dimension) => <div className="completeness-row" key={String(dimension.key)}><span>{String(dimension.label)}</span><strong className={`completeness-${String(dimension.status)}`}>{dimension.status === "confirmed" ? "✓" : dimension.status === "conflicting" ? "!" : dimension.status === "pending" ? "?" : "×"}</strong></div>)}{dimensions.length === 0 && <p className="page-note">分析完成后显示确定性完整度。</p>}</article></div>}
+      {tab === "facts" && <div className="fact-review-grid"><div className="project-fact-cards">{projectFacts.map((fact) => <article className={`fact-review-card fact-review-${fact.status ?? "active"}`} key={fact.id}><header><div><span className="fact-type-label">{PROJECT_FACT_LABELS[fact.type]}</span><h3>{fact.title}</h3></div><strong>{statusText(fact)}</strong></header><p>{fact.content}</p><div className="fact-evidence-line"><span>来源：{fact.sourceIds.map(sourceTitle).join("、") || "未关联"}</span><span>置信度：{Math.round(fact.confidence * 100)}%</span></div>{fact.evidence?.[0] && <button className="evidence-link" onClick={() => setSelectedEvidence(fact)}>查看证据：“{fact.evidence[0].quote.slice(0, 80)}”</button>}<footer>{fact.status !== "rejected" && <button className="dark-pill" onClick={() => void props.onReviewFact(fact.id, "active")}>{fact.verified ? "已确认" : "确认"}</button>}{fact.status !== "rejected" && <button className="outline-pill" onClick={() => void props.onReviewFact(fact.id, "rejected")}>不正确</button>}{fact.status === "rejected" && <button className="outline-pill" onClick={() => void props.onReviewFact(fact.id, "pending_review")}>恢复待确认</button>}</footer></article>)}{projectFacts.length === 0 && <div className="knowledge-empty"><strong>暂无项目事实</strong><span>重新分析或补充项目资料。</span></div>}</div><aside className="fact-review-summary"><strong>事实待办箱</strong><span>待确认 {projectFacts.filter((fact) => !fact.verified && fact.status !== "rejected").length}</span><span>冲突 {projectFacts.filter((fact) => fact.status === "conflicting").length}</span><span>已确认 {projectFacts.filter((fact) => fact.verified).length}</span><span>已拒绝 {projectFacts.filter((fact) => fact.status === "rejected").length}</span></aside></div>}
+      {tab === "sources" && <div className="source-evidence-layout"><div className="source-detail-list">{sources.map((source) => <article className="source-detail-card" key={String(source.id)}><strong>{String(source.title)}</strong><span>{String(source.documentType ?? source.sourceType)} · {String(source.relationship ?? "supporting")}</span><small>{String(source.status ?? "未验证")} · {new Date(Number(source.updatedAt ?? Date.now())).toLocaleString()}</small></article>)}{sources.length === 0 && <div className="knowledge-empty"><strong>暂无绑定资料</strong><span>从资料库导入并绑定到项目。</span></div>}</div><aside className="evidence-drawer-placeholder"><h3>Evidence Drawer</h3>{selectedEvidence ? <><strong>{selectedEvidence.title}</strong>{selectedEvidence.evidence?.map((item) => <div className="evidence-quote" key={`${item.sourceId}-${item.quote}`}><small>{sourceTitle(item.sourceId)}</small><p>“{item.quote}”</p><span>confidence {Math.round(selectedEvidence.confidence * 100)}%</span></div>)}</> : <p className="page-note">在“项目事实”中点击证据即可查看来源引用。</p>}</aside></div>}
+      {tab === "questions" && <div className="project-question-list">{projectQuestions.map((question) => <article className="project-question-card" key={question.id}><div><span className="fact-type-label">项目题</span><h3>{question.question}</h3><p>{question.answerPoints.join("；")}</p></div><aside><span>{question.factIds?.length ?? 0} 个关联事实</span><span>{question.stale ? "已过期" : "当前"}</span></aside></article>)}{projectQuestions.length === 0 && <div className="knowledge-empty"><strong>暂无项目面试题</strong><span>项目事实确认后重新生成。</span></div>}</div>}
+    </>}
+  </section>;
+}
+
 function JobTargetsPage(props: JobTargetsPageProps): JSX.Element {
   const activeTarget = props.targets.find((target) => target.status === "active") ?? props.targets[0];
   return <section className="simple-page job-targets-page">
@@ -126,6 +170,7 @@ function PersonalMemoryPage({ memory, stats, rebuilding, onRebuild }: { memory?:
 
 const PROJECT_FACT_LABELS: Record<ProjectFact["type"], string> = {
   background: "项目背景",
+  application: "应用场景",
   goal: "项目目标",
   responsibility: "个人职责",
   hardware: "硬件",
@@ -177,9 +222,27 @@ function MemoryGovernancePanel(props: MemoryGovernancePanelProps): JSX.Element {
   </section>;
 }
 
+function ChatResponseSupplement({ messages, onApproveAction }: { messages: ChatMessage[]; onApproveAction: (messageId: string, action: ChatAction) => Promise<void> }): JSX.Element | null {
+  const latest = [...messages].reverse().find((message) => message.role === "assistant" && message.structuredResponse);
+  const response = latest?.structuredResponse;
+  if (!latest || !response || (!response.cards?.length && !response.actions?.length && !response.sources?.length)) return null;
+  return <section className="chat-response-supplement" aria-label="结构化回答补充">
+    {response.sources && response.sources.length > 0 && <div className="chat-response-sources"><span className="page-kicker">SOURCES</span>{response.sources.map((source) => <span className="chat-source-chip" key={source.id}>{source.label}</span>)}</div>}
+    {response.cards && response.cards.length > 0 && <div className="chat-response-cards">{response.cards.map((card) => <article className={`chat-response-card chat-response-card-${card.kind}`} key={card.id}><span className="page-kicker">{card.kind.toUpperCase()}</span><strong>{card.title}</strong>{card.body && <p>{card.body}</p>}{card.data && <div className="chat-response-card-data">{Object.entries(card.data).slice(0, 8).map(([key, value]) => <span key={key}><small>{key}</small>{typeof value === "string" || typeof value === "number" ? String(value) : JSON.stringify(value)}</span>)}</div>}</article>)}</div>}
+    {response.actions && response.actions.length > 0 && <div className="chat-response-actions"><div className="chat-response-actions-heading"><span className="page-kicker">REVIEW REQUIRED</span><strong>以下操作需要你确认后才会写入本地数据</strong></div>{response.actions.map((action) => <div className="chat-response-action" key={action.id}><div><strong>{action.label}</strong>{action.rationale && <p>{action.rationale}</p>}</div>{action.status === "approved" ? <span className="chat-action-status approved">已确认</span> : action.status === "failed" ? <span className="chat-action-status failed">执行失败</span> : <button className="dark-pill" onClick={() => void onApproveAction(latest.id, action)}>确认并执行</button>}</div>)}</div>}
+  </section>;
+}
+
 interface QuestionBankPageProps {
   questions: QuestionBankQuestionRecord[];
+  total: number;
   skills: QuestionBankSkillRecord[];
+  jobs: QuestionBankJobProfileRecord[];
+  onList: (options: QuestionBankListOptions) => Promise<QuestionBankQuestionRecord[]>;
+  onCount: (options: Omit<QuestionBankListOptions, "limit" | "offset" | "sort">) => Promise<number>;
+  onBulkUpdate: (questionIds: string[], patch: QuestionBankBulkPatch) => Promise<number>;
+  onDuplicates: () => Promise<QuestionBankDuplicateCluster[]>;
+  onMergeDuplicates: (canonicalId: string, duplicateIds: string[]) => Promise<QuestionBankQuestionRecord | undefined>;
   onSaveQuestion: (input: QuestionBankQuestionInput) => Promise<QuestionBankQuestionRecord | undefined>;
   onSaveAnswer: (input: QuestionBankAnswerCardInput) => Promise<unknown>;
   onDeleteQuestion: (questionId: string) => Promise<void>;
@@ -187,7 +250,13 @@ interface QuestionBankPageProps {
   onGenerateAnswers: (questionIds?: string[]) => Promise<QuestionBankAnswerGenerationResult | undefined>;
   answerGenerationProgress?: { status: "started" | "running" | "completed"; total: number; completed: number; generated: number; skipped: number; failed: number; questionId?: string; error?: string };
   onSaveSkill: (input: QuestionBankSkillInput) => Promise<void>;
+  onLinkSkill: (questionId: string, skillId: string) => Promise<boolean>;
+  onCoverage: (jobProfileId?: string) => Promise<QuestionBankCoverageResult>;
   onNotice: (message: string) => void;
+}
+
+function QuestionBankCoveragePanel({ result, jobs, jobProfileId, onJobProfileChange }: { result: QuestionBankCoverageResult; jobs: QuestionBankJobProfileRecord[]; jobProfileId: string; onJobProfileChange: (jobProfileId: string) => void }): JSX.Element {
+  return <div className="question-bank-coverage detail-sheet"><div className="question-bank-editor-heading"><div><span className="page-kicker">SKILL COVERAGE</span><h2>题库技能覆盖分析</h2><p className="page-note">按岗位技能和技能知识点检查题目、答案卡与人工核验状态；缺口只作为补题建议，不会自动生成答案。</p></div><label className="clean-field"><span>分析范围</span><select value={jobProfileId} onChange={(event) => onJobProfileChange(event.target.value)}><option value="">全部技能</option>{jobs.map((job) => <option value={job.id} key={job.id}>{job.name}</option>)}</select></label></div><div className="detail-metrics question-bank-coverage-metrics"><span>整体覆盖 <strong>{result.overallCoverage}%</strong></span><span>待补技能 <strong>{result.missingSkills.length}</strong></span><span>技能主题 <strong>{result.topics.length}</strong></span></div><div className="question-bank-coverage-list">{result.topics.map((topic) => <article className="question-bank-coverage-row" key={topic.skillId}><div className="question-bank-coverage-row-heading"><strong>{topic.skill}</strong><b>{topic.coverage}%</b></div><div className="coverage-progress"><i style={{ width: `${Math.min(100, Math.max(0, topic.coverage))}%` }} /></div><small>题目 {topic.totalQuestions} · 有答案 {topic.answeredQuestions} · 已核验 {topic.verifiedQuestions}{topic.staleQuestions ? ` · 待复核 ${topic.staleQuestions}` : ""}</small>{topic.missingAreas.length > 0 && <p>缺口：{topic.missingAreas.join("、")}</p>}</article>)}{result.topics.length === 0 && <div className="knowledge-empty"><strong>暂无可分析技能</strong><span>先在技能资料中登记技能和知识点，再把题目挂接到技能。</span></div>}</div></div>;
 }
 
 function QuestionBankPage(props: QuestionBankPageProps): JSX.Element {
@@ -203,19 +272,64 @@ function QuestionBankPage(props: QuestionBankPageProps): JSX.Element {
   const [answer, setAnswer] = useState("");
   const [code, setCode] = useState("");
   const [verified, setVerified] = useState(false);
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [includeProject, setIncludeProject] = useState(false);
   const [includeBehavioral, setIncludeBehavioral] = useState(true);
   const [skillName, setSkillName] = useState("");
   const [skillDescription, setSkillDescription] = useState("");
-  const selected = props.questions.find((item) => item.id === selectedId);
-  const visibleQuestions = props.questions.filter((item) => (scopeFilter === "all" || item.scope === "global") && (typeFilter === "all" || item.type === typeFilter) && `${item.canonicalText} ${item.jobRole ?? ""}`.toLowerCase().includes(search.toLowerCase()));
+  const [page, setPage] = useState(0);
+  const [rows, setRows] = useState<QuestionBankQuestionRecord[]>(props.questions);
+  const [total, setTotal] = useState(props.total);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [duplicates, setDuplicates] = useState<QuestionBankDuplicateCluster[]>([]);
+  const [showDuplicates, setShowDuplicates] = useState(false);
+  const [coverage, setCoverage] = useState<QuestionBankCoverageResult>();
+  const [coverageJobId, setCoverageJobId] = useState("");
+  const [coverageLoading, setCoverageLoading] = useState(false);
+  const pageSize = 60;
+  const selected = rows.find((item) => item.id === selectedId) ?? props.questions.find((item) => item.id === selectedId);
+  const visibleQuestions = rows;
+
+  useEffect(() => {
+    setRows(props.questions);
+    setTotal(props.total);
+  }, [props.questions, props.total]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const options: QuestionBankListOptions = { search: search.trim() || undefined, type: typeFilter === "all" ? undefined : typeFilter, scope: scopeFilter === "all" ? undefined : "global", status: "active", limit: pageSize, offset: page * pageSize, sort: "updated" };
+    void Promise.all([props.onList(options), props.onCount(options)]).then(([nextRows, nextTotal]) => {
+      if (!cancelled) { setRows(nextRows); setTotal(nextTotal); }
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [page, scopeFilter, search, typeFilter]);
 
   const resetForm = () => {
-    setSelectedId(""); setQuestion(""); setType("technical"); setDifficulty("medium"); setJobRole(""); setVariants(""); setAnswer(""); setCode(""); setVerified(false);
+    setSelectedId(""); setQuestion(""); setType("technical"); setDifficulty("medium"); setJobRole(""); setVariants(""); setAnswer(""); setCode(""); setVerified(false); setSelectedSkillIds([]);
   };
   const selectQuestion = (item: QuestionBankQuestionRecord) => {
     const card = item.answerCards[0];
-    setSelectedId(item.id); setQuestion(item.canonicalText); setType(item.type); setDifficulty(item.difficulty); setJobRole(item.jobRole ?? ""); setVariants(item.variants.join("\n")); setAnswer(card?.content ?? ""); setCode(card?.codeContent ?? ""); setVerified(card?.verified ?? false);
+    setSelectedId(item.id); setQuestion(item.canonicalText); setType(item.type); setDifficulty(item.difficulty); setJobRole(item.jobRole ?? ""); setVariants(item.variants.join("\n")); setAnswer(card?.content ?? ""); setCode(card?.codeContent ?? ""); setVerified(card?.verified ?? false); setSelectedSkillIds(item.skillIds);
+  };
+  const toggleSelection = (questionId: string) => setSelectedIds((current) => current.includes(questionId) ? current.filter((id) => id !== questionId) : [...current, questionId]);
+  const bulkUpdate = async (patch: QuestionBankBulkPatch) => {
+    if (selectedIds.length === 0) { props.onNotice("请先选择题目"); return; }
+    const count = await props.onBulkUpdate(selectedIds, patch);
+    setSelectedIds([]);
+    props.onNotice(`已批量更新 ${count} 道题目`);
+    const next = await props.onList({ search: search.trim() || undefined, type: typeFilter === "all" ? undefined : typeFilter, scope: scopeFilter === "all" ? undefined : "global", status: "active", limit: pageSize, offset: page * pageSize, sort: "updated" });
+    setRows(next);
+  };
+  const loadDuplicates = async () => {
+    const next = await props.onDuplicates();
+    setDuplicates(next);
+    setShowDuplicates(true);
+  };
+  const loadCoverage = async (jobProfileId = coverageJobId) => {
+    setCoverageLoading(true);
+    try { setCoverage(await props.onCoverage(jobProfileId || undefined)); }
+    catch (error) { props.onNotice(`技能覆盖分析失败：${error instanceof Error ? error.message : String(error)}`); }
+    finally { setCoverageLoading(false); }
   };
   const save = async () => {
     if (!question.trim()) { props.onNotice("题目不能为空"); return; }
@@ -223,6 +337,7 @@ function QuestionBankPage(props: QuestionBankPageProps): JSX.Element {
       const saved = await props.onSaveQuestion({ id: selectedId || undefined, canonicalText: question, type, difficulty, jobRole, variants: variants.split("\n").map((item) => item.trim()).filter(Boolean) });
       if (!saved) throw new Error("题目保存失败");
       if (answer.trim() || code.trim()) await props.onSaveAnswer({ id: selected?.answerCards[0]?.id, questionId: saved.id, mode: type === "code" ? "code" : "standard", content: answer, codeContent: code || undefined, verified, sourceType: selected?.answerCards[0]?.sourceType ?? "manual" });
+      await Promise.all(selectedSkillIds.map((skillId) => props.onLinkSkill(saved.id, skillId)));
       setSelectedId(saved.id);
       props.onNotice("题目和答案卡已保存");
     } catch (error) { props.onNotice(`题库保存失败：${error instanceof Error ? error.message : String(error)}`); }
@@ -247,8 +362,12 @@ function QuestionBankPage(props: QuestionBankPageProps): JSX.Element {
   return <section className="simple-page question-bank-page">
     <div className="page-heading"><div><span className="page-kicker">QUESTION BANK</span><h1>题库</h1><p className="page-note">经典问题优先本地命中；代码题保留完整代码、复杂度和边界；技能资料可作为岗位准备素材。</p></div><div className="detail-actions"><label className="outline-pill question-bank-import">导入题库文件<input type="file" accept=".txt,.md,.json" onChange={(event) => void importFile(event)} /></label><button className="dark-pill" onClick={resetForm}>新增问题</button></div></div>
     <div className="question-bank-import-options"><label className="check-row"><input type="checkbox" checked={!includeProject} onChange={(event) => setIncludeProject(!event.target.checked)} />只导入非项目题</label><label className="check-row"><input type="checkbox" checked={includeBehavioral} onChange={(event) => setIncludeBehavioral(event.target.checked)} />保留行为题</label></div>
-    <div className="question-bank-toolbar"><input className="inline-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索问题、岗位或关键词" /><select value={scopeFilter} onChange={(event) => setScopeFilter(event.target.value as "global" | "all")}><option value="global">通用题库</option><option value="all">全部题目</option></select><select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value as "all" | QuestionBankType)}><option value="all">全部题型</option>{QUESTION_BANK_TYPES.map((item) => <option value={item} key={item}>{QUESTION_BANK_TYPE_LABELS[item]}</option>)}</select><button className="outline-pill" disabled={props.answerGenerationProgress?.status === "running" || props.answerGenerationProgress?.status === "started"} onClick={() => void props.onGenerateAnswers()}>{props.answerGenerationProgress?.status === "running" || props.answerGenerationProgress?.status === "started" ? `生成答案 ${props.answerGenerationProgress.completed}/${props.answerGenerationProgress.total}` : "生成缺失答案"}</button><span className="page-note">{visibleQuestions.length} / {props.questions.length} 题</span></div>
-    <div className="question-bank-layout"><div className="clean-list question-bank-list">{visibleQuestions.map((item) => <button className={`clean-list-row question-bank-row ${item.id === selectedId ? "selected" : ""}`} key={item.id} onClick={() => selectQuestion(item)}><span><strong>{item.canonicalText}</strong><small>{QUESTION_BANK_TYPE_LABELS[item.type]} · {item.jobRole || "通用岗位"} · {item.answerCards.length ? "已有答案卡" : "待补答案"}</small></span><em>{item.answerCards.some((card) => card.verified) ? "已验证" : "草稿"}</em></button>)}{visibleQuestions.length === 0 && <div className="knowledge-empty"><strong>还没有匹配题目</strong><span>可以新增问题，或导入包含“问题：/答案：”的 TXT、MD 文件。</span></div>}</div><div className="detail-sheet question-bank-editor"><div className="question-bank-editor-heading"><div><span className="page-kicker">ANSWER CARD</span><h2>{selected ? "编辑题目" : "新增题目"}</h2></div>{selected && <button className="text-button danger-text" onClick={async () => { await props.onDeleteQuestion(selected.id); resetForm(); }}>删除</button>}</div><label className="clean-field"><span>问题</span><textarea value={question} onChange={(event) => setQuestion(event.target.value)} rows={3} placeholder="例如：IIC 通讯读不到数据时，如何定位？" /></label><div className="question-bank-form-grid"><label className="clean-field"><span>题型</span><select value={type} onChange={(event) => setType(event.target.value as QuestionBankType)}>{QUESTION_BANK_TYPES.map((item) => <option value={item} key={item}>{QUESTION_BANK_TYPE_LABELS[item]}</option>)}</select></label><label className="clean-field"><span>难度</span><select value={difficulty} onChange={(event) => setDifficulty(event.target.value)}><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label></div><div className="question-bank-form-grid"><label className="clean-field"><span>适用岗位</span><input value={jobRole} onChange={(event) => setJobRole(event.target.value)} placeholder="嵌入式 / 电机控制 / 通用" /></label><label className="clean-field"><span>问题变体（每行一个）</span><input value={variants} onChange={(event) => setVariants(event.target.value)} placeholder="同义问法，增强召回" /></label></div><label className="clean-field"><span>标准回答</span><textarea value={answer} onChange={(event) => setAnswer(event.target.value)} rows={7} placeholder="按当前题型整理回答；项目题只填写真实经历素材。" /></label>{type === "code" && <label className="clean-field"><span>完整代码</span><textarea className="code-editor" value={code} onChange={(event) => setCode(event.target.value)} rows={8} placeholder="保留可运行代码、边界处理和复杂度说明。" /></label>}<label className="check-row"><input type="checkbox" checked={verified} onChange={(event) => setVerified(event.target.checked)} />答案已人工核验，允许作为优先参考答案</label><div className="detail-actions"><button className="dark-pill" onClick={() => void save()}>保存题目</button><button className="outline-pill" onClick={resetForm}>清空</button></div></div></div>
+    <div className="question-bank-analysis-toolbar"><button className="outline-pill" disabled={coverageLoading} onClick={() => void loadCoverage()}>{coverageLoading ? "分析中…" : coverage ? "刷新技能覆盖分析" : "技能覆盖分析"}</button>{coverage && <span className="page-note">当前整体覆盖 {coverage.overallCoverage}%</span>}</div>
+    {coverage && <QuestionBankCoveragePanel result={coverage} jobs={props.jobs} jobProfileId={coverageJobId} onJobProfileChange={(next) => { setCoverageJobId(next); void loadCoverage(next); }} />}
+    <div className="question-bank-toolbar"><input className="inline-search" value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder="搜索问题、岗位或关键词" /><select value={scopeFilter} onChange={(event) => { setScopeFilter(event.target.value as "global" | "all"); setPage(0); }}><option value="global">通用题库</option><option value="all">全部题目</option></select><select value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value as "all" | QuestionBankType); setPage(0); }}><option value="all">全部题型</option>{QUESTION_BANK_TYPES.map((item) => <option value={item} key={item}>{QUESTION_BANK_TYPE_LABELS[item]}</option>)}</select><button className="outline-pill" disabled={props.answerGenerationProgress?.status === "running" || props.answerGenerationProgress?.status === "started"} onClick={() => void props.onGenerateAnswers(selectedIds.length ? selectedIds : undefined)}>{props.answerGenerationProgress?.status === "running" || props.answerGenerationProgress?.status === "started" ? `生成答案 ${props.answerGenerationProgress.completed}/${props.answerGenerationProgress.total}` : selectedIds.length ? `生成选中答案（${selectedIds.length}）` : "生成缺失答案"}</button><button className="outline-pill" onClick={() => void loadDuplicates()}>检查重复题</button><span className="page-note">{total} 题 · 第 {page + 1} / {Math.max(1, Math.ceil(total / pageSize))} 页</span></div>
+    <div className="question-bank-bulk-toolbar"><span>{selectedIds.length ? `已选择 ${selectedIds.length} 道` : "可勾选题目进行批量操作"}</span><button className="text-button" onClick={() => void bulkUpdate({ verified: true, stale: false })} disabled={!selectedIds.length}>标记已验证</button><button className="text-button" onClick={() => void bulkUpdate({ stale: true })} disabled={!selectedIds.length}>标记待复核</button><button className="text-button danger-text" onClick={() => void bulkUpdate({ status: "archived" })} disabled={!selectedIds.length}>归档</button><button className="text-button" onClick={() => setSelectedIds([])} disabled={!selectedIds.length}>清除选择</button></div>
+    <div className="question-bank-layout"><div className="clean-list question-bank-list">{visibleQuestions.map((item) => <button className={`clean-list-row question-bank-row ${item.id === selectedId ? "selected" : ""}`} key={item.id} onClick={() => selectQuestion(item)}><input type="checkbox" checked={selectedIds.includes(item.id)} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelection(item.id)} /><span><strong>{item.canonicalText}</strong><small>{QUESTION_BANK_TYPE_LABELS[item.type]} · {item.jobRole || "通用岗位"} · {item.answerCards.length ? "已有答案卡" : "待补答案"}{item.skillIds.length ? ` · ${item.skillIds.length} 个技能` : ""}{item.stale ? " · 待复核" : ""}</small></span><em>{item.answerCards.some((card) => card.verified) ? "已验证" : "草稿"}</em></button>)}{visibleQuestions.length === 0 && <div className="knowledge-empty"><strong>还没有匹配题目</strong><span>可以新增问题，或导入包含“问题：/答案：”的 TXT、MD 文件。</span></div>}<div className="question-bank-pagination"><button className="outline-pill" disabled={page === 0} onClick={() => setPage((current) => Math.max(0, current - 1))}>上一页</button><button className="outline-pill" disabled={(page + 1) * pageSize >= total} onClick={() => setPage((current) => current + 1)}>下一页</button></div></div><div className="detail-sheet question-bank-editor question-bank-editor-drawer"><div className="question-bank-editor-heading"><div><span className="page-kicker">ANSWER CARD</span><h2>{selected ? "编辑题目" : "新增题目"}</h2></div><div className="detail-actions">{selected && <button className="text-button danger-text" onClick={async () => { await props.onDeleteQuestion(selected.id); resetForm(); }}>删除</button>}{selected && <button className="text-button" onClick={resetForm}>关闭</button>}</div></div><label className="clean-field"><span>问题</span><textarea value={question} onChange={(event) => setQuestion(event.target.value)} rows={3} placeholder="例如：IIC 通讯读不到数据时，如何定位？" /></label><div className="question-bank-form-grid"><label className="clean-field"><span>题型</span><select value={type} onChange={(event) => setType(event.target.value as QuestionBankType)}>{QUESTION_BANK_TYPES.map((item) => <option value={item} key={item}>{QUESTION_BANK_TYPE_LABELS[item]}</option>)}</select></label><label className="clean-field"><span>难度</span><select value={difficulty} onChange={(event) => setDifficulty(event.target.value)}><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label></div><div className="question-bank-form-grid"><label className="clean-field"><span>适用岗位</span><input value={jobRole} onChange={(event) => setJobRole(event.target.value)} placeholder="嵌入式 / 电机控制 / 通用" /></label><label className="clean-field"><span>问题变体（每行一个）</span><input value={variants} onChange={(event) => setVariants(event.target.value)} placeholder="同义问法，增强召回" /></label></div><div className="question-bank-skill-selector"><span>关联技能（用于覆盖分析）</span><div>{props.skills.length ? props.skills.map((skill) => <label className="check-row" key={skill.id}><input type="checkbox" checked={selectedSkillIds.includes(skill.id)} onChange={() => setSelectedSkillIds((current) => current.includes(skill.id) ? current.filter((id) => id !== skill.id) : [...current, skill.id])} />{skill.name}</label>) : <small>暂无技能，请先在下方技能资料中新增。</small>}</div></div><label className="clean-field"><span>标准回答</span><textarea value={answer} onChange={(event) => setAnswer(event.target.value)} rows={7} placeholder="按当前题型整理回答；项目题只填写真实经历素材。" /></label>{type === "code" && <label className="clean-field"><span>完整代码</span><textarea className="code-editor" value={code} onChange={(event) => setCode(event.target.value)} rows={8} placeholder="保留可运行代码、边界处理和复杂度说明。" /></label>}<label className="check-row"><input type="checkbox" checked={verified} onChange={(event) => setVerified(event.target.checked)} />答案已人工核验，允许作为优先参考答案</label><div className="detail-actions"><button className="dark-pill" onClick={() => void save()}>保存题目</button><button className="outline-pill" onClick={resetForm}>清空</button></div></div></div>
+    {showDuplicates && <div className="question-bank-duplicates detail-sheet"><div className="question-bank-editor-heading"><div><span className="page-kicker">DUPLICATE REVIEW</span><h2>重复题审核</h2><p className="page-note">相似度达到 82% 的题目会聚类展示；合并后保留变体、技能、事实关联和已验证答案卡。</p></div><button className="text-button" onClick={() => setShowDuplicates(false)}>关闭</button></div>{duplicates.length === 0 ? <div className="knowledge-empty"><strong>未发现高相似题目</strong><span>可以继续导入或手动维护题库。</span></div> : duplicates.map((cluster) => <div className="duplicate-cluster" key={cluster.canonical.id}><div><strong>{cluster.canonical.canonicalText}</strong><span>相似度 {Math.round(cluster.score * 100)}%</span></div>{cluster.variants.map((variant) => <label className="duplicate-variant" key={variant.id}><input type="checkbox" defaultChecked value={variant.id} /><span>{variant.canonicalText}</span></label>)}<button className="outline-pill" onClick={async (event) => { const container = (event.currentTarget.parentElement); const ids = Array.from(container?.querySelectorAll<HTMLInputElement>("input[type=checkbox]:checked") ?? []).map((input) => input.value); await props.onMergeDuplicates(cluster.canonical.id, ids); props.onNotice("重复题已合并并归档变体"); await loadDuplicates(); }}>合并选中变体</button></div>)}</div>}
     <div className="question-bank-skills"><div><span className="page-kicker">SKILL LIBRARY</span><h2>技能资料</h2><p className="page-note">先登记技能名称和说明，后续可继续挂接知识点、岗位和题目。</p></div><div className="question-bank-skill-form"><input value={skillName} onChange={(event) => setSkillName(event.target.value)} placeholder="技能名称，例如 IIC / FreeRTOS" /><input value={skillDescription} onChange={(event) => setSkillDescription(event.target.value)} placeholder="技能说明或使用边界" /><button className="outline-pill" onClick={() => void saveSkill()}>新增技能</button></div>{props.skills.length > 0 && <div className="skill-chip-list">{props.skills.map((skill) => <span className="knowledge-type-badge" key={skill.id}>{skill.name}</span>)}</div>}</div>
   </section>;
 }
@@ -665,7 +784,9 @@ export function App(): JSX.Element {
   const [knowledgeBaseId, setKnowledgeBaseId] = useState("");
   const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDocumentItem[]>([]);
   const [questionBankQuestions, setQuestionBankQuestions] = useState<QuestionBankQuestionRecord[]>([]);
+  const [questionBankTotal, setQuestionBankTotal] = useState(0);
   const [questionBankSkills, setQuestionBankSkills] = useState<QuestionBankSkillRecord[]>([]);
+  const [questionBankJobs, setQuestionBankJobs] = useState<QuestionBankJobProfileRecord[]>([]);
   const [questionBankAnswerProgress, setQuestionBankAnswerProgress] = useState<{ status: "started" | "running" | "completed"; total: number; completed: number; generated: number; skipped: number; failed: number; questionId?: string; error?: string }>();
   const [historyRecords, setHistoryRecords] = useState<Array<{ id: string; profileId: string; projectId?: string; jobTargetId?: string; startedAt: number; endedAt?: number; status: string; automationMode: string }>>([]);
   const [historyMetrics, setHistoryMetrics] = useState<{ id: string; answerRate: number; questionCount: number; answeredQuestionCount: number; averageAnswerLatencyMs?: number }>();
@@ -771,8 +892,12 @@ export function App(): JSX.Element {
         setKnowledgeBases(bases);
         setKnowledgeBaseId(bases[0]?.id ?? "");
         setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(bases[0]?.id));
-        setQuestionBankQuestions(await window.interviewCopilot.questionBank.list({ limit: 500 }));
-        setQuestionBankSkills(await window.interviewCopilot.questionBank.listSkills());
+        const [initialQuestions, initialQuestionTotal] = await Promise.all([window.interviewCopilot.questionBank.list({ status: "active", limit: 60, offset: 0, sort: "updated" }), window.interviewCopilot.questionBank.count({ status: "active" })]);
+        setQuestionBankQuestions(initialQuestions);
+        setQuestionBankTotal(initialQuestionTotal);
+        const [initialSkills, initialJobs] = await Promise.all([window.interviewCopilot.questionBank.listSkills(), window.interviewCopilot.questionBank.listJobs()]);
+        setQuestionBankSkills(initialSkills);
+        setQuestionBankJobs(initialJobs);
         const selectedProfile = storedProfiles.find((profile) => profile.id === (active?.id ?? storedProfiles[0]?.id));
         if (selectedProfile && selectedProfile.knowledgeBaseIds.length === 0 && bases[0]) {
           const linked = await window.interviewCopilot.profiles.save({ ...selectedProfile, knowledgeBaseIds: [bases[0].id] });
@@ -834,14 +959,18 @@ export function App(): JSX.Element {
         void window.interviewCopilot.chat.listConversations().then(setConversations);
       }),
       window.interviewCopilot.events.onChatError((event) => {
-        const payload = event && typeof event === "object" ? event as { message?: string; code?: string } : {};
+        const payload = event && typeof event === "object" ? event as { message?: string; userMessage?: string; code?: string } : {};
         setChatSending(false);
-        store.setNotice(`${payload.code ?? "CHAT_ERROR"}：${payload.message ?? "聊天请求失败"}`);
+        store.setNotice(payload.userMessage ?? payload.message ?? "AI 服务暂时中断，请重试。");
+      }),
+      window.interviewCopilot.events.onChatCancelled(() => {
+        setChatSending(false);
+        store.setNotice("已停止生成，可以继续回答或重新生成。");
       }),
       window.interviewCopilot.events.onQuestionBankAnswerGenerationProgress((progress) => {
         setQuestionBankAnswerProgress(progress);
         if (progress.status === "completed") {
-          void window.interviewCopilot.questionBank.list({ limit: 500 }).then(setQuestionBankQuestions);
+          void Promise.all([window.interviewCopilot.questionBank.list({ status: "active", limit: 60, offset: 0, sort: "updated" }), window.interviewCopilot.questionBank.count({ status: "active" })]).then(([questions, total]) => { setQuestionBankQuestions(questions); setQuestionBankTotal(total); });
           store.setNotice(`答案生成完成：新增 ${progress.generated} 张，跳过 ${progress.skipped} 张，失败 ${progress.failed} 张`);
         }
       }),
@@ -1058,9 +1187,11 @@ export function App(): JSX.Element {
     event.target.value = "";
   };
   const refreshQuestionBank = async () => {
-    const [questions, skills] = await Promise.all([window.interviewCopilot.questionBank.list({ limit: 500 }), window.interviewCopilot.questionBank.listSkills()]);
+    const [questions, total, skills, jobs] = await Promise.all([window.interviewCopilot.questionBank.list({ status: "active", limit: 60, offset: 0, sort: "updated" }), window.interviewCopilot.questionBank.count({ status: "active" }), window.interviewCopilot.questionBank.listSkills(), window.interviewCopilot.questionBank.listJobs()]);
     setQuestionBankQuestions(questions);
+    setQuestionBankTotal(total);
     setQuestionBankSkills(skills);
+    setQuestionBankJobs(jobs);
   };
   const attachProfileMaterial = async (kind: "resume" | "jobDescription", event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -1179,6 +1310,38 @@ export function App(): JSX.Element {
       setChatSending(false);
     }
   };
+  const reviewProjectFact = async (factId: string, status: "active" | "pending_review" | "rejected" | "conflicting") => {
+    const updated = await window.interviewCopilot.projectMemory.reviewFact(factId, status);
+    if (updated) {
+      setProjectFacts((current) => current.map((fact) => fact.id === updated.id ? updated : fact));
+      store.setNotice(status === "rejected" ? "事实已标记为不正确" : status === "active" ? "事实已确认" : "事实状态已更新");
+    }
+  };
+  const continueChatMessage = async (messageId: string) => {
+    if (!activeConversationId || chatSending) return;
+    setChatSending(true);
+    try { await window.interviewCopilot.chat.continueMessage(activeConversationId, messageId); }
+    catch (error) { setChatSending(false); store.setNotice(`继续生成失败：${userFacingError(error)}`); }
+  };
+  const retryChatMessage = async (messageId: string) => {
+    if (!activeConversationId || chatSending) return;
+    const index = chatMessages.findIndex((message) => message.id === messageId);
+    const question = [...chatMessages.slice(0, index)].reverse().find((message) => message.role === "user");
+    if (!question) { store.setNotice("找不到原始问题，请重新输入。"); return; }
+    setChatSending(true);
+    try { await window.interviewCopilot.chat.sendMessage(activeConversationId, question.content); }
+    catch (error) { setChatSending(false); store.setNotice(`重新生成失败：${userFacingError(error)}`); }
+  };
+  const approveChatAction = async (messageId: string, action: ChatAction) => {
+    if (!activeConversationId) return;
+    try {
+      await window.interviewCopilot.chat.approveAction({ conversationId: activeConversationId, messageId, action });
+      setChatMessages((current) => current.map((message) => message.id === messageId && message.structuredResponse ? { ...message, structuredResponse: { ...message.structuredResponse, actions: (message.structuredResponse.actions ?? []).map((item) => item.id === action.id ? { ...item, status: "approved" as const } : item) } } : message));
+      store.setNotice("操作已确认并写入本地数据");
+    } catch (error) {
+      store.setNotice(`操作执行失败：${userFacingError(error)}`);
+    }
+  };
   const createProject = async () => {
     const value = await requestDialog({ kind: "form", title: "创建项目", description: "项目会保存到本地数据库，并可关联当前 Profile。", label: "项目名称", defaultValue: "新面试项目", required: true, confirmLabel: "创建" });
     if (typeof value !== "string" || !value.trim()) return;
@@ -1207,15 +1370,15 @@ export function App(): JSX.Element {
   const specialPageContent = page === "knowledge"
     ? <KnowledgePage knowledgeBases={knowledgeBases} knowledgeBaseId={knowledgeBaseId} knowledgeDocuments={knowledgeDocuments} requestDialog={requestDialog} onSelectBase={setKnowledgeBaseId} onCreateBase={async (name) => { const created = await window.interviewCopilot.knowledge.createBase(name); if (created) { setKnowledgeBases((current) => [created, ...current]); setKnowledgeBaseId(created.id); setKnowledgeDocuments([]); } }} onRenameBase={async (id, name) => { const updated = await window.interviewCopilot.knowledge.renameBase(id, name); if (updated) setKnowledgeBases((current) => current.map((item) => item.id === updated.id ? updated : item)); }} onDeleteBase={async (id, name) => { const confirmed = await requestDialog({ kind: "confirm", title: `删除 ${name}？`, description: "删除后资料库和其中的文档会一起删除。", confirmLabel: "删除" }); if (confirmed === true) { await window.interviewCopilot.knowledge.deleteBase(id); const next = await window.interviewCopilot.knowledge.listBases(); const nextId = next[0]?.id ?? ""; setKnowledgeBases(next); setKnowledgeBaseId(nextId); setKnowledgeDocuments(nextId ? await window.interviewCopilot.knowledge.listDocuments(nextId) : []); } }} onUpload={uploadKnowledgeFile} onUpdateType={async (id, type) => { await window.interviewCopilot.knowledge.updateType(id, type); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onReindex={async (id) => { await window.interviewCopilot.knowledge.reindex(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onDeleteDocument={async (id) => { await window.interviewCopilot.knowledge.delete(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} />
     : page === "project-library"
-      ? <ProjectLibraryPage memory={projectMemory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] }} stats={projectMemoryStats} facts={projectFacts} documents={knowledgeDocuments} analysisRuns={knowledgeAnalysisRuns} rebuilding={projectMemoryRunning} onUploadProject={(file) => uploadKnowledgeFile(file, "project")} onRebuild={() => void rebuildProjectMemory()} onVerifyFact={verifyProjectFact} onOpenSources={() => setPage("knowledge")} />
+      ? <ProjectLibraryManager profileId={profileId} memory={projectMemory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] }} stats={projectMemoryStats} facts={projectFacts} documents={knowledgeDocuments} analysisRuns={knowledgeAnalysisRuns} rebuilding={projectMemoryRunning} onUploadProject={(file) => uploadKnowledgeFile(file, "project")} onRebuild={() => void rebuildProjectMemory()} onVerifyFact={verifyProjectFact} onReviewFact={reviewProjectFact} onOpenSources={() => setPage("knowledge")} />
       : page === "job-targets"
       ? <JobTargetsPage targets={jobTargets} onUploadJob={uploadJobDescription} onOpenProfile={() => setPage("profiles")} />
       : undefined;
   const modernPageContent = specialPageContent ?? (() => {
     if (String(page) === "personal-memory") return <><PersonalMemoryPage memory={projectMemory} stats={projectMemoryStats} rebuilding={projectMemoryRunning} onRebuild={() => void rebuildProjectMemory()} /><MemoryGovernancePanel memory={projectMemory} facts={projectFacts} jobTargets={jobTargets} analysisRuns={knowledgeAnalysisRuns} retrievalRuns={retrievalRuns} onVerifyFact={verifyProjectFact} /></>;
     if (String(page) === "knowledge") return <KnowledgePage knowledgeBases={knowledgeBases} knowledgeBaseId={knowledgeBaseId} knowledgeDocuments={knowledgeDocuments} requestDialog={requestDialog} onSelectBase={setKnowledgeBaseId} onCreateBase={async (name) => { const created = await window.interviewCopilot.knowledge.createBase(name); if (created) { setKnowledgeBases((current) => [created, ...current]); setKnowledgeBaseId(created.id); setKnowledgeDocuments([]); } }} onRenameBase={async (id, name) => { const updated = await window.interviewCopilot.knowledge.renameBase(id, name); if (updated) setKnowledgeBases((current) => current.map((item) => item.id === updated.id ? updated : item)); }} onDeleteBase={async (id, name) => { const confirmed = await requestDialog({ kind: "confirm", title: `删除 ${name}？`, description: "知识库和其中的文档会一起删除。", confirmLabel: "删除" }); if (confirmed === true) { await window.interviewCopilot.knowledge.deleteBase(id); const next = await window.interviewCopilot.knowledge.listBases(); setKnowledgeBases(next); const nextId = next[0]?.id ?? ""; setKnowledgeBaseId(nextId); setKnowledgeDocuments(nextId ? await window.interviewCopilot.knowledge.listDocuments(nextId) : []); } }} onUpload={uploadKnowledgeFile} onUpdateType={async (id, type) => { await window.interviewCopilot.knowledge.updateType(id, type); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onReindex={async (id) => { await window.interviewCopilot.knowledge.reindex(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onDeleteDocument={async (id) => { await window.interviewCopilot.knowledge.delete(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} />;
-    if (String(page) === "question-bank") return <QuestionBankPage questions={questionBankQuestions} skills={questionBankSkills} answerGenerationProgress={questionBankAnswerProgress} onSaveQuestion={async (input) => { const saved = await window.interviewCopilot.questionBank.saveQuestion(input); await refreshQuestionBank(); return saved; }} onSaveAnswer={async (input) => { const saved = await window.interviewCopilot.questionBank.saveAnswer(input); await refreshQuestionBank(); return saved; }} onDeleteQuestion={async (id) => { await window.interviewCopilot.questionBank.deleteQuestion(id); await refreshQuestionBank(); store.setNotice("题目已删除"); }} onImport={async (text, filename, options) => { const result = await window.interviewCopilot.questionBank.importText({ text, filename, ...options }); await refreshQuestionBank(); return result; }} onGenerateAnswers={async (questionIds) => { try { store.setNotice("正在生成题库答案…"); return await window.interviewCopilot.questionBank.generateAnswers({ questionIds, onlyUnanswered: true }); } catch (error) { store.setNotice(`答案生成失败：${userFacingError(error)}`); return undefined; } }} onSaveSkill={async (input) => { await window.interviewCopilot.questionBank.saveSkill(input); await refreshQuestionBank(); store.setNotice(`技能“${input.name}”已保存`); }} onNotice={(message) => store.setNotice(message)} />;
-    if (page === "home") return chatMessages.length > 0 ? <section className="conversation-view"><div className="page-heading"><div><span className="page-kicker">CONVERSATION</span><h1>{conversations.find((conversation) => conversation.id === activeConversationId)?.title ?? "新对话"}</h1></div><span className="conversation-status">{chatSending ? "AI 正在生成…" : "已保存到本地"}</span></div><div className="chat-message-list">{chatMessages.map((message) => <article className={`chat-message ${message.role}`} key={message.id}><span className="chat-message-avatar">{message.role === "user" ? "你" : "AI"}</span><div className="chat-message-body"><div className="chat-message-role">{message.role === "user" ? "你" : "Interview Copilot"}{message.status === "streaming" && <span className="streaming-label">正在生成…</span>}</div>{message.role === "assistant" ? <MarkdownAnswer text={message.content || "正在生成…"} /> : <p>{message.content}</p>}</div></article>)}</div>{chatSending && activeConversationId && <button className="outline-pill stop-generation" onClick={() => void window.interviewCopilot.chat.cancel(activeConversationId)}>停止生成</button>}</section> : <WelcomeScreen onPrepare={startPreparation} onPolish={polishResume} onLanguage={selectLanguage} onRefresh={beginNewConversation} />;
+    if (String(page) === "question-bank") return <QuestionBankPage questions={questionBankQuestions} total={questionBankTotal} skills={questionBankSkills} jobs={questionBankJobs} onList={(options) => window.interviewCopilot.questionBank.list(options)} onCount={(options) => window.interviewCopilot.questionBank.count(options)} onBulkUpdate={(ids, patch) => window.interviewCopilot.questionBank.bulkUpdate(ids, patch).then(async (count) => { await refreshQuestionBank(); return count; })} onDuplicates={() => window.interviewCopilot.questionBank.duplicates()} onMergeDuplicates={(canonicalId, duplicateIds) => window.interviewCopilot.questionBank.mergeDuplicates(canonicalId, duplicateIds).then(async (result) => { await refreshQuestionBank(); return result; })} answerGenerationProgress={questionBankAnswerProgress} onSaveQuestion={async (input) => { const saved = await window.interviewCopilot.questionBank.saveQuestion(input); await refreshQuestionBank(); return saved; }} onSaveAnswer={async (input) => { const saved = await window.interviewCopilot.questionBank.saveAnswer(input); await refreshQuestionBank(); return saved; }} onDeleteQuestion={async (id) => { await window.interviewCopilot.questionBank.deleteQuestion(id); await refreshQuestionBank(); store.setNotice("题目已删除"); }} onImport={async (text, filename, options) => { const result = await window.interviewCopilot.questionBank.importText({ text, filename, ...options }); await refreshQuestionBank(); return result; }} onGenerateAnswers={async (questionIds) => { try { store.setNotice("正在生成题库答案…"); return await window.interviewCopilot.questionBank.generateAnswers({ questionIds, onlyUnanswered: true }); } catch (error) { store.setNotice(`答案生成失败：${userFacingError(error)}`); return undefined; } }} onSaveSkill={async (input) => { await window.interviewCopilot.questionBank.saveSkill(input); await refreshQuestionBank(); store.setNotice(`技能“${input.name}”已保存`); }} onLinkSkill={(questionId, skillId) => window.interviewCopilot.questionBank.linkSkill(questionId, skillId)} onCoverage={(jobProfileId) => window.interviewCopilot.questionBank.coverage(jobProfileId)} onNotice={(message) => store.setNotice(message)} />;
+    if (page === "home") return chatMessages.length > 0 ? <section className="conversation-view"><div className="page-heading"><div><span className="page-kicker">CONVERSATION</span><h1>{conversations.find((conversation) => conversation.id === activeConversationId)?.title ?? "新对话"}</h1></div><span className="conversation-status">{chatSending ? "AI 正在生成…" : "已保存到本地"}</span></div><div className="chat-message-list">{chatMessages.map((message) => { const recoverable = message.role === "assistant" && (message.status === "cancelled" || message.status === "partial_error"); const retryable = message.role === "assistant" && message.status === "failed"; return <article className={`chat-message ${message.role}`} key={message.id}><span className="chat-message-avatar">{message.role === "user" ? "你" : "AI"}</span><div className="chat-message-body"><div className="chat-message-role">{message.role === "user" ? "你" : "Interview Copilot"}{message.status === "streaming" && <span className="streaming-label">正在生成…</span>}{message.status === "cancelled" && <span className="chat-status-label">已停止生成</span>}{message.status === "partial_error" && <span className="chat-status-label chat-status-warning">回答生成中断，已保留当前内容</span>}{message.status === "failed" && <span className="chat-status-label chat-status-error">生成失败</span>}</div>{message.role === "assistant" ? <MarkdownAnswer text={message.content || (message.status === "streaming" ? "正在生成…" : message.status === "failed" ? "暂无回答内容" : "已保留当前回答内容")} /> : <p>{message.content}</p>}{(recoverable || retryable) && <div className="chat-recovery-actions">{recoverable && <button className="outline-pill" disabled={chatSending} onClick={() => void continueChatMessage(message.id)}>继续回答</button>}<button className="outline-pill" disabled={chatSending} onClick={() => void retryChatMessage(message.id)}>重新生成</button></div>}</div></article>; })}</div>{chatSending && activeConversationId && <button className="outline-pill stop-generation" onClick={() => void window.interviewCopilot.chat.cancel(activeConversationId)}>停止生成</button>}</section> : <WelcomeScreen onPrepare={startPreparation} onPolish={polishResume} onLanguage={selectLanguage} onRefresh={beginNewConversation} />;
     if (page === "interview") return <section className="simple-page interview-page"><div className="page-heading"><div><span className="page-kicker">LIVE INTERVIEW</span><h1>开始面试</h1><p className="page-note">面试官一开口，答案就在屏幕上。</p></div><div className="detail-actions"><button className="outline-pill" onClick={() => void startWrittenTest()}>笔试模式</button><button className="dark-pill" onClick={() => setSetupOpen(true)}>开始面试 <span>↗</span></button></div></div><div className="interview-hero"><div className="interview-hero-copy"><span className="hero-status"><i /> READY WHEN YOU ARE</span><h2>让 AI 负责听题，<br />你负责表达。</h2><p>连接麦克风和系统音频，选择面试档案后开始。回答会基于本轮准备快照生成，保持真实、简洁、贴合你的经历。需要笔试时，直接进入截图回答模式。</p><div className="detail-actions"><button className="hero-cta" onClick={() => setSetupOpen(true)}>打开面试设置 <span>→</span></button><button className="outline-pill" onClick={() => void startWrittenTest()}>开始笔试模式</button></div></div><div className="interview-orbit" aria-hidden="true"><span className="orbit-ring ring-one" /><span className="orbit-ring ring-two" /><span className="orbit-core"><b>AI</b><small>LISTEN<br />THINK<br />ANSWER</small></span></div></div><div className="interview-steps"><article><span>01</span><strong>冻结准备快照</strong><p>简历、JD、项目和技能卡</p></article><article><span>02</span><strong>实时识别问题</strong><p>支持追问、打断和换方向</p></article><article><span>03</span><strong>截图回答笔试题</strong><p>Ctrl+Alt+S 触发视觉回答</p></article></div></section>;
     if (page === "preparation") return <section className="simple-page preparation-page"><div className="page-heading"><div><span className="page-kicker">PREPARATION AGENT</span><h1>面试准备</h1></div><span className="page-note">最多 40 步 · 写入需审批</span></div><label className="clean-field"><span>准备目标</span><textarea value={preparationGoal} onChange={(event) => setPreparationGoal(event.target.value)} rows={4} /></label><div className="detail-actions"><button className="dark-pill" disabled={preparationRunning} onClick={async () => { setPreparationEvents([]); setPreparationRunning(true); try { await window.interviewCopilot.preparation.start(preparationGoal); } catch (error) { setPreparationRunning(false); store.setNotice(`Preparation 启动失败：${userFacingError(error)}`); } }}>{preparationRunning ? "准备中…" : "开始准备"}</button>{preparationRunning && <button className="outline-pill" onClick={() => void window.interviewCopilot.preparation.stop()}>停止</button>}</div><div className="preparation-events">{preparationEvents.map((event, index) => <div className={`event-row event-${String(event.type ?? "event")}`} key={`${String(event.type)}-${index}`}><strong>{String(event.type ?? "event")}</strong><span>{typeof event.summary === "string" ? event.summary : typeof event.message === "string" ? event.message : typeof event.tool === "string" ? `${event.tool}${event.rationale ? ` · ${String(event.rationale)}` : ""}` : event.risk ? `风险：${String(event.risk)}` : ""}</span>{event.type === "approval_required" && typeof event.requestId === "string" && <span className="approval-actions"><button className="dark-pill" onClick={() => void window.interviewCopilot.preparation.approve(String(event.requestId))}>允许</button><button className="outline-pill" onClick={() => void window.interviewCopilot.preparation.reject(String(event.requestId))}>拒绝</button></span>}</div>)}</div></section>;
     if (page === "profiles") return <section className="simple-page"><div className="page-heading"><div><span className="page-kicker">PROFILES</span><h1>档案</h1></div><button className="dark-pill" onClick={async () => { const created = await window.interviewCopilot.profiles.save({ name: `面试档案 ${profiles.length + 1}`, language: "zh-CN", skills: [], knowledgeBaseIds: knowledgeBases[0] ? [knowledgeBases[0].id] : [] }); if (created) { setProfiles((current) => [created, ...current]); setProfileId(created.id); } }}>新建档案</button></div><div className="profile-layout"><div className="clean-list">{profiles.map((profile) => <button className={`clean-list-row ${profile.id === profileId ? "selected" : ""}`} key={profile.id} onClick={() => { setProfileId(profile.id); void window.interviewCopilot.profiles.selectActive(profile.id); }}><span>{profile.name}</span><small>{profile.language} · {profile.skills.length} skills</small></button>)}</div>{selectedProfile && <div className="detail-sheet"><h2>{selectedProfile.name}</h2><p className="page-note">{selectedProfile.language} · 当前档案</p><label className="clean-field"><span>Resume</span><label className="upload-row">{selectedProfile.resume?.summary ?? "未上传 Resume"}<input type="file" accept=".txt,.md,.pdf,.docx" onChange={(event) => void attachProfileMaterial("resume", event)} /></label>{selectedProfile.resume && <button className="text-button danger-text" onClick={() => void removeProfileMaterial("resume")}>移除 Resume</button>}</label><label className="clean-field"><span>职位描述</span><label className="upload-row">{selectedProfile.jobDescription?.summary ?? "未上传 JD"}<input type="file" accept=".txt,.md,.pdf,.docx" onChange={(event) => void attachProfileMaterial("jobDescription", event)} /></label>{selectedProfile.jobDescription && <button className="text-button danger-text" onClick={() => void removeProfileMaterial("jobDescription")}>移除 JD</button>}</label><div className="detail-actions"><button className="outline-pill" onClick={() => void editInstructions()}>编辑 Instructions</button><button className="outline-pill" onClick={() => void addSkill()}>新增 Skill</button><button className="outline-pill" onClick={() => void cloneProfile()}>克隆</button><button className="outline-pill" onClick={() => void renameProfile()}>重命名</button><button className="outline-pill danger-outline" onClick={() => void deleteProfile()}>删除</button></div><div className="profile-subsection"><h3>Skills</h3>{selectedProfile.skills.length === 0 && <p className="page-note">尚未添加 Skill</p>}{selectedProfile.skills.map((skill) => <div className="skill-row" key={skill.id}><span><strong>{skill.name}</strong><small>{skill.content.slice(0, 80)}</small></span><span><button className="text-button" onClick={() => void editSkill(skill.id)}>编辑</button><button className="text-button danger-text" onClick={() => void deleteSkill(skill.id)}>删除</button></span></div>)}</div><div className="profile-subsection"><h3>关联知识库</h3>{knowledgeBases.map((base) => <label className="check-row" key={base.id}><input type="checkbox" checked={selectedProfile.knowledgeBaseIds.includes(base.id)} onChange={() => void toggleKnowledgeBase(base.id, selectedProfile.knowledgeBaseIds.includes(base.id))} />{base.name}</label>)}</div></div>}</div></section>;
@@ -1235,12 +1398,14 @@ export function App(): JSX.Element {
         <div className="modern-main">
           {page === "interview" && <section className="interview-context-panel"><div><span className="page-kicker">ANSWER CONTEXT</span><strong>本轮回答上下文</strong><small>未选择时，系统会根据面试问题自动识别项目和岗位。</small></div><label className="clean-field"><span>目标岗位</span><select value={interviewJobTargetId} onChange={(event) => setInterviewJobTargetId(event.target.value)}><option value="">自动使用当前岗位</option>{jobTargets.map((target) => <option value={target.id} key={target.id}>{target.name}</option>)}</select></label><label className="clean-field"><span>重点项目</span><select value={interviewProjectId} onChange={(event) => setInterviewProjectId(event.target.value)}><option value="">根据问题自动识别</option>{projectMemory?.projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label></section>}
           {page === "settings" && <LlmModelProfilesPanel profiles={llmProfiles} activeId={activeLlmProfileId} selectedId={llmProfileId} name={llmProfileName} onNameChange={setLlmProfileName} onSelect={(nextId) => { setLlmProfileId(nextId); if (nextId) void activateLlmProfile(nextId); }} onNew={startNewLlmProfile} onDelete={() => void deleteLlmProfile()} />}
-          {modernPageContent}
+          <PageErrorBoundary page={page}>{modernPageContent}</PageErrorBoundary>
+          {page === "home" && <ChatResponseSupplement messages={chatMessages} onApproveAction={approveChatAction} />}
           {page === "settings" && <TaskModelRoutingPanel values={{ fallbackModel, questionRecognitionModel, profileBuilderModel, projectAnalyzerModel, questionBankModel, chatModel, postInterviewModel, preparationModel }} onChange={(key, value) => { const setters: Record<TaskModelKey, (next: string) => void> = { fallbackModel: setFallbackModel, questionRecognitionModel: setQuestionRecognitionModel, profileBuilderModel: setProfileBuilderModel, projectAnalyzerModel: setProjectAnalyzerModel, questionBankModel: setQuestionBankModel, chatModel: setChatModel, postInterviewModel: setPostInterviewModel, preparationModel: setPreparationModel }; setters[key](value); }} />}
           {page === "profiles" && selectedProfile && <div className="profile-subsection profile-builder-panel">
-             <div className="profile-builder-heading"><div><h3>简历结构化结果</h3><p className="page-note">上传简历后不会自动调用大模型；点击“重新识别简历”后生成技能、项目和面试素材。</p></div><span className="profile-builder-status">{profileBuilderRunning ? "识别中…" : profileBuilderArtifact?.artifact ? "已完成" : "待识别"}</span></div>
+             <div className="profile-builder-heading"><div><h3>简历结构化结果</h3><p className="page-note">上传简历后不会自动调用大模型；点击“重新识别简历”后生成技能、项目和面试素材。</p></div><span className="profile-builder-status">{profileBuilderRunning ? "分析中…" : profileBuilderArtifact?.status === "error" ? "分析失败 · 保留上次结果" : profileBuilderArtifact?.artifact?.status === "partial" ? "部分完成" : profileBuilderArtifact?.artifact ? "分析完成" : "待分析"}</span></div>
              <div className="detail-actions"><button className="outline-pill" disabled={profileBuilderRunning} onClick={() => void rebuildProfileBuilder()}>{profileBuilderRunning ? "构建中…" : "重新识别简历"}</button><span className="page-note">{profileBuilderArtifact?.artifact ? `技能 ${profileBuilderArtifact.artifact.skillGraph.nodes.length} · 项目 ${profileBuilderArtifact.artifact.projectGraph.nodes.length} · 回答素材 ${profileBuilderArtifact.artifact.answerMaterials.length}` : "上传后需手动识别"}</span></div>
-            {profileBuilderArtifact?.artifact?.warnings.map((warning) => <small className="page-note" key={warning}>{warning}</small>)}
+             {profileBuilderArtifact?.error && <small className="page-note profile-builder-error">本次分析失败：{profileBuilderArtifact.error}；上次成功结果仍可使用。</small>}
+             {profileBuilderArtifact?.artifact?.warnings.map((warning) => <small className="page-note" key={warning}>{warning}</small>)}
             {profileBuilderArtifact?.artifact && <div className="profile-builder-grid">
               <div className="profile-builder-card"><h4>识别到的技能</h4><div className="profile-skill-chip-list">{selectedProfile.skills.filter((skill) => skill.tags.includes("待确认")).map((skill) => <span className="profile-skill-chip" key={skill.id}>{skill.name}<button className="text-button" onClick={() => void confirmDetectedSkill(skill.id)}>确认</button></span>)}{selectedProfile.skills.filter((skill) => !skill.tags.includes("待确认")).map((skill) => <span className="profile-skill-chip" key={skill.id}>{skill.name}<small>已确认</small></span>)}</div>{profileBuilderArtifact.artifact.skillGraph.nodes.length === 0 && <p className="page-note">暂未识别到技能</p>}</div>
               <div className="profile-builder-card"><h4>项目经历</h4>{profileBuilderArtifact.artifact.projectGraph.nodes.map((project) => <article className="profile-project-card" key={project.id}><strong>{project.name}</strong><p>{project.summary}</p>{project.skills.length > 0 && <small>{project.skills.join(" · ")}</small>}</article>)}{profileBuilderArtifact.artifact.projectGraph.nodes.length === 0 && <p className="page-note">暂未识别到项目</p>}</div>
@@ -1250,7 +1415,7 @@ export function App(): JSX.Element {
            {page === "profiles" && selectedProfile && <div className="profile-subsection"><h3>Profile Builder</h3><p className="page-note">上传 Resume、项目资料或完成面试后不会自动调用大模型；所有素材都保留来源证据。</p><div className="detail-actions"><button className="outline-pill" disabled={profileBuilderRunning} onClick={() => void rebuildProfileBuilder()}>{profileBuilderRunning ? "构建中…" : "立即构建画像"}</button><span className="page-note">{profileBuilderArtifact?.artifact ? `技能 ${profileBuilderArtifact.artifact.skillGraph.nodes.length} · 项目 ${profileBuilderArtifact.artifact.projectGraph.nodes.length} · 回答素材 ${profileBuilderArtifact.artifact.answerMaterials.length} · FAQ ${profileBuilderArtifact.artifact.faqs.length}` : "尚未生成"}</span></div>{profileBuilderArtifact?.artifact?.warnings.map((warning) => <small className="page-note" key={warning}>{warning}</small>)}</div>}
           {page === "settings" && <CaptureProtectionSettings status={captureProtection} onToggle={(enabled) => void toggleCaptureProtection(enabled)} />}
         </div>
-        {(page === "home" || page === "interview") && <ChatComposer value={composerText} onChange={setComposerText} onSubmit={() => void submitComposer()} onCreateProject={() => void createProject()} />}
+        {(page === "home" || page === "interview") && <><div className="chat-context-capsules chat-context-capsules-composer"><span>档案：{selectedProfile?.name ?? "未选择"}</span><span>项目：{selectedProjectId ? projects.find((project) => project.id === selectedProjectId)?.name ?? "当前项目" : "自动"}</span><span>知识：自动检索</span><span>事实策略：仅已确认</span></div><ChatComposer value={composerText} onChange={setComposerText} onSubmit={() => void submitComposer()} onCreateProject={() => void createProject()} /></>}
         {store.notice && <button className="notice-toast" onClick={() => store.setNotice(undefined)}>{store.notice} <span>×</span></button>}
       </section>
       {dialog && <AppDialog dialog={dialog} onConfirm={(value) => closeDialog(dialog.kind === "confirm" ? true : value)} onCancel={() => closeDialog(undefined)} />}

@@ -10,9 +10,9 @@ import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
-import type { KnowledgeDocumentType, Profile, ProfileInput, ProjectFact, ProjectMemorySnapshot, ProviderSettings, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
+import type { ChatAction, KnowledgeDocumentType, Profile, ProfileInput, ProjectFact, ProjectMemorySnapshot, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectAnalysisState, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
+import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectAnalysisState, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 
 declare global {
@@ -82,7 +82,9 @@ declare global {
         listConversations(profileId?: string): Promise<ConversationRecord[]>;
         getConversation(conversationId: string): Promise<{ conversation: ConversationRecord; messages: ConversationMessageRecord[] } | undefined>;
         sendMessage(conversationId: string, content: string): Promise<boolean>;
-        cancel(conversationId: string): Promise<boolean>;
+        continueMessage(conversationId: string, messageId: string): Promise<boolean>;
+        cancel(conversationId: string, reason?: "user_stop" | "navigation" | "shutdown" | "superseded" | "provider_abort" | "timeout"): Promise<boolean>;
+        approveAction(input: { conversationId: string; messageId: string; action: ChatAction }): Promise<{ actionId: string; status: "approved"; result: unknown }>;
         deleteConversation(conversationId: string): Promise<boolean>;
       };
       profiles: {
@@ -106,6 +108,9 @@ declare global {
         listFacts(profileId: string, projectId?: string): Promise<ProjectFact[]>;
         addCandidateFact(fact: ProjectFact): Promise<ProjectFact | undefined>;
         verifyFact(factId: string, verified: boolean): Promise<ProjectFact | undefined>;
+        reviewFact(factId: string, status: "active" | "pending_review" | "rejected" | "conflicting"): Promise<ProjectFact | undefined>;
+        sources(projectId: string): Promise<unknown[]>;
+        completeness(profileId: string, projectId: string): Promise<unknown>;
         analysisRuns(profileId: string): Promise<KnowledgeAnalysisRunRecord[]>;
         state(projectId: string): Promise<ProjectAnalysisState | undefined>;
         assignSource(input: { profileId: string; projectId: string; sourceType: "document" | "repository" | "resume_section" | "user_fact"; sourceId: string; relationship?: "primary" | "supporting" | "reference"; confidence?: number; verified?: boolean }): Promise<boolean>;
@@ -146,7 +151,11 @@ declare global {
         reindex(documentId: string): Promise<unknown>;
       };
       questionBank: {
-        list(options?: { search?: string; type?: QuestionBankType; limit?: number }): Promise<QuestionBankQuestionRecord[]>;
+        list(options?: QuestionBankListOptions): Promise<QuestionBankQuestionRecord[]>;
+        count(options?: Omit<QuestionBankListOptions, "limit" | "offset" | "sort">): Promise<number>;
+        bulkUpdate(questionIds: string[], patch: QuestionBankBulkPatch): Promise<number>;
+        duplicates(limit?: number): Promise<QuestionBankDuplicateCluster[]>;
+        mergeDuplicates(canonicalId: string, duplicateIds: string[]): Promise<QuestionBankQuestionRecord | undefined>;
         get(questionId: string): Promise<QuestionBankQuestionRecord | undefined>;
         saveQuestion(input: QuestionBankQuestionInput): Promise<QuestionBankQuestionRecord | undefined>;
         deleteQuestion(questionId: string): Promise<boolean>;
@@ -157,6 +166,7 @@ declare global {
         saveSkillPoint(input: QuestionBankSkillPointInput): Promise<unknown>;
         linkSkill(questionId: string, skillId: string): Promise<boolean>;
         listJobs(): Promise<QuestionBankJobProfileRecord[]>;
+        coverage(jobProfileId?: string): Promise<QuestionBankCoverageResult>;
         saveJob(input: QuestionBankJobProfileInput): Promise<QuestionBankJobProfileRecord | undefined>;
         importText(input: { text: string; filename?: string; includeProject?: boolean; includeBehavioral?: boolean }): Promise<QuestionBankImportResult | undefined>;
         generateAnswers(input?: { questionIds?: string[]; onlyUnanswered?: boolean }): Promise<QuestionBankAnswerGenerationResult>;
@@ -204,6 +214,7 @@ declare global {
         onChatMessageDelta(listener: (event: unknown) => void): () => void;
         onChatMessageEnd(listener: (event: unknown) => void): () => void;
         onChatError(listener: (event: unknown) => void): () => void;
+        onChatCancelled(listener: (event: unknown) => void): () => void;
         onProfileBuilderUpdated(listener: (event: ProfileBuilderArtifactRecord) => void): () => void;
         onQuestionBankAnswerGenerationProgress(listener: (event: { status: "started" | "running" | "completed"; total: number; completed: number; generated: number; skipped: number; failed: number; questionId?: string; error?: string }) => void): () => void;
       };

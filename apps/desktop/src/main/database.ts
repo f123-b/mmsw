@@ -41,10 +41,25 @@ import {
   type ProjectSourceAssignment,
   type ProjectSourceRelationship,
   type ProjectSourceType,
-  type ProjectFactEvidence
+  type ProjectFactEvidence,
+  normalizeProfileBuilderArtifact,
+  calculateProjectCompleteness,
+  calculateQuestionBankCoverage,
+  type ProjectCompletenessResult,
+  type QuestionBankCoverageResult
 } from "@interview-copilot/shared";
+import type { ChatCancelReason, ChatMessageStatus, ChatResponse, ChatStreamTelemetry } from "@interview-copilot/shared";
 
 export const APP_DATA_DIRECTORY = "InterviewCopilot";
+
+function safeJson<T>(raw: unknown): T | undefined {
+  try {
+    const value = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return value && typeof value === "object" ? value as T : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export interface DatabaseFlushDiagnostics {
   databaseFlushDurationMs: number;
@@ -508,6 +523,21 @@ export class SqliteDatabase {
         );
         CREATE INDEX IF NOT EXISTS question_bank_question_facts_fact_idx ON question_bank_question_facts(fact_id);
       `],
+      [16, `
+        ALTER TABLE conversation_messages ADD COLUMN provider TEXT;
+        ALTER TABLE conversation_messages ADD COLUMN error_code TEXT;
+        ALTER TABLE conversation_messages ADD COLUMN cancel_reason TEXT;
+        ALTER TABLE conversation_messages ADD COLUMN started_at INTEGER;
+        ALTER TABLE conversation_messages ADD COLUMN first_token_at INTEGER;
+        ALTER TABLE conversation_messages ADD COLUMN finished_at INTEGER;
+        ALTER TABLE conversation_messages ADD COLUMN duration_ms INTEGER;
+        ALTER TABLE conversation_messages ADD COLUMN finish_reason TEXT;
+        ALTER TABLE conversation_messages ADD COLUMN characters_generated INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX IF NOT EXISTS conversation_messages_status_idx ON conversation_messages(status, created_at);
+      `],
+      [17, `
+        ALTER TABLE conversation_messages ADD COLUMN response_json TEXT;
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -604,12 +634,15 @@ export class SqliteProfileBuilderRepository {
   get(profileId: string): ProfileBuilderArtifactRecord | undefined {
     const row = this.database.first<{ profileId: string; version: number; status: string; sourceSnapshotJson: string; artifactJson: string; error: string | null; createdAt: number; updatedAt: number }>("SELECT profile_id AS profileId, version, status, source_snapshot_json AS sourceSnapshotJson, artifact_json AS artifactJson, error, created_at AS createdAt, updated_at AS updatedAt FROM profile_builder_artifacts WHERE profile_id = ?", [profileId]);
     if (!row) return undefined;
+    let sourceSnapshot: unknown;
+    try { sourceSnapshot = JSON.parse(row.sourceSnapshotJson); } catch { sourceSnapshot = { sources: [], error: "Invalid source snapshot JSON" }; }
+    const artifact = normalizeProfileBuilderArtifact(row.artifactJson, { profileId: row.profileId, status: row.status as ProfileBuilderOutput["status"], error: row.error ?? undefined });
     return {
       profileId: row.profileId,
       version: row.version,
       status: row.status as ProfileBuilderArtifactRecord["status"],
-      sourceSnapshot: JSON.parse(row.sourceSnapshotJson),
-      artifact: row.artifactJson ? JSON.parse(row.artifactJson) as ProfileBuilderOutput : undefined,
+      sourceSnapshot,
+      artifact,
       ...(row.error ? { error: row.error } : {}),
       createdAt: row.createdAt,
       updatedAt: row.updatedAt
@@ -659,8 +692,18 @@ export interface ConversationMessageRecord {
   conversationId: string;
   role: "user" | "assistant" | "system";
   content: string;
-  status: "pending" | "streaming" | "completed" | "error" | "cancelled";
+  status: ChatMessageStatus;
   model?: string;
+  provider?: string;
+  errorCode?: string;
+  cancelReason?: ChatCancelReason;
+  startedAt?: number;
+  firstTokenAt?: number;
+  finishedAt?: number;
+  durationMs?: number;
+  finishReason?: string;
+  charactersGenerated: number;
+  structuredResponse?: ChatResponse;
   createdAt: number;
 }
 
@@ -725,6 +768,14 @@ export interface ProjectSourceRecord extends ProjectSourceAssignment {
   updatedAt: number;
 }
 
+export interface ProjectSourceDetail extends ProjectSourceRecord {
+  title: string;
+  documentType?: string;
+  status?: string;
+  text?: string;
+  updatedAt: number;
+}
+
 export class SqliteProjectSourceRepository {
   constructor(private readonly database: SqliteDatabase) {}
 
@@ -769,6 +820,14 @@ export class SqliteProjectMemoryRepository {
   }
 
   listProjectSources(projectId: string): ProjectSourceRecord[] { return this.sources.listProjectSources(projectId); }
+  listSourceDetails(projectId: string): ProjectSourceDetail[] {
+    return this.listProjectSources(projectId).map((assignment) => {
+      const document = assignment.sourceType === "document" || assignment.sourceType === "repository"
+        ? this.database.first<Record<string, unknown>>("SELECT filename, document_type AS documentType, status, text, updated_at AS updatedAt FROM documents WHERE id = ?", [assignment.sourceId])
+        : undefined;
+      return { ...assignment, title: String(document?.filename ?? assignment.sourceId), ...(document?.documentType ? { documentType: String(document.documentType) } : {}), ...(document?.status ? { status: String(document.status) } : {}), ...(document?.text ? { text: String(document.text).slice(0, 20_000) } : {}), updatedAt: Number(document?.updatedAt ?? assignment.updatedAt) };
+    });
+  }
   assignSource(input: Omit<ProjectSourceAssignment, "id" | "createdAt" | "updatedAt"> & { id?: string }): ProjectSourceRecord { return this.sources.assign(input); }
   sourcesFor(sourceType: ProjectSourceType, sourceId: string): ProjectSourceRecord[] { return this.sources.getBySource(sourceType, sourceId); }
 
@@ -792,7 +851,7 @@ export class SqliteProjectMemoryRepository {
     const modules = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, module_name AS moduleName, description, file_path AS filePath, source_ids_json AS sourceIdsJson FROM project_modules WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), moduleName: String(row.moduleName), description: String(row.description), ...(row.filePath ? { filePath: String(row.filePath) } : {}), sourceIds: jsonArray(row.sourceIdsJson) }));
     const technicalPoints = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, topic, content, importance, source_ids_json AS sourceIdsJson FROM technical_points WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), topic: String(row.topic), content: String(row.content), importance: String(row.importance) as ProjectTechnicalPoint["importance"], sourceIds: jsonArray(row.sourceIdsJson) }));
     const problems = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, problem, cause, solution, result, source_ids_json AS sourceIdsJson FROM project_problems WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), problem: String(row.problem), cause: String(row.cause), solution: String(row.solution), result: String(row.result), sourceIds: jsonArray(row.sourceIdsJson) }));
-    const interviewQuestions = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, question, answer_points_json AS answerPointsJson, keywords_json AS keywordsJson, source_ids_json AS sourceIdsJson FROM interview_questions WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), question: String(row.question), answerPoints: jsonArray(row.answerPointsJson), keywords: jsonArray(row.keywordsJson), sourceIds: jsonArray(row.sourceIdsJson), factIds: this.database.all<{ factId: string }>("SELECT fact_id AS factId FROM question_bank_question_facts WHERE question_id = ?", [String(row.id)]).map((item) => item.factId) }));
+    const interviewQuestions = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, question, answer_points_json AS answerPointsJson, keywords_json AS keywordsJson, source_ids_json AS sourceIdsJson FROM interview_questions WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), question: String(row.question), answerPoints: jsonArray(row.answerPointsJson), keywords: jsonArray(row.keywordsJson), sourceIds: jsonArray(row.sourceIdsJson), factIds: this.database.all<{ factId: string }>("SELECT fact_id AS factId FROM question_bank_question_facts WHERE question_id = ?", [String(row.id)]).map((item) => item.factId), stale: Number(this.database.first<{ stale: number }>("SELECT stale FROM question_bank_questions WHERE id = ?", [String(row.id)])?.stale ?? 0) === 1 }));
     return { projects, modules, technicalPoints, problems, interviewQuestions, facts: this.listFacts(profileId) };
   }
 
@@ -855,8 +914,8 @@ export class SqliteProjectMemoryRepository {
 
   listFacts(profileId: string, projectId?: string): ProjectFact[] {
       const rows = projectId
-      ? this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.project_id = ? AND f.status IN ('active', 'pending_review', 'conflicting') ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId, projectId])
-      : this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.status IN ('active', 'pending_review', 'conflicting') ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId]);
+      ? this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.project_id = ? AND f.status IN ('active', 'pending_review', 'conflicting', 'rejected') ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId, projectId])
+      : this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.status IN ('active', 'pending_review', 'conflicting', 'rejected') ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId]);
     return rows.map((row) => this.hydrateFact(row));
   }
 
@@ -884,7 +943,7 @@ export class SqliteProjectMemoryRepository {
   }
 
   searchFacts(profileId: string, query: string, options: { projectId?: string; detectedProjectId?: string; queryEmbedding?: number[]; questionType?: string; limit?: number; minScore?: number } = {}): ProjectFactMatch[] {
-    const hits = new ProjectFactMemoryRetriever().search(query, this.listFacts(profileId), {
+    const hits = new ProjectFactMemoryRetriever().search(query, this.listFacts(profileId).filter((fact) => fact.status !== "rejected"), {
       selectedProjectId: options.projectId,
       detectedProjectId: options.detectedProjectId,
       queryEmbedding: options.queryEmbedding,
@@ -893,6 +952,22 @@ export class SqliteProjectMemoryRepository {
       minScore: options.minScore
     });
     return hits.map((hit: ProjectRetrievalHit) => ({ ...hit, score: hit.finalScore }));
+  }
+
+  setFactReviewStatus(factId: string, status: ProjectFact["status"], now = Date.now()): ProjectFact | undefined {
+    if (!this.getFact(factId) || !status) return undefined;
+    this.database.run("UPDATE project_facts SET status = ?, verified = ?, updated_at = ? WHERE id = ?", [status, status === "active" ? 1 : 0, now, factId]);
+    this.database.run("UPDATE question_bank_questions SET stale = 1, updated_at = ? WHERE id IN (SELECT question_id FROM question_bank_question_facts WHERE fact_id = ?)", [now, factId]);
+    this.database.run("UPDATE question_bank_answer_cards SET stale = 1, updated_at = ? WHERE question_id IN (SELECT question_id FROM question_bank_question_facts WHERE fact_id = ?)", [now, factId]);
+    this.database.flushNow();
+    return this.getFact(factId);
+  }
+
+  getProjectCompleteness(profileId: string, projectId: string): ProjectCompletenessResult | undefined {
+    const snapshot = this.getSnapshot(profileId);
+    const project = snapshot.projects.find((item) => item.id === projectId);
+    if (!project) return undefined;
+    return calculateProjectCompleteness({ project, facts: this.listFacts(profileId, projectId), modules: snapshot.modules, problems: snapshot.problems, questions: snapshot.interviewQuestions });
   }
 
   setFactEmbedding(factId: string, embedding: number[], options: { model?: string; version?: string; now?: number } = {}): ProjectFact | undefined {
@@ -1105,8 +1180,16 @@ export class SqliteConversationRepository {
   get(conversationId: string): { conversation: ConversationRecord; messages: ConversationMessageRecord[] } | undefined {
     const conversation = this.database.first<ConversationRecord>("SELECT id, project_id AS projectId, profile_id AS profileId, title, created_at AS createdAt, updated_at AS updatedAt FROM conversations WHERE id = ?", [conversationId]);
     if (!conversation) return undefined;
-    const messages = this.database.all<ConversationMessageRecord>("SELECT id, conversation_id AS conversationId, role, content, status, model, created_at AS createdAt FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, id", [conversationId]);
-    return { conversation, messages: messages.map((message) => ({ ...message, role: message.role as ConversationMessageRecord["role"], status: message.status as ConversationMessageRecord["status"], ...(message.model ? { model: message.model } : {}) })) };
+    const messages = this.database.all<Record<string, unknown>>("SELECT id, conversation_id AS conversationId, role, content, status, model, provider, error_code AS errorCode, cancel_reason AS cancelReason, started_at AS startedAt, first_token_at AS firstTokenAt, finished_at AS finishedAt, duration_ms AS durationMs, finish_reason AS finishReason, characters_generated AS charactersGenerated, response_json AS responseJson, created_at AS createdAt FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, id", [conversationId]);
+    return { conversation, messages: messages.map((message) => ({
+      id: String(message.id), conversationId: String(message.conversationId), role: String(message.role) as ConversationMessageRecord["role"], content: String(message.content),
+      status: (message.status === "error" ? "failed" : String(message.status)) as ConversationMessageRecord["status"],
+      ...(message.model ? { model: String(message.model) } : {}), ...(message.provider ? { provider: String(message.provider) } : {}),
+      ...(message.errorCode ? { errorCode: String(message.errorCode) } : {}), ...(message.cancelReason ? { cancelReason: String(message.cancelReason) as ChatCancelReason } : {}),
+      ...(message.startedAt ? { startedAt: Number(message.startedAt) } : {}), ...(message.firstTokenAt ? { firstTokenAt: Number(message.firstTokenAt) } : {}), ...(message.finishedAt ? { finishedAt: Number(message.finishedAt) } : {}),
+      ...(message.durationMs ? { durationMs: Number(message.durationMs) } : {}), ...(message.finishReason ? { finishReason: String(message.finishReason) } : {}),
+      charactersGenerated: Number(message.charactersGenerated ?? String(message.content).length), ...(message.responseJson ? { structuredResponse: safeJson<ChatResponse>(message.responseJson) } : {}), createdAt: Number(message.createdAt)
+    })) };
   }
 
   create(profileId?: string, projectId?: string, title = "新对话", now = Date.now()): ConversationRecord {
@@ -1121,16 +1204,17 @@ export class SqliteConversationRepository {
     this.database.flushNow();
   }
 
-  addMessage(input: { conversationId: string; role: ConversationMessageRecord["role"]; content: string; status: ConversationMessageRecord["status"]; model?: string }, now = Date.now()): ConversationMessageRecord {
-    const message = { id: id("message", now), ...input, createdAt: now };
-    this.database.run("INSERT INTO conversation_messages(id, conversation_id, role, content, status, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [message.id, message.conversationId, message.role, message.content, message.status, message.model ?? null, now]);
+  addMessage(input: { conversationId: string; role: ConversationMessageRecord["role"]; content: string; status: ConversationMessageRecord["status"]; model?: string; provider?: string; startedAt?: number; charactersGenerated?: number; structuredResponse?: ChatResponse }, now = Date.now()): ConversationMessageRecord {
+    const message: ConversationMessageRecord = { id: id("message", now), ...input, charactersGenerated: input.charactersGenerated ?? input.content.length, createdAt: now };
+    this.database.run("INSERT INTO conversation_messages(id, conversation_id, role, content, status, model, provider, started_at, characters_generated, response_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [message.id, message.conversationId, message.role, message.content, message.status, message.model ?? null, message.provider ?? null, message.startedAt ?? null, message.charactersGenerated, message.structuredResponse ? JSON.stringify(message.structuredResponse) : null, now]);
     this.database.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, input.conversationId]);
     this.database.flushNow();
     return message;
   }
 
-  updateMessage(messageId: string, content: string, status: ConversationMessageRecord["status"], now = Date.now()): void {
-    this.database.run("UPDATE conversation_messages SET content = ?, status = ? WHERE id = ?", [content, status, messageId]);
+  updateMessage(messageId: string, content: string, status: ConversationMessageRecord["status"], now = Date.now(), telemetry: Partial<ChatStreamTelemetry> & { errorCode?: string; cancelReason?: ChatCancelReason; structuredResponse?: ChatResponse } = {}): void {
+    const durationMs = telemetry.durationMs ?? (telemetry.startedAt && telemetry.finishedAt ? telemetry.finishedAt - telemetry.startedAt : undefined);
+    this.database.run("UPDATE conversation_messages SET content = ?, status = ?, error_code = COALESCE(?, error_code), cancel_reason = COALESCE(?, cancel_reason), started_at = COALESCE(?, started_at), first_token_at = COALESCE(?, first_token_at), finished_at = COALESCE(?, finished_at), duration_ms = COALESCE(?, duration_ms), finish_reason = COALESCE(?, finish_reason), provider = COALESCE(?, provider), characters_generated = ?, response_json = COALESCE(?, response_json) WHERE id = ?", [content, status, telemetry.errorCode ?? null, telemetry.cancelReason ?? null, telemetry.startedAt ?? null, telemetry.firstTokenAt ?? null, telemetry.finishedAt ?? null, durationMs ?? null, telemetry.finishReason ?? null, telemetry.provider ?? null, telemetry.charactersGenerated ?? content.length, telemetry.structuredResponse ? JSON.stringify(telemetry.structuredResponse) : null, messageId]);
     const message = this.database.first<{ conversationId: string }>("SELECT conversation_id AS conversationId FROM conversation_messages WHERE id = ?", [messageId]);
     if (message) this.database.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, message.conversationId]);
     // Streaming updates arrive once per token. A synchronous full-database
@@ -1142,10 +1226,10 @@ export class SqliteConversationRepository {
   }
 
   recoverInterruptedMessages(now = Date.now()): number {
-    const interrupted = this.database.all<{ id: string }>("SELECT id FROM conversation_messages WHERE status = 'streaming'");
+    const interrupted = this.database.all<{ id: string; content: string }>("SELECT id, content FROM conversation_messages WHERE status = 'streaming'");
     if (interrupted.length === 0) return 0;
-    this.database.run("UPDATE conversation_messages SET status = 'error' WHERE status = 'streaming'");
-    this.database.run("UPDATE conversations SET updated_at = ? WHERE id IN (SELECT conversation_id FROM conversation_messages WHERE status = 'error')", [now]);
+    this.database.run("UPDATE conversation_messages SET status = CASE WHEN length(content) > 0 THEN 'partial_error' ELSE 'failed' END, error_code = 'CHAT_RELOADED_DURING_STREAM', finished_at = ?, duration_ms = CASE WHEN started_at IS NOT NULL THEN ? - started_at ELSE NULL END WHERE status = 'streaming'", [now, now]);
+    this.database.run("UPDATE conversations SET updated_at = ? WHERE id IN (SELECT conversation_id FROM conversation_messages WHERE status IN ('partial_error', 'failed'))", [now]);
     this.database.flushNow();
     return interrupted.length;
   }
@@ -1411,6 +1495,24 @@ export interface QuestionBankImportOptions {
   includeBehavioral?: boolean;
 }
 
+export interface QuestionBankListOptions {
+  search?: string;
+  type?: QuestionBankType;
+  scope?: QuestionBankScope;
+  profileId?: string;
+  projectId?: string;
+  jobProfileId?: string;
+  skillId?: string;
+  status?: "active" | "archived" | "all";
+  sort?: "updated" | "name" | "difficulty" | "verified";
+  limit?: number;
+  offset?: number;
+}
+
+export interface QuestionBankBulkPatch { status?: "active" | "archived"; stale?: boolean; verified?: boolean; type?: QuestionBankType; projectId?: string | null; }
+
+export interface QuestionBankDuplicateCluster { canonical: QuestionBankQuestionRecord; variants: QuestionBankQuestionRecord[]; score: number; }
+
 interface QuestionBankQuestionRow {
   id: string;
   canonicalText: string;
@@ -1442,23 +1544,95 @@ export interface QuestionBankAnswerGenerationResult {
 export class SqliteQuestionBankRepository {
   constructor(private readonly database: SqliteDatabase) {}
 
-  listQuestions(options: { search?: string; type?: QuestionBankType; scope?: QuestionBankScope; profileId?: string; projectId?: string; jobProfileId?: string; limit?: number } = {}): QuestionBankQuestionRecord[] {
-    const clauses: string[] = ["status = 'active'"];
+  listQuestions(options: QuestionBankListOptions = {}): QuestionBankQuestionRecord[] {
+    const clauses: string[] = [options.status === "all" ? "1 = 1" : "status = ?"];
     const params: Array<string | number> = [];
+    if (options.status !== "all") params.push(options.status ?? "active");
     if (options.type) { clauses.push("type = ?"); params.push(options.type); }
     if (options.scope) { clauses.push("scope = ?"); params.push(options.scope); }
     if (options.profileId) { clauses.push("(profile_id = ? OR profile_id IS NULL)"); params.push(options.profileId); }
     if (options.projectId) { clauses.push("(project_id = ? OR project_id IS NULL)"); params.push(options.projectId); }
     if (options.jobProfileId) { clauses.push("(job_profile_id = ? OR job_profile_id IS NULL)"); params.push(options.jobProfileId); }
+    if (options.skillId) { clauses.push("EXISTS (SELECT 1 FROM question_bank_question_skills qs WHERE qs.question_id = question_bank_questions.id AND qs.skill_id = ?)"); params.push(options.skillId); }
     if (options.search?.trim()) {
       const search = normalizeQuestionBankText(options.search);
       clauses.push("(normalized_text LIKE ? OR search_text LIKE ? OR id IN (SELECT question_id FROM question_bank_variants WHERE normalized_text LIKE ?))");
       params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
     const limit = Math.max(1, Math.min(5000, options.limit ?? 200));
-    params.push(limit);
-    const rows = this.database.all<QuestionBankQuestionRow>(`SELECT id, canonical_text AS canonicalText, normalized_text AS normalizedText, type, scope, profile_id AS profileId, project_id AS projectId, job_profile_id AS jobProfileId, difficulty, job_role AS jobRole, source, status, confidence, verified, stale, embedding_json AS embeddingJson, created_at AS createdAt, updated_at AS updatedAt FROM question_bank_questions WHERE ${clauses.join(" AND ")} ORDER BY verified DESC, confidence DESC, updated_at DESC LIMIT ?`, params);
+    const offset = Math.max(0, Math.floor(options.offset ?? 0));
+    const order = options.sort === "name" ? "canonical_text ASC" : options.sort === "difficulty" ? "difficulty ASC, updated_at DESC" : options.sort === "verified" ? "verified DESC, updated_at DESC" : "updated_at DESC";
+    params.push(limit, offset);
+    const rows = this.database.all<QuestionBankQuestionRow>(`SELECT id, canonical_text AS canonicalText, normalized_text AS normalizedText, type, scope, profile_id AS profileId, project_id AS projectId, job_profile_id AS jobProfileId, difficulty, job_role AS jobRole, source, status, confidence, verified, stale, embedding_json AS embeddingJson, created_at AS createdAt, updated_at AS updatedAt FROM question_bank_questions WHERE ${clauses.join(" AND ")} ORDER BY ${order} LIMIT ? OFFSET ?`, params);
     return rows.map((row) => this.hydrateQuestion(row));
+  }
+
+  countQuestions(options: Omit<QuestionBankListOptions, "limit" | "offset" | "sort"> = {}): number {
+    const clauses: string[] = [options.status === "all" ? "1 = 1" : "status = ?"];
+    const params: Array<string | number> = [];
+    if (options.status !== "all") params.push(options.status ?? "active");
+    if (options.type) { clauses.push("type = ?"); params.push(options.type); }
+    if (options.scope) { clauses.push("scope = ?"); params.push(options.scope); }
+    if (options.profileId) { clauses.push("(profile_id = ? OR profile_id IS NULL)"); params.push(options.profileId); }
+    if (options.projectId) { clauses.push("(project_id = ? OR project_id IS NULL)"); params.push(options.projectId); }
+    if (options.jobProfileId) { clauses.push("(job_profile_id = ? OR job_profile_id IS NULL)"); params.push(options.jobProfileId); }
+    if (options.skillId) { clauses.push("EXISTS (SELECT 1 FROM question_bank_question_skills qs WHERE qs.question_id = question_bank_questions.id AND qs.skill_id = ?)"); params.push(options.skillId); }
+    if (options.search?.trim()) { const search = normalizeQuestionBankText(options.search); clauses.push("(normalized_text LIKE ? OR search_text LIKE ? OR id IN (SELECT question_id FROM question_bank_variants WHERE normalized_text LIKE ?))"); params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
+    return Number(this.database.first<{ count: number }>(`SELECT COUNT(*) AS count FROM question_bank_questions WHERE ${clauses.join(" AND ")}`, params)?.count ?? 0);
+  }
+
+  bulkUpdate(questionIds: string[], patch: QuestionBankBulkPatch, now = Date.now()): number {
+    const ids = [...new Set(questionIds)].filter(Boolean);
+    for (const questionId of ids) {
+      const current = this.getQuestion(questionId);
+      if (!current) continue;
+      this.database.run("UPDATE question_bank_questions SET status = ?, stale = ?, verified = ?, type = ?, project_id = ?, updated_at = ? WHERE id = ?", [patch.status ?? current.status, patch.stale === undefined ? current.stale ? 1 : 0 : patch.stale ? 1 : 0, patch.verified === undefined ? current.verified ? 1 : 0 : patch.verified ? 1 : 0, patch.type ?? current.type, patch.projectId === undefined ? current.projectId ?? null : patch.projectId, now, questionId]);
+    }
+    this.database.flushNow();
+    return ids.filter((questionId) => Boolean(this.getQuestion(questionId))).length;
+  }
+
+  duplicateClusters(limit = 120): QuestionBankDuplicateCluster[] {
+    const questions = this.listQuestions({ limit: Math.min(800, Math.max(1, limit * 6)), status: "active" });
+    const clusters: QuestionBankDuplicateCluster[] = [];
+    const seen = new Set<string>();
+    for (let index = 0; index < questions.length; index += 1) {
+      const canonical = questions[index];
+      if (seen.has(canonical.id)) continue;
+      const variants = questions.slice(index + 1).map((candidate) => ({ candidate, score: questionBankSimilarity(canonical.canonicalText, candidate.canonicalText) })).filter((item) => item.score >= 0.82).sort((left, right) => right.score - left.score).slice(0, 8);
+      if (variants.length) { variants.forEach((item) => seen.add(item.candidate.id)); clusters.push({ canonical, variants: variants.map((item) => item.candidate), score: variants[0]?.score ?? 0 }); }
+      if (clusters.length >= limit) break;
+    }
+    return clusters;
+  }
+
+  coverage(jobProfileId?: string, profileId?: string): QuestionBankCoverageResult {
+    const skills = this.listSkills();
+    const jobSkillIds = jobProfileId ? this.getJobProfile(jobProfileId)?.skillIds : undefined;
+    const questions = this.listQuestions({ status: "active", profileId, limit: 5000 }).map((question) => {
+      const searchable = [question.canonicalText, ...question.variants, ...question.answerCards.map((card) => `${card.content} ${card.codeContent ?? ""}`)].join(" ");
+      const coveredPointIds = skills.flatMap((skill) => skill.points.filter((point) => question.skillIds.includes(skill.id) && (searchable.includes(point.title) || questionBankSimilarity(searchable, point.title) >= 0.62)).map((point) => point.id));
+      return { skillIds: question.skillIds, coveredPointIds, verified: question.verified, stale: question.stale, answerCards: question.answerCards.map((card) => ({ content: card.content, verified: card.verified, stale: card.stale })) };
+    });
+    return calculateQuestionBankCoverage({ skills, questions, skillIds: jobSkillIds, jobProfileId });
+  }
+
+  mergeDuplicates(canonicalId: string, duplicateIds: string[], now = Date.now()): QuestionBankQuestionRecord | undefined {
+    const canonical = this.getQuestion(canonicalId);
+    if (!canonical) return undefined;
+    const mergedVariants = [...canonical.variants];
+    for (const duplicateId of [...new Set(duplicateIds)].filter((id) => id !== canonicalId)) {
+      const duplicate = this.getQuestion(duplicateId);
+      if (!duplicate) continue;
+      mergedVariants.push(duplicate.canonicalText, ...duplicate.variants);
+      for (const skillId of duplicate.skillIds) this.database.run("INSERT OR IGNORE INTO question_bank_question_skills(question_id, skill_id) VALUES (?, ?)", [canonicalId, skillId]);
+      for (const factId of duplicate.factIds ?? []) this.database.run("INSERT OR IGNORE INTO question_bank_question_facts(question_id, fact_id) VALUES (?, ?)", [canonicalId, factId]);
+      const verifiedCard = duplicate.answerCards.find((card) => card.verified);
+      if (verifiedCard && !canonical.answerCards.some((card) => card.verified)) this.saveAnswerCard({ ...verifiedCard, id: undefined, questionId: canonicalId });
+      this.database.run("UPDATE question_bank_questions SET status = 'archived', updated_at = ? WHERE id = ?", [now, duplicateId]);
+    }
+    const uniqueVariants = [...new Set(mergedVariants.map((item) => item.trim()).filter((item) => normalizeQuestionBankText(item) !== canonical.normalizedText))];
+    return this.saveQuestion({ id: canonicalId, canonicalText: canonical.canonicalText, variants: uniqueVariants, stale: canonical.stale, verified: canonical.verified });
   }
 
   getQuestion(questionId: string): QuestionBankQuestionRecord | undefined {

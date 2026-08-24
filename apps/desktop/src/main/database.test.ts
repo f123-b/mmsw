@@ -133,7 +133,7 @@ describe("SQLite persistence", () => {
       const conversation = conversations.create(undefined, undefined, "中断恢复", 20);
       conversations.addMessage({ conversationId: conversation.id, role: "assistant", content: "部分回答", status: "streaming", model: "mock" }, 21);
       expect(conversations.recoverInterruptedMessages(22)).toBe(1);
-      expect(conversations.get(conversation.id)?.messages[0]).toMatchObject({ content: "部分回答", status: "error" });
+      expect(conversations.get(conversation.id)?.messages[0]).toMatchObject({ content: "部分回答", status: "partial_error", errorCode: "CHAT_RELOADED_DURING_STREAM" });
     } finally { database.close(); }
   });
 
@@ -225,6 +225,46 @@ describe("SQLite persistence", () => {
       expect(result.filteredProjectQuestions).toBe(1);
       expect(result.duplicatesMerged).toBe(1);
       expect(questionBank.listQuestions({ limit: 5000 })).toHaveLength(2);
+    } finally { database.close(); }
+  });
+
+  it("supports server-side question pagination, bulk review and duplicate merge", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const questionBank = new SqliteQuestionBankRepository(database);
+      const canonical = questionBank.saveQuestion({ canonicalText: "volatile 有什么作用？", type: "technical" });
+      const duplicate = questionBank.saveQuestion({ canonicalText: "volatile 有什么作用", type: "technical", variants: ["volatile 关键字的作用"] });
+      questionBank.saveAnswerCard({ questionId: duplicate.id, content: "限制编译器和 CPU 对访问的重排。", verified: true });
+      expect(questionBank.countQuestions({ status: "active" })).toBe(2);
+      expect(questionBank.listQuestions({ status: "active", limit: 1, offset: 1 })).toHaveLength(1);
+      expect(questionBank.bulkUpdate([canonical.id], { verified: true, stale: true })).toBe(1);
+      expect(questionBank.getQuestion(canonical.id)).toMatchObject({ verified: true, stale: true });
+      expect(questionBank.duplicateClusters()).toHaveLength(1);
+      const merged = questionBank.mergeDuplicates(canonical.id, [duplicate.id]);
+      expect(merged?.variants).toContain("volatile 关键字的作用");
+      expect(questionBank.getQuestion(duplicate.id)?.status).toBe("archived");
+      expect(merged?.answerCards.some((card) => card.verified)).toBe(true);
+    } finally { database.close(); }
+  });
+
+  it("persists structured chat responses and calculates skill coverage", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const profile = profiles.save({ name: "覆盖分析", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const conversations = new SqliteConversationRepository(database);
+      const conversation = conversations.create(profile.id);
+      conversations.addMessage({ conversationId: conversation.id, role: "user", content: "分析题库覆盖", status: "completed" });
+      const questionBank = new SqliteQuestionBankRepository(database);
+      const skill = questionBank.saveSkill({ name: "Linux" });
+      questionBank.saveSkillPoint({ skillId: skill.id, title: "进程调度", content: "调度与上下文切换", verified: true });
+      const question = questionBank.saveQuestion({ canonicalText: "Linux 进程调度如何定位？", verified: true });
+      questionBank.linkQuestionSkill(question.id, skill.id);
+      questionBank.saveAnswerCard({ questionId: question.id, content: "分析调度策略和上下文切换。", verified: true });
+      const response = { text: "覆盖不错", cards: [{ id: "coverage-card", kind: "coverage" as const, title: "Linux" }], actions: [{ id: "action-1", type: "create_question" as const, label: "加入题库", payload: { canonicalText: "补充内存管理" }, requiresConfirmation: true as const, status: "pending" as const }] };
+      const assistant = conversations.addMessage({ conversationId: conversation.id, role: "assistant", content: response.text, status: "completed", structuredResponse: response });
+      expect(conversations.get(conversation.id)?.messages.find((message) => message.id === assistant.id)?.structuredResponse).toEqual(response);
+      expect(questionBank.coverage().overallCoverage).toBe(100);
     } finally { database.close(); }
   });
 });

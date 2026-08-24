@@ -9,7 +9,7 @@ import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planChatContext, PreparationAgentRuntime, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
@@ -23,6 +23,8 @@ import { LocalAsrServiceManager } from "./local-asr-service-manager";
 import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
 import { createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
+import type { ChatAction, ChatCancelReason, ChatResponse } from "@interview-copilot/shared";
+import type { QuestionBankBulkPatch, QuestionBankListOptions } from "./database";
 
 if (process.env.INTERVIEW_COPILOT_DISABLE_GPU === "1") {
   app.commandLine.appendSwitch("disable-gpu");
@@ -225,7 +227,7 @@ let projectMemoryService: ProjectMemoryService | undefined;
 let conversationRepository: SqliteConversationRepository | undefined;
 let preparationRuntime: PreparationAgentRuntime | undefined;
 let preparationAbortController: AbortController | undefined;
-const chatAbortControllers = new Map<string, AbortController>();
+const chatAbortControllers = new Map<string, { controller: AbortController; reason?: ChatCancelReason }>();
 const chatStreamPromises = new Set<Promise<void>>();
 const providerPreflightCache = new ProviderPreflightCache();
 let appLogger: SafeLogger | undefined;
@@ -252,7 +254,7 @@ const rendererAppReadyWaiters = new Map<number, Set<() => void>>();
 const shutdownController = new ShutdownController([
   { name: "unregister-shortcuts", run: () => globalShortcut.unregisterAll() },
   { name: "abort-preparation", run: () => preparationAbortController?.abort() },
-  { name: "abort-chat", run: () => chatAbortControllers.forEach((controller) => controller.abort()) },
+  { name: "abort-chat", run: () => chatAbortControllers.forEach((entry) => { entry.reason = "shutdown"; entry.controller.abort(); }) },
   { name: "wait-chat", run: async () => { await Promise.allSettled([...chatStreamPromises]); } },
   { name: "stop-interview", run: async () => { await interviewCoordinator?.stop("user"); } },
   { name: "stop-written-test", run: () => { writtenTestController?.stop(); } },
@@ -819,66 +821,234 @@ async function stopInterview(): Promise<void> {
   }
 }
 
-function chatContext(profileId?: string, userMessage = ""): string {
+function chatContext(profileId?: string, userMessage = "", projectId?: string): { text: string; intent: string; sources: string[] } {
   const profile = profileId ? profileRepository?.get(profileId) : profileRepository?.active();
-  if (!profile) return "当前没有可用 Profile。请明确告诉用户先创建 Profile。";
-  const chunks = knowledgeRepository?.listChunks(profile.knowledgeBaseIds) ?? [];
-  const retrieved = new HybridRetriever().search(userMessage, chunks, { topK: 8 }).slice(0, 5);
-  return [
-    `当前 Profile：${profile.name}（语言：${profile.language}）`,
-    profile.resume ? `Resume：${profile.resume.rawContent.slice(0, 12_000)}` : "Resume：未上传",
-    profile.jobDescription ? `JD：${profile.jobDescription.rawContent.slice(0, 8_000)}` : "JD：未上传",
-    profile.instructions ? `Instructions：${profile.instructions}` : "",
-    profile.skills.length ? `Skills：${profile.skills.map((skill) => `${skill.name}: ${skill.description}\n${skill.content}`).join("\n\n")}` : "",
-    retrieved.length ? `相关知识（${providerConfigStore?.get("embedding")?.apiKey ? "Hybrid Retrieval" : "Keyword Retrieval"}）：\n${retrieved.map((chunk) => `${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`).join("\n\n")}` : "相关知识：无"
-  ].filter(Boolean).join("\n\n");
+  if (!profile) return { text: "当前没有可用 Profile。请明确告诉用户先创建 Profile。", intent: "general_technical", sources: [] };
+  const plan = planChatContext(userMessage);
+  const sections: string[] = [`当前 Profile：${profile.name}（语言：${profile.language}）`, `本轮上下文策略：${plan.label}（仅按问题选择相关资料，未选中的大段材料不会注入）`];
+  const sources: string[] = [];
+  if (plan.includeResume) sections.push(profile.resume ? `Resume 摘要：${profile.resume.rawContent.slice(0, 6_000)}` : "Resume：未上传");
+  if (plan.includeJobDescription) sections.push(profile.jobDescription ? `JD 摘要：${profile.jobDescription.rawContent.slice(0, 6_000)}` : "JD：未上传");
+  if (profile.instructions) sections.push(`Instructions：${profile.instructions.slice(0, 2_000)}`);
+  if (profile.skills.length && plan.intent !== "general_technical") sections.push(`Skills：${profile.skills.map((skill) => `${skill.name}: ${skill.description}\n${skill.content}`).join("\n\n").slice(0, 5_000)}`);
+
+  const snapshot = plan.includeProjectMemory && profileId ? projectMemoryRepository?.getSnapshot(profileId) : undefined;
+  const project = snapshot?.projects.find((item) => item.id === projectId) ?? (snapshot?.projects.length === 1 ? snapshot.projects[0] : undefined);
+  if (project) {
+    const projectFacts = snapshot?.facts ?? [];
+    const facts = projectFacts.filter((fact) => fact.projectId === project.id && fact.verified && fact.status !== "rejected").slice(0, 24);
+    const pending = projectFacts.filter((fact) => fact.projectId === project.id && !fact.verified && fact.status !== "rejected").length;
+    const completeness = profileId ? projectMemoryRepository?.getProjectCompleteness(profileId, project.id) : undefined;
+    sections.push(`当前项目：${project.name}\n背景：${project.description || "未补充"}\n职责：${project.role || "未确认"}\n技术栈：${project.technologyStack.join("、") || "未确认"}\n${facts.length ? `已确认事实：\n${facts.map((fact) => `- [${fact.type}] ${fact.title}：${fact.content}`).join("\n")}` : "已确认事实：无"}\n待确认事实：${pending} 条${completeness ? `\n项目资料完整度：${completeness.completeness}%` : ""}`);
+    sources.push(...(project.sourceIds ?? []).slice(0, 8));
+    const details = projectMemoryRepository?.listSourceDetails(project.id).slice(0, 5) ?? [];
+    if (details.length) sections.push(`项目来源：${details.map((source) => source.title).join("、")}`);
+  } else if (plan.includeProjectMemory && snapshot?.projects.length) {
+    const projectSummary = snapshot.projects.slice(0, 8).map((item) => {
+      const result = profileId ? projectMemoryRepository?.getProjectCompleteness(profileId, item.id) : undefined;
+      return `${item.name}：${result?.completeness ?? 0}%${result?.missingFactTypes.length ? `，缺少 ${result.missingFactTypes.join("、")}` : ""}`;
+    }).join("；");
+    sections.push(`项目记忆：当前档案有 ${snapshot.projects.length} 个项目。${projectSummary ? `项目完整度摘要：${projectSummary}` : ""}\n用户未指定项目时，不要把不同项目的经历混写；请先澄清项目名称。`);
+  }
+
+  if (plan.includeQuestionBank && questionBankRepository) {
+    const match = questionBankRepository.matchQuestion(userMessage, { profileId, projectId });
+    const card = match?.question.answerCards.find((item) => item.verified && !item.stale) ?? match?.question.answerCards[0];
+    if (match) {
+      sections.push(`题库匹配：${match.question.canonicalText}（匹配度 ${Math.round(match.score * 100)}%）${card ? `\n参考答案卡：${card.content.slice(0, 4_000)}${card.codeContent ? `\n代码：\n${card.codeContent.slice(0, 4_000)}` : ""}` : "\n暂无答案卡，请基于当前资料组织回答。"}`);
+      sources.push(match.question.id);
+    }
+  }
+  if (plan.includeKnowledge) {
+    const chunks = knowledgeRepository?.listChunks(profile.knowledgeBaseIds) ?? [];
+    const retrieved = new HybridRetriever().search(userMessage, chunks, { topK: 8 }).slice(0, 5);
+    if (retrieved.length) {
+      sections.push(`相关知识（${providerConfigStore?.get("embedding")?.apiKey ? "Hybrid Retrieval" : "Keyword Retrieval"}）：\n${retrieved.map((chunk) => `${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`).join("\n\n")}`);
+      sources.push(...retrieved.map((chunk) => chunk.metadata.filename));
+    } else sections.push("相关知识：无");
+  }
+  return { text: sections.filter(Boolean).join("\n\n"), intent: plan.intent, sources: [...new Set(sources)] };
 }
 
-async function streamChat(conversationId: string, content: string): Promise<void> {
+async function streamChat(conversationId: string, content: string, resumeMessageId?: string): Promise<void> {
   if (!conversationRepository) throw new Error("Chat database is still initializing");
   const conversation = conversationRepository.get(conversationId);
   if (!conversation) throw new Error("Conversation not found");
   if (chatAbortControllers.has(conversationId)) throw new Error("CHAT_BUSY: 当前对话仍在生成中");
   const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings;
   if (!settings.apiKey) {
-    broadcast("chat:error", { conversationId, code: "LLM_NOT_CONFIGURED", message: "未配置 LLM API Key" });
-    throw new Error("未配置 LLM API Key");
+    broadcast("chat:error", { conversationId, code: "LLM_NOT_CONFIGURED", message: "AI 服务尚未配置，请先完成模型设置。" });
+    return;
   }
-  const history = buildConversationHistory(conversation.messages);
-  const userMessage = conversationRepository.addMessage({ conversationId, role: "user", content, status: "completed" });
   const selectedModel = taskModel(settings, "chatModel", "normalModel");
-  const assistantMessage = conversationRepository.addMessage({ conversationId, role: "assistant", content: "", status: "streaming", model: selectedModel });
-  broadcast("chat:message-start", { conversationId, userMessage, assistantMessage });
-  appLogger?.info("CHAT_STREAM_STARTED", { conversationId, messageId: assistantMessage.id, model: selectedModel });
-  const controller = new AbortController();
-  chatAbortControllers.set(conversationId, controller);
-  let answer = "";
+  const existing = resumeMessageId ? conversation.messages.find((message) => message.id === resumeMessageId) : undefined;
+  if (resumeMessageId && (!existing || existing.role !== "assistant" || !["cancelled", "partial_error"].includes(existing.status))) {
+    broadcast("chat:error", { conversationId, code: "CHAT_CONTINUE_NOT_AVAILABLE", message: "这条回答当前不能继续生成，请重新提问。" });
+    return;
+  }
+  const userMessage = existing
+    ? [...conversation.messages].slice(0, conversation.messages.findIndex((message) => message.id === existing.id)).reverse().find((message) => message.role === "user")
+    : conversationRepository.addMessage({ conversationId, role: "user", content, status: "completed" });
+  if (!userMessage) {
+    broadcast("chat:error", { conversationId, code: "CHAT_CONTEXT_NOT_FOUND", message: "找不到这条回答对应的问题，请重新提问。" });
+    return;
+  }
+  const startedAt = existing?.startedAt ?? Date.now();
+  const assistantMessage = existing ?? conversationRepository.addMessage({ conversationId, role: "assistant", content: "", status: "streaming", model: selectedModel, provider: settings.providerName, startedAt }, startedAt);
+  if (existing) conversationRepository.updateMessage(existing.id, existing.content, "streaming", Date.now(), { startedAt, provider: settings.providerName, charactersGenerated: existing.content.length });
+  const entry: { controller: AbortController; reason?: ChatCancelReason } = { controller: new AbortController() };
+  chatAbortControllers.set(conversationId, entry);
+  broadcast("chat:message-start", { conversationId, userMessage, assistantMessage: { ...assistantMessage, status: "streaming" }, resumed: Boolean(existing) });
+  appLogger?.info("CHAT_STREAM_START", { conversationId, messageId: assistantMessage.id, provider: settings.providerName, model: selectedModel, charactersGenerated: existing?.content.length ?? 0 });
+  let answer = existing?.content ?? "";
+  let firstTokenAt = existing?.firstTokenAt;
+  const provider = new OpenAICompatibleAnswerProvider(settings);
+  const contextForQuestion = chatContext(conversation.conversation.profileId, userMessage.content, conversation.conversation.projectId);
   try {
-    const prompt = `${chatContext(conversation.conversation.profileId, content)}\n\n用户问题：${content}`;
-    for await (const delta of new OpenAICompatibleAnswerProvider(settings).stream({ model: selectedModel, sections: [
-      { name: "system/base", content: "你是 Interview Copilot 面试助手。只根据提供的 Profile、Resume、JD 和知识回答；如果资料不足，请明确说明，不要编造经历。" },
+    const history = buildConversationHistory(conversation.messages.filter((message) => message.id !== existing?.id));
+    const prompt = existing
+      ? `${contextForQuestion.text}\n\n原始用户问题：${userMessage.content}\n已有回答：${existing.content}\n请从中断位置继续回答。不要重复已有回答，保持原答案的语言、结构和语气，只输出新增内容。`
+      : `${contextForQuestion.text}\n\n用户问题：${content}`;
+    for await (const delta of provider.stream({ model: selectedModel, sections: [
+      { name: "system/base", content: "你是 Interview Copilot 面试助手。只根据提供的 Profile、Resume、JD 和知识回答；如果资料不足，请明确说明，不要编造经历。普通问题输出简洁 Markdown。对于项目缺口、题库覆盖或明确要求执行动作的问题，可以输出一个 JSON 对象：{text, sources, cards, actions, context}；actions 只能是建议，必须 requiresConfirmation=true，绝不能声称已经写入数据库。" },
       ...(history ? [{ name: "conversation-history" as const, content: history }] : []),
       { name: "question", content: prompt }
-    ] }, controller.signal)) {
+    ] }, entry.controller.signal)) {
       answer += delta;
-      conversationRepository.updateMessage(assistantMessage.id, answer, "streaming");
+      firstTokenAt ??= Date.now();
+      conversationRepository.updateMessage(assistantMessage.id, answer, "streaming", Date.now(), { startedAt, firstTokenAt, provider: settings.providerName, charactersGenerated: answer.length });
       broadcast("chat:message-delta", { conversationId, messageId: assistantMessage.id, delta, text: answer });
     }
-    conversationRepository.updateMessage(assistantMessage.id, answer, "completed");
-    broadcast("chat:message-end", { conversationId, message: { ...assistantMessage, content: answer, status: "completed" } });
-    appLogger?.info("CHAT_STREAM_FINISHED", { conversationId, messageId: assistantMessage.id, characters: answer.length });
+    const finishedAt = Date.now();
+    const structured = parseStructuredChatResponse(answer, { profileId: conversation.conversation.profileId, ...(conversation.conversation.projectId ? { projectIds: [conversation.conversation.projectId] } : {}), intent: contextForQuestion.intent });
+    const structuredResponse: ChatResponse = { ...structured, sources: [...(structured.sources ?? []), ...contextForQuestion.sources.map((source) => ({ id: source, label: source }))].filter((source, index, all) => all.findIndex((item) => item.id === source.id) === index), context: structured.context ?? { profileId: conversation.conversation.profileId, ...(conversation.conversation.projectId ? { projectIds: [conversation.conversation.projectId] } : {}), intent: contextForQuestion.intent } };
+    const displayAnswer = structuredResponse.text || answer;
+    const telemetry = { provider: settings.providerName, model: selectedModel, charactersGenerated: answer.length, startedAt, firstTokenAt, finishedAt, durationMs: finishedAt - startedAt, finishReason: provider.lastStreamMetadata?.finishReason ?? "stop", structuredResponse };
+    conversationRepository.updateMessage(assistantMessage.id, displayAnswer, "completed", finishedAt, telemetry);
+    broadcast("chat:message-end", { conversationId, message: { ...assistantMessage, content: displayAnswer, status: "completed", ...telemetry } });
+    appLogger?.info("CHAT_STREAM_END", { conversationId, messageId: assistantMessage.id, ...telemetry });
   } catch (error) {
-    const cancelled = controller.signal.aborted || (error instanceof Error && error.name === "AbortError");
-    const status = cancelled ? "cancelled" : "error";
-    conversationRepository.updateMessage(assistantMessage.id, answer, status);
-    // The renderer needs a terminal message event as well as the diagnostic
-    // event; otherwise the last assistant bubble remains visually "streaming"
-    // after a timeout, provider error, or user cancellation.
-    broadcast("chat:message-end", { conversationId, message: { ...assistantMessage, content: answer, status } });
-    broadcast("chat:error", { conversationId, messageId: assistantMessage.id, code: cancelled ? "CHAT_CANCELLED" : "CHAT_PROVIDER_ERROR", message: cancelled ? "已停止生成" : userFacingError(error) });
-    appLogger?.warn("CHAT_STREAM_FAILED", { conversationId, messageId: assistantMessage.id, status, characters: answer.length, error: String(error) });
-    if (!cancelled) throw error;
+    const finishedAt = Date.now();
+    const requestedCancel = entry.reason;
+    const providerAbort = error instanceof Error && error.name === "AbortError";
+    const status = requestedCancel ? "cancelled" : answer.trim() ? "partial_error" : "failed";
+    const errorCode = typeof (error as { code?: unknown })?.code === "string" ? String((error as { code: string }).code) : providerAbort ? "CHAT_PROVIDER_ABORT" : "CHAT_PROVIDER_ERROR";
+    const cancelReason = requestedCancel ?? (providerAbort ? "provider_abort" : undefined);
+    const telemetry = { provider: settings.providerName, model: selectedModel, charactersGenerated: answer.length, startedAt, firstTokenAt, finishedAt, durationMs: finishedAt - startedAt, finishReason: provider.lastStreamMetadata?.finishReason, ...(cancelReason ? { cancelReason } : {}), errorCode };
+    conversationRepository.updateMessage(assistantMessage.id, answer, status, finishedAt, telemetry);
+    const message = { ...assistantMessage, content: answer, status, ...telemetry };
+    broadcast("chat:message-end", { conversationId, message });
+    if (status === "cancelled") {
+      broadcast("chat:cancelled", { conversationId, messageId: assistantMessage.id, message, cancelReason });
+      appLogger?.info("CHAT_STREAM_CANCEL", { conversationId, messageId: assistantMessage.id, ...telemetry });
+    } else {
+      broadcast("chat:error", { conversationId, messageId: assistantMessage.id, code: errorCode, message: answer.trim() ? "回答生成中断，已保留当前内容。" : "AI 服务暂时中断，请重试。", userMessage: answer.trim() ? "回答生成中断，已保留当前内容。" : "生成失败", recoverable: true });
+      appLogger?.warn(answer.trim() ? "CHAT_STREAM_PARTIAL_ERROR" : "CHAT_STREAM_FAILED", { conversationId, messageId: assistantMessage.id, ...telemetry, error: String(error) });
+    }
   } finally { chatAbortControllers.delete(conversationId); }
+}
+
+function actionString(payload: Record<string, unknown>, key: string, required = true): string {
+  const value = payload[key];
+  if (typeof value !== "string" || !value.trim()) {
+    if (required) throw new Error(`CHAT_ACTION_INVALID: 缺少 ${key}`);
+    return "";
+  }
+  return value.trim();
+}
+
+function actionStringArray(payload: Record<string, unknown>, key: string, required = false): string[] {
+  const value = payload[key];
+  if (!Array.isArray(value)) {
+    if (required) throw new Error(`CHAT_ACTION_INVALID: ${key} 必须是数组`);
+    return [];
+  }
+  const result = value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim());
+  if (required && result.length === 0) throw new Error(`CHAT_ACTION_INVALID: ${key} 不能为空`);
+  return [...new Set(result)];
+}
+
+function executeChatAction(conversationId: string, messageId: string, action: ChatAction): { actionId: string; status: "approved"; result: unknown } {
+  if (!conversationRepository || !profileRepository || !projectMemoryRepository || !questionBankRepository) throw new Error("CHAT_ACTION_NOT_READY: 本地数据服务仍在初始化");
+  if (!action || action.requiresConfirmation !== true) throw new Error("CHAT_ACTION_CONFIRMATION_REQUIRED: 该操作必须经过确认");
+  const conversation = conversationRepository.get(conversationId);
+  const message = conversation?.messages.find((item) => item.id === messageId);
+  if (!conversation || !message || message.role !== "assistant" || !message.structuredResponse) throw new Error("CHAT_ACTION_NOT_FOUND: 找不到可审批的结构化回答");
+  const stored = message.structuredResponse.actions?.find((item) => item.id === action.id);
+  if (!stored || JSON.stringify(stored.payload) !== JSON.stringify(action.payload)) throw new Error("CHAT_ACTION_CHANGED: 操作内容已变化，请刷新后重新确认");
+  if (stored.status === "approved") return { actionId: stored.id, status: "approved", result: { alreadyApproved: true } };
+  const payload = stored.payload;
+  let result: unknown;
+  if (stored.type === "add_project_fact") {
+    const projectId = actionString(payload, "projectId");
+    const project = projectMemoryRepository.getSnapshot(conversation.conversation.profileId ?? "").projects.find((item) => item.id === projectId);
+    if (!project) throw new Error("CHAT_ACTION_SCOPE: 项目不属于当前对话档案");
+    const type = actionString(payload, "type") as import("@interview-copilot/shared").ProjectFactType;
+    if (!["responsibility", "implementation", "problem", "metric", "application", "timeline", "limitation"].includes(type)) throw new Error("CHAT_ACTION_INVALID: 不支持的事实类型");
+    const title = actionString(payload, "title");
+    const content = actionString(payload, "content");
+    const sourceIds = actionStringArray(payload, "sourceIds", true);
+    const rawEvidence = payload.evidence;
+    if (!Array.isArray(rawEvidence) || rawEvidence.length === 0) throw new Error("CHAT_ACTION_INVALID: evidence 不能为空");
+    const evidence = rawEvidence.map((item) => {
+      if (!item || typeof item !== "object") throw new Error("CHAT_ACTION_INVALID: evidence 格式错误");
+      const value = item as Record<string, unknown>;
+      const sourceId = typeof value.sourceId === "string" ? value.sourceId.trim() : "";
+      const quote = typeof value.quote === "string" ? value.quote.trim() : "";
+      if (!sourceId || !quote || !sourceIds.includes(sourceId)) throw new Error("CHAT_ACTION_INVALID: evidence 必须引用 sourceIds");
+      return { sourceId, quote, ...(typeof value.locator === "string" && value.locator.trim() ? { locator: value.locator.trim() } : {}) };
+    });
+    result = projectMemoryRepository.addCandidateFact({
+      id: actionString(payload, "id", false) || `chat-fact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      projectId,
+      profileId: conversation.conversation.profileId,
+      type,
+      title,
+      content,
+      confidence: typeof payload.confidence === "number" ? Math.max(0, Math.min(1, payload.confidence)) : 0.7,
+      verified: false,
+      sourceIds,
+      evidence,
+      status: "pending_review",
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    });
+  } else if (stored.type === "review_fact") {
+    const factId = actionString(payload, "factId");
+    const fact = projectMemoryRepository.getFact(factId);
+    if (!fact || fact.profileId !== conversation.conversation.profileId) throw new Error("CHAT_ACTION_SCOPE: 事实不属于当前对话档案");
+    const status = actionString(payload, "status") as import("@interview-copilot/shared").ProjectFact["status"];
+    if (!["active", "pending_review", "rejected", "conflicting"].includes(status ?? "")) throw new Error("CHAT_ACTION_INVALID: 不支持的事实审核状态");
+    result = projectMemoryRepository.setFactReviewStatus(factId, status);
+  } else {
+    const canonicalText = actionString(payload, "canonicalText");
+    const questionType = actionString(payload, "type", false) as import("@interview-copilot/shared").QuestionBankType;
+    const scope = actionString(payload, "scope", false) as import("@interview-copilot/shared").QuestionBankScope;
+    const allowedTypes = ["technical", "concept", "comparison", "system-design", "troubleshooting", "code", "project", "behavioral", "general"];
+    const allowedScopes = ["global", "profile", "project", "job"];
+    if (questionType && !allowedTypes.includes(questionType)) throw new Error("CHAT_ACTION_INVALID: 不支持的题型");
+    if (scope && !allowedScopes.includes(scope)) throw new Error("CHAT_ACTION_INVALID: 不支持的题库范围");
+    const projectId = actionString(payload, "projectId", false) || undefined;
+    if (projectId && !projectMemoryRepository.getSnapshot(conversation.conversation.profileId ?? "").projects.some((item) => item.id === projectId)) throw new Error("CHAT_ACTION_SCOPE: 项目不属于当前对话档案");
+    result = questionBankRepository.saveQuestion({
+      id: actionString(payload, "id", false) || undefined,
+      canonicalText,
+      ...(questionType ? { type: questionType } : {}),
+      ...(scope ? { scope } : {}),
+      ...(conversation.conversation.profileId ? { profileId: conversation.conversation.profileId } : {}),
+      ...(projectId ? { projectId } : {}),
+      ...(actionString(payload, "jobProfileId", false) ? { jobProfileId: actionString(payload, "jobProfileId", false) } : {}),
+      variants: actionStringArray(payload, "variants"),
+      factIds: actionStringArray(payload, "factIds"),
+      source: "generated",
+      verified: false,
+      stale: false
+    });
+  }
+  const nextResponse: ChatResponse = { ...message.structuredResponse, actions: (message.structuredResponse.actions ?? []).map((item) => item.id === stored.id ? { ...item, status: "approved" as const } : item) };
+  conversationRepository.updateMessage(messageId, message.content, message.status, Date.now(), { structuredResponse: nextResponse });
+  broadcast("chat:action-updated", { conversationId, messageId, actionId: stored.id, status: "approved", result });
+  return { actionId: stored.id, status: "approved", result };
 }
 
 function agentArg(args: Record<string, unknown>, name: string): string {
@@ -1055,7 +1225,18 @@ function registerIpc(): void {
       chatStreamPromises.delete(stream);
     }
   });
-  ipcMain.handle("chat:cancel", (_event, conversationId: string) => { chatAbortControllers.get(conversationId)?.abort(); return true; });
+  ipcMain.handle("chat:continue-message", async (_event, input: { conversationId: string; messageId: string }) => {
+    const stream = streamChat(input.conversationId, "", input.messageId);
+    chatStreamPromises.add(stream);
+    try { await stream; return true; } finally { chatStreamPromises.delete(stream); }
+  });
+  ipcMain.handle("chat:cancel", (_event, input: string | { conversationId: string; reason?: ChatCancelReason }) => {
+    const conversationId = typeof input === "string" ? input : input.conversationId;
+    const entry = chatAbortControllers.get(conversationId);
+    if (entry) { entry.reason = typeof input === "string" ? "user_stop" : input.reason ?? "user_stop"; entry.controller.abort(); }
+    return true;
+  });
+  ipcMain.handle("chat:approve-action", (_event, input: { conversationId: string; messageId: string; action: ChatAction }) => executeChatAction(input.conversationId, input.messageId, input.action));
   ipcMain.handle("chat:delete-conversation", (_event, conversationId: string) => { conversationRepository?.delete(conversationId); return true; });
   ipcMain.handle("profiles:list", () => profileRepository?.list() ?? []);
   ipcMain.handle("profiles:get", (_event, profileId: string) => profileRepository?.get(profileId));
@@ -1134,7 +1315,11 @@ function registerIpc(): void {
       return saved;
     }
   });
-  ipcMain.handle("question-bank:list", (_event, options?: { search?: string; type?: import("@interview-copilot/shared").QuestionBankType; limit?: number }) => questionBankRepository?.listQuestions(options) ?? []);
+  ipcMain.handle("question-bank:list", (_event, options?: QuestionBankListOptions) => questionBankRepository?.listQuestions(options) ?? []);
+  ipcMain.handle("question-bank:count", (_event, options?: Omit<QuestionBankListOptions, "limit" | "offset" | "sort">) => questionBankRepository?.countQuestions(options) ?? 0);
+  ipcMain.handle("question-bank:bulk-update", (_event, input: { questionIds: string[]; patch: QuestionBankBulkPatch }) => questionBankRepository?.bulkUpdate(input.questionIds, input.patch) ?? 0);
+  ipcMain.handle("question-bank:duplicates", (_event, limit?: number) => questionBankRepository?.duplicateClusters(limit) ?? []);
+  ipcMain.handle("question-bank:merge-duplicates", (_event, input: { canonicalId: string; duplicateIds: string[] }) => questionBankRepository?.mergeDuplicates(input.canonicalId, input.duplicateIds));
   ipcMain.handle("question-bank:get", (_event, questionId: string) => questionBankRepository?.getQuestion(questionId));
   ipcMain.handle("question-bank:save-question", (_event, input: Parameters<SqliteQuestionBankRepository["saveQuestion"]>[0]) => questionBankRepository?.saveQuestion(input));
   ipcMain.handle("question-bank:delete-question", (_event, questionId: string) => { questionBankRepository?.deleteQuestion(questionId); return true; });
@@ -1145,6 +1330,7 @@ function registerIpc(): void {
   ipcMain.handle("question-bank:save-skill-point", (_event, input: Parameters<SqliteQuestionBankRepository["saveSkillPoint"]>[0]) => questionBankRepository?.saveSkillPoint(input));
   ipcMain.handle("question-bank:link-skill", (_event, questionId: string, skillId: string) => { questionBankRepository?.linkQuestionSkill(questionId, skillId); return true; });
   ipcMain.handle("question-bank:list-jobs", () => questionBankRepository?.listJobProfiles() ?? []);
+  ipcMain.handle("question-bank:coverage", (_event, jobProfileId?: string) => questionBankRepository?.coverage(jobProfileId) ?? { overallCoverage: 0, topics: [], missingSkills: [], generatedAt: Date.now() });
   ipcMain.handle("question-bank:save-job", (_event, input: Parameters<SqliteQuestionBankRepository["saveJobProfile"]>[0]) => questionBankRepository?.saveJobProfile(input));
   ipcMain.handle("question-bank:import-text", (_event, input: { text: string; filename?: string; includeProject?: boolean; includeBehavioral?: boolean }) => questionBankRepository?.importText(input.text, input.filename, { includeProject: input.includeProject, includeBehavioral: input.includeBehavioral }));
   ipcMain.handle("question-bank:generate-answers", (_event, input?: { questionIds?: string[]; onlyUnanswered?: boolean }) => generateQuestionBankAnswers(input));
@@ -1159,6 +1345,9 @@ function registerIpc(): void {
   ipcMain.handle("project-memory:list-facts", (_event, profileId: string, projectId?: string) => projectMemoryRepository?.listFacts(profileId, projectId) ?? []);
   ipcMain.handle("project-memory:add-candidate-fact", (_event, fact: import("@interview-copilot/shared").ProjectFact) => projectMemoryRepository?.addCandidateFact(fact));
   ipcMain.handle("project-memory:verify-fact", (_event, factId: string, verified: boolean) => projectMemoryRepository?.setFactVerification(factId, verified));
+  ipcMain.handle("project-memory:review-fact", (_event, factId: string, status: import("@interview-copilot/shared").ProjectFact["status"]) => projectMemoryRepository?.setFactReviewStatus(factId, status));
+  ipcMain.handle("project-memory:sources", (_event, projectId: string) => projectMemoryRepository?.listSourceDetails(projectId) ?? []);
+  ipcMain.handle("project-memory:completeness", (_event, profileId: string, projectId: string) => projectMemoryRepository?.getProjectCompleteness(profileId, projectId));
   ipcMain.handle("project-memory:analysis-runs", (_event, profileId: string) => knowledgeAnalysisRepository?.list(profileId) ?? []);
   ipcMain.handle("project-memory:state", (_event, projectId: string) => knowledgeAnalysisRepository?.getProjectState(projectId));
   ipcMain.handle("project-memory:assign-source", (_event, input: Parameters<NonNullable<typeof projectMemoryService>["assignSource"]>[0]) => { projectMemoryService?.assignSource(input); return true; });

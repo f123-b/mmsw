@@ -95,15 +95,30 @@ function thinkingForRequest(settings: ProviderSettings, request: AnswerProviderR
   return { type: request.thinking ? "enabled" : "disabled" };
 }
 
+function textFromContent(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value.map((part) => {
+    if (typeof part === "string") return part;
+    if (!part || typeof part !== "object") return "";
+    const item = part as Record<string, unknown>;
+    return typeof item.text === "string" ? item.text : typeof item.content === "string" ? item.content : "";
+  }).join("");
+}
+
 function extractDelta(value: unknown): string {
   if (!value || typeof value !== "object") return "";
   const record = value as Record<string, unknown>;
   const choices = Array.isArray(record.choices) ? record.choices : [];
   const choice = choices[0] as Record<string, unknown> | undefined;
   const delta = choice?.delta as Record<string, unknown> | undefined;
-  if (typeof delta?.content === "string") return delta.content;
+  const deltaContent = textFromContent(delta?.content);
+  if (deltaContent) return deltaContent;
+  const messageContent = textFromContent((choice?.message as Record<string, unknown> | undefined)?.content);
+  if (messageContent) return messageContent;
   if (typeof choice?.text === "string") return choice.text;
   if (typeof record.content === "string") return record.content;
+  if (typeof record.output_text === "string") return record.output_text;
   if (typeof record.delta === "string") return record.delta;
   return "";
 }
@@ -151,11 +166,12 @@ async function readError(response: Response): Promise<string> {
   }
 }
 
-async function* parseSse(response: Response, signal: AbortSignal): AsyncGenerator<string> {
+async function* parseSse(response: Response, signal: AbortSignal, onFinish: (reason: string) => void): AsyncGenerator<string> {
   if (!response.body) throw new Error("Provider response has no streaming body");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let finished = false;
   try {
     while (true) {
       if (signal.aborted) throw abortError();
@@ -169,27 +185,49 @@ async function* parseSse(response: Response, signal: AbortSignal): AsyncGenerato
         if (!value.startsWith("data:")) continue;
         const payload = value.slice(5).trim();
         if (!payload) continue;
-        if (payload === "[DONE]") return;
+        if (payload === "[DONE]") {
+          finished = true;
+          onFinish("stop");
+          return;
+        }
         try {
           const parsed = JSON.parse(payload);
           const delta = extractDelta(parsed);
           if (delta) yield delta;
-          if (streamFinished(parsed)) return;
-        } catch {
-          // Ignore keep-alive/non-JSON SSE frames; the provider contract is still streamed.
+          if (streamFinished(parsed)) {
+            finished = true;
+            const choices = (parsed as Record<string, unknown>).choices;
+            const choice = Array.isArray(choices) ? choices[0] as Record<string, unknown> | undefined : undefined;
+            onFinish(String(choice?.finish_reason ?? "stop"));
+            return;
+          }
+        } catch (error) {
+          throw new Error(`Invalid SSE payload: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
     }
     buffer += decoder.decode();
     if (buffer.startsWith("data:")) {
       const payload = buffer.slice(5).trim();
-      if (payload && payload !== "[DONE]") {
+      if (payload === "[DONE]") {
+        finished = true;
+        onFinish("stop");
+        return;
+      }
+      if (payload) {
         const parsed = JSON.parse(payload);
         const delta = extractDelta(parsed);
         if (delta) yield delta;
-        if (streamFinished(parsed)) return;
+        if (streamFinished(parsed)) {
+          finished = true;
+          const choices = (parsed as Record<string, unknown>).choices;
+          const choice = Array.isArray(choices) ? choices[0] as Record<string, unknown> | undefined : undefined;
+          onFinish(String(choice?.finish_reason ?? "stop"));
+          return;
+        }
       }
     }
+    if (!finished) throw new Error("Provider stream closed before completion");
   } finally {
     reader.releaseLock();
   }
@@ -197,6 +235,7 @@ async function* parseSse(response: Response, signal: AbortSignal): AsyncGenerato
 
 export class OpenAICompatibleAnswerProvider implements AnswerProvider {
   private readonly fetchImpl: FetchLike;
+  lastStreamMetadata: { startedAt?: number; firstTokenAt?: number; finishedAt?: number; finishReason?: string } | undefined;
 
   constructor(private readonly settings: ProviderSettings, fetchImpl?: FetchLike) {
     this.fetchImpl = fetchImpl ?? ((input, init) => fetch(input, init));
@@ -204,12 +243,15 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
 
   async *stream(request: AnswerProviderRequest, signal?: AbortSignal): AsyncIterable<string> {
     const externalSignal = signal ?? new AbortController().signal;
+    const startedAt = Date.now();
+    this.lastStreamMetadata = { startedAt };
     let lastError: unknown;
     const retries = Math.max(0, Math.min(5, request.maxRetries ?? this.settings.maxRetries));
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       if (externalSignal.aborted) throw abortError();
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), Math.max(1_000, this.settings.timeoutMs));
+      let timedOut = false;
+      const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, Math.max(1_000, this.settings.timeoutMs));
       const abort = () => controller.abort();
       externalSignal.addEventListener("abort", abort, { once: true });
       let yielded = false;
@@ -234,17 +276,26 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
         if (response.headers.get("content-type")?.toLowerCase().includes("application/json")) {
           const completion = extractCompletion(await response.json());
           if (!completion.trim()) throw new Error("Answer provider returned an empty completion");
+          this.lastStreamMetadata = { ...this.lastStreamMetadata, firstTokenAt: Date.now(), finishedAt: Date.now(), finishReason: "stop" };
           yielded = true;
           yield completion;
           return;
         }
-        for await (const delta of parseSse(response, controller.signal)) {
+        for await (const delta of parseSse(response, controller.signal, (reason) => { this.lastStreamMetadata = { ...this.lastStreamMetadata, finishReason: reason }; })) {
+          if (!this.lastStreamMetadata?.firstTokenAt) this.lastStreamMetadata = { ...this.lastStreamMetadata, firstTokenAt: Date.now() };
           yielded = true;
           yield delta;
         }
+        this.lastStreamMetadata = { ...this.lastStreamMetadata, finishedAt: Date.now() };
         return;
       } catch (error) {
         if (externalSignal.aborted) throw abortError();
+        if (timedOut) {
+          const timeoutError = new Error("Answer provider request timed out");
+          timeoutError.name = "TimeoutError";
+          (timeoutError as Error & { code?: string }).code = "CHAT_TIMEOUT";
+          throw timeoutError;
+        }
         lastError = error;
         if (yielded) break;
         if (attempt >= retries) break;
@@ -257,6 +308,7 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
         externalSignal.removeEventListener("abort", abort);
       }
     }
+    this.lastStreamMetadata = { ...this.lastStreamMetadata, finishedAt: Date.now() };
     throw lastError instanceof Error ? lastError : new Error("Answer provider request failed");
   }
 

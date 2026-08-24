@@ -68,16 +68,16 @@ export interface ProfileBuilderOutput {
   version: 1;
   profileId: string;
   generatedAt: number;
-  status: "ready" | "partial";
+  status: "ready" | "partial" | "error";
   sourceIds: string[];
   skillGraph: ProfileSkillGraph;
   projectGraph: ProfileProjectGraph;
   answerMaterials: InterviewAnswerMaterial[];
   faqs: ProfileFAQ[];
   warnings: string[];
+  error?: string;
 }
 
 export interface ProfileBuilderModel {
   generate(input: { profile: ProfileBuilderInput; fallback: ProfileBuilderOutput }): Promise<string>;
 }
-

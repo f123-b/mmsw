@@ -59,6 +59,7 @@ export const PROJECT_FACT_TYPES = [
   "solution",
   "result",
   "metric",
+  "application",
   "timeline",
   "limitation"
 ] as const;
@@ -130,6 +131,7 @@ export interface ProjectInterviewQuestion {
   keywords: string[];
   sourceIds: string[];
   factIds?: string[];
+  stale?: boolean;
 }
 
 export interface ProjectMemorySnapshot {
