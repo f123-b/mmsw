@@ -11,6 +11,14 @@ describe("TranscriptStabilizer", () => {
     expect(stabilizer.history("remote")[0]?.text).toBe("FOC 的电流环？");
     expect(stabilizer.history("mic")[0]?.text).toContain("采样时刻");
   });
+
+  it("replaces overlapping final revisions instead of duplicating one utterance", () => {
+    const stabilizer = new TranscriptStabilizer();
+    stabilizer.upsert({ id: "remote-item-final", utteranceId: "item-7", source: "remote", text: "追和栈", startMs: 100, endMs: 800, final: true });
+    stabilizer.upsert({ id: "remote-item-final-revision", utteranceId: "item-7", source: "remote", text: "堆和栈的区别是什么？", startMs: 100, endMs: 900, final: true });
+    expect(stabilizer.history("remote")).toHaveLength(1);
+    expect(stabilizer.history("remote")[0]?.text).toBe("堆和栈的区别是什么？");
+  });
 });
 
 describe("PcmBackpressureQueue", () => {

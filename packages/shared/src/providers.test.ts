@@ -30,6 +30,19 @@ describe("OpenAICompatibleAnswerProvider", () => {
     expect(JSON.parse(String(request?.body)).max_tokens).toBe(1_024);
   });
 
+  it("stops when the provider sends finish_reason even without a DONE frame", async () => {
+    const encoder = new TextEncoder();
+    const provider = new OpenAICompatibleAnswerProvider({ providerName: "test", baseUrl: "https://llm.test", apiKey: "secret", model: "test-model", timeoutMs: 5_000, maxRetries: 0 }, async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("data: {\"choices\":[{\"delta\":{\"content\":\"完成\"},\"finish_reason\":\"stop\"}]}\n\n"));
+        // Some gateways leave the connection open after the terminal frame.
+      }
+    })));
+    const deltas: string[] = [];
+    for await (const delta of provider.stream({ model: "test-model", sections: [{ name: "question", content: "问题" }] })) deltas.push(delta);
+    expect(deltas).toEqual(["完成"]);
+  });
+
   it("uses the DeepSeek chat endpoint and disables thinking for low-latency modes", async () => {
     let requestUrl = "";
     let requestBody: Record<string, unknown> | undefined;

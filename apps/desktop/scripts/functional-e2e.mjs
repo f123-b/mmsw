@@ -245,6 +245,8 @@ const evidence = [];
 let overlay;
 try {
   await waitFor(() => document.documentElement?.dataset.appReady === "true");
+  if (answerRequests.length !== 0) throw new Error(`STARTUP_LLM_REQUEST_DETECTED: ${answerRequests.length}`);
+  evidence.push("Startup: PASS; STARTUP_NO_LLM_REQUESTS: PASS");
   await clickText("快捷帮助");
   await waitFor(() => Boolean(document.querySelector(".settings-page")));
   await screenshot("01-settings.png");
@@ -256,7 +258,7 @@ try {
   await screenshot("02-provider-success.png");
   await clickText("保存设置");
 
-  await clickText("档案");
+  await clickText("档案 / 简历");
   await clickText("新建档案");
   await clickText("重命名");
   await screenshot("04-profile-dialog.png");
@@ -264,8 +266,8 @@ try {
   await clickText("保存");
   evidence.push("Profile: PASS");
 
-  await clickText("知识库");
-  await clickText("新建知识库");
+  await clickText("资料库");
+  await clickText("新建资料库");
   await fillSelector(".app-dialog input", "Mock E2E Knowledge");
   await clickText("创建");
   await waitFor(() => document.body.innerText.includes("Mock E2E Knowledge"));
@@ -295,6 +297,7 @@ try {
   await main.evaluate(`(async () => { await window.interviewCopilot.settings.update("llm", { providerName: "Mock LLM", baseUrl: "http://127.0.0.1:${mockPort}", model: "mock-model", apiKey: "mock-key", timeoutMs: 10_000, maxRetries: 0 }); await window.interviewCopilot.settings.update("asr", { providerName: "Custom WebSocket ASR Gateway", providerType: "custom-gateway", baseUrl: "ws://127.0.0.1:${asrPort}/realtime", model: "mock-asr", language: "zh-CN", apiKey: "", timeoutMs: 3_000, maxRetries: 0 }); return true; })()`);
   await main.evaluate("location.reload()");
   await waitFor(() => document.documentElement?.dataset.appReady === "true");
+  await waitFor(() => Boolean(document.querySelector("button.start-interview")));
   answerRequests.length = 0;
   await clickSelector("button.start-interview");
   await waitFor(() => Boolean(document.querySelector(".setup-modal")));
@@ -384,7 +387,7 @@ try {
   if (!snapshot?.record || snapshot.record.status !== "ended") throw new Error("Screenshot-only history interview did not end");
   if (!(snapshot.detail?.questions ?? []).some((item) => item.text === "请分析截图中的题目、代码或内容，并给出适合面试场景的回答。")) throw new Error("Screenshot-only synthetic question was not persisted");
   evidence.push(`History: PASS; interview count=${snapshot.count}; first interview remote transcripts=${firstSnapshot.detail.transcripts.filter((item) => item.source === "remote").length}; first interview questions=${firstSnapshot.detail.questions.length}; first interview answers=${firstSnapshot.detail.answers.length}; latest status=${snapshot.record.status}`);
-  await clickText("面试记录");
+  await clickText("面试历史");
   await clickSelector(".history-layout .clean-list-row");
   await waitFor(() => document.body.innerText.includes("面试详情"));
   await screenshot("history-after-interview.png");

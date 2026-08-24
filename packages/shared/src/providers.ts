@@ -108,6 +108,16 @@ function extractDelta(value: unknown): string {
   return "";
 }
 
+function streamFinished(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  const choices = Array.isArray(record.choices) ? record.choices : [];
+  const choice = choices[0];
+  if (!choice || typeof choice !== "object") return false;
+  const finishReason = (choice as Record<string, unknown>).finish_reason;
+  return typeof finishReason === "string" && finishReason.length > 0;
+}
+
 function extractCompletion(value: unknown): string {
   if (!value || typeof value !== "object") return "";
   const record = value as Record<string, unknown>;
@@ -158,10 +168,13 @@ async function* parseSse(response: Response, signal: AbortSignal): AsyncGenerato
         const value = line.trim();
         if (!value.startsWith("data:")) continue;
         const payload = value.slice(5).trim();
-        if (!payload || payload === "[DONE]") continue;
+        if (!payload) continue;
+        if (payload === "[DONE]") return;
         try {
-          const delta = extractDelta(JSON.parse(payload));
+          const parsed = JSON.parse(payload);
+          const delta = extractDelta(parsed);
           if (delta) yield delta;
+          if (streamFinished(parsed)) return;
         } catch {
           // Ignore keep-alive/non-JSON SSE frames; the provider contract is still streamed.
         }
@@ -171,8 +184,10 @@ async function* parseSse(response: Response, signal: AbortSignal): AsyncGenerato
     if (buffer.startsWith("data:")) {
       const payload = buffer.slice(5).trim();
       if (payload && payload !== "[DONE]") {
-        const delta = extractDelta(JSON.parse(payload));
+        const parsed = JSON.parse(payload);
+        const delta = extractDelta(parsed);
         if (delta) yield delta;
+        if (streamFinished(parsed)) return;
       }
     }
   } finally {
@@ -197,6 +212,7 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
       const timeout = setTimeout(() => controller.abort(), Math.max(1_000, this.settings.timeoutMs));
       const abort = () => controller.abort();
       externalSignal.addEventListener("abort", abort, { once: true });
+      let yielded = false;
       try {
         const thinking = thinkingForRequest(this.settings, request);
         const response = await this.fetchImpl(providerEndpoint(this.settings, providerCapabilities(this.settings).chatPath), {
@@ -215,7 +231,13 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
           signal: controller.signal
         });
         if (!response.ok) throw new Error(`Answer provider HTTP ${response.status}: ${await readError(response)}`);
-        let yielded = false;
+        if (response.headers.get("content-type")?.toLowerCase().includes("application/json")) {
+          const completion = extractCompletion(await response.json());
+          if (!completion.trim()) throw new Error("Answer provider returned an empty completion");
+          yielded = true;
+          yield completion;
+          return;
+        }
         for await (const delta of parseSse(response, controller.signal)) {
           yielded = true;
           yield delta;
@@ -224,6 +246,7 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
       } catch (error) {
         if (externalSignal.aborted) throw abortError();
         lastError = error;
+        if (yielded) break;
         if (attempt >= retries) break;
         await new Promise<void>((resolve, reject) => {
           const timer = setTimeout(resolve, 250 * (attempt + 1));

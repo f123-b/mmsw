@@ -9,7 +9,7 @@ describe("realtime protocol", () => {
     })).type).toBe("asr_partial");
     expect(realtimeServerMessageSchema.parse({
       type: "asr_final",
-      segment: { id: "r1", source: "remote", text: "为什么要同步采样？", startMs: 0, endMs: 1_000, final: true, confidence: 0.94 }
+      segment: { id: "r1", utteranceId: "qwen-item-1", source: "remote", text: "为什么要同步采样？", startMs: 0, endMs: 1_000, final: true, confidence: 0.94 }
     }).type).toBe("asr_final");
   });
 

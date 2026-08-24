@@ -57,7 +57,8 @@ const api = {
   },
   realtime: {
     connect: (options: RealtimeConnectOptions) => ipcRenderer.invoke("realtime:connect", options),
-    disconnect: () => ipcRenderer.invoke("realtime:disconnect")
+    disconnect: () => ipcRenderer.invoke("realtime:disconnect"),
+    getTranscript: (): Promise<Partial<Record<"mic" | "remote", TranscriptSnapshot>>> => ipcRenderer.invoke("realtime:get-transcript")
   },
   interview: {
     start: (options: InterviewStartOptions) => ipcRenderer.invoke("interview:start", options) as Promise<string>,

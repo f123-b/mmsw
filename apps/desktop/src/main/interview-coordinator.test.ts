@@ -52,7 +52,7 @@ describe("InterviewCoordinator software E2E", () => {
       expect.objectContaining({ type: "answer_start" }),
       expect.objectContaining({ type: "answer_end", text: "核心回答。" })
     ]));
-    expect(messages.some((message) => (message as { type?: string }).type === "answer_delta")).toBe(false);
+    expect(messages.some((message) => (message as { type?: string }).type === "answer_delta")).toBe(true);
     await coordinator.stop();
     expect(coordinator.running).toBe(false);
     expect(interviewId).toMatch(/^interview-/);
@@ -306,9 +306,22 @@ describe("InterviewCoordinator software E2E", () => {
     for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
     expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({ type: "answer_cancelled", reason: "superseded" }), expect.objectContaining({ type: "answer_end" })]));
     const snapshot = history.snapshot(coordinator.interviewId!);
-    expect(snapshot.answers.find((answer) => answer.cancelReason === "superseded")?.text).toBe("");
+    expect(snapshot.answers.find((answer) => answer.cancelReason === "superseded")?.text).toBe("旧答案");
     await coordinator.stop();
     vi.useRealTimers();
+  });
+
+  it("closes the answer state when the model fails after answer_start", async () => {
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    const provider: AnswerProvider = { stream: async function* () { yield "已经收到"; throw new Error("provider offline"); } };
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" })) });
+    const messages: Array<{ type: string; reason?: string }> = [];
+    coordinator.on("event", (event: { type: string; message?: { type: string; reason?: string } }) => { if (event.type === "realtime_message" && event.message) messages.push(event.message); });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
+    await coordinator.answerQuestionText("为什么使用 DMA？");
+    expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({ type: "answer_start" }), expect.objectContaining({ type: "answer_cancelled", reason: "timeout" }), expect.objectContaining({ type: "runtime_error", code: "LLM_FAILED" })]));
+    await coordinator.stop();
   });
 
   it("AUTOMATION_DEFAULT_AUTO", () => {

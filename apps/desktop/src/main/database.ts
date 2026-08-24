@@ -405,6 +405,16 @@ export class SqliteDatabase {
         FROM interview_questions iq
         JOIN projects p ON p.id = iq.project_id
         WHERE p.profile_id IS NOT NULL;
+      `],
+      [11, `
+        ALTER TABLE interviews ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;
+        ALTER TABLE interviews ADD COLUMN job_target_id TEXT REFERENCES job_targets(id) ON DELETE SET NULL;
+        CREATE INDEX IF NOT EXISTS interviews_context_idx ON interviews(profile_id, project_id, job_target_id, created_at DESC);
+      `],
+      [12, `
+        ALTER TABLE questions ADD COLUMN parent_question_id TEXT REFERENCES questions(id) ON DELETE SET NULL;
+        ALTER TABLE questions ADD COLUMN root_question_id TEXT REFERENCES questions(id) ON DELETE SET NULL;
+        CREATE INDEX IF NOT EXISTS questions_thread_idx ON questions(interview_id, root_question_id, detected_at);
       `]
     ];
     for (const [version, sql] of migrations) {
@@ -629,6 +639,7 @@ export class SqliteProjectMemoryRepository {
   }
 
   replaceSnapshot(profileId: string, snapshot: ProjectMemorySnapshot, now = Date.now()): ProjectMemorySnapshot {
+    const previousFactVerification = new Map(this.database.all<{ id: string; verified: number }>("SELECT id, verified FROM project_facts WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ? AND id LIKE 'memory-project-%')", [profileId]).map((row) => [row.id, Number(row.verified) === 1] as const));
     this.database.run("DELETE FROM question_bank_questions WHERE scope = 'project' AND profile_id = ? AND source = 'generated'", [profileId]);
     this.database.run("DELETE FROM projects WHERE profile_id = ? AND id LIKE 'memory-project-%'", [profileId]);
     for (const project of snapshot.projects) {
@@ -640,7 +651,8 @@ export class SqliteProjectMemoryRepository {
     for (const question of snapshot.interviewQuestions) this.database.run("INSERT INTO interview_questions(id, project_id, question, answer_points_json, keywords_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?)", [question.id, question.projectId, question.question, JSON.stringify(question.answerPoints), JSON.stringify(question.keywords), JSON.stringify(question.sourceIds)]);
     const projectById = new Map(snapshot.projects.map((project) => [project.id, project]));
     const saveFact = (fact: ProjectFact): void => {
-      this.database.run("INSERT INTO project_facts(id, project_id, fact_type, title, content, confidence, verified, status, embedding_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, ?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, fact_type=excluded.fact_type, title=excluded.title, content=excluded.content, confidence=excluded.confidence, verified=excluded.verified, status=excluded.status, updated_at=excluded.updated_at", [fact.id, fact.projectId, fact.type, fact.title, fact.content, Math.max(0, Math.min(1, fact.confidence)), fact.verified ? 1 : 0, fact.createdAt ?? now, fact.updatedAt ?? now]);
+      const verified = previousFactVerification.get(fact.id) ?? fact.verified;
+      this.database.run("INSERT INTO project_facts(id, project_id, fact_type, title, content, confidence, verified, status, embedding_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, ?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, fact_type=excluded.fact_type, title=excluded.title, content=excluded.content, confidence=excluded.confidence, verified=excluded.verified, status=excluded.status, updated_at=excluded.updated_at", [fact.id, fact.projectId, fact.type, fact.title, fact.content, Math.max(0, Math.min(1, fact.confidence)), verified ? 1 : 0, fact.createdAt ?? now, fact.updatedAt ?? now]);
       this.database.run("DELETE FROM project_fact_sources WHERE fact_id = ?", [fact.id]);
       for (const sourceId of fact.sourceIds) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, created_at) VALUES (?, ?, NULL, NULL, ?)", [fact.id, sourceId, now]);
     };
@@ -846,8 +858,10 @@ export class SqliteJobTargetRepository {
     return rows.map((row) => this.hydrate(row));
   }
 
-  searchRequirements(profileId: string, query: string, limit = 5): JobRequirementMatch[] {
-    const targetIds = this.database.all<{ id: string }>("SELECT id FROM job_targets WHERE profile_id = ? AND status = 'active'", [profileId]).map((row) => row.id);
+  searchRequirements(profileId: string, query: string, limit = 5, targetId?: string): JobRequirementMatch[] {
+    const targetIds = targetId
+      ? this.database.all<{ id: string }>("SELECT id FROM job_targets WHERE profile_id = ? AND status = 'active' AND id = ?", [profileId, targetId]).map((row) => row.id)
+      : this.database.all<{ id: string }>("SELECT id FROM job_targets WHERE profile_id = ? AND status = 'active'", [profileId]).map((row) => row.id);
     if (targetIds.length === 0) return [];
     const placeholders = targetIds.map(() => "?").join(",");
     return this.database.all<Record<string, unknown>>(`SELECT id, job_target_id AS jobTargetId, category, requirement, importance, source_quote AS sourceQuote, verified, created_at AS createdAt, updated_at AS updatedAt FROM job_requirements WHERE job_target_id IN (${placeholders})`, targetIds).map((row) => {
@@ -907,7 +921,21 @@ export class SqliteConversationRepository {
     this.database.run("UPDATE conversation_messages SET content = ?, status = ? WHERE id = ?", [content, status, messageId]);
     const message = this.database.first<{ conversationId: string }>("SELECT conversation_id AS conversationId FROM conversation_messages WHERE id = ?", [messageId]);
     if (message) this.database.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, message.conversationId]);
+    // Streaming updates arrive once per token. A synchronous full-database
+    // export here blocks Electron's main process and makes the window appear
+    // unresponsive while an answer is being generated. Batch intermediate
+    // writes, but persist terminal states immediately.
+    if (status === "streaming") this.database.flush();
+    else this.database.flushNow();
+  }
+
+  recoverInterruptedMessages(now = Date.now()): number {
+    const interrupted = this.database.all<{ id: string }>("SELECT id FROM conversation_messages WHERE status = 'streaming'");
+    if (interrupted.length === 0) return 0;
+    this.database.run("UPDATE conversation_messages SET status = 'error' WHERE status = 'streaming'");
+    this.database.run("UPDATE conversations SET updated_at = ? WHERE id IN (SELECT conversation_id FROM conversation_messages WHERE status = 'error')", [now]);
     this.database.flushNow();
+    return interrupted.length;
   }
 
   delete(conversationId: string): void {
@@ -921,7 +949,7 @@ export class SqliteInterviewHistoryRepository {
 
   createInterview(input: Omit<InterviewRecord, "id" | "createdAt">, now = Date.now()): InterviewRecord {
     const record = { ...input, id: id("interview", now), createdAt: now };
-    this.database.run("INSERT INTO interviews(id, profile_id, started_at, ended_at, status, language, automation_mode, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.profileId, record.startedAt, record.endedAt ?? null, record.status, record.language, record.automationMode, record.createdAt]);
+    this.database.run("INSERT INTO interviews(id, profile_id, project_id, job_target_id, started_at, ended_at, status, language, automation_mode, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.profileId, record.projectId ?? null, record.jobTargetId ?? null, record.startedAt, record.endedAt ?? null, record.status, record.language, record.automationMode, record.createdAt]);
     this.database.flushNow();
     return record;
   }
@@ -929,7 +957,7 @@ export class SqliteInterviewHistoryRepository {
   endInterview(interviewId: string, status: "ended" | "error" = "ended", endedAt = Date.now()): InterviewRecord {
     this.database.run("UPDATE interviews SET status = ?, ended_at = ? WHERE id = ?", [status, endedAt, interviewId]);
     this.database.flushNow();
-    const record = this.database.first<InterviewRecord>("SELECT id, profile_id AS profileId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews WHERE id = ?", [interviewId]);
+    const record = this.database.first<InterviewRecord>("SELECT id, profile_id AS profileId, project_id AS projectId, job_target_id AS jobTargetId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews WHERE id = ?", [interviewId]);
     if (!record) throw new Error(`Interview not found: ${interviewId}`);
     return record;
   }
@@ -944,7 +972,7 @@ export class SqliteInterviewHistoryRepository {
 
   addQuestion(input: Omit<QuestionRecord, "id">): QuestionRecord {
     const record = { ...input, id: id("question", input.detectedAt) };
-    this.database.run("INSERT INTO questions(id, interview_id, text, confidence, source, detected_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)", [record.id, record.interviewId, record.text, record.confidence, record.source, record.detectedAt, record.status]);
+    this.database.run("INSERT INTO questions(id, interview_id, text, confidence, source, detected_at, status, parent_question_id, root_question_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.interviewId, record.text, record.confidence, record.source, record.detectedAt, record.status, record.parentQuestionId ?? null, record.rootQuestionId ?? null]);
     this.database.flush();
     return record;
   }
@@ -952,7 +980,7 @@ export class SqliteInterviewHistoryRepository {
   updateQuestionStatus(questionId: string, status: QuestionRecord["status"]): QuestionRecord | undefined {
     this.database.run("UPDATE questions SET status = ? WHERE id = ?", [status, questionId]);
     this.database.flushNow();
-    return this.database.first<QuestionRecord>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status FROM questions WHERE id = ?", [questionId]);
+    return this.database.first<QuestionRecord>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status, parent_question_id AS parentQuestionId, root_question_id AS rootQuestionId FROM questions WHERE id = ?", [questionId]);
   }
 
   addAnswer(input: Omit<AnswerRecord, "id">): AnswerRecord {
@@ -963,7 +991,7 @@ export class SqliteInterviewHistoryRepository {
   }
 
   listInterviews(): InterviewRecord[] {
-    return this.database.all<InterviewRecord>("SELECT id, profile_id AS profileId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews ORDER BY created_at DESC");
+    return this.database.all<InterviewRecord>("SELECT id, profile_id AS profileId, project_id AS projectId, job_target_id AS jobTargetId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews ORDER BY created_at DESC");
   }
 
   deleteInterview(interviewId: string): void {
@@ -982,10 +1010,10 @@ export class SqliteInterviewHistoryRepository {
   }
 
   snapshot(interviewId: string): InterviewSnapshot {
-    const interview = this.database.first<InterviewRecord>("SELECT id, profile_id AS profileId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews WHERE id = ?", [interviewId]);
+    const interview = this.database.first<InterviewRecord>("SELECT id, profile_id AS profileId, project_id AS projectId, job_target_id AS jobTargetId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews WHERE id = ?", [interviewId]);
     if (!interview) throw new Error(`Interview not found: ${interviewId}`);
     const transcripts = this.database.all<TranscriptRecord>("SELECT id, interview_id AS interviewId, source, text, start_ms AS startMs, end_ms AS endMs, final, confidence, created_at AS createdAt FROM transcripts WHERE interview_id = ? ORDER BY start_ms", [interviewId]);
-    const questions = this.database.all<QuestionRecord>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status FROM questions WHERE interview_id = ? ORDER BY detected_at", [interviewId]);
+    const questions = this.database.all<QuestionRecord>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status, parent_question_id AS parentQuestionId, root_question_id AS rootQuestionId FROM questions WHERE interview_id = ? ORDER BY detected_at", [interviewId]);
     const answers = this.database.all<AnswerRecord>("SELECT a.id, a.question_id AS questionId, a.text, a.model, a.mode, a.latency_first_token AS latencyFirstToken, a.latency_total AS latencyTotal, a.cancel_reason AS cancelReason, a.started_at AS startedAt, a.first_token_at AS firstTokenAt, a.finished_at AS finishedAt, a.created_at AS createdAt FROM answers a JOIN questions q ON q.id = a.question_id WHERE q.interview_id = ? ORDER BY a.created_at", [interviewId]);
     return { interview, transcripts, questions, answers };
   }

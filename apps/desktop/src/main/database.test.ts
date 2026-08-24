@@ -108,6 +108,17 @@ describe("SQLite persistence", () => {
     } finally { database.close(); }
   });
 
+  it("recovers messages left streaming after an interrupted app process", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const conversations = new SqliteConversationRepository(database);
+      const conversation = conversations.create(undefined, undefined, "中断恢复", 20);
+      conversations.addMessage({ conversationId: conversation.id, role: "assistant", content: "部分回答", status: "streaming", model: "mock" }, 21);
+      expect(conversations.recoverInterruptedMessages(22)).toBe(1);
+      expect(conversations.get(conversation.id)?.messages[0]).toMatchObject({ content: "部分回答", status: "error" });
+    } finally { database.close(); }
+  });
+
   it("persists Profile Builder artifacts without changing legacy records", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
@@ -148,6 +159,11 @@ describe("SQLite persistence", () => {
       const analyses = new SqliteKnowledgeAnalysisRepository(database);
       analyses.record({ id: "analysis-1", profileId: "profile-1", runType: "project-memory", inputHash: "hash-1", status: "completed", inputSnapshot: { sourceIds: ["doc-1"] }, output: snapshot, now: 30 });
       expect(analyses.list("profile-1")[0]).toMatchObject({ id: "analysis-1", status: "completed", inputHash: "hash-1" });
+      const confirmedFact = memory.listFacts("profile-1").find((fact) => fact.type === "responsibility");
+      expect(confirmedFact).toBeDefined();
+      memory.setFactVerification(confirmedFact?.id ?? "", true, 40);
+      memory.replaceSnapshot("profile-1", snapshot, 50);
+      expect(memory.getFact(confirmedFact?.id ?? "")?.verified).toBe(true);
       expect(memory.getSnapshot("other").projects).toHaveLength(0);
     } finally { database.close(); }
   });

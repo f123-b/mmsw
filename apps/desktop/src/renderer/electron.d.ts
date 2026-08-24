@@ -58,6 +58,7 @@ declare global {
       realtime: {
         connect(options: RealtimeConnectOptions): Promise<boolean>;
         disconnect(): Promise<boolean>;
+        getTranscript(): Promise<Partial<Record<"mic" | "remote", TranscriptSnapshot>>>;
       };
       interview: {
         start(options: InterviewStartOptions): Promise<string>;

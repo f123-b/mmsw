@@ -103,6 +103,8 @@ export const transcriptSegmentSchema = z.object({
   startMs: z.number().int().nonnegative(),
   endMs: z.number().int().nonnegative(),
   final: z.boolean(),
+  /** Provider-side speech item. Partial and final events for one utterance share it. */
+  utteranceId: z.string().min(1).optional(),
   confidence: z.number().min(0).max(1).optional()
 });
 

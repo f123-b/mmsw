@@ -363,8 +363,12 @@ export class RealtimeSession extends EventEmitter {
     if (message.type === "runtime_error") this.emit("runtime-error", message);
   }
 
-  private handleDirectSegment(segment: { source: "mic" | "remote"; text: string; startMs: number; endMs: number; final: boolean; confidence?: number }): void {
-    const id = `${segment.source}-${segment.startMs}-${segment.endMs}-${segment.final ? "final" : "partial"}-${segment.text}`;
+  private handleDirectSegment(segment: { source: "mic" | "remote"; text: string; startMs: number; endMs: number; final: boolean; confidence?: number; utteranceId?: string }): void {
+    // Keep partial/final events for one provider speech item addressable by a
+    // stable id. Building the id from text made every ASR revision look like a
+    // new utterance and caused duplicate questions and answer cancellations.
+    const utteranceId = segment.utteranceId ?? `${segment.source}-${segment.startMs}`;
+    const id = `${segment.source}-${utteranceId}-${segment.final ? "final" : "partial"}`;
     const message: RealtimeServerMessage = segment.final
       ? { type: "asr_final", segment: { ...segment, id, final: true } }
       : { type: "asr_partial", segment: { ...segment, id, final: false } };

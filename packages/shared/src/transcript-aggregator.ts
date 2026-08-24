@@ -25,6 +25,8 @@ const INCOMPLETE_TAIL = /(?:比如|例如|包括|以及|并且|而且|尤其|关
 const STANDALONE_ACKNOWLEDGEMENT = /^(?:好|好的|那|嗯+|呃+|啊+|哦+|对|明白了?|知道了?|行|可以)[。！？?！\s，,、]*$/i;
 const STANDALONE_REPAIR_QUESTION = /^(?:你觉得(?:呢)?|怎么(?:回答|答|说)|答案(?:是什么|呢))[。！？?！\s]*$/i;
 const STANDALONE_TRANSITION = /^(?:还有(?:一个)?问题|下一个(?:问题)?|再问(?:一个)?|接下来(?:问)?)[。！？?！\s，,、]*$/i;
+const NEW_QUESTION_START = /^(?:那如果|那么|为什么|为何|什么是|哪些|哪种|怎么|如何|请问|能否|是否|介绍一下|解释一下|说说|讲讲)/;
+const QUESTION_SHAPE = /(?:什么|为什么|为何|怎么|如何|哪些|哪种|区别|原理|介绍|解释|能否|是否|吗|呢)/;
 
 function normalize(text: string): string {
   return normalizeTechnicalTerms(text);
@@ -57,6 +59,17 @@ function shouldMergeAfterPunctuation(previous: string, next: string): boolean {
   // interviewer is continuing the same prompt: “请解释 volatile。” →
   // “关键字的作用。” → “以及常见误区”。 Keep those fragments together.
   return CONTINUATION_START.test(nextText);
+}
+
+function startsNewQuestion(previous: string, next: string): boolean {
+  const previousText = normalize(previous).trim();
+  const nextText = normalize(next).trim();
+  if (previousText.length < 8 || !NEW_QUESTION_START.test(nextText)) return false;
+  if (INCOMPLETE_TAIL.test(previousText) || STANDALONE_ACKNOWLEDGEMENT.test(nextText)) return false;
+  // ASR sometimes omits punctuation between two interviewer questions. A
+  // strong question opener after a complete-looking prompt is a semantic
+  // boundary even when the time gap is still below maxGapMs.
+  return /[？?！!]$/.test(previousText) || QUESTION_SHAPE.test(previousText);
 }
 
 export class TranscriptAggregator {
@@ -94,6 +107,7 @@ export class TranscriptAggregator {
     const canMerge = Boolean(
       previous &&
       segment.startMs - previous.endMs <= this.maxGapMs &&
+      !startsNewQuestion(previous.text, text) &&
       (!this.punctuationBoundary || shouldMergeAfterPunctuation(previous.text, text))
     );
     if (canMerge && previous) {

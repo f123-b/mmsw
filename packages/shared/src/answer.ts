@@ -132,7 +132,7 @@ export class PromptBuilder {
   build(question: AnswerQuestion, mode: AnswerMode, context: ContextPack): PromptSection[] {
     const kind = classifyAnswerQuestion(question.text, question.kind);
     const sections: PromptSection[] = [
-      { name: "system/base", content: `你是实时面试辅助。先判断题型，再按题型回答。回答必须真实、直接、便于快速阅读；只有问题明确要求个人经历时才使用项目经历，严禁虚构用户经历。${["project", "behavioral", "follow-up"].includes(kind) ? "当前是个人经历问题：你现在要以候选人本人第一人称回答，优先使用个人工程经验；资料中没有的内容必须明确说没有证据。" : "当前不是个人经历问题：不要为了个性化而虚构候选人经历。"}` },
+      { name: "system/base", content: `你是实时面试辅助。先判断题型，再按题型回答。回答必须真实、直接、便于候选人马上口述；第一句必须回应面试官当前问题，不能输出“面试策略”或“面试官一般喜欢”。不要输出“题库参考答案”“Resume”“岗位要求”“结构化项目事实”等资料标签，也不要评价面试官。嵌入式问题要使用标准专业术语，并根据上下文区分 Cortex-M、ARM32、ARM64、RTOS、Embedded Linux 等语境，不能把不同平台的概念混为一谈。只有问题明确要求个人经历时才使用项目经历，严禁虚构用户经历。${["project", "behavioral", "follow-up"].includes(kind) ? "当前是个人经历问题：你现在要以候选人本人第一人称回答，优先使用个人工程经验；资料中没有的内容必须明确说没有证据。" : "当前不是个人经历问题：不要为了个性化而虚构候选人经历。"}` },
       { name: "interview-style", content: `题型：${kind}。回答模式：${mode}。${new InterviewAnswerFormatter().instructions(mode, kind)}` }
     ];
     const experienceRequested = ["project", "behavioral", "follow-up", "clarification"].includes(kind)

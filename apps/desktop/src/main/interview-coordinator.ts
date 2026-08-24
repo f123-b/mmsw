@@ -51,11 +51,18 @@ export type InterviewRealtimePort = InterviewASRPort;
 
 export interface InterviewStartOptions extends Omit<RealtimeConnectOptions, "autoReconnect" | "language"> {
   profileId: string;
+  projectId?: string;
+  jobTargetId?: string;
   inputDeviceId?: string;
   outputDeviceId?: string;
   automationMode?: "MANUAL" | "AUTO";
   answerMode: AnswerMode;
   language?: string;
+}
+
+export interface InterviewContextSelection {
+  projectId?: string;
+  jobTargetId?: string;
 }
 
 export interface InterviewHistoryPort {
@@ -78,7 +85,7 @@ export interface InterviewCoordinatorOptions {
   memory?: InterviewMemory;
   aggregator?: TranscriptAggregator;
   history?: InterviewHistoryPort;
-  contextProvider?: (question: QuestionCandidate, profileId: string, recentTranscript: string[]) => AnswerContextInput | Promise<AnswerContextInput>;
+  contextProvider?: (question: QuestionCandidate, profileId: string, recentTranscript: string[], context?: InterviewContextSelection) => AnswerContextInput | Promise<AnswerContextInput>;
   asrSettingsProvider?: (profileId: string) => Pick<RealtimeConnectOptions, "providerType" | "providerName" | "model" | "language" | "url">;
   interviewBrain?: InterviewBrain;
   now?: () => number;
@@ -105,7 +112,7 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly aggregator: TranscriptAggregator;
   private readonly history: InterviewHistoryPort;
   private readonly now: () => number;
-  private readonly contextProvider: (question: QuestionCandidate, profileId: string, recentTranscript: string[]) => AnswerContextInput | Promise<AnswerContextInput>;
+  private readonly contextProvider: (question: QuestionCandidate, profileId: string, recentTranscript: string[], context?: InterviewContextSelection) => AnswerContextInput | Promise<AnswerContextInput>;
   private defaultAutomationMode: "MANUAL" | "AUTO";
   private activeInterviewId: string | undefined;
   private activeOptions: InterviewStartOptions | undefined;
@@ -137,7 +144,10 @@ export class InterviewCoordinator extends EventEmitter {
   constructor(private readonly options: InterviewCoordinatorOptions) {
     super();
     this.asr = options.asrManager ?? options.realtime ?? (() => { throw new Error("ASRManager is required"); })();
-    this.questionSilenceMs = Math.max(120, options.questionSilenceMs ?? 280);
+    // A short ASR pause is common inside an embedded question (for example
+    // “堆和栈的区别”). Give the final transcript enough time to settle before
+    // the detector starts an answer, while keeping the UI partial live.
+    this.questionSilenceMs = Math.max(180, options.questionSilenceMs ?? 420);
     this.detector = options.detector ?? new QuestionDetector({ silenceMs: this.questionSilenceMs });
     this.detector2 = options.questionDetector2 ?? new QuestionDetector2();
     this.brain = options.interviewBrain ?? new InterviewBrain();
@@ -180,6 +190,8 @@ export class InterviewCoordinator extends EventEmitter {
     const startedAt = this.now();
     const record = this.history.createInterview({
       profileId: startOptions.profileId,
+      ...(startOptions.projectId ? { projectId: startOptions.projectId } : {}),
+      ...(startOptions.jobTargetId ? { jobTargetId: startOptions.jobTargetId } : {}),
       startedAt,
       status: "running",
       language: startOptions.language ?? "zh-CN",
@@ -309,7 +321,7 @@ export class InterviewCoordinator extends EventEmitter {
     const startedAt = this.now();
     this.accumulatedAnswerText = "";
     try {
-      const providerContextResult = this.contextProvider(question, this.activeProfileId ?? "", [...this.recentTranscript]);
+      const providerContextResult = this.contextProvider(question, this.activeProfileId ?? "", [...this.recentTranscript], { projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId });
       // Keep the default synchronous context path truly synchronous. This
       // removes an avoidable microtask from consecutive-question handling;
       // async profile/knowledge retrieval still remains cancellable below.
@@ -330,10 +342,11 @@ export class InterviewCoordinator extends EventEmitter {
         this.answerStartedAt = startedAt;
         this.answerFirstTokenAt = finishedAt;
         this.emit("event", { type: "realtime_message", message: { type: "answer_start", answerId, questionId: question.id, mode, model: "question-bank" } });
-        this.emit("event", { type: "realtime_message", message: { type: "answer_end", answerId, text: preparedAnswer.content } });
+        const preparedText = normalizeTechnicalTerms(preparedAnswer.content);
+        this.emit("event", { type: "realtime_message", message: { type: "answer_end", answerId, text: preparedText } });
         const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
-        this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: preparedAnswer.content, model: "question-bank", mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
-        this.memory.recordAnswer(preparedAnswer.content, { question: question.text, createdAt: finishedAt });
+        this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: preparedText, model: "question-bank", mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
+        this.memory.recordAnswer(preparedText, { question: question.text, createdAt: finishedAt });
         this.detector.markAnswered(question.id);
         this.options.history?.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "answered");
         this.answerId = undefined;
@@ -347,10 +360,12 @@ export class InterviewCoordinator extends EventEmitter {
       const context = { ...providerContext, recentTranscript: providerContext.recentTranscript ?? [...this.recentTranscript], interviewMemory: this.memory.snapshot() };
       for await (const event of this.options.answerAgent.stream({ id: question.id, text: question.text }, mode, context, controller.signal, {
         ...streamOptions,
-        directDisplay: true,
-        emitDeltas: false,
+        // Expose provider deltas so the overlay can show the first useful
+        // sentence immediately instead of waiting for the whole answer.
+        directDisplay: false,
+        emitDeltas: true,
         allowQualityRepair: false,
-        formatAnswer: false,
+        formatAnswer: true,
         maxRetries: 1,
         preferFastRoute: this.activeOptions?.automationMode === "AUTO" && !streamOptions.hasScreenshot,
         modelOverride: this.activeModelSnapshot
@@ -371,9 +386,9 @@ export class InterviewCoordinator extends EventEmitter {
         } else {
           const finishedAt = this.now();
           const answerText = event.text || this.accumulatedAnswerText;
-          // Direct-display mode has no partial token event. The answer becomes
-          // visible at completion, so record that point as the first visible
-          // response for latency diagnostics.
+          // If a provider does not emit deltas, completion is still the first
+          // visible response. Normal live providers stream through the branch
+          // above and set answerFirstTokenAt when the first delta arrives.
           this.answerFirstTokenAt ??= finishedAt;
           this.emit("event", { type: "realtime_message", message: { type: "answer_end", answerId: event.answerId, text: answerText, quality: event.quality } });
           const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
@@ -392,6 +407,10 @@ export class InterviewCoordinator extends EventEmitter {
       }
     } catch (error) {
       if (controller.signal.aborted) return;
+      // Always close the visible answer state on a provider failure. Without
+      // this terminal event the overlay remains in “生成中” forever and the
+      // next question can look as if it was ignored.
+      this.cancelAnswer("timeout");
       this.emitDiagnostic(`LLM_FAILED: ${String(error)}`);
       this.emit("event", { type: "realtime_message", message: { type: "runtime_error", code: "LLM_FAILED", message: "答案生成失败，请检查模型配置后重试", recoverable: true } });
     } finally {
@@ -447,15 +466,25 @@ export class InterviewCoordinator extends EventEmitter {
     this.asr.on("diagnostic", (message: string) => this.emitDiagnostic(message));
   }
 
-  private emitQuestion(event: QuestionEvent): void {
-      if (event.type === "question_confirmed" || event.type === "question_superseded") {
+  private emitQuestion(inputEvent: QuestionEvent): QuestionEvent {
+    const event = this.linkQuestionThread(inputEvent);
+    if (event.type === "question_confirmed" || event.type === "question_superseded") {
       this.currentQuestion = event.question;
       // The renderer must never keep showing the previous answer under a new
       // question while context retrieval or model generation is still pending.
       this.emit("event", { type: "realtime_message", message: { type: "answer_reset", questionId: event.question.id } });
       this.memory.recordQuestion(event.question.text, { createdAt: event.question.detectedAt });
       if (this.activeInterviewId) {
-        const stored = this.history.addQuestion({ interviewId: this.activeInterviewId, text: event.question.text, confidence: event.question.confidence, source: event.question.source, detectedAt: event.question.detectedAt, status: event.question.status });
+        const stored = this.history.addQuestion({
+          interviewId: this.activeInterviewId,
+          text: event.question.text,
+          confidence: event.question.confidence,
+          source: event.question.source,
+          detectedAt: event.question.detectedAt,
+          status: event.question.status,
+          ...(event.question.parentQuestionId ? { parentQuestionId: this.historyQuestionIds.get(event.question.parentQuestionId) } : {}),
+          ...(event.question.rootQuestionId ? { rootQuestionId: this.historyQuestionIds.get(event.question.rootQuestionId) } : {})
+        });
         this.historyQuestionIds.set(event.question.id, stored.id);
         this.questionConfirmedAt.set(event.question.id, this.now());
       }
@@ -466,6 +495,24 @@ export class InterviewCoordinator extends EventEmitter {
       }
     }
     this.emitEvent({ type: "question", event });
+    return event;
+  }
+
+  private linkQuestionThread(event: QuestionEvent): QuestionEvent {
+    if (event.type !== "question_confirmed" && event.type !== "question_superseded") return event;
+    const previous = this.currentQuestion;
+    const isFollowUp = event.question.speechAct === "FOLLOW_UP"
+      || event.question.detectionType === "follow_up"
+      || event.question.category === "followup";
+    if (!isFollowUp || !previous || previous.id === event.question.id) return event;
+    return {
+      ...event,
+      question: {
+        ...event.question,
+        parentQuestionId: event.question.parentQuestionId ?? previous.id,
+        rootQuestionId: event.question.rootQuestionId ?? previous.rootQuestionId ?? previous.id
+      }
+    };
   }
 
   private enqueueFinalUtterance(utterance: TranscriptUtterance): void {
@@ -539,8 +586,8 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private handleQuestionEvent(event: QuestionEvent): void {
-    this.emitQuestion(event);
-    if ((event.type === "question_confirmed" || event.type === "question_superseded") && this.activeOptions?.automationMode === "AUTO") this.scheduleAnswer(event.question);
+    const effectiveEvent = this.emitQuestion(event);
+    if ((effectiveEvent.type === "question_confirmed" || effectiveEvent.type === "question_superseded") && this.activeOptions?.automationMode === "AUTO") this.scheduleAnswer(effectiveEvent.question);
   }
 
   private async observeFinalQuestion(utterance: TranscriptUtterance, sessionGeneration = this.sessionGeneration): Promise<void> {

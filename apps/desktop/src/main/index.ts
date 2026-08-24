@@ -9,8 +9,8 @@ import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, generatePostInterviewAnalysis, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings } from "@interview-copilot/shared";
-import { InterviewCoordinator, type InterviewStartOptions } from "./interview-coordinator";
+import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
 import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type ProviderSection } from "./settings-store";
@@ -232,7 +232,12 @@ let appLogger: SafeLogger | undefined;
 let audioLogger: SafeLogger | undefined;
 let realtimeLogger: SafeLogger | undefined;
 let database: SqliteDatabase | undefined;
-let lastInterviewProfileId: string | undefined;
+// The overlay is created after the interview starts. Keep the latest local
+// snapshots in the main process so a newly mounted overlay can replay them
+// instead of waiting for the next ASR packet.
+let realtimeTranscriptSnapshots: Partial<Record<"mic" | "remote", TranscriptSnapshot>> = {};
+let pendingTranscriptBroadcast: TranscriptSnapshot | undefined;
+let transcriptBroadcastTimer: NodeJS.Timeout | undefined;
 let questionBankAnswerGeneration: Promise<import("./database").QuestionBankAnswerGenerationResult> | undefined;
 const preloadPath = join(__dirname, "../preload/index.mjs");
 const rendererFile = join(__dirname, "../renderer/index.html");
@@ -244,15 +249,6 @@ let mainRendererLoad: Promise<void> | undefined;
 const rendererAppReadyWindows = new Set<number>();
 const rendererAppReadyWaiters = new Map<number, Set<() => void>>();
 
-function triggerProfileBuilder(profileId: string | undefined): void {
-  if (!profileId || !profileBuilderService) return;
-  void profileBuilderService.rebuild(profileId).catch((error) => appLogger?.warn("profile builder failed", { profileId, error: String(error) }));
-  void projectMemoryService?.rebuild(profileId).catch((error) => appLogger?.warn("project memory failed", { profileId, error: String(error) }));
-}
-
-function triggerProfilesForKnowledgeBase(knowledgeBaseId: string): void {
-  for (const profile of profileRepository?.list() ?? []) if (profile.knowledgeBaseIds.includes(knowledgeBaseId)) triggerProfileBuilder(profile.id);
-}
 const shutdownController = new ShutdownController([
   { name: "unregister-shortcuts", run: () => globalShortcut.unregisterAll() },
   { name: "abort-preparation", run: () => preparationAbortController?.abort() },
@@ -420,10 +416,37 @@ async function loadRenderer(window: BrowserWindow, overlay = false): Promise<voi
   }
 }
 
-function broadcast(channel: string, payload: unknown): void {
+function broadcastToWindows(channel: string, payload: unknown): void {
   for (const window of [mainWindow, overlayManager?.currentWindow]) {
     if (window && !window.isDestroyed()) window.webContents.send(channel, payload);
   }
+}
+
+function broadcast(channel: string, payload: unknown): void {
+  if (channel === "realtime:transcript" && payload && typeof payload === "object" && "source" in payload) {
+    const snapshot = payload as TranscriptSnapshot;
+    if (snapshot.source !== "mic" && snapshot.source !== "remote") return;
+    realtimeTranscriptSnapshots[snapshot.source] = snapshot;
+    // Partial ASR updates can arrive dozens of times per second. Coalesce
+    // only partials into a 50 ms UI tick; final snapshots remain immediate so
+    // the question/answer boundary is never delayed by rendering.
+    if (snapshot.partial) {
+      pendingTranscriptBroadcast = snapshot;
+      if (!transcriptBroadcastTimer) {
+        transcriptBroadcastTimer = setTimeout(() => {
+          transcriptBroadcastTimer = undefined;
+          const pending = pendingTranscriptBroadcast;
+          pendingTranscriptBroadcast = undefined;
+          if (pending) broadcastToWindows("realtime:transcript", pending);
+        }, 50);
+      }
+      return;
+    }
+    if (transcriptBroadcastTimer) clearTimeout(transcriptBroadcastTimer);
+    transcriptBroadcastTimer = undefined;
+    pendingTranscriptBroadcast = undefined;
+  }
+  broadcastToWindows(channel, payload);
 }
 
 function rendererWindowName(window: BrowserWindow | null): "main" | "overlay" | "unknown" {
@@ -782,25 +805,9 @@ function agentWorkspace(profileId: string): string {
   return join(app.getPath("userData"), "workspaces", profileId);
 }
 
-async function runPostAnalysis(interviewId: string): Promise<void> {
-  const snapshot = historyRepository?.snapshot(interviewId);
-  const settings = providerConfigStore?.get("llm");
-  if (!snapshot || !settings?.apiKey || !settings.model || !historyRepository) return;
-  try {
-    const analysis = await generatePostInterviewAnalysis(snapshot, answerProvider, taskModel(settings, "postInterviewModel", "normalModel"));
-    historyRepository.saveAnalysis(interviewId, analysis);
-    broadcast("history:analysis-ready", { interviewId, analysis });
-  } catch (error) {
-    appLogger?.warn("post interview analysis failed", { interviewId, error: String(error) });
-  }
-}
-
-async function stopInterviewWithAnalysis(): Promise<void> {
-  const interviewId = coordinator().interviewId;
+async function stopInterview(): Promise<void> {
   try {
     await coordinator().stop("user");
-    if (interviewId) void runPostAnalysis(interviewId);
-    triggerProfileBuilder(lastInterviewProfileId);
   } finally {
     // The HUD is a session-scoped window. Always restore the normal app even
     // when ASR/audio shutdown reports an error or an answer is still flushing.
@@ -842,6 +849,7 @@ async function streamChat(conversationId: string, content: string): Promise<void
   const selectedModel = taskModel(settings, "chatModel", "normalModel");
   const assistantMessage = conversationRepository.addMessage({ conversationId, role: "assistant", content: "", status: "streaming", model: selectedModel });
   broadcast("chat:message-start", { conversationId, userMessage, assistantMessage });
+  appLogger?.info("CHAT_STREAM_STARTED", { conversationId, messageId: assistantMessage.id, model: selectedModel });
   const controller = new AbortController();
   chatAbortControllers.set(conversationId, controller);
   let answer = "";
@@ -858,10 +866,17 @@ async function streamChat(conversationId: string, content: string): Promise<void
     }
     conversationRepository.updateMessage(assistantMessage.id, answer, "completed");
     broadcast("chat:message-end", { conversationId, message: { ...assistantMessage, content: answer, status: "completed" } });
+    appLogger?.info("CHAT_STREAM_FINISHED", { conversationId, messageId: assistantMessage.id, characters: answer.length });
   } catch (error) {
     const cancelled = controller.signal.aborted || (error instanceof Error && error.name === "AbortError");
-    conversationRepository.updateMessage(assistantMessage.id, answer, cancelled ? "cancelled" : "error");
+    const status = cancelled ? "cancelled" : "error";
+    conversationRepository.updateMessage(assistantMessage.id, answer, status);
+    // The renderer needs a terminal message event as well as the diagnostic
+    // event; otherwise the last assistant bubble remains visually "streaming"
+    // after a timeout, provider error, or user cancellation.
+    broadcast("chat:message-end", { conversationId, message: { ...assistantMessage, content: answer, status } });
     broadcast("chat:error", { conversationId, messageId: assistantMessage.id, code: cancelled ? "CHAT_CANCELLED" : "CHAT_PROVIDER_ERROR", message: cancelled ? "已停止生成" : userFacingError(error) });
+    appLogger?.warn("CHAT_STREAM_FAILED", { conversationId, messageId: assistantMessage.id, status, characters: answer.length, error: String(error) });
     if (!cancelled) throw error;
   } finally { chatAbortControllers.delete(conversationId); }
 }
@@ -956,10 +971,13 @@ function registerIpc(): void {
     realtimeSession.disconnect();
     return true;
   });
+  ipcMain.handle("realtime:get-transcript", () => ({ ...realtimeTranscriptSnapshots }));
   ipcMain.handle("interview:start", async (_event, options: InterviewStartOptions) => {
     let coordinatorStarted = false;
     try {
       if (!profileRepository?.get(options.profileId)) throw new Error("PROFILE_NOT_FOUND: 面试档案不存在");
+      if (options.projectId && !projectMemoryRepository?.getSnapshot(options.profileId).projects.some((project) => project.id === options.projectId)) throw new Error("PROJECT_NOT_FOUND: 重点项目不属于当前档案");
+      if (options.jobTargetId && jobTargetRepository?.get(options.jobTargetId)?.profileId !== options.profileId) throw new Error("JOB_TARGET_NOT_FOUND: 目标岗位不属于当前档案");
       const llm = providerConfigStore?.get("llm") ?? environmentLlmSettings;
       if (!llm.apiKey) throw new Error("LLM_NOT_CONFIGURED: 未配置 LLM API Key");
       const asr = providerConfigStore?.get("asr");
@@ -975,8 +993,7 @@ function registerIpc(): void {
       if (!preflight.llm.reachable) throw new Error(`LLM_CONNECT_FAILED: ${preflight.llm.message ?? preflight.llm.status}`);
       if (!preflight.asr.reachable) throw new Error(`ASR_CONNECT_FAILED: ${preflight.asr.message ?? preflight.asr.status}`);
       const interviewId = await coordinator().start(options);
-       lastInterviewProfileId = options.profileId;
-       // The main window must not remain underneath the transparent HUD. Keep
+        // The main window must not remain underneath the transparent HUD. Keep
        // it available for restoration after an explicit or exceptional stop.
        mainWindow?.hide();
        overlayManager?.enterInterviewMode();
@@ -999,7 +1016,7 @@ function registerIpc(): void {
       throw new Error(`${mappedCode}: ${message}`);
     }
   });
-  ipcMain.handle("interview:stop", () => stopInterviewWithAnalysis());
+  ipcMain.handle("interview:stop", () => stopInterview());
   ipcMain.handle("interview:answer-latest", () => coordinator().answerLatest());
   ipcMain.handle("interview:answer-question", (_event, input: { text: string }) => coordinator().answerQuestionText(input.text));
   ipcMain.handle("interview:answer-screenshot", () => answerCapturedScreenshot());
@@ -1043,9 +1060,10 @@ function registerIpc(): void {
   ipcMain.handle("profiles:list", () => profileRepository?.list() ?? []);
   ipcMain.handle("profiles:get", (_event, profileId: string) => profileRepository?.get(profileId));
   ipcMain.handle("profiles:save", (_event, input: Parameters<SqliteProfileRepository["save"]>[0]) => {
-    const saved = profileRepository?.save(input);
-    triggerProfileBuilder(saved?.id);
-    return saved;
+    // Saving profile metadata is a local database operation. Analysis is an
+    // explicit user action so opening the app or editing a profile cannot
+    // silently create paid LLM requests.
+    return profileRepository?.save(input);
   });
   ipcMain.handle("profiles:delete", (_event, profileId: string) => { profileRepository?.delete(profileId); return true; });
   ipcMain.handle("profiles:clone", (_event, profileId: string, name: string) => profileRepository?.clone(profileId, name));
@@ -1056,20 +1074,11 @@ function registerIpc(): void {
     const profile = profileRepository.get(input.profileId);
     if (!profile) throw new Error("Profile not found");
     const parsed = await parseDocument({ documentId: `profile-material-${Date.now()}`, filename: input.filename, mimeType: input.mimeType, bytes: input.bytes });
-    let summary = parsed.text.slice(0, 800);
-    const settings = providerConfigStore?.get("llm");
-    if (settings?.apiKey && settings.model) {
-      try {
-        let generated = "";
-        for await (const delta of new OpenAICompatibleAnswerProvider(settings).stream({ model: taskModel(settings, "profileBuilderModel", "normalModel"), sections: [{ name: "system/base", content: "请把材料总结为真实、可核验的中文面试上下文，保留技能、职责和量化结果。只输出摘要。" }, { name: "question", content: parsed.text.slice(0, 12_000) }] })) generated += delta;
-        if (generated.trim()) summary = generated.trim();
-      } catch (error) {
-        appLogger?.warn("material summary failed", { error: String(error) });
-      }
-    }
+    // Keep upload local and deterministic. The user can explicitly run
+    // Profile Builder from the profile page when a model call is desired.
+    const summary = parsed.text.replace(/\s+/g, " ").trim().slice(0, 800);
     const material = { rawContent: parsed.text, summary };
     const saved = profileRepository.save({ ...profile, ...(input.kind === "resume" ? { resume: material } : { jobDescription: material }), updatedAt: Date.now() });
-    triggerProfileBuilder(saved.id);
     return saved;
   });
   ipcMain.handle("profiles:remove-material", (_event, profileId: string, kind: "resume" | "jobDescription") => {
@@ -1077,7 +1086,6 @@ function registerIpc(): void {
     const profile = profileRepository.get(profileId);
     if (!profile) throw new Error("Profile not found");
     const saved = profileRepository.save({ ...profile, ...(kind === "resume" ? { resume: undefined } : { jobDescription: undefined }), updatedAt: Date.now() });
-    triggerProfileBuilder(saved.id);
     return saved;
   });
   ipcMain.handle("knowledge:list-bases", () => knowledgeRepository?.listKnowledgeBases() ?? []);
@@ -1096,15 +1104,11 @@ function registerIpc(): void {
     const document = knowledgeRepository.saveDocument({ id: parsed.documentId, ...parsed, knowledgeBaseId: knowledgeBase.id, documentType, status: "processing" });
     try {
       const chunks = chunkText(parsed.text, { documentId: parsed.documentId, filename: parsed.filename, documentType });
-      const embeddingSettings = providerConfigStore?.get("embedding");
-      await embedKnowledgeChunks(chunks, embeddingSettings);
       knowledgeRepository.replaceChunks(document.id, chunks);
       const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, status: "ready" });
-      triggerProfilesForKnowledgeBase(knowledgeBase.id);
       return saved;
     } catch (error) {
       const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, status: "error", error: String(error) });
-      triggerProfilesForKnowledgeBase(knowledgeBase.id);
       return saved;
     }
   });
@@ -1120,11 +1124,9 @@ function registerIpc(): void {
       await embedKnowledgeChunks(chunks, embeddingSettings);
       knowledgeRepository.replaceChunks(document.id, chunks);
       const saved = knowledgeRepository.saveDocument({ ...document, status: "ready", error: undefined });
-      triggerProfilesForKnowledgeBase(document.knowledgeBaseId);
       return saved;
     } catch (error) {
       const saved = knowledgeRepository.saveDocument({ ...document, status: "error", error: String(error) });
-      triggerProfilesForKnowledgeBase(document.knowledgeBaseId);
       return saved;
     }
   });
@@ -1262,9 +1264,9 @@ function registerIpc(): void {
     return runProviderPreflight({ llm: providerConfigStore.get("llm"), asr: providerConfigStore.get("asr"), embedding: providerConfigStore.get("embedding") }, Boolean(checkReachability), providerPreflightCache);
   });
   ipcMain.handle("projects:list", () => projectRepository?.list() ?? []);
-  ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string }) => { const project = projectRepository?.create(input.name, input.profileId); triggerProfileBuilder(project?.profileId); return project; });
-  ipcMain.handle("projects:rename", (_event, projectId: string, name: string) => { const project = projectRepository?.get(projectId); const updated = projectRepository?.rename(projectId, name); triggerProfileBuilder(updated?.profileId ?? project?.profileId); return updated; });
-  ipcMain.handle("projects:delete", (_event, projectId: string) => { const project = projectRepository?.get(projectId); projectRepository?.delete(projectId); triggerProfileBuilder(project?.profileId); return true; });
+  ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string }) => projectRepository?.create(input.name, input.profileId));
+  ipcMain.handle("projects:rename", (_event, projectId: string, name: string) => projectRepository?.rename(projectId, name));
+  ipcMain.handle("projects:delete", (_event, projectId: string) => { projectRepository?.delete(projectId); return true; });
 }
 
 async function generateQuestionBankAnswers(input: { questionIds?: string[]; onlyUnanswered?: boolean } = {}): Promise<import("./database").QuestionBankAnswerGenerationResult> {
@@ -1384,6 +1386,8 @@ if (hasSingleInstanceLock) {
     projectMemoryRepository = new SqliteProjectMemoryRepository(database);
     profileBuilderRepository = new SqliteProfileBuilderRepository(database);
     conversationRepository = new SqliteConversationRepository(database);
+    const recoveredChatMessages = conversationRepository.recoverInterruptedMessages();
+    if (recoveredChatMessages > 0) appLogger.info("CHAT_INTERRUPTED_MESSAGES_RECOVERED", { count: recoveredChatMessages });
     try {
       providerConfigStore = new ProviderConfigStore(database, await createSecretStore(appDataPath), { llm: environmentLlmSettings });
     } catch {
@@ -1427,15 +1431,17 @@ if (hasSingleInstanceLock) {
     if (embeddingCache.size >= 64) embeddingCache.delete(embeddingCache.keys().next().value as string);
     embeddingCache.set(key, vector);
   };
-  const answerContextProvider = async (question: { text: string }, profileId: string, recentTranscript: string[] = []) => {
+  const answerContextProvider = async (question: { text: string }, profileId: string, recentTranscript: string[] = [], interviewContext?: InterviewContextSelection) => {
     const profile = profileRepository?.get(profileId);
     const normalizedQuestion = normalizeTechnicalTerms(question.text);
     const projectSnapshot = projectMemoryService?.get(profileId) ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] };
     const questionAnalysis = new QuestionAnalyzer().analyze(normalizedQuestion, projectSnapshot.projects.map((project) => project.name));
     const knowledgeRoute = routeKnowledge(questionAnalysis);
-    const targetProjectId = questionAnalysis.project ? projectSnapshot.projects.find((project) => project.name.toLowerCase() === questionAnalysis.project?.toLowerCase())?.id : undefined;
+    const detectedProjectId = questionAnalysis.project ? projectSnapshot.projects.find((project) => project.name.toLowerCase() === questionAnalysis.project?.toLowerCase())?.id : undefined;
+    const targetProjectId = interviewContext?.projectId ?? detectedProjectId;
+    const useProjectContext = Boolean(interviewContext?.projectId) || knowledgeRoute.useProjectMemory;
     const factMatches = projectMemoryRepository?.searchFacts(profileId, normalizedQuestion, { projectId: targetProjectId, limit: 5 }) ?? [];
-    const relevantFactMatches = (knowledgeRoute.useProjectMemory || (factMatches[0]?.score ?? 0) >= 0.28) ? factMatches : [];
+    const relevantFactMatches = (useProjectContext || (factMatches[0]?.score ?? 0) >= 0.28) ? factMatches : [];
     const verifiedFactExperience = relevantFactMatches.filter((hit) => hit.fact.verified)
       .map((hit) => `结构化项目事实（${hit.fact.type}，已确认，来源 ${hit.fact.sourceIds.join("、")}）：\n${hit.fact.title}\n${hit.fact.content}`);
     const artifactExperience = retrieveProfileExperience(normalizedQuestion, profileBuilderService?.get(profileId)?.artifact).map((hit) => hit.text);
@@ -1453,12 +1459,12 @@ if (hasSingleInstanceLock) {
       }
     }
     const resumeExperience = new HybridRetriever().search(normalizedQuestion, resumeChunks, { topK: 2, candidateK: 8 }).map((hit) => `Resume（相关经历）：${hit.text}`);
-    const experience = knowledgeRoute.useProjectMemory
+    const experience = useProjectContext
       ? verifiedFactExperience.slice(0, 6)
       : [...artifactExperience, ...resumeExperience].slice(0, 6);
-    const personalEvidence = knowledgeRoute.useProjectMemory ? verifiedFactExperience.slice(0, 6) : [];
+    const personalEvidence = useProjectContext ? verifiedFactExperience.slice(0, 6) : [];
     const questionBankMatch = questionBankRepository?.matchQuestion(normalizedQuestion, {
-      ...(questionAnalysis.type === "project" || questionAnalysis.type === "behavioral" || questionAnalysis.type === "follow-up" ? {} : { scope: "global" }),
+      ...(useProjectContext || questionAnalysis.type === "behavioral" || questionAnalysis.type === "follow-up" ? {} : { scope: "global" }),
       profileId,
       ...(targetProjectId ? { projectId: targetProjectId } : {})
     });
@@ -1469,7 +1475,7 @@ if (hasSingleInstanceLock) {
       ? candidateCard
       : undefined;
     const preparedAnswer = preparedCard ? `题库参考答案（匹配度 ${Math.round((questionBankMatch?.score ?? 0) * 100)}%，仅作为已整理素材，不替代当前问题判断）：\n${preparedCard.content}${preparedCard.codeContent ? `\n代码：\n${preparedCard.codeContent}` : ""}${preparedCard.complexity ? `\n复杂度：${preparedCard.complexity}` : ""}${preparedCard.limitations ? `\n边界与限制：${preparedCard.limitations}` : ""}` : undefined;
-    const jobMatches = jobTargetRepository?.searchRequirements(profileId, normalizedQuestion, 4) ?? [];
+    const jobMatches = jobTargetRepository?.searchRequirements(profileId, normalizedQuestion, 4, interviewContext?.jobTargetId) ?? [];
     const jobContext = jobMatches.map((hit) => `岗位要求（${hit.requirement.importance}，匹配度 ${Math.round(hit.score * 100)}%）：${hit.requirement.requirement}`);
     const chunks = knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? [];
     const retrievalOptions = { chunks, topK: 3, candidateK: 12, reranker: new KeywordReranker() };
@@ -1570,7 +1576,15 @@ if (hasSingleInstanceLock) {
   realtimeSession.on("diagnostics", (diagnostics) => broadcast("realtime:diagnostics", diagnostics));
   realtimeSession.on("runtime-error", (error) => broadcast("runtime:error", error));
   coordinator().on("event", (event: { type: string; [key: string]: unknown }) => {
-    if (event.type === "session_state") broadcast("session:state", event.state);
+    if (event.type === "session_state") {
+      if (event.state === "CREATING" || event.state === "IDLE" || event.state === "ENDED") {
+        realtimeTranscriptSnapshots = {};
+        pendingTranscriptBroadcast = undefined;
+        if (transcriptBroadcastTimer) clearTimeout(transcriptBroadcastTimer);
+        transcriptBroadcastTimer = undefined;
+      }
+      broadcast("session:state", event.state);
+    }
     if (event.type === "transcript") broadcast("realtime:transcript", event.snapshot);
     if (event.type === "question") {
       const questionEvent = event.event as { type?: string; text?: string; questionScore?: number; confidence?: number; candidate?: boolean; confirmed?: boolean; reason?: string; category?: string; detectionType?: string; speechAct?: string; fingerprint?: string; ignoredReason?: string; dedupeScore?: number };

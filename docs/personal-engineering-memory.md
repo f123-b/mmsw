@@ -45,7 +45,7 @@ flowchart LR
 
 ## 数据库
 
-数据库仍为本地 sql.js SQLite。迁移 009 为 `projects` 补充项目画像字段，并新增 `project_modules`、`technical_points`、`project_problems`、`interview_questions`。迁移 010 在兼容这些旧表的基础上，将项目问题同步到统一题库作用域，并新增 `project_facts`、`project_fact_sources`、`job_targets`、`job_requirements`、`knowledge_analysis_runs`、`retrieval_runs` 和 `retrieval_hits`。对应脚本见 [`migrations/009_project_memory.sql`](migrations/009_project_memory.sql) 和 [`migrations/010_knowledge_model.sql`](migrations/010_knowledge_model.sql)，Electron 启动时会自动执行同等迁移。
+数据库仍为本地 sql.js SQLite。迁移 009 为 `projects` 补充项目画像字段，并新增 `project_modules`、`technical_points`、`project_problems`、`interview_questions`。迁移 010 在兼容这些旧表的基础上，将项目问题同步到统一题库作用域，并新增 `project_facts`、`project_fact_sources`、`job_targets`、`job_requirements`、`knowledge_analysis_runs`、`retrieval_runs` 和 `retrieval_hits`。迁移 011 为面试历史记录保存本轮选择的项目和岗位上下文。对应脚本见 [`migrations/009_project_memory.sql`](migrations/009_project_memory.sql)、[`migrations/010_knowledge_model.sql`](migrations/010_knowledge_model.sql) 和 [`migrations/011_interview_context.sql`](migrations/011_interview_context.sql)，Electron 启动时会自动执行同等迁移。
 
 简历、岗位要求和项目文档属于上下文/证据；通用题、项目题和答案卡属于可检索的准备材料；面试问题、检索命中和最终回答属于运行时数据。项目回答只能使用已关联的项目事实，岗位要求只用于调整回答重点，不能作为候选人经历的证据。
 

@@ -6,6 +6,8 @@ export type HistoryQuestionStatus = "candidate" | "confirmed" | "answering" | "s
 export interface InterviewRecord {
   id: string;
   profileId: string;
+  projectId?: string;
+  jobTargetId?: string;
   startedAt: number;
   endedAt?: number;
   status: InterviewStatus;
@@ -34,6 +36,8 @@ export interface QuestionRecord {
   source: "rules" | "extractor";
   detectedAt: number;
   status: HistoryQuestionStatus;
+  parentQuestionId?: string;
+  rootQuestionId?: string;
 }
 
 export interface AnswerRecord {

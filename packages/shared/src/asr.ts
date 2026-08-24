@@ -490,7 +490,7 @@ export class QwenRealtimeAsrProvider implements StreamingAsrProvider {
     const range = this.itemRanges.get(itemId) ?? { startMs: this.lastFinalEndMs };
     const startMs = Math.max(0, Math.round(range.startMs));
     const endMs = Math.max(startMs, Math.round(range.endMs ?? this.sentAudioMs));
-    this.segmentListener({ source: this.source, text, startMs, endMs, final });
+    this.segmentListener({ source: this.source, text, startMs, endMs, final, utteranceId: itemId });
     if (final) {
       this.lastFinalEndMs = endMs;
       this.itemRanges.delete(itemId);

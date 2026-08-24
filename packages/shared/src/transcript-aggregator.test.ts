@@ -34,6 +34,16 @@ describe("TranscriptAggregator", () => {
     expect(aggregator.push({ id: "r5", source: "remote", text: "嗯。", startMs: 2_100, endMs: 2_300, final: true })?.text).toBe("嗯。");
   });
 
+  it("splits adjacent questions even when ASR omits punctuation", () => {
+    const aggregator = new TranscriptAggregator({ maxGapMs: 1_800 });
+    aggregator.push({ id: "q1", source: "remote", text: "为什么使用 DMA", startMs: 0, endMs: 600, final: true });
+    aggregator.push({ id: "q2", source: "remote", text: "如何验证采样时序", startMs: 700, endMs: 1_400, final: true });
+    const utterances = aggregator.flush("remote");
+    expect(utterances).toHaveLength(2);
+    expect(utterances[0]?.text).toContain("为什么使用 DMA");
+    expect(utterances[1]?.text).toContain("如何验证采样时序");
+  });
+
   it("does not carry a remote prompt across a candidate answer", () => {
     const aggregator = new TranscriptAggregator();
     aggregator.push({ id: "r1", source: "remote", text: "你准备怎么开始补这块？", startMs: 0, endMs: 900, final: true });

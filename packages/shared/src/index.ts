@@ -113,6 +113,31 @@ function normalizeTranscriptText(text: string): string {
   return normalizeTechnicalTerms(text);
 }
 
+function transcriptTextSimilarity(left: string, right: string): number {
+  const a = normalizeTranscriptText(left).replace(/[\s，。！？、,.!?；;:：]/g, "");
+  const b = normalizeTranscriptText(right).replace(/[\s，。！？、,.!?；;:：]/g, "");
+  if (!a || !b) return 0;
+  if (a === b || a.includes(b) || b.includes(a)) return 1;
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length > b.length ? a : b;
+  let common = 0;
+  for (const character of new Set(shorter)) if (longer.includes(character)) common += 1;
+  return common / Math.max(1, new Set(longer).size);
+}
+
+function transcriptOverlap(left: TranscriptSegment, right: TranscriptSegment): number {
+  const overlap = Math.max(0, Math.min(left.endMs, right.endMs) - Math.max(left.startMs, right.startMs));
+  const shortest = Math.max(1, Math.min(left.endMs - left.startMs, right.endMs - right.startMs));
+  return overlap / shortest;
+}
+
+function sameTranscriptUtterance(left: TranscriptSegment, right: TranscriptSegment): boolean {
+  if (left.source !== right.source) return false;
+  if (left.id && right.id && left.id === right.id) return true;
+  if (left.utteranceId && right.utteranceId && left.utteranceId === right.utteranceId) return true;
+  return transcriptOverlap(left, right) >= 0.75 && transcriptTextSimilarity(left.text, right.text) >= 0.55;
+}
+
 export class TranscriptStabilizer {
   private readonly finals: Record<TranscriptSource, TranscriptSegment[]> = { mic: [], remote: [] };
   private readonly partials: Partial<Record<TranscriptSource, TranscriptSegment>> = {};
@@ -122,9 +147,16 @@ export class TranscriptStabilizer {
     if (normalized.final) {
       delete this.partials[normalized.source];
       const list = this.finals[normalized.source];
-      const existingIndex = list.findIndex((item) => item.id === normalized.id);
-      if (existingIndex >= 0) list[existingIndex] = normalized;
-      else if (!list.some((item) => item.text === normalized.text && item.endMs === normalized.endMs)) list.push(normalized);
+      const existingIndex = list.findIndex((item) => sameTranscriptUtterance(item, normalized));
+      if (existingIndex >= 0) {
+        const existing = list[existingIndex];
+        // Prefer the provider's longer revision when the same speech item is
+        // finalized more than once. This replaces the old partial/final pair
+        // instead of appending both to the visible transcript.
+        list[existingIndex] = normalized.text.length >= existing.text.length
+          ? normalized
+          : { ...existing, ...normalized, text: existing.text };
+      } else list.push(normalized);
       list.sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
     } else {
       this.partials[normalized.source] = normalized;
@@ -222,6 +254,9 @@ export interface QuestionCandidate {
   fingerprint?: string;
   final?: boolean;
   triggerReason?: string;
+  /** Stable conversation-thread links for follow-up questions. */
+  parentQuestionId?: string;
+  rootQuestionId?: string;
 }
 
 export type QuestionEvent =
@@ -256,7 +291,13 @@ export function questionSimilarity(left: string, right: string): number {
   const b = tokenSet(right);
   if (a.size === 0 && b.size === 0) return 1;
   const intersection = [...a].filter((token) => b.has(token)).length;
-  return intersection / Math.max(1, new Set([...a, ...b]).size);
+  const unionScore = intersection / Math.max(1, new Set([...a, ...b]).size);
+  // ASR often emits a short revision and then a longer final sentence. A
+  // plain Jaccard score treats the longer sentence as a new question even
+  // when it contains the complete short question, so use containment as a
+  // second signal for dedupe.
+  const containmentScore = intersection / Math.max(1, Math.min(a.size, b.size));
+  return Math.max(unionScore, containmentScore * 0.96);
 }
 
 export function scoreQuestion(text: string, final: boolean, contextText = ""): { score: number; confidence: QuestionConfidence } {
@@ -383,7 +424,17 @@ export class QuestionDetector {
   }
 
   private confirmCandidate(candidate: QuestionCandidate, observedAtMs: number): QuestionEvent[] {
-    const dedupeScore = this.confirmed.reduce((maximum, previous) => observedAtMs - previous.detectedAt < this.dedupeWindowMs ? Math.max(maximum, previous.fingerprint && candidate.fingerprint && previous.fingerprint === candidate.fingerprint ? 1 : questionSimilarity(previous.text, candidate.text)) : maximum, 0);
+    const dedupeScore = this.confirmed.reduce((maximum, previous) => {
+      if (observedAtMs - previous.detectedAt >= this.dedupeWindowMs) return maximum;
+      // Brain-normalized follow-ups deliberately contain the parent question
+      // (“围绕…针对…追问：…”). Containment is useful for ASR revisions, but
+      // must not collapse a real follow-up into its parent turn.
+      const parentContextFollowUp = candidate.speechAct === "FOLLOW_UP"
+        && previous.speechAct !== "FOLLOW_UP"
+        && /(?:围绕|追问：|追问:)/.test(candidate.text);
+      if (parentContextFollowUp) return maximum;
+      return Math.max(maximum, previous.fingerprint && candidate.fingerprint && previous.fingerprint === candidate.fingerprint ? 1 : questionSimilarity(previous.text, candidate.text));
+    }, 0);
     if (dedupeScore >= this.similarityThreshold) {
       this.stateValue = "IDLE";
       this.resetBuffer();
