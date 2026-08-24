@@ -17,7 +17,8 @@ export class ProjectMemoryService {
     private readonly memories: SqliteProjectMemoryRepository,
     private readonly model?: ProjectMemoryModel,
     private readonly onUpdated?: (profileId: string) => void,
-    private readonly analysisRuns?: SqliteKnowledgeAnalysisRepository
+    private readonly analysisRuns?: SqliteKnowledgeAnalysisRepository,
+    private readonly embedFacts?: (profileId: string) => Promise<void>
   ) {}
 
   get(profileId: string) { return this.memories.getSnapshot(profileId); }
@@ -64,6 +65,7 @@ export class ProjectMemoryService {
     try {
       const snapshot = await new ProjectAnalyzerAgentClass(this.model).analyze(input);
       const saved = this.memories.replaceSnapshot(profileId, snapshot);
+      await this.embedFacts?.(profileId);
       this.analysisRuns?.record({ id: runId, profileId, runType: "project-memory", inputHash, status: "completed", inputSnapshot, output: saved });
       this.onUpdated?.(profileId);
       return saved;

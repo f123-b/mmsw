@@ -4,6 +4,7 @@ import { extractFile, listPackage } from "@electron/asar";
 
 const unpackedDirectory = process.env.ELECTRON_PACKAGE_DIR ?? join(process.cwd(), "apps", "desktop", "release", "win-unpacked");
 const archive = join(unpackedDirectory, "resources", "app.asar");
+const vadModel = join(unpackedDirectory, "resources", "vad", "silero_vad_16k_op15.onnx");
 const unpackedRequired = [
   join(unpackedDirectory, "resources", "audio-sidecar", "interview-audio.exe"),
   join(unpackedDirectory, "resources", "capture-helper", "capture-helper.exe"),
@@ -23,6 +24,7 @@ for (const path of unpackedRequired) {
   if (!existsSync(path)) throw new Error(`Missing packaged runtime dependency: ${path}`);
 }
 if (!existsSync(archive)) throw new Error(`Missing packaged archive: ${archive}`);
+if (!existsSync(vadModel)) throw new Error(`VAD_MODEL_PRESENT: Missing packaged Silero VAD model: ${vadModel}`);
 
 const archiveEntries = listPackage(archive, { isPack: false });
 console.log("First packaged app.asar entries returned by listPackage():");
@@ -61,4 +63,5 @@ if (packagedQ8Files.length > 0) throw new Error(`Forbidden q8 model files found 
 
 console.log(`Verified app.asar entries: ${archiveRequired.join(", ")}`);
 console.log(`Verified packaged runtime dependencies: ${unpackedRequired.join(", ")}`);
+console.log(`VAD_MODEL_PRESENT ${vadModel}`);
 console.log("Verified packaged resources do not contain q8 model files");

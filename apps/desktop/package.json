@@ -18,7 +18,7 @@
     "shutdown-process:e2e": "npm run build && node scripts/shutdown-e2e.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run --passWithNoTests",
-    "test:soak": "vitest run src/main/soak.test.ts --reporter=verbose"
+    "test:soak": "vitest run src/main/persistence-volume.test.ts src/main/interview-coordinator-soak.test.ts --reporter=verbose"
   },
   "dependencies": {
     "@interview-copilot/protocol": "0.1.0",

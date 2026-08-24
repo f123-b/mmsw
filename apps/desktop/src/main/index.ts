@@ -9,7 +9,7 @@ import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, fastRetrievalRace, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
@@ -1422,7 +1422,14 @@ if (hasSingleInstanceLock) {
       projectMemoryRepository,
       { generate: (input) => { const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings; return createProjectMemoryModel(answerProvider, { ...settings, model: taskModel(settings, "projectAnalyzerModel", "normalModel") }).generate(input); } },
       (profileId) => broadcast("project-memory:updated", { profileId, stats: projectMemoryRepository?.stats(profileId) }),
-      knowledgeAnalysisRepository
+      knowledgeAnalysisRepository,
+      async (profileId) => {
+        const settings = providerConfigStore?.get("embedding");
+        if (!settings?.apiKey || !settings.model || !projectMemoryRepository) return;
+        const embeddingProvider = new OpenAICompatibleEmbeddingProvider(settings);
+        const result = await projectMemoryRepository.embedFacts(profileId, (text) => embeddingProvider.embed(text), { model: settings.model, version: "project-facts-v1", concurrency: 4 });
+        if (result.failed > 0) appLogger?.warn("PROJECT_MEMORY_EMBEDDING_PARTIAL", { profileId, ...result });
+      }
     );
   }
   const resumeChunkCache = new Map<string, { source: string; chunks: ReturnType<typeof chunkText> }>();
@@ -1431,6 +1438,26 @@ if (hasSingleInstanceLock) {
     if (embeddingCache.size >= 64) embeddingCache.delete(embeddingCache.keys().next().value as string);
     embeddingCache.set(key, vector);
   };
+  const resolveEmbeddingWithinBudget = (embeddingPromise: Promise<number[] | undefined>, budgetMs = 100): Promise<{ vector?: number[]; timedOut: boolean; elapsedMs: number }> => new Promise((resolve) => {
+    const startedAt = performance.now();
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ timedOut: true, elapsedMs: Math.max(0, performance.now() - startedAt) });
+    }, budgetMs);
+    embeddingPromise.then((vector) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(vector ? { vector, timedOut: false, elapsedMs: Math.max(0, performance.now() - startedAt) } : { timedOut: false, elapsedMs: Math.max(0, performance.now() - startedAt) });
+    }, () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ timedOut: false, elapsedMs: Math.max(0, performance.now() - startedAt) });
+    });
+  });
   const answerContextProvider = async (question: { text: string }, profileId: string, recentTranscript: string[] = [], interviewContext?: InterviewContextSelection) => {
     const profile = profileRepository?.get(profileId);
     const normalizedQuestion = normalizeTechnicalTerms(question.text);
@@ -1440,13 +1467,44 @@ if (hasSingleInstanceLock) {
     const detectedProjectId = questionAnalysis.project ? projectSnapshot.projects.find((project) => project.name.toLowerCase() === questionAnalysis.project?.toLowerCase())?.id : undefined;
     const targetProjectId = interviewContext?.projectId ?? detectedProjectId;
     const useProjectContext = Boolean(interviewContext?.projectId) || knowledgeRoute.useProjectMemory;
-    const factMatches = projectMemoryRepository?.searchFacts(profileId, normalizedQuestion, {
+    const embeddingSettings = providerConfigStore?.get("embedding");
+    const embeddingKey = embeddingSettings?.apiKey && embeddingSettings.model
+      ? `${embeddingSettings.baseUrl}|${embeddingSettings.model}|${normalizedQuestion.toLowerCase()}`
+      : undefined;
+    const cachedVector = embeddingKey ? embeddingCache.get(embeddingKey) : undefined;
+    const queryEmbeddingPromise = cachedVector
+      ? Promise.resolve<number[] | undefined>(cachedVector)
+      : embeddingSettings?.apiKey && embeddingSettings.model
+        ? new OpenAICompatibleEmbeddingProvider(embeddingSettings).embed(normalizedQuestion).then((vector) => {
+          if (embeddingKey) rememberEmbedding(embeddingKey, vector);
+          return vector;
+        }).catch(() => undefined)
+        : Promise.resolve<number[] | undefined>(undefined);
+    const chunks = knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? [];
+    const retrievalOptions = { chunks, topK: 3, candidateK: 12, reranker: new KeywordReranker() };
+    const keywordTiming: RetrievalTiming = {};
+    // Start the lexical path before waiting for the shared query embedding so
+    // the 100ms semantic budget never delays the safe fallback.
+    const keywordRetrieval = new HybridKnowledgeRetriever({ ...retrievalOptions, timings: keywordTiming }).search(normalizedQuestion);
+    let factMatches = projectMemoryRepository?.searchFacts(profileId, normalizedQuestion, {
       projectId: interviewContext?.projectId,
       detectedProjectId,
       questionType: questionAnalysis.type,
       limit: 5,
       minScore: 0.18
     }) ?? [];
+    const embeddingBudget = await resolveEmbeddingWithinBudget(queryEmbeddingPromise, 100);
+    const queryEmbedding = embeddingBudget.vector;
+    if (queryEmbedding && projectMemoryRepository) {
+      factMatches = projectMemoryRepository.searchFacts(profileId, normalizedQuestion, {
+        projectId: interviewContext?.projectId,
+        detectedProjectId,
+        questionType: questionAnalysis.type,
+        queryEmbedding,
+        limit: 5,
+        minScore: 0.18
+      });
+    }
     const relevantFactMatches = (useProjectContext || (factMatches[0]?.score ?? 0) >= 0.28) ? factMatches : [];
     const verifiedFactExperience = relevantFactMatches.filter((hit) => hit.fact.verified)
       .map((hit) => `结构化项目事实（${hit.fact.type}，已确认，来源 ${hit.fact.sourceIds.join("、")}）：\n${hit.fact.title}\n${hit.fact.content}`);
@@ -1483,39 +1541,18 @@ if (hasSingleInstanceLock) {
     const preparedAnswer = preparedCard ? `题库参考答案（匹配度 ${Math.round((questionBankMatch?.score ?? 0) * 100)}%，仅作为已整理素材，不替代当前问题判断）：\n${preparedCard.content}${preparedCard.codeContent ? `\n代码：\n${preparedCard.codeContent}` : ""}${preparedCard.complexity ? `\n复杂度：${preparedCard.complexity}` : ""}${preparedCard.limitations ? `\n边界与限制：${preparedCard.limitations}` : ""}` : undefined;
     const jobMatches = jobTargetRepository?.searchRequirements(profileId, normalizedQuestion, 4, interviewContext?.jobTargetId) ?? [];
     const jobContext = jobMatches.map((hit) => `岗位要求（${hit.requirement.importance}，匹配度 ${Math.round(hit.score * 100)}%）：${hit.requirement.requirement}`);
-    const chunks = knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? [];
-    const retrievalOptions = { chunks, topK: 3, candidateK: 12, reranker: new KeywordReranker() };
-    const keywordTiming: RetrievalTiming = {};
-    const keywordRetrieval = new HybridKnowledgeRetriever({ ...retrievalOptions, timings: keywordTiming }).search(normalizedQuestion);
     let retrieved = await keywordRetrieval;
     let retrievalDiagnostics = {
       keywordRetrievalMs: keywordTiming.totalRetrievalMs ?? 0,
-      embeddingMs: 0,
+      embeddingMs: cachedVector ? 0 : embeddingBudget.elapsedMs,
       rerankMs: keywordTiming.rerankMs ?? 0,
       totalRetrievalMs: keywordTiming.totalRetrievalMs ?? 0,
-      embeddingTimedOut: false
+      embeddingTimedOut: embeddingBudget.timedOut
     };
-    const embeddingSettings = providerConfigStore?.get("embedding");
-    if (embeddingSettings?.apiKey && embeddingSettings.model && chunks.length > 0) {
-      const embeddingKey = `${embeddingSettings.baseUrl}|${embeddingSettings.model}|${normalizedQuestion.toLowerCase()}`;
-      const cachedVector = embeddingCache.get(embeddingKey);
-      if (cachedVector) {
-        const embeddingTiming: RetrievalTiming = {};
-        retrieved = await new HybridKnowledgeRetriever({ ...retrievalOptions, embeddingProvider: { embed: () => cachedVector }, timings: embeddingTiming }).search(normalizedQuestion);
-        retrievalDiagnostics = { ...retrievalDiagnostics, embeddingMs: 0, rerankMs: embeddingTiming.rerankMs ?? 0, totalRetrievalMs: embeddingTiming.totalRetrievalMs ?? retrievalDiagnostics.totalRetrievalMs };
-      } else {
-        const embeddingTiming: RetrievalTiming = {};
-        const embeddingStartedAt = performance.now();
-        const embeddingProvider = new OpenAICompatibleEmbeddingProvider(embeddingSettings);
-        const embeddingRetrieval = embeddingProvider.embed(normalizedQuestion).then((vector) => {
-          embeddingTiming.embeddingMs = Math.max(0, performance.now() - embeddingStartedAt);
-          rememberEmbedding(embeddingKey, vector);
-          return new HybridKnowledgeRetriever({ ...retrievalOptions, embeddingProvider: { embed: () => vector }, timings: embeddingTiming }).search(normalizedQuestion);
-        });
-        const race = await fastRetrievalRace({ keyword: keywordRetrieval, embedding: embeddingRetrieval, keywordTiming, embeddingTiming, budgetMs: 100 });
-        retrieved = race.results;
-        retrievalDiagnostics = race;
-      }
+    if (queryEmbedding && chunks.length > 0) {
+      const embeddingTiming: RetrievalTiming = {};
+      retrieved = await new HybridKnowledgeRetriever({ ...retrievalOptions, embeddingProvider: { embed: () => queryEmbedding }, timings: embeddingTiming }).search(normalizedQuestion);
+      retrievalDiagnostics = { ...retrievalDiagnostics, embeddingMs: cachedVector ? 0 : retrievalDiagnostics.embeddingMs, rerankMs: embeddingTiming.rerankMs ?? 0, totalRetrievalMs: embeddingTiming.totalRetrievalMs ?? retrievalDiagnostics.totalRetrievalMs };
     }
     retrievalRepository?.record({
       profileId,

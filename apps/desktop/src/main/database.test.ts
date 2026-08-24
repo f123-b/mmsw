@@ -168,6 +168,13 @@ describe("SQLite persistence", () => {
       expect(memory.stats("profile-1")).toEqual({ projects: 1, modules: 1, technicalPoints: 1, problems: 1, interviewQuestions: 1 });
       expect(memory.listFacts("profile-1").some((fact) => fact.type === "challenge" && fact.title === "低速抖动")).toBe(true);
       expect(memory.searchFacts("profile-1", "DMA 采样").some((item) => item.fact.title === "ADC" || item.fact.content.includes("DMA"))).toBe(true);
+      const firstEmbeddingRun = await memory.embedFacts("profile-1", async () => [1, 0, 0], { model: "test-embedding", version: "project-facts-v1" });
+      expect(firstEmbeddingRun.embedded).toBeGreaterThan(0);
+      expect(memory.listFacts("profile-1").every((fact) => fact.embedding?.length && fact.embeddingModel === "test-embedding")).toBe(true);
+      const semanticMatches = memory.searchFacts("profile-1", "完全不同的表述", { queryEmbedding: [1, 0, 0], limit: 3, minScore: 0 });
+      expect(semanticMatches[0]?.vectorScore).toBeGreaterThan(0.99);
+      const secondEmbeddingRun = await memory.embedFacts("profile-1", async () => { throw new Error("should reuse persisted vectors"); }, { model: "test-embedding", version: "project-facts-v1" });
+      expect(secondEmbeddingRun).toMatchObject({ embedded: 0, failed: 0 });
       const questionBank = new SqliteQuestionBankRepository(database);
       expect(questionBank.getQuestion("question-1")).toMatchObject({ scope: "project", profileId: "profile-1", projectId: "memory-project-foc", source: "generated" });
       expect(questionBank.getQuestion("question-1")?.answerCards[0]?.keyPoints).toEqual(["基于实时性约束"]);

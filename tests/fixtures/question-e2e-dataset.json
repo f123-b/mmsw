@@ -1,0 +1,81 @@
+[
+  {
+    "id": "partial-to-final",
+    "events": [
+      { "at": 1000, "id": "partial-1", "source": "remote", "text": "你会怎么", "startMs": 0, "endMs": 400, "final": false },
+      { "at": 1120, "id": "partial-1", "source": "remote", "text": "你会怎么优化这个模块？", "startMs": 0, "endMs": 900, "final": true }
+    ],
+    "expected": { "confirmed": 1, "utterances": 1, "shouldAnswer": true }
+  },
+  {
+    "id": "punctuation-merge",
+    "events": [
+      { "at": 2000, "id": "merge-1", "source": "remote", "text": "请解释 volatile。", "startMs": 0, "endMs": 900, "final": true },
+      { "at": 2200, "id": "merge-2", "source": "remote", "text": "关键字的作用。", "startMs": 900, "endMs": 1600, "final": true },
+      { "at": 2350, "id": "merge-3", "source": "remote", "text": "以及常见误区？", "startMs": 1600, "endMs": 2300, "final": true }
+    ],
+    "expected": { "confirmed": 1, "utterances": 1, "shouldAnswer": true, "expectMerge": true }
+  },
+  {
+    "id": "two-question-split",
+    "events": [
+      { "at": 3000, "id": "split-1", "source": "remote", "text": "为什么使用 DMA？", "startMs": 0, "endMs": 700, "final": true },
+      { "at": 5400, "id": "split-2", "source": "remote", "text": "如果重新设计你会怎么优化？", "startMs": 2600, "endMs": 3400, "final": true }
+    ],
+    "expected": { "confirmed": 2, "followUps": 1, "utterances": 2, "shouldAnswer": true, "expectSplit": true }
+  },
+  {
+    "id": "contextual-follow-up",
+    "events": [
+      { "at": 6000, "id": "follow-1", "source": "remote", "text": "介绍一下你的 FOC 项目？", "startMs": 0, "endMs": 900, "final": true },
+      { "at": 7700, "id": "follow-2", "source": "remote", "text": "好，说说", "startMs": 1500, "endMs": 1900, "final": true }
+    ],
+    "expected": { "confirmed": 2, "followUps": 1, "utterances": 2, "shouldAnswer": true }
+  },
+  {
+    "id": "revision-and-duplicate-final",
+    "events": [
+      { "at": 9000, "id": "revision-1", "source": "remote", "text": "你会怎么", "startMs": 0, "endMs": 400, "final": false },
+      { "at": 9150, "id": "revision-1", "source": "remote", "text": "你会怎么排查？", "startMs": 0, "endMs": 700, "final": true },
+      { "at": 9250, "id": "revision-1", "source": "remote", "text": "你会怎么一步步排查？", "startMs": 0, "endMs": 900, "final": true }
+    ],
+    "expected": { "confirmed": 1, "utterances": 1, "duplicateFinals": 1, "shouldAnswer": true }
+  },
+  {
+    "id": "mic-answer-is-not-question",
+    "events": [
+      { "at": 10000, "id": "mic-1", "source": "mic", "text": "我会先检查采样时序。", "startMs": 0, "endMs": 600, "final": true },
+      { "at": 10200, "id": "mic-2", "source": "mic", "text": "然后看 DMA 是否溢出。", "startMs": 700, "endMs": 1300, "final": true }
+    ],
+    "expected": { "confirmed": 0, "utterances": 0, "shouldAnswer": false }
+  },
+  {
+    "id": "control-speech",
+    "events": [
+      { "at": 11000, "id": "control-1", "source": "remote", "text": "请开始回答。", "startMs": 0, "endMs": 500, "final": true }
+    ],
+    "expected": { "confirmed": 0, "utterances": 1, "shouldAnswer": false }
+  },
+  {
+    "id": "statement-not-question",
+    "events": [
+      { "at": 12000, "id": "statement-1", "source": "remote", "text": "DMA 主要用于搬运采样数据。", "startMs": 0, "endMs": 700, "final": true }
+    ],
+    "expected": { "confirmed": 0, "utterances": 1, "shouldAnswer": false }
+  },
+  {
+    "id": "question-without-punctuation",
+    "events": [
+      { "at": 13000, "id": "no-punctuation-1", "source": "remote", "text": "你会如何验证采样时序", "startMs": 0, "endMs": 900, "final": true }
+    ],
+    "expected": { "confirmed": 1, "utterances": 1, "shouldAnswer": true }
+  },
+  {
+    "id": "clarification-follow-up",
+    "events": [
+      { "at": 14000, "id": "clarify-1", "source": "remote", "text": "IIC 通讯偶发读不到数据，你会怎么排查？", "startMs": 0, "endMs": 1000, "final": true },
+      { "at": 15800, "id": "clarify-2", "source": "remote", "text": "具体一点？", "startMs": 3000, "endMs": 3400, "final": true }
+    ],
+    "expected": { "confirmed": 2, "followUps": 1, "utterances": 2, "shouldAnswer": true }
+  }
+]

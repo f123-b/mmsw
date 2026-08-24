@@ -273,7 +273,10 @@ export class RealtimeSession extends EventEmitter {
 
   sendAudio(packet: Uint8Array): void {
     if (this.manualStop || this.state === "disconnected" || this.state === "reconnecting" || this.state === "error") return;
-    if (!this.hasSpeech(packet)) return;
+    // VAD is diagnostic/endpoint metadata only. Every PCM packet must reach
+    // the ASR stream so model warm-up, low-volume onset, and silence context
+    // cannot cause the beginning of a spoken turn to disappear.
+    this.processVAD(packet);
     this.audioTimelineOriginAt ||= Date.now();
     if (this.directRouter && this.state === "connected" && this.directRouter.isReady) {
       try {
@@ -305,20 +308,15 @@ export class RealtimeSession extends EventEmitter {
     }
   }
 
-  private hasSpeech(packet: Uint8Array): boolean {
-    // The sidecar emits interleaved stereo PCM16. Keep tiny synthetic packets
-    // usable for diagnostics/tests while gating real audio frames.
-    if (packet.byteLength < 160 || packet.byteLength % 4 !== 0) return true;
+  private processVAD(packet: Uint8Array): void {
+    // The sidecar emits interleaved stereo PCM16. Tiny packets are still sent
+    // to ASR, but are too short to produce useful channel-level VAD metadata.
+    if (packet.byteLength < 160 || packet.byteLength % 4 !== 0) return;
     const channels = splitStereoPcm(packet);
     const mic = this.micVad.process(channels.mic);
     const remote = this.remoteVad.process(channels.system);
     this.updateVADDiagnostics("mic", mic, this.micVad);
     this.updateVADDiagnostics("remote", remote, this.remoteVad);
-    // Do not drop audio while ONNX sessions are warming up. Once both
-    // providers are ready, VAD is only an endpoint gate and ASR remains the
-    // source of truth for the transcript.
-    if (mic.ready === false || remote.ready === false) return true;
-    return mic.speech || remote.speech;
   }
 
   sendControl(message: ClientControlMessage): void {

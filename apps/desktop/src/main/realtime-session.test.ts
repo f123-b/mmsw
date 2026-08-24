@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RealtimeSession, type RealtimeSocket } from "./realtime-session";
-import type { ProviderSettings, StreamingAsrSocket } from "@interview-copilot/shared";
+import type { ProviderSettings, StreamingAsrSocket, VADProvider } from "@interview-copilot/shared";
 
 class FakeSocket implements RealtimeSocket {
   readonly sent: Array<string | Uint8Array> = [];
@@ -43,6 +43,15 @@ class FakeDeepgramSocket implements StreamingAsrSocket {
 const directSettings: ProviderSettings = { providerName: "Deepgram", providerType: "deepgram", baseUrl: "wss://api.deepgram.com/v1/listen", apiKey: "secret", model: "nova-3", language: "zh-CN", timeoutMs: 15_000, maxRetries: 2 };
 const qwenSettings: ProviderSettings = { providerName: "Qwen Realtime ASR", providerType: "qwen", baseUrl: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime", apiKey: "secret", model: "qwen3-asr-flash-realtime", language: "zh-CN", timeoutMs: 15_000, maxRetries: 2 };
 
+function fakeVAD(ready: boolean): VADProvider {
+  return {
+    providerName: "silero",
+    fallback: false,
+    process: () => ({ speech: false, startTime: 0, endTime: 0, speechProbability: 0, speechStarted: false, speechEnded: false, ready }),
+    reset: () => undefined
+  };
+}
+
 describe("RealtimeSession", () => {
   it("sends client_ready and keeps ASR partials out of final history", () => {
     const socket = new FakeSocket();
@@ -56,6 +65,43 @@ describe("RealtimeSession", () => {
     socket.onmessage?.({ data: JSON.stringify({ type: "asr_final", segment: { id: "r1", source: "remote", text: "你能不能解释采样同步？", startMs: 0, endMs: 900, final: true } }) });
     expect(snapshots[0]?.final).toHaveLength(0);
     expect(snapshots[1]?.final).toHaveLength(1);
+    session.disconnect();
+  });
+
+  it("forwards silent PCM to ASR while VAD only updates diagnostics", () => {
+    const socket = new FakeSocket();
+    const session = new RealtimeSession(
+      () => socket,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => fakeVAD(true)
+    );
+    session.connect({ url: "wss://example.test/realtime", autoReconnect: false });
+    socket.onopen?.();
+    session.sendAudio(new Uint8Array(2_560));
+    expect(socket.sent).toContainEqual(expect.any(Uint8Array));
+    expect(session.asrDiagnostics.micSpeech).toBe(false);
+    session.disconnect();
+  });
+
+  it("forwards PCM while Silero providers are still warming up", () => {
+    const socket = new FakeSocket();
+    const session = new RealtimeSession(
+      () => socket,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => fakeVAD(false)
+    );
+    session.connect({ url: "wss://example.test/realtime", autoReconnect: false });
+    socket.onopen?.();
+    session.sendAudio(new Uint8Array(2_560));
+    expect(socket.sent).toContainEqual(expect.any(Uint8Array));
     session.disconnect();
   });
 

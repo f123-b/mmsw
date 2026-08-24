@@ -1,7 +1,10 @@
 export interface QuestionTraceInput {
   questionTraceId: string;
+  asrFinalReceivedAt?: number;
+  /** @deprecated Use asrFinalReceivedAt. Kept for existing integrations. */
   asrFinalAt?: number;
   utteranceFinalizedAt?: number;
+  questionDetectionStartedAt?: number;
   questionDetectedAt?: number;
   questionConfirmedAt?: number;
   questionScore?: number;
@@ -13,10 +16,15 @@ export interface QuestionTraceInput {
 }
 
 export interface QuestionTraceMetrics {
+  asrFinalToUtteranceMs?: number;
+  utteranceToDetectionMs?: number;
+  detectionToConfirmationMs?: number;
+  confirmationToRetrievalMs?: number;
   asrToQuestionMs?: number;
   questionToRetrievalMs?: number;
   retrievalMs?: number;
   llmFirstTokenMs?: number;
+  answerGenerationMs?: number;
   answerTotalMs?: number;
   endToEndMs?: number;
 }
@@ -40,10 +48,18 @@ export class QuestionTrace {
     this.value = { ...input, metrics: {} };
   }
 
-  mark(stage: "asrFinal" | "utteranceFinalized" | "questionDetected" | "questionConfirmed" | "retrievalStarted" | "retrievalEnded" | "llmRequestStarted" | "firstToken" | "answerEnded", at: number): this {
+  update(input: Partial<QuestionTraceInput>): this {
+    this.value = { ...this.value, ...input, metrics: this.value.metrics };
+    this.refreshMetrics();
+    return this;
+  }
+
+  mark(stage: "asrFinalReceived" | "asrFinal" | "utteranceFinalized" | "questionDetectionStarted" | "questionDetected" | "questionConfirmed" | "retrievalStarted" | "retrievalEnded" | "llmRequestStarted" | "firstToken" | "answerEnded", at: number): this {
     const key = {
+      asrFinalReceived: "asrFinalReceivedAt",
       asrFinal: "asrFinalAt",
       utteranceFinalized: "utteranceFinalizedAt",
+      questionDetectionStarted: "questionDetectionStartedAt",
       questionDetected: "questionDetectedAt",
       questionConfirmed: "questionConfirmedAt",
       retrievalStarted: "retrievalStartedAt",
@@ -53,15 +69,25 @@ export class QuestionTrace {
       answerEnded: "answerEndedAt"
     }[stage] as keyof QuestionTraceSnapshot;
     (this.value as unknown as Record<string, unknown>)[key] = at;
+    this.refreshMetrics();
+    return this;
+  }
+
+  private refreshMetrics(): void {
+    const asrFinalReceivedAt = this.value.asrFinalReceivedAt ?? this.value.asrFinalAt;
     this.value.metrics = {
-      asrToQuestionMs: elapsed(this.value.questionConfirmedAt, this.value.asrFinalAt),
+      asrFinalToUtteranceMs: elapsed(this.value.utteranceFinalizedAt, asrFinalReceivedAt),
+      utteranceToDetectionMs: elapsed(this.value.questionDetectedAt, this.value.utteranceFinalizedAt),
+      detectionToConfirmationMs: elapsed(this.value.questionConfirmedAt, this.value.questionDetectedAt),
+      confirmationToRetrievalMs: elapsed(this.value.retrievalStartedAt, this.value.questionConfirmedAt),
+      asrToQuestionMs: elapsed(this.value.questionConfirmedAt, asrFinalReceivedAt),
       questionToRetrievalMs: elapsed(this.value.retrievalStartedAt, this.value.questionConfirmedAt),
       retrievalMs: elapsed(this.value.retrievalEndedAt, this.value.retrievalStartedAt),
       llmFirstTokenMs: elapsed(this.value.firstTokenAt, this.value.llmRequestStartedAt),
+      answerGenerationMs: elapsed(this.value.answerEndedAt, this.value.llmRequestStartedAt),
       answerTotalMs: elapsed(this.value.answerEndedAt, this.value.llmRequestStartedAt),
-      endToEndMs: elapsed(this.value.answerEndedAt, this.value.asrFinalAt)
+      endToEndMs: elapsed(this.value.answerEndedAt, asrFinalReceivedAt)
     };
-    return this;
   }
 
   snapshot(): QuestionTraceSnapshot {

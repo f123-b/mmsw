@@ -458,6 +458,7 @@ export class InterviewCoordinator extends EventEmitter {
       if (state === "error" && this.running) this.emitDiagnostic("ASR connection failed; reconnect is still enabled");
     });
     this.asr.on("transcript", (snapshot: unknown, rawSegment: TranscriptSegment) => {
+      const receivedAt = this.now();
       const segment: TranscriptSegment = { ...rawSegment, text: normalizeTechnicalTerms(rawSegment.text) };
       this.emit("event", { type: "transcript", snapshot, segment });
       if (!this.activeInterviewId) return;
@@ -484,7 +485,7 @@ export class InterviewCoordinator extends EventEmitter {
       // A provider final marks a stable ASR segment, not necessarily the end
       // of the interviewer's sentence. Keep assembling until a short adaptive
       // silence expires, then analyze the complete utterance exactly once.
-      const utterance = this.aggregator.push(segment);
+      const utterance = this.aggregator.push(segment, receivedAt);
       if (!utterance) return;
       this.clearQuestionFlushTimer();
       this.drainCompletedRemoteUtterances();
@@ -499,7 +500,7 @@ export class InterviewCoordinator extends EventEmitter {
     if (event.type === "question_confirmed" || event.type === "question_superseded") {
       this.currentQuestion = event.question;
       const trace = this.pendingQuestionTrace ?? new QuestionTrace({ questionTraceId: `question-trace-${event.question.id}`, questionScore: event.question.score, questionType: event.question.detectionType, followUp: event.question.speechAct === "FOLLOW_UP", projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId });
-      trace.mark("questionDetected", event.question.detectedAt).mark("questionConfirmed", this.now());
+      trace.mark("questionDetected", this.now()).mark("questionConfirmed", this.now());
       this.currentQuestionTrace = trace;
       this.pendingQuestionTrace = undefined;
       // The renderer must never keep showing the previous answer under a new
@@ -577,7 +578,7 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private flushRemoteUtterances(): void {
-    this.aggregator.flush("remote").forEach((utterance) => this.enqueueFinalUtterance(utterance));
+    this.aggregator.flush("remote", this.now()).forEach((utterance) => this.enqueueFinalUtterance(utterance));
   }
 
   private scheduleRemoteAssembly(utterance: TranscriptUtterance, latest: TranscriptSegment): void {
@@ -624,6 +625,15 @@ export class InterviewCoordinator extends EventEmitter {
 
   private async observeFinalQuestion(utterance: TranscriptUtterance, sessionGeneration = this.sessionGeneration): Promise<void> {
     if (sessionGeneration !== this.sessionGeneration || !this.activeInterviewId) return;
+    const detectionStartedAt = this.now();
+    const trace = new QuestionTrace({
+      questionTraceId: `question-trace-${utterance.id}`,
+      asrFinalReceivedAt: utterance.lastFinalReceivedAt ?? detectionStartedAt,
+      utteranceFinalizedAt: utterance.finalizedAt ?? detectionStartedAt,
+      projectId: this.activeOptions?.projectId,
+      jobTargetId: this.activeOptions?.jobTargetId
+    }).mark("questionDetectionStarted", detectionStartedAt);
+    this.pendingQuestionTrace = trace;
     // Rules remain the first signal. When the local classifier is configured,
     // the async call adds the CPU-local ONNX speech-act signal. Test and
     // third-party integrations without that optional model retain the old
@@ -641,7 +651,10 @@ export class InterviewCoordinator extends EventEmitter {
     }
     // Elliptical follow-ups such as “好，说说” are promoted by
     // InterviewBrain immediately when a topic exists in memory.
-    if (!decision.isQuestion || !this.activeInterviewId || sessionGeneration !== this.sessionGeneration) return;
+    if (!decision.isQuestion || !this.activeInterviewId || sessionGeneration !== this.sessionGeneration) {
+      if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
+      return;
+    }
     const observed = decision.normalizedQuestion && decision.normalizedQuestion !== utterance.text ? { ...utterance, text: decision.normalizedQuestion } : utterance;
     const effectiveAnalysis = analysis.isQuestion
       ? analysis
@@ -655,8 +668,11 @@ export class InterviewCoordinator extends EventEmitter {
         reason: decision.reason,
         score: { ...analysis.score, finalScore: Math.max(analysis.score.finalScore, decision.confidence), semanticScore: Math.max(analysis.score.semanticScore, decision.confidence) }
       };
-    const traceAt = this.now();
-    this.pendingQuestionTrace = new QuestionTrace({ questionTraceId: `question-trace-${utterance.id}`, asrFinalAt: traceAt, questionScore: effectiveAnalysis.score.finalScore, questionType: effectiveAnalysis.type, followUp: effectiveAnalysis.speechAct === "FOLLOW_UP", projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId }).mark("utteranceFinalized", traceAt).mark("questionDetected", traceAt);
+    trace.update({
+      questionScore: effectiveAnalysis.score.finalScore,
+      questionType: effectiveAnalysis.type,
+      followUp: effectiveAnalysis.speechAct === "FOLLOW_UP"
+    }).mark("questionDetected", this.now());
     this.detector.observe({ ...observed, utteranceId: utterance.id, analysis: effectiveAnalysis }, this.now()).forEach((event) => this.handleQuestionEvent(event));
     // The remote assembly timer already represents an end-of-speech silence.
     // Flush the temporal detector immediately after the assembled utterance

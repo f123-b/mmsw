@@ -74,4 +74,12 @@ describe("TranscriptAggregator", () => {
     aggregator.push({ id: "same-segment", source: "remote", text: "IIC 通讯偶发读不到数据", startMs: 0, endMs: 650, final: true });
     expect(aggregator.flush("remote")[0]?.text).toBe("IIC 通讯偶发读不到数据");
   });
+
+  it("keeps runtime receipt and utterance finalization timestamps separate from ASR offsets", () => {
+    const aggregator = new TranscriptAggregator();
+    aggregator.push({ id: "timed", source: "remote", text: "为什么这样设计？", startMs: 0, endMs: 900, final: true }, 10_000);
+    const utterance = aggregator.flush("remote", 10_240)[0];
+    expect(utterance).toMatchObject({ firstSegmentReceivedAt: 10_000, lastFinalReceivedAt: 10_000, finalizedAt: 10_240 });
+    expect(utterance?.startMs).toBe(0);
+  });
 });

@@ -17,6 +17,12 @@ function asPredictedType(isAnswerable: boolean, speechAct: string): QuestionFixt
   return speechAct === "FOLLOW_UP" ? "follow_up" : "question";
 }
 
+function percentile(values: number[], percentileValue: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * percentileValue) - 1)] ?? 0;
+}
+
 describe("Question Detection benchmark", () => {
   it("reports precision, recall, follow-up accuracy and failed samples", async () => {
     const fixtures = dataset as QuestionFixture[];
@@ -28,7 +34,7 @@ describe("Question Detection benchmark", () => {
     let trueNegative = 0;
     let followUpCorrect = 0;
     let followUpTotal = 0;
-    let totalLatencyMs = 0;
+    const classificationLatenciesMs: number[] = [];
     const failures: Array<{ text: string; expected: string; predicted: string; reason: string }> = [];
 
     for (const fixture of fixtures) {
@@ -37,7 +43,7 @@ describe("Question Detection benchmark", () => {
       const analysis = fixture.source === "mic"
         ? { isQuestion: false, speechAct: "CONTROL", reason: "mic-excluded" }
         : await detector.analyze(text, fixture.context?.join(" | ") ?? "", true, { recentTranscript: fixture.context });
-      totalLatencyMs += performance.now() - startedAt;
+      classificationLatenciesMs.push(performance.now() - startedAt);
       const predictedAnswer = analysis.isQuestion;
       if (fixture.shouldAnswer && predictedAnswer) truePositive += 1;
       else if (!fixture.shouldAnswer && predictedAnswer) falsePositive += 1;
@@ -68,7 +74,9 @@ describe("Question Detection benchmark", () => {
       falsePositiveRate: Number(falsePositiveRate.toFixed(4)),
       missRate: Number(missRate.toFixed(4)),
       followUpAccuracy: Number(followUpAccuracy.toFixed(4)),
-      averageConfirmationLatencyMs: Number((totalLatencyMs / fixtures.length).toFixed(3)),
+      averageClassificationLatencyMs: Number((classificationLatenciesMs.reduce((sum, value) => sum + value, 0) / fixtures.length).toFixed(3)),
+      classificationLatencyP50Ms: Number(percentile(classificationLatenciesMs, 0.5).toFixed(3)),
+      classificationLatencyP95Ms: Number(percentile(classificationLatenciesMs, 0.95).toFixed(3)),
       truePositive,
       falsePositive,
       falseNegative,

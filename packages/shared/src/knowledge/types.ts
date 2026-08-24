@@ -50,6 +50,10 @@ export interface ProjectFact {
   verified: boolean;
   sourceIds: string[];
   embedding?: number[];
+  embeddingHash?: string;
+  embeddingModel?: string;
+  embeddingVersion?: string;
+  embeddingUpdatedAt?: number;
   createdAt?: number;
   updatedAt?: number;
 }

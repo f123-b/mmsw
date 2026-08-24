@@ -1,4 +1,5 @@
 import initSqlJs, { type SqlJsStatic } from "sql.js";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -50,6 +51,10 @@ export interface DatabaseFlushDiagnostics {
 }
 
 function id(prefix: string, now: number): string { return `${prefix}-${now}-${Math.random().toString(36).slice(2, 8)}`; }
+
+function projectFactEmbeddingHash(title: string, content: string): string {
+  return createHash("sha256").update(`${title}\n${content}`).digest("hex");
+}
 
 function wasmCandidates(): string[] {
   const resourcesPath = process.resourcesPath ?? process.cwd();
@@ -450,6 +455,13 @@ export class SqliteDatabase {
       `],
       [13, `
         ALTER TABLE retrieval_runs ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
+      `],
+      [14, `
+        ALTER TABLE project_facts ADD COLUMN embedding_hash TEXT;
+        ALTER TABLE project_facts ADD COLUMN embedding_model TEXT;
+        ALTER TABLE project_facts ADD COLUMN embedding_version TEXT;
+        ALTER TABLE project_facts ADD COLUMN embedding_updated_at INTEGER;
+        CREATE INDEX IF NOT EXISTS project_facts_embedding_idx ON project_facts(embedding_hash, embedding_model, embedding_version);
       `]
     ];
     for (const [version, sql] of migrations) {
@@ -682,6 +694,7 @@ export class SqliteProjectMemoryRepository {
 
   replaceSnapshot(profileId: string, snapshot: ProjectMemorySnapshot, now = Date.now()): ProjectMemorySnapshot {
     const previousFactVerification = new Map(this.database.all<{ id: string; verified: number }>("SELECT id, verified FROM project_facts WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ? AND id LIKE 'memory-project-%')", [profileId]).map((row) => [row.id, Number(row.verified) === 1] as const));
+    const previousFactEmbeddings = new Map(this.database.all<{ id: string; embeddingJson: string | null; embeddingHash: string | null; embeddingModel: string | null; embeddingVersion: string | null; embeddingUpdatedAt: number | null }>("SELECT id, embedding_json AS embeddingJson, embedding_hash AS embeddingHash, embedding_model AS embeddingModel, embedding_version AS embeddingVersion, embedding_updated_at AS embeddingUpdatedAt FROM project_facts WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ? AND id LIKE 'memory-project-%')", [profileId]).map((row) => [row.id, row] as const));
     this.database.run("DELETE FROM question_bank_questions WHERE scope = 'project' AND profile_id = ? AND source = 'generated'", [profileId]);
     this.database.run("DELETE FROM projects WHERE profile_id = ? AND id LIKE 'memory-project-%'", [profileId]);
     for (const project of snapshot.projects) {
@@ -694,7 +707,10 @@ export class SqliteProjectMemoryRepository {
     const projectById = new Map(snapshot.projects.map((project) => [project.id, project]));
     const saveFact = (fact: ProjectFact): void => {
       const verified = previousFactVerification.get(fact.id) ?? fact.verified;
-      this.database.run("INSERT INTO project_facts(id, project_id, fact_type, title, content, confidence, verified, status, embedding_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, ?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, fact_type=excluded.fact_type, title=excluded.title, content=excluded.content, confidence=excluded.confidence, verified=excluded.verified, status=excluded.status, updated_at=excluded.updated_at", [fact.id, fact.projectId, fact.type, fact.title, fact.content, Math.max(0, Math.min(1, fact.confidence)), verified ? 1 : 0, fact.createdAt ?? now, fact.updatedAt ?? now]);
+      const contentHash = projectFactEmbeddingHash(fact.title, fact.content);
+      const previous = previousFactEmbeddings.get(fact.id);
+      const keepEmbedding = previous?.embeddingHash === contentHash && Boolean(previous.embeddingJson);
+      this.database.run("INSERT INTO project_facts(id, project_id, fact_type, title, content, confidence, verified, status, embedding_json, embedding_hash, embedding_model, embedding_version, embedding_updated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, fact_type=excluded.fact_type, title=excluded.title, content=excluded.content, confidence=excluded.confidence, verified=excluded.verified, status=excluded.status, embedding_json=excluded.embedding_json, embedding_hash=excluded.embedding_hash, embedding_model=excluded.embedding_model, embedding_version=excluded.embedding_version, embedding_updated_at=excluded.embedding_updated_at, updated_at=excluded.updated_at", [fact.id, fact.projectId, fact.type, fact.title, fact.content, Math.max(0, Math.min(1, fact.confidence)), verified ? 1 : 0, keepEmbedding ? previous?.embeddingJson : null, keepEmbedding ? contentHash : null, keepEmbedding ? previous?.embeddingModel ?? null : null, keepEmbedding ? previous?.embeddingVersion ?? null : null, keepEmbedding ? previous?.embeddingUpdatedAt ?? null : null, fact.createdAt ?? now, fact.updatedAt ?? now]);
       this.database.run("DELETE FROM project_fact_sources WHERE fact_id = ?", [fact.id]);
       for (const sourceId of fact.sourceIds) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, created_at) VALUES (?, ?, NULL, NULL, ?)", [fact.id, sourceId, now]);
     };
@@ -718,13 +734,13 @@ export class SqliteProjectMemoryRepository {
 
   listFacts(profileId: string, projectId?: string): ProjectFact[] {
       const rows = projectId
-      ? this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.embedding_json AS embeddingJson, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.project_id = ? AND f.status = 'active' ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId, projectId])
-      : this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.embedding_json AS embeddingJson, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.status = 'active' ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId]);
+      ? this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.project_id = ? AND f.status = 'active' ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId, projectId])
+      : this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.status = 'active' ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId]);
     return rows.map((row) => this.hydrateFact(row));
   }
 
   getFact(factId: string): ProjectFact | undefined {
-    const row = this.database.first<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE f.id = ?", [factId]);
+    const row = this.database.first<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE f.id = ?", [factId]);
     return row ? this.hydrateFact(row) : undefined;
   }
 
@@ -747,10 +763,47 @@ export class SqliteProjectMemoryRepository {
     return hits.map((hit: ProjectRetrievalHit) => ({ ...hit, score: hit.finalScore }));
   }
 
+  setFactEmbedding(factId: string, embedding: number[], options: { model?: string; version?: string; now?: number } = {}): ProjectFact | undefined {
+    const fact = this.getFact(factId);
+    const vector = embedding.filter((value) => Number.isFinite(value));
+    if (!fact || vector.length === 0) return fact;
+    const now = options.now ?? Date.now();
+    this.database.run("UPDATE project_facts SET embedding_json = ?, embedding_hash = ?, embedding_model = ?, embedding_version = ?, embedding_updated_at = ?, updated_at = ? WHERE id = ?", [JSON.stringify(vector), projectFactEmbeddingHash(fact.title, fact.content), options.model ?? null, options.version ?? "project-facts-v1", now, now, factId]);
+    this.database.flushNow();
+    return this.getFact(factId);
+  }
+
+  async embedFacts(profileId: string, embed: (text: string) => Promise<number[]>, options: { model?: string; version?: string; concurrency?: number } = {}): Promise<{ embedded: number; reused: number; failed: number }> {
+    const facts = this.listFacts(profileId);
+    const concurrency = Math.max(1, Math.min(8, Math.floor(options.concurrency ?? 4)));
+    let embedded = 0;
+    let reused = 0;
+    let failed = 0;
+    const pending = facts.filter((fact) => {
+      const sameContent = Boolean(fact.embedding?.length && fact.embeddingHash === projectFactEmbeddingHash(fact.title, fact.content));
+      const sameModel = !options.model || fact.embeddingModel === options.model;
+      const sameVersion = !options.version || fact.embeddingVersion === options.version;
+      if (sameContent && sameModel && sameVersion) { reused += 1; return false; }
+      return true;
+    });
+    for (let index = 0; index < pending.length; index += concurrency) {
+      await Promise.all(pending.slice(index, index + concurrency).map(async (fact) => {
+        try {
+          const vector = await embed(`${fact.title}\n${fact.content}`);
+          if (this.setFactEmbedding(fact.id, vector, options)) embedded += 1;
+          else failed += 1;
+        } catch {
+          failed += 1;
+        }
+      }));
+    }
+    return { embedded, reused, failed };
+  }
+
   private hydrateFact(row: Record<string, unknown>): ProjectFact {
     const sourceIds = this.database.all<{ sourceId: string }>("SELECT source_id AS sourceId FROM project_fact_sources WHERE fact_id = ? ORDER BY created_at", [String(row.id)]).map((item) => item.sourceId);
     const embedding = jsonArray<number>(row.embeddingJson);
-    return { id: String(row.id), projectId: String(row.projectId), profileId: String(row.profileId), type: String(row.type) as ProjectFactType, title: String(row.title), content: String(row.content), confidence: Number(row.confidence ?? 1), verified: Number(row.verified) === 1, sourceIds, ...(embedding.length ? { embedding } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
+    return { id: String(row.id), projectId: String(row.projectId), profileId: String(row.profileId), type: String(row.type) as ProjectFactType, title: String(row.title), content: String(row.content), confidence: Number(row.confidence ?? 1), verified: Number(row.verified) === 1, sourceIds, ...(embedding.length ? { embedding } : {}), ...(row.embeddingHash ? { embeddingHash: String(row.embeddingHash) } : {}), ...(row.embeddingModel ? { embeddingModel: String(row.embeddingModel) } : {}), ...(row.embeddingVersion ? { embeddingVersion: String(row.embeddingVersion) } : {}), ...(row.embeddingUpdatedAt ? { embeddingUpdatedAt: Number(row.embeddingUpdatedAt) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
   }
 
   stats(profileId: string): ProjectMemoryStats {

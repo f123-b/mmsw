@@ -10,6 +10,12 @@ export interface TranscriptUtterance {
   endMs: number;
   final: true;
   confidence?: number;
+  /** Runtime receipt time of the first final segment in this turn. */
+  firstSegmentReceivedAt?: number;
+  /** Runtime receipt time of the latest final/revision in this turn. */
+  lastFinalReceivedAt?: number;
+  /** Runtime time at which the turn was closed by a boundary or flush. */
+  finalizedAt?: number;
 }
 
 export interface TranscriptAggregatorOptions {
@@ -88,7 +94,7 @@ export class TranscriptAggregator {
    * Only final segments are emitted. Partials are intentionally left to the
    * stabilizer/UI so the question detector never answers on unstable text.
    */
-  push(segment: TranscriptSegment): TranscriptUtterance | undefined {
+  push(segment: TranscriptSegment, receivedAt = Date.now()): TranscriptUtterance | undefined {
     if (!segment.final) return undefined;
     const text = normalize(segment.text);
     if (!text) return undefined;
@@ -100,6 +106,7 @@ export class TranscriptAggregator {
       this.parts[segment.source]?.set(segment.id, text);
       previous.startMs = Math.min(previous.startMs, segment.startMs);
       previous.endMs = Math.max(previous.endMs, segment.endMs);
+      previous.lastFinalReceivedAt = receivedAt;
       if (segment.confidence !== undefined) previous.confidence = segment.confidence;
       previous.text = this.rebuildText(segment.source, previous.segmentIds);
       return { ...previous, segmentIds: [...previous.segmentIds] };
@@ -116,10 +123,11 @@ export class TranscriptAggregator {
       previous.text = this.rebuildText(segment.source, [...previous.segmentIds, segment.id]);
       previous.endMs = Math.max(previous.endMs, segment.endMs);
       previous.segmentIds.push(segment.id);
+      previous.lastFinalReceivedAt = receivedAt;
       if (segment.confidence !== undefined) previous.confidence = segment.confidence;
       return { ...previous, segmentIds: [...previous.segmentIds] };
     }
-    if (previous) this.enqueueCompleted(segment.source, previous);
+    if (previous) this.enqueueCompleted(segment.source, previous, receivedAt);
     const parts = new Map<string, string>([[segment.id, text]]);
     this.parts[segment.source] = parts;
     const utterance: TranscriptUtterance = {
@@ -130,6 +138,8 @@ export class TranscriptAggregator {
       startMs: segment.startMs,
       endMs: segment.endMs,
       final: true,
+      firstSegmentReceivedAt: receivedAt,
+      lastFinalReceivedAt: receivedAt,
       ...(segment.confidence !== undefined ? { confidence: segment.confidence } : {})
     };
     this.current[segment.source] = utterance;
@@ -146,13 +156,13 @@ export class TranscriptAggregator {
     return values.map((value) => ({ ...value, segmentIds: [...value.segmentIds] }));
   }
 
-  flush(source?: TranscriptSource): TranscriptUtterance[] {
+  flush(source?: TranscriptSource, finalizedAt = Date.now()): TranscriptUtterance[] {
     if (source) {
       const value = this.current[source];
       const completed = this.drainCompleted(source);
       delete this.current[source];
       delete this.parts[source];
-      return value ? [...completed, { ...value, segmentIds: [...value.segmentIds] }] : completed;
+      return value ? [...completed, { ...value, finalizedAt, segmentIds: [...value.segmentIds] }] : completed;
     }
     const values = (Object.keys(this.current) as TranscriptSource[]).flatMap((item) => this.flush(item));
     return values;
@@ -167,9 +177,9 @@ export class TranscriptAggregator {
     delete this.parts.remote;
   }
 
-  private enqueueCompleted(source: TranscriptSource, utterance: TranscriptUtterance): void {
+  private enqueueCompleted(source: TranscriptSource, utterance: TranscriptUtterance, finalizedAt: number): void {
     const queue = this.completed[source] ?? [];
-    queue.push({ ...utterance, segmentIds: [...utterance.segmentIds] });
+    queue.push({ ...utterance, finalizedAt, segmentIds: [...utterance.segmentIds] });
     this.completed[source] = queue;
   }
 
