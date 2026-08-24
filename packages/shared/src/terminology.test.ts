@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeTechnicalTerms, normalizeTechnicalTermsWithCorrections } from "./terminology";
+import { createTerminologyDictionary, normalizeTechnicalTerms, normalizeTechnicalTermsWithCorrections } from "./terminology";
 import { QuestionDetector2 } from "./question-detector-2";
 
 describe("technical terminology normalization", () => {
@@ -24,5 +24,17 @@ describe("technical terminology normalization", () => {
     expect(result.text).toContain("CAN FD");
     expect(result.text).toContain("堆溢出");
     expect(result.corrections.length).toBeGreaterThan(3);
+  });
+
+  it("does not rewrite ordinary words that contain acronym spellings", () => {
+    expect(normalizeTechnicalTerms("candidate focus DMA 项目")) .toBe("candidate focus DMA 项目");
+  });
+
+  it("supports scoped project vocabulary and records only term-level corrections", () => {
+    const dictionary = createTerminologyDictionary([{ canonical: "STM32G431", pattern: /stm\s*32\s*g\s*431/gi, context: /FOC|电机/i, priority: 20 }]);
+    const result = normalizeTechnicalTermsWithCorrections("FOC 项目使用 stm 32 g 431", dictionary.rules);
+    expect(result.text).toContain("STM32G431");
+    expect(result.corrections.at(-1)).toMatchObject({ canonical: "STM32G431", source: "project" });
+    expect(result.corrections.every((correction) => correction.raw.length < 32)).toBe(true);
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AnswerAgent, classifyAnswerQuestion, ContextRouter, ModelRouter, PromptBuilder, StableAnswerStateMachine, type AnswerProvider } from "./answer";
 import { InterviewAnswerFormatter } from "./answer/interview-answer-formatter";
+import { StreamingAnswerSanitizer } from "./answer/streaming-answer-sanitizer";
 
 async function* chunks(values: string[]): AsyncGenerator<string> {
   for (const value of values) yield value;
@@ -13,6 +14,7 @@ describe("Answer routing and generation", () => {
     expect(classifyAnswerQuestion("请写一个二叉树遍历，并说明复杂度")).toBe("code");
     expect(classifyAnswerQuestion("设计一个高并发订单系统")).toBe("system-design");
     expect(classifyAnswerQuestion("IIC 和 SPI 有什么区别？")).toBe("comparison");
+    expect(classifyAnswerQuestion("低速抖动怎么排查？")).toBe("embedded-debugging");
     expect(classifyAnswerQuestion("介绍一下你负责的项目")).toBe("project");
     expect(classifyAnswerQuestion("你如何处理团队冲突？")).toBe("behavioral");
   });
@@ -92,6 +94,13 @@ describe("Answer routing and generation", () => {
     expect(calls).toBe(1);
     expect(events.map((event) => event.type)).toEqual(["answer_start", "answer_end"]);
     expect(events.at(-1)).toMatchObject({ type: "answer_end", text: "首先，直接返回这一版。" });
+  });
+
+  it("sanitizes safe presentation noise without rewriting technical content", () => {
+    const sanitizer = new StreamingAnswerSanitizer();
+    expect(sanitizer.push("这个问题可以从以下几个方面回答")).toBe("");
+    expect(sanitizer.push("：\n###\n- DMA 让 CPU 不再搬运数据。\n\n\n" )).toBe("DMA 让 CPU 不再搬运数据。\n\n");
+    expect(sanitizer.finalize()).toBe("DMA 让 CPU 不再搬运数据。\n\n");
   });
 });
 

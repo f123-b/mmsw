@@ -17,7 +17,8 @@
     "probe-failure:e2e": "npm run build && node scripts/probe-failure-e2e.mjs",
     "shutdown-process:e2e": "npm run build && node scripts/shutdown-e2e.mjs",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "test:soak": "vitest run src/main/soak.test.ts --reporter=verbose"
   },
   "dependencies": {
     "@interview-copilot/protocol": "0.1.0",
@@ -76,6 +77,13 @@
           "labels.json",
           "metrics.json",
           "model-card.json"
+        ]
+      },
+      {
+        "from": "models/vad",
+        "to": "vad",
+        "filter": [
+          "silero_vad_16k_op15.onnx"
         ]
       },
       {

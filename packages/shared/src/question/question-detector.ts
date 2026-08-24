@@ -3,8 +3,9 @@ import type { LocalQuestionModel, LocalQuestionResult } from "./local-classifier
 import type { QuestionAnalysis, QuestionDetectionContext, QuestionDetectionType, QuestionLLMConfirmer, QuestionScore, QuestionSpeechAct } from "./types";
 import { normalizeTechnicalTerms } from "../terminology";
 
-const RULE_KEYWORDS = /什么|为什么|为何|怎么|如何|介绍|原理|区别|优化|请问|能不能|是否|有没有|哪个|哪里|解释|讲一下|说一下|说说|展开|困难|挑战|设计|如果.*(重新|改|换|设计)/;
-const ROBUST_QUESTION_FORM = /为什么|为何|什么是|哪些|哪种|区别|原理|介绍|解释|说明|请问|怎么(?:排查|解决|定位|判断|验证|设计|优化)|如何(?:排查|解决|定位|判断|验证|设计|优化)|如果.*(?:重新|改|换|设计)|会怎么优化/;
+const RULE_KEYWORDS = /什么|为什么|为何|怎么|如何|介绍|原理|区别|优化|请问|能不能|是否|有没有|哪些|哪种|哪个|哪里|解释|说明|讲一下|说一下|说说|展开|常见误区|作用|困难|挑战|设计|架构|系统|如果.*(重新|改|换|设计)/;
+const ROBUST_QUESTION_FORM = /为什么|为何|什么是|哪些|哪种|区别|原理|介绍|解释|说明|常见误区|作用|请问|怎么(?:排查|解决|定位|判断|验证|设计|优化)|如何(?:排查|解决|定位|判断|验证|设计|优化)|如果.*(?:重新|改|换|设计)|会怎么优化|设计.*(?:系统|架构|方案|模块)/;
+const SHORT_FOLLOW_UP_FORM = /^(?:为什么|具体(?:呢)?|这个.+|那.+|怎么(?:做的?|办|排查|定位)|如何(?:做)?|还有(?:吗)?|然后呢|再具体一点)[？?。！!\s]*$/;
 const CLARIFICATION_KEYWORDS = /具体一点|什么意思|没听清|再说一遍|能展开|详细一点|指的是|怎么理解/;
 const FILLER_ONLY = /^(嗯+|呃+|啊+|哦+|好+|对+|那个|嗯嗯|知道了)[。！？?！\s]*$/i;
 const SMALL_TALK = /^(你好|您好|谢谢|辛苦了|好的|明白了|嗯嗯|哈哈)[。！？?！\s]*$/i;
@@ -133,7 +134,7 @@ function buildAnalysisWithClassifier(
   llm?: { confidence: number; isQuestion: boolean; label?: QuestionSpeechAct; type?: QuestionDetectionType; reason?: string },
   threshold = 0.85
 ): QuestionAnalysis {
-  const normalized = normalize(text);
+  const normalized = normalize(text).replace(/^(?:面试官|interviewer)\s*[:：]\s*/i, "");
   const contextText = normalize(context.contextText || [context.memory?.currentTopic, ...(context.recentTranscript || [])].filter(Boolean).join(" "));
   const classification = { ...classifier.classify(normalized, contextText, final) };
   const nonQuestionAct = classifyNonQuestionSpeechAct(normalized);
@@ -156,6 +157,7 @@ function buildAnalysisWithClassifier(
   }
   if (classification.isQuestion && RULE_KEYWORDS.test(normalized) && normalized.length >= 6) classification.confidence = Math.max(classification.confidence, 0.9);
   const contextualFollowUp = isFollowUp(normalized, contextText, context.memory);
+  const shortFollowUpQuestion = contextualFollowUp && (SHORT_FOLLOW_UP_FORM.test(normalized) || (normalized.length <= 12 && /[？?]/.test(normalized)));
   const ruleScore = ruleScoreFor(normalized, final);
   const semanticScore = classification.isQuestion ? clamp(classification.confidence) : 0;
   // A negative/low-confidence LLM confirmation must not erase a clear local
@@ -166,12 +168,14 @@ function buildAnalysisWithClassifier(
   // questions even when they do not contain a question particle. Their rule
   // signal is intentionally stronger than a generic topic statement, so let
   // the robust path accept the classifier's 0.60+ confidence here.
-  const robustRuleQuestion = classification.isQuestion && classification.confidence >= 0.60 && ruleScore >= 0.35 && ROBUST_QUESTION_FORM.test(normalized);
-  const finalScore = robustRuleQuestion ? Math.max(rawFinalScore, 0.86) : rawFinalScore;
+  const robustRuleQuestion = classification.isQuestion && classification.confidence >= 0.52 && ruleScore >= 0.35
+    && (ROBUST_QUESTION_FORM.test(normalized) || /有什么|什么作用|常见误区|怎么做的/.test(normalized));
+  const followUpRescue = shortFollowUpQuestion;
+  const finalScore = robustRuleQuestion || followUpRescue ? Math.max(rawFinalScore, 0.86) : rawFinalScore;
   const candidateQuestion = !FILLER_ONLY.test(normalized) && !SMALL_TALK.test(normalized) && !META_PROMPT_ONLY.test(normalized);
   const llmRescue = Boolean(llm?.isQuestion && llm.confidence >= 0.82 && (ruleScore >= 0.35 || contextualFollowUp));
   const isQuestion = candidateQuestion
-    && (robustRuleQuestion || (llm?.isQuestion ?? classification.isQuestion))
+    && (robustRuleQuestion || followUpRescue || (llm?.isQuestion ?? classification.isQuestion))
     && (finalScore >= threshold || llmRescue || robustRuleQuestion);
   const type = llm?.type && isQuestion ? llm.type : inferType(normalized, classification.category, contextualFollowUp);
   const speechAct = llm?.label && isQuestion ? llm.label : inferSpeechAct(normalized, isQuestion, contextualFollowUp);

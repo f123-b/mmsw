@@ -150,6 +150,33 @@ export interface KnowledgeRetrieverOptions {
   reranker?: Reranker;
   candidateK?: number;
   topK?: number;
+  timings?: RetrievalTiming;
+}
+
+export interface RetrievalTiming {
+  keywordRetrievalMs?: number;
+  embeddingMs?: number;
+  rerankMs?: number;
+  totalRetrievalMs?: number;
+}
+
+export interface FastRetrievalRaceResult {
+  results: RetrievalResult[];
+  keywordRetrievalMs: number;
+  embeddingMs: number;
+  rerankMs: number;
+  totalRetrievalMs: number;
+  embeddingTimedOut: boolean;
+  embeddingError?: string;
+}
+
+export interface FastRetrievalRaceOptions {
+  keyword: Promise<RetrievalResult[]>;
+  embedding?: Promise<RetrievalResult[]>;
+  keywordTiming?: RetrievalTiming;
+  embeddingTiming?: RetrievalTiming;
+  budgetMs?: number;
+  signal?: AbortSignal;
 }
 
 function keywordScore(query: string, text: string): number {
@@ -224,18 +251,91 @@ export class HybridKnowledgeRetriever implements KnowledgeRetriever {
   constructor(private readonly options: KnowledgeRetrieverOptions) {}
 
   async search(query: string): Promise<RetrievalResult[]> {
+    const startedAt = performance.now();
     const queryEmbedding = this.options.embeddingProvider ? await this.options.embeddingProvider.embed(query) : undefined;
+    const candidateStartedAt = performance.now();
     const candidates = this.hybrid.search(query, this.options.chunks, {
       candidateK: this.options.candidateK ?? 20,
       topK: this.options.candidateK ?? 20,
       embeddingProvider: queryEmbedding ? { embed: () => queryEmbedding } : undefined
     });
+    const candidateFinishedAt = performance.now();
     const reranker = this.options.reranker ?? new KeywordReranker();
-    return candidates
+    const rerankStartedAt = performance.now();
+    const result = candidates
       .map((candidate) => ({ ...candidate, score: candidate.score * 0.4 + reranker.score(query, candidate) * 0.6 }))
       .sort((left, right) => right.score - left.score)
       .slice(0, this.options.topK ?? 5);
+    const finishedAt = performance.now();
+    if (this.options.timings) {
+      this.options.timings.keywordRetrievalMs = Math.max(0, candidateFinishedAt - candidateStartedAt);
+      this.options.timings.rerankMs = Math.max(0, finishedAt - rerankStartedAt);
+      this.options.timings.totalRetrievalMs = Math.max(0, finishedAt - startedAt);
+    }
+    return result;
   }
+}
+
+/**
+ * Runs the cheap lexical path and optional semantic path together. Semantic
+ * retrieval is allowed a small budget; a timeout never blocks the answer and
+ * the embedding promise is still allowed to warm the caller's cache.
+ */
+export async function fastRetrievalRace(options: FastRetrievalRaceOptions): Promise<FastRetrievalRaceResult> {
+  const startedAt = performance.now();
+  const budgetMs = Math.max(0, options.budgetMs ?? 100);
+  const keywordPromise = options.keyword.catch(() => [] as RetrievalResult[]);
+  const keywordResults = await keywordPromise;
+  const keywordTiming = options.keywordTiming ?? {};
+  const embeddingTiming = options.embeddingTiming ?? {};
+  const keywordRetrievalMs = keywordTiming.totalRetrievalMs ?? Math.max(0, performance.now() - startedAt);
+  if (!options.embedding) {
+    return {
+      results: keywordResults,
+      keywordRetrievalMs,
+      embeddingMs: 0,
+      rerankMs: keywordTiming.rerankMs ?? 0,
+      totalRetrievalMs: Math.max(0, performance.now() - startedAt),
+      embeddingTimedOut: false
+    };
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const abortPromise = options.signal
+    ? new Promise<"aborted">((resolve) => {
+      if (options.signal?.aborted) resolve("aborted");
+      else options.signal?.addEventListener("abort", () => resolve("aborted"), { once: true });
+    })
+    : undefined;
+  const timeoutPromise = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), budgetMs);
+    timer.unref?.();
+  });
+  const embeddingOutcome = await Promise.race([
+    options.embedding.then((results) => ({ kind: "embedding" as const, results })).catch((error) => ({ kind: "error" as const, error: String(error) })),
+    timeoutPromise.then((kind) => ({ kind })),
+    ...(abortPromise ? [abortPromise.then((kind) => ({ kind }))] : [])
+  ]);
+  if (timer) clearTimeout(timer);
+  if (embeddingOutcome.kind === "embedding") {
+    return {
+      results: embeddingOutcome.results,
+      keywordRetrievalMs,
+      embeddingMs: embeddingTiming.embeddingMs ?? embeddingTiming.totalRetrievalMs ?? Math.max(0, performance.now() - startedAt),
+      rerankMs: embeddingTiming.rerankMs ?? 0,
+      totalRetrievalMs: Math.max(0, performance.now() - startedAt),
+      embeddingTimedOut: false
+    };
+  }
+  return {
+    results: keywordResults,
+    keywordRetrievalMs,
+    embeddingMs: embeddingTiming.embeddingMs ?? 0,
+    rerankMs: keywordTiming.rerankMs ?? 0,
+    totalRetrievalMs: Math.max(0, performance.now() - startedAt),
+    embeddingTimedOut: embeddingOutcome.kind === "timeout" || embeddingOutcome.kind === "aborted",
+    ...(embeddingOutcome.kind === "error" ? { embeddingError: embeddingOutcome.error } : {})
+  };
 }
 
 export class KeywordReranker implements Reranker {

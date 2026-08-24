@@ -36,7 +36,7 @@ describe("Interview Copilot core upgrade", () => {
 
   it("formats spoken answer prompts and checks answer quality", () => {
     const formatter = new InterviewAnswerFormatter();
-    expect(formatter.instructions("FAST")).toContain("30~80");
+    expect(formatter.instructions("FAST")).toContain("20~60");
     expect(formatter.format("# 第一部分\n- 我会先看采样时序。", "FAST")).toBe("我会先看采样时序。");
     const quality = new AnswerQualityChecker().check({ question: "为什么使用CAN", answer: "CAN用于工业通信。", mode: "NORMAL" });
     expect(quality.issues).not.toContain("not-first-person");

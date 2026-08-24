@@ -22,6 +22,8 @@
     "shutdown-process:e2e": "npm --workspace apps/desktop run shutdown-process:e2e",
     "verify:package": "node apps/desktop/scripts/verify-package.mjs",
     "test": "npm run test --workspaces --if-present",
+    "benchmark:question": "npm --workspace @interview-copilot/shared run benchmark:question",
+    "test:soak": "npm --workspace @interview-copilot/desktop run test:soak",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "format:check": "npm run format:check --workspaces --if-present"
   },

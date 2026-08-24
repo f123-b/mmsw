@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import WebSocket, { type RawData } from "ws";
 import {
   clientControlMessageSchema,
@@ -15,6 +17,10 @@ import {
   LocalFunASRProvider,
   StereoAsrChannelRouter,
   TranscriptStabilizer,
+  createVADProvider,
+  type VADDiagnostic,
+  type VADProvider,
+  type VADResult,
   type AsrLanguage,
   type AsrProviderType,
   type ProviderSettings,
@@ -61,7 +67,16 @@ export interface AsrRuntimeDiagnostics {
   lastFinalObservedLatencyMs?: number;
   reconnectCount: number;
   droppedPcmPackets: number;
+  vadProvider: "silero" | "energy" | "unknown";
+  speechProbability: { mic: number; remote: number };
+  micSpeech: boolean;
+  remoteSpeech: boolean;
+  fallback: boolean;
+  lastSpeechStart: { mic?: number; remote?: number };
+  lastSpeechEnd: { mic?: number; remote?: number };
 }
+
+export type RealtimeVADProviderFactory = (source: "mic" | "remote", onDiagnostic: (diagnostic: VADDiagnostic) => void) => VADProvider;
 
 const OPEN = 1;
 const MAX_SOCKET_BUFFER_BYTES = 192_000;
@@ -85,6 +100,28 @@ function messageCode(error: ProviderError | Error | unknown): "WS_AUTH_FAILED" |
 function messageText(error: unknown): string {
   if (error instanceof ProviderError) return error.message;
   return error instanceof Error ? error.message : String(error);
+}
+
+function defaultSileroModelPath(): string | undefined {
+  const candidates = [
+    process.env.INTERVIEW_COPILOT_VAD_MODEL,
+    process.resourcesPath ? join(process.resourcesPath, "vad", "silero_vad_16k_op15.onnx") : undefined,
+    join(process.cwd(), "models", "vad", "silero_vad_16k_op15.onnx"),
+    join(process.cwd(), "apps", "desktop", "models", "vad", "silero_vad_16k_op15.onnx"),
+    join(__dirname, "..", "..", "models", "vad", "silero_vad_16k_op15.onnx")
+  ];
+  return candidates.find((candidate) => Boolean(candidate && existsSync(candidate)));
+}
+
+function defaultVADProviderFactory(source: "mic" | "remote", onDiagnostic: (diagnostic: VADDiagnostic) => void): VADProvider {
+  return createVADProvider({
+    provider: "silero",
+    modelPath: defaultSileroModelPath(),
+    onDiagnostic,
+    sampleRate: 16_000,
+    minSpeechMs: 80,
+    endSilenceMs: 320
+  });
 }
 
 class WsStreamingAsrSocket implements StreamingAsrSocket {
@@ -136,12 +173,13 @@ export class RealtimeSession extends EventEmitter {
   private state: RealtimeConnectionState = "disconnected";
   private readonly audioQueue = new PcmBackpressureQueue(192_000);
   private readonly stabilizer = new TranscriptStabilizer();
-  private readonly micVad = new SileroVADProvider({ sampleRate: 16_000 });
-  private readonly remoteVad = new SileroVADProvider({ sampleRate: 16_000 });
+  private readonly micVad: VADProvider;
+  private readonly remoteVad: VADProvider;
   private directRouter: StereoAsrChannelRouter | undefined;
   private directGeneration = 0;
   private handledDirectFailureGeneration = 0;
   private lastBackpressureDiagnosticAt = 0;
+  private lastVadDiagnosticAt = 0;
   private audioTimelineOriginAt = 0;
   private diagnostics: AsrRuntimeDiagnostics = {
     provider: "unknown",
@@ -150,7 +188,14 @@ export class RealtimeSession extends EventEmitter {
     micState: "stopped",
     remoteState: "stopped",
     reconnectCount: 0,
-    droppedPcmPackets: 0
+    droppedPcmPackets: 0,
+    vadProvider: "unknown",
+    speechProbability: { mic: 0, remote: 0 },
+    micSpeech: false,
+    remoteSpeech: false,
+    fallback: false,
+    lastSpeechStart: {},
+    lastSpeechEnd: {}
   };
 
   constructor(
@@ -159,9 +204,18 @@ export class RealtimeSession extends EventEmitter {
     private readonly directSocketFactory = createDeepgramSocket,
     private readonly qwenSocketFactory = createQwenSocket,
     private readonly localSocketFactory = createLocalAsrSocket,
-    private readonly localAsrServiceManager?: LocalAsrServiceManager
+    private readonly localAsrServiceManager?: LocalAsrServiceManager,
+    vadProviderFactory: RealtimeVADProviderFactory = defaultVADProviderFactory
   ) {
     super();
+    const onVadDiagnostic = (diagnostic: VADDiagnostic) => this.handleVADDiagnostic(diagnostic);
+    this.micVad = vadProviderFactory("mic", onVadDiagnostic);
+    this.remoteVad = vadProviderFactory("remote", onVadDiagnostic);
+    this.diagnostics = {
+      ...this.diagnostics,
+      vadProvider: this.micVad.providerName,
+      fallback: this.micVad.fallback || this.remoteVad.fallback
+    };
   }
 
   get connectionState(): RealtimeConnectionState { return this.state; }
@@ -186,6 +240,7 @@ export class RealtimeSession extends EventEmitter {
     this.audioTimelineOriginAt = 0;
     this.micVad.reset();
     this.remoteVad.reset();
+    this.resetVadDiagnostics();
     this.emitDiagnostics();
     this.openSocket();
   }
@@ -204,9 +259,11 @@ export class RealtimeSession extends EventEmitter {
     this.socket = undefined;
     this.audioQueue.clear();
     this.lastBackpressureDiagnosticAt = 0;
+    this.lastVadDiagnosticAt = 0;
     this.audioTimelineOriginAt = 0;
     this.micVad.reset();
     this.remoteVad.reset();
+    this.resetVadDiagnostics();
     this.stabilizer.clear();
     if (clearOptions) this.options = undefined;
     this.diagnostics = { ...this.diagnostics, micState: "stopped", remoteState: "stopped" };
@@ -253,7 +310,15 @@ export class RealtimeSession extends EventEmitter {
     // usable for diagnostics/tests while gating real audio frames.
     if (packet.byteLength < 160 || packet.byteLength % 4 !== 0) return true;
     const channels = splitStereoPcm(packet);
-    return this.micVad.process(channels.mic).speech || this.remoteVad.process(channels.system).speech;
+    const mic = this.micVad.process(channels.mic);
+    const remote = this.remoteVad.process(channels.system);
+    this.updateVADDiagnostics("mic", mic, this.micVad);
+    this.updateVADDiagnostics("remote", remote, this.remoteVad);
+    // Do not drop audio while ONNX sessions are warming up. Once both
+    // providers are ready, VAD is only an endpoint gate and ASR remains the
+    // source of truth for the transcript.
+    if (mic.ready === false || remote.ready === false) return true;
+    return mic.speech || remote.speech;
   }
 
   sendControl(message: ClientControlMessage): void {
@@ -478,6 +543,51 @@ export class RealtimeSession extends EventEmitter {
     else if (source === "remote") this.diagnostics = { ...this.diagnostics, remoteState: state };
     else this.diagnostics = { ...this.diagnostics, micState: state, remoteState: state };
     this.emitDiagnostics();
+  }
+
+  private updateVADDiagnostics(source: "mic" | "remote", result: VADResult, provider: VADProvider): void {
+    const previous = this.diagnostics;
+    const lastSpeechStart = { ...previous.lastSpeechStart };
+    const lastSpeechEnd = { ...previous.lastSpeechEnd };
+    if (result.speechStarted) lastSpeechStart[source] = result.startTime;
+    if (result.speechEnded) lastSpeechEnd[source] = result.endTime;
+    this.diagnostics = {
+      ...previous,
+      vadProvider: provider.providerName,
+      speechProbability: { ...previous.speechProbability, [source]: result.speechProbability },
+      micSpeech: source === "mic" ? result.speech : previous.micSpeech,
+      remoteSpeech: source === "remote" ? result.speech : previous.remoteSpeech,
+      fallback: provider.fallback || this.micVad.fallback || this.remoteVad.fallback,
+      lastSpeechStart,
+      lastSpeechEnd
+    };
+    const shouldEmit = result.speechStarted
+      || result.speechEnded
+      || previous.fallback !== this.diagnostics.fallback
+      || (result.ready && previous.speechProbability[source] === 0);
+    if (shouldEmit || Date.now() - this.lastVadDiagnosticAt >= 250) {
+      this.lastVadDiagnosticAt = Date.now();
+      this.emitDiagnostics();
+    }
+  }
+
+  private handleVADDiagnostic(diagnostic: VADDiagnostic): void {
+    this.diagnostics = { ...this.diagnostics, vadProvider: diagnostic.provider, fallback: true };
+    this.emit("diagnostic", diagnostic.code);
+    this.emitDiagnostics();
+  }
+
+  private resetVadDiagnostics(): void {
+    this.diagnostics = {
+      ...this.diagnostics,
+      vadProvider: this.micVad.providerName,
+      speechProbability: { mic: 0, remote: 0 },
+      micSpeech: false,
+      remoteSpeech: false,
+      fallback: this.micVad.fallback || this.remoteVad.fallback,
+      lastSpeechStart: {},
+      lastSpeechEnd: {}
+    };
   }
 
   private recordAsrLatency(final: boolean, segmentEndMs: number): void {

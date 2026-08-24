@@ -41,6 +41,12 @@ jobs:
       - name: Run JavaScript tests
         run: npm test
 
+      - name: Question detection benchmark
+        run: npm run benchmark:question
+
+      - name: Interview soak test
+        run: npm run test:soak
+
       - name: Typecheck
         run: npm run typecheck
 

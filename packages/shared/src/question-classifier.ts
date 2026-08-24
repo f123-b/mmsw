@@ -68,7 +68,11 @@ export function classifyQuestion(text: string, contextText = "", final = false):
   if (nonQuestionAct) return { isQuestion: false, confidence: 0, category: "followup", questionText: normalized, reason: nonQuestionAct === "CONTROL" ? "control-speech" : "answer-instruction" };
 
   const hasQuestionMark = /[？?]$/.test(normalized);
-  const questionForm = QUESTION_FORMS.some((pattern) => pattern.test(normalized));
+  const nounPhraseQuestion = /(?:作用|区别|原理|误区|流程|依据|瓶颈)[。！？?！\s]*$/.test(normalized)
+    && !/^(?:我|我们|系统|项目当前|当前项目)/.test(normalized);
+  const designQuestion = /(?:设计|架构).*(?:系统|架构|方案|模块|服务)/.test(normalized)
+    && !/^(?:我|我们)设计/.test(normalized);
+  const questionForm = QUESTION_FORMS.some((pattern) => pattern.test(normalized)) || nounPhraseQuestion || designQuestion;
   const hasSecondPersonOrTarget = /你|您的|项目|方案|系统|这个/.test(normalized);
   const hasQuestionLabel = /(?:问题|题目)\s*[:：]/.test(normalized);
   const hasTrailingQuestionParticle = /(吗|呢)[。！？?！\s]*$/i.test(normalized);

@@ -1,4 +1,6 @@
 export * from "./types";
+export { ProjectMemoryRetriever as ProjectFactMemoryRetriever } from "./project-memory-retriever";
+export type { ProjectRetrievalHit, ProjectMemoryRetrievalOptions } from "./project-memory-retriever";
 export * from "./importer";
 export * from "./analyzer";
 export * from "./project-memory";

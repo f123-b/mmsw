@@ -324,7 +324,7 @@ const useAudioStore = create<AudioStore>((set) => ({
   automationMode: "AUTO",
   answerMode: "NORMAL",
   realtimeState: "disconnected",
-  asrDiagnostics: { provider: "unknown", model: "", language: "", micState: "stopped", remoteState: "stopped", reconnectCount: 0, droppedPcmPackets: 0 },
+  asrDiagnostics: { provider: "unknown", model: "", language: "", micState: "stopped", remoteState: "stopped", reconnectCount: 0, droppedPcmPackets: 0, vadProvider: "unknown", speechProbability: { mic: 0, remote: 0 }, micSpeech: false, remoteSpeech: false, fallback: false, lastSpeechStart: {}, lastSpeechEnd: {} },
   remoteTranscript: { source: "remote", final: [] },
   micTranscript: { source: "mic", final: [] },
   questionDiagnostics: [],

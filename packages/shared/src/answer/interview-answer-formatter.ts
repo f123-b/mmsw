@@ -2,9 +2,9 @@ import type { AnswerMode, AnswerQuestionKind } from "../answer";
 import { normalizeTechnicalTerms } from "../terminology";
 
 export const ANSWER_LENGTH_POLICY: Record<AnswerMode, { min: number; max: number }> = {
-  FAST: { min: 30, max: 80 },
-  NORMAL: { min: 80, max: 150 },
-  DEEP: { min: 150, max: 250 }
+  FAST: { min: 20, max: 60 },
+  NORMAL: { min: 60, max: 130 },
+  DEEP: { min: 120, max: 250 }
 };
 
 const CODE_LENGTH_POLICY: Record<AnswerMode, { min: number; max: number }> = {

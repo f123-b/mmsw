@@ -32,12 +32,22 @@ import {
   type QuestionBankSourceType,
   type QuestionBankType,
   type ProjectMemorySnapshot,
+  ProjectFactMemoryRetriever,
+  type ProjectRetrievalHit,
   type ProjectTechnicalPoint,
   type ProjectFact,
   type ProjectFactType
 } from "@interview-copilot/shared";
 
 export const APP_DATA_DIRECTORY = "InterviewCopilot";
+
+export interface DatabaseFlushDiagnostics {
+  databaseFlushDurationMs: number;
+  databaseSize: number;
+  pendingFlush: boolean;
+  lastFlushAt?: number;
+  lastDiagnostic?: "DATABASE_FLUSH_SLOW";
+}
 
 function id(prefix: string, now: number): string { return `${prefix}-${now}-${Math.random().toString(36).slice(2, 8)}`; }
 
@@ -57,21 +67,23 @@ function value<T>(input: unknown): T | undefined {
 export class SqliteDatabase {
   private dirty = false;
   private flushTimer: NodeJS.Timeout | undefined;
+  private diagnostics: DatabaseFlushDiagnostics = { databaseFlushDurationMs: 0, databaseSize: 0, pendingFlush: false };
 
-  private constructor(private readonly filePath: string, private readonly database: InstanceType<SqlJsStatic["Database"]>) {}
+  private constructor(private readonly filePath: string, private readonly database: InstanceType<SqlJsStatic["Database"]>, private readonly onDiagnostic?: (code: string) => void) {}
 
-  static async open(filePath: string, wasmPath = wasmCandidates().find((candidate) => existsSync(candidate))): Promise<SqliteDatabase> {
+  static async open(filePath: string, wasmPath = wasmCandidates().find((candidate) => existsSync(candidate)), options: { onDiagnostic?: (code: string) => void } = {}): Promise<SqliteDatabase> {
     if (filePath !== ":memory:") await mkdir(dirname(filePath), { recursive: true });
     const SQL: SqlJsStatic = await initSqlJs(wasmPath ? { locateFile: () => wasmPath } : undefined);
     const bytes = filePath !== ":memory:" && existsSync(filePath) ? readFileSync(filePath) : undefined;
     const database = new SQL.Database(bytes);
-    const store = new SqliteDatabase(filePath, database);
+    const store = new SqliteDatabase(filePath, database, options.onDiagnostic);
     store.migrate();
     store.flushNow();
     return store;
   }
 
   run(sql: string, params: Array<string | number | Uint8Array | null> = []): void {
+    if (params.some((param) => param === undefined)) throw new Error(`DATABASE_UNDEFINED_PARAM: ${sql}`);
     this.database.run(sql, params);
     this.markDirty();
   }
@@ -92,7 +104,10 @@ export class SqliteDatabase {
     return this.all<T>(sql, params)[0];
   }
 
-  markDirty(): void { this.dirty = true; }
+  markDirty(): void {
+    this.dirty = true;
+    this.diagnostics = { ...this.diagnostics, pendingFlush: true };
+  }
 
   flush(): void {
     if (this.filePath === ":memory:" || !this.dirty || this.flushTimer) return;
@@ -106,10 +121,27 @@ export class SqliteDatabase {
   flushNow(): void {
     if (this.flushTimer) clearTimeout(this.flushTimer);
     this.flushTimer = undefined;
-    if (this.filePath === ":memory:" || !this.dirty) return;
-    writeFileSync(this.filePath, this.database.export());
+    if (this.filePath === ":memory:" || !this.dirty) {
+      this.diagnostics = { ...this.diagnostics, pendingFlush: false };
+      return;
+    }
+    const startedAt = performance.now();
+    const bytes = this.database.export();
+    writeFileSync(this.filePath, bytes);
+    const duration = Math.max(0, performance.now() - startedAt);
     this.dirty = false;
+    const slow = duration > 50;
+    this.diagnostics = {
+      databaseFlushDurationMs: duration,
+      databaseSize: bytes.byteLength,
+      pendingFlush: false,
+      lastFlushAt: Date.now(),
+      ...(slow ? { lastDiagnostic: "DATABASE_FLUSH_SLOW" as const } : {})
+    };
+    if (slow) this.onDiagnostic?.("DATABASE_FLUSH_SLOW");
   }
+
+  getFlushDiagnostics(): DatabaseFlushDiagnostics { return { ...this.diagnostics, pendingFlush: this.dirty || Boolean(this.flushTimer) }; }
 
   close(): void {
     this.flushNow();
@@ -415,6 +447,9 @@ export class SqliteDatabase {
         ALTER TABLE questions ADD COLUMN parent_question_id TEXT REFERENCES questions(id) ON DELETE SET NULL;
         ALTER TABLE questions ADD COLUMN root_question_id TEXT REFERENCES questions(id) ON DELETE SET NULL;
         CREATE INDEX IF NOT EXISTS questions_thread_idx ON questions(interview_id, root_question_id, detected_at);
+      `],
+      [13, `
+        ALTER TABLE retrieval_runs ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
       `]
     ];
     for (const [version, sql] of migrations) {
@@ -618,6 +653,13 @@ function jsonArray<T = string>(value: unknown): T[] {
 export interface ProjectFactMatch {
   fact: ProjectFact;
   score: number;
+  lexicalScore: number;
+  vectorScore: number;
+  typeScore: number;
+  projectScore: number;
+  verifiedBoost: number;
+  finalScore: number;
+  reason: string;
 }
 
 /** Structured Project Memory persistence. Legacy projects/conversations remain compatible. */
@@ -675,9 +717,9 @@ export class SqliteProjectMemoryRepository {
   }
 
   listFacts(profileId: string, projectId?: string): ProjectFact[] {
-    const rows = projectId
-      ? this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.project_id = ? AND f.status = 'active' ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId, projectId])
-      : this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.status = 'active' ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId]);
+      const rows = projectId
+      ? this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.embedding_json AS embeddingJson, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.project_id = ? AND f.status = 'active' ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId, projectId])
+      : this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.embedding_json AS embeddingJson, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.status = 'active' ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId]);
     return rows.map((row) => this.hydrateFact(row));
   }
 
@@ -693,18 +735,22 @@ export class SqliteProjectMemoryRepository {
     return this.getFact(factId);
   }
 
-  searchFacts(profileId: string, query: string, options: { projectId?: string; limit?: number } = {}): ProjectFactMatch[] {
-    const limit = Math.max(1, Math.min(50, options.limit ?? 8));
-    return this.listFacts(profileId, options.projectId)
-      .map((fact) => ({ fact, score: Math.min(1, questionBankSimilarity(query, `${fact.title} ${fact.content}`) + (fact.verified ? 0.03 : 0)) }))
-      .filter((item) => item.score > 0)
-      .sort((left, right) => right.score - left.score)
-      .slice(0, limit);
+  searchFacts(profileId: string, query: string, options: { projectId?: string; detectedProjectId?: string; queryEmbedding?: number[]; questionType?: string; limit?: number; minScore?: number } = {}): ProjectFactMatch[] {
+    const hits = new ProjectFactMemoryRetriever().search(query, this.listFacts(profileId), {
+      selectedProjectId: options.projectId,
+      detectedProjectId: options.detectedProjectId,
+      queryEmbedding: options.queryEmbedding,
+      questionType: options.questionType,
+      topK: options.limit,
+      minScore: options.minScore
+    });
+    return hits.map((hit: ProjectRetrievalHit) => ({ ...hit, score: hit.finalScore }));
   }
 
   private hydrateFact(row: Record<string, unknown>): ProjectFact {
     const sourceIds = this.database.all<{ sourceId: string }>("SELECT source_id AS sourceId FROM project_fact_sources WHERE fact_id = ? ORDER BY created_at", [String(row.id)]).map((item) => item.sourceId);
-    return { id: String(row.id), projectId: String(row.projectId), profileId: String(row.profileId), type: String(row.type) as ProjectFactType, title: String(row.title), content: String(row.content), confidence: Number(row.confidence ?? 1), verified: Number(row.verified) === 1, sourceIds, createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
+    const embedding = jsonArray<number>(row.embeddingJson);
+    return { id: String(row.id), projectId: String(row.projectId), profileId: String(row.profileId), type: String(row.type) as ProjectFactType, title: String(row.title), content: String(row.content), confidence: Number(row.confidence ?? 1), verified: Number(row.verified) === 1, sourceIds, ...(embedding.length ? { embedding } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
   }
 
   stats(profileId: string): ProjectMemoryStats {
@@ -713,53 +759,8 @@ export class SqliteProjectMemoryRepository {
   }
 }
 
-export interface RetrievalHitInput {
-  resultType: "question" | "project-fact" | "document-chunk" | "job-requirement";
-  resultId: string;
-  score: number;
-  verified?: boolean;
-  preview: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface RetrievalRunRecord {
-  id: string;
-  interviewId?: string;
-  questionId?: string;
-  profileId?: string;
-  query: string;
-  route: string;
-  createdAt: number;
-  hits: Array<RetrievalHitInput & { id: string; rank: number }>;
-}
-
-export class SqliteRetrievalRepository {
-  constructor(private readonly database: SqliteDatabase) {}
-
-  record(input: { query: string; route: string; profileId?: string; interviewId?: string; questionId?: string; hits: RetrievalHitInput[]; now?: number }): RetrievalRunRecord {
-    const now = input.now ?? Date.now();
-    const runId = id("retrieval", now);
-    this.database.run("INSERT INTO retrieval_runs(id, interview_id, question_id, profile_id, query, route, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [runId, input.interviewId ?? null, input.questionId ?? null, input.profileId ?? null, input.query, input.route, now]);
-    const hits = input.hits.slice(0, 20).map((hit, index) => {
-      const hitId = id("retrieval-hit", now + index);
-      this.database.run("INSERT INTO retrieval_hits(id, retrieval_run_id, result_type, result_id, rank, score, verified, preview, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [hitId, runId, hit.resultType, hit.resultId, index + 1, Math.max(0, Math.min(1, hit.score)), hit.verified ? 1 : 0, hit.preview.slice(0, 1_000), JSON.stringify(hit.metadata ?? {})]);
-      return { ...hit, id: hitId, rank: index + 1 };
-    });
-    this.database.flush();
-    return { id: runId, ...(input.interviewId ? { interviewId: input.interviewId } : {}), ...(input.questionId ? { questionId: input.questionId } : {}), ...(input.profileId ? { profileId: input.profileId } : {}), query: input.query, route: input.route, createdAt: now, hits };
-  }
-
-  get(runId: string): RetrievalRunRecord | undefined {
-    const row = this.database.first<{ id: string; interviewId: string | null; questionId: string | null; profileId: string | null; query: string; route: string; createdAt: number }>("SELECT id, interview_id AS interviewId, question_id AS questionId, profile_id AS profileId, query, route, created_at AS createdAt FROM retrieval_runs WHERE id = ?", [runId]);
-    if (!row) return undefined;
-    const hits = this.database.all<Record<string, unknown>>("SELECT id, result_type AS resultType, result_id AS resultId, rank, score, verified, preview, metadata_json AS metadataJson FROM retrieval_hits WHERE retrieval_run_id = ? ORDER BY rank", [runId]).map((hit) => ({ id: String(hit.id), resultType: String(hit.resultType) as RetrievalHitInput["resultType"], resultId: String(hit.resultId), rank: Number(hit.rank), score: Number(hit.score), verified: Number(hit.verified) === 1, preview: String(hit.preview), metadata: JSON.parse(String(hit.metadataJson)) as Record<string, unknown> }));
-    return { id: row.id, ...(row.interviewId ? { interviewId: row.interviewId } : {}), ...(row.questionId ? { questionId: row.questionId } : {}), ...(row.profileId ? { profileId: row.profileId } : {}), query: row.query, route: row.route, createdAt: row.createdAt, hits };
-  }
-
-  list(profileId: string, limit = 20): RetrievalRunRecord[] {
-    return this.database.all<{ id: string }>("SELECT id FROM retrieval_runs WHERE profile_id = ? ORDER BY created_at DESC LIMIT ?", [profileId, Math.max(1, Math.min(100, limit))]).map((row) => this.get(row.id)).filter((run): run is RetrievalRunRecord => Boolean(run));
-  }
-}
+export { SqliteRetrievalRepository } from "./database/retrieval-repository";
+export type { RetrievalHitInput, RetrievalRunRecord } from "./database/retrieval-repository";
 
 export interface KnowledgeAnalysisRunRecord {
   id: string;

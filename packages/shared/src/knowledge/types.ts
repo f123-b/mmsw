@@ -49,6 +49,7 @@ export interface ProjectFact {
   confidence: number;
   verified: boolean;
   sourceIds: string[];
+  embedding?: number[];
   createdAt?: number;
   updatedAt?: number;
 }

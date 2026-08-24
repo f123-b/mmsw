@@ -315,8 +315,11 @@ export class OpenAICompatibleEmbeddingProvider {
     this.fetchImpl = fetchImpl ?? ((input, init) => fetch(input, init));
   }
 
-  async embed(text: string): Promise<number[]> {
+  async embed(text: string, externalSignal?: AbortSignal): Promise<number[]> {
     const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (externalSignal?.aborted) controller.abort();
+    externalSignal?.addEventListener("abort", abort, { once: true });
     const timer = setTimeout(() => controller.abort(), Math.max(1_000, this.settings.timeoutMs));
     try {
       const response = await this.fetchImpl(providerEndpoint(this.settings, providerCapabilities(this.settings).embeddingPath), {
@@ -332,6 +335,7 @@ export class OpenAICompatibleEmbeddingProvider {
       return embedding as number[];
     } finally {
       clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", abort);
     }
   }
 }

@@ -1,6 +1,9 @@
 import { normalizeTechnicalTerms } from "./terminology";
 
 export interface InterviewMemoryTurn {
+  questionId?: string;
+  parentQuestionId?: string;
+  rootQuestionId?: string;
   question: string;
   answer?: string;
   topic?: string;
@@ -49,12 +52,12 @@ export class InterviewMemory {
     this.currentTopic = undefined;
   }
 
-  recordQuestion(question: string, metadata: { topic?: string; createdAt?: number } = {}): void {
+  recordQuestion(question: string, metadata: { questionId?: string; parentQuestionId?: string; rootQuestionId?: string; topic?: string; createdAt?: number } = {}): void {
     const normalized = normalize(question);
     if (!normalized) return;
     const topic = metadata.topic || inferTopic(normalized) || this.currentTopic;
     extractEntities(normalized).forEach((entity) => this.entities.add(entity));
-    this.turns.push({ question: normalized, topic, createdAt: metadata.createdAt });
+    this.turns.push({ questionId: metadata.questionId, parentQuestionId: metadata.parentQuestionId, rootQuestionId: metadata.rootQuestionId, question: normalized, topic, createdAt: metadata.createdAt });
     while (this.turns.length > this.maxTurns) this.turns.shift();
     this.pendingQuestion = normalized;
     if (topic) this.currentTopic = topic;

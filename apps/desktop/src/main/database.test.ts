@@ -70,6 +70,24 @@ describe("SQLite persistence", () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
+  it("reports pending flush, size and duration diagnostics", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "interview-copilot-flush-"));
+    const filePath = join(directory, "flush.sqlite");
+    const diagnostics: string[] = [];
+    try {
+      const database = await SqliteDatabase.open(filePath, undefined, { onDiagnostic: (code) => diagnostics.push(code) });
+      database.run("CREATE TABLE flush_probe(value TEXT)");
+      database.flush();
+      expect(database.getFlushDiagnostics().pendingFlush).toBe(true);
+      database.flushNow();
+      expect(database.getFlushDiagnostics()).toMatchObject({ pendingFlush: false });
+      expect(database.getFlushDiagnostics().databaseSize).toBeGreaterThan(0);
+      expect(database.getFlushDiagnostics().databaseFlushDurationMs).toBeGreaterThanOrEqual(0);
+      expect(diagnostics).not.toContain("DATABASE_FLUSH_SLOW");
+      database.close();
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("keeps multiple knowledge bases and their chunks isolated", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
@@ -154,8 +172,9 @@ describe("SQLite persistence", () => {
       expect(questionBank.getQuestion("question-1")).toMatchObject({ scope: "project", profileId: "profile-1", projectId: "memory-project-foc", source: "generated" });
       expect(questionBank.getQuestion("question-1")?.answerCards[0]?.keyPoints).toEqual(["基于实时性约束"]);
       const retrievals = new SqliteRetrievalRepository(database);
-      const run = retrievals.record({ profileId: "profile-1", query: "DMA 采样", route: "personal-evidence-first", hits: [{ resultType: "project-fact", resultId: "point-1-fact", score: 0.9, preview: "DMA搬运采样数据", verified: false }], now: 20 });
+      const run = retrievals.record({ profileId: "profile-1", query: "DMA 采样", route: "personal-evidence-first", metadata: { totalRetrievalMs: 12, embeddingTimedOut: true }, hits: [{ resultType: "project-fact", resultId: "point-1-fact", score: 0.9, preview: "DMA搬运采样数据", verified: false }], now: 20 });
       expect(retrievals.get(run.id)?.hits[0]).toMatchObject({ resultType: "project-fact", resultId: "point-1-fact", rank: 1, score: 0.9 });
+      expect(retrievals.get(run.id)?.metadata).toEqual({ totalRetrievalMs: 12, embeddingTimedOut: true });
       const analyses = new SqliteKnowledgeAnalysisRepository(database);
       analyses.record({ id: "analysis-1", profileId: "profile-1", runType: "project-memory", inputHash: "hash-1", status: "completed", inputSnapshot: { sourceIds: ["doc-1"] }, output: snapshot, now: 30 });
       expect(analyses.list("profile-1")[0]).toMatchObject({ id: "analysis-1", status: "completed", inputHash: "hash-1" });

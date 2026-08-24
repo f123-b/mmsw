@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkText, DocumentMemoryCache, DocumentParserRegistry, HybridRetriever, inferKnowledgeDocumentType, plainTextDocumentParser } from "./knowledge";
+import { chunkText, DocumentMemoryCache, DocumentParserRegistry, fastRetrievalRace, HybridRetriever, inferKnowledgeDocumentType, plainTextDocumentParser, type RetrievalResult } from "./knowledge";
 
 describe("knowledge preparation", () => {
   it("chunks long text with bounded size and overlap", () => {
@@ -50,5 +50,20 @@ describe("hybrid retrieval", () => {
     const results = new HybridRetriever().search("中断 任务 消息 队列", chunks, { topK: 2 });
     expect(results).toHaveLength(2);
     expect(new Set(results.map((result) => result.metadata.documentId)).size).toBe(2);
+  });
+
+  it("uses semantic retrieval inside the latency budget", async () => {
+    const keyword: RetrievalResult[] = [{ id: "keyword", text: "关键词结果", metadata: { documentId: "d", filename: "k" }, score: 0.4, keywordScore: 0.4, vectorScore: 0 }];
+    const semantic: RetrievalResult[] = [{ id: "semantic", text: "语义结果", metadata: { documentId: "d", filename: "s" }, score: 0.9, keywordScore: 0.2, vectorScore: 0.9 }];
+    const result = await fastRetrievalRace({ keyword: Promise.resolve(keyword), embedding: new Promise<RetrievalResult[]>((resolve) => setTimeout(() => resolve(semantic), 5)), budgetMs: 80 });
+    expect(result.results[0]?.id).toBe("semantic");
+    expect(result.embeddingTimedOut).toBe(false);
+  });
+
+  it("falls back to keyword retrieval when embedding exceeds the budget", async () => {
+    const keyword: RetrievalResult[] = [{ id: "keyword", text: "关键词结果", metadata: { documentId: "d", filename: "k" }, score: 0.4, keywordScore: 0.4, vectorScore: 0 }];
+    const result = await fastRetrievalRace({ keyword: Promise.resolve(keyword), embedding: new Promise<RetrievalResult[]>((resolve) => setTimeout(() => resolve([]), 30)), budgetMs: 2 });
+    expect(result.results[0]?.id).toBe("keyword");
+    expect(result.embeddingTimedOut).toBe(true);
   });
 });

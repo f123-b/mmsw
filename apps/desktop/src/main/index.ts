@@ -9,7 +9,7 @@ import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, fastRetrievalRace, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, PreparationAgentRuntime, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
@@ -1440,7 +1440,13 @@ if (hasSingleInstanceLock) {
     const detectedProjectId = questionAnalysis.project ? projectSnapshot.projects.find((project) => project.name.toLowerCase() === questionAnalysis.project?.toLowerCase())?.id : undefined;
     const targetProjectId = interviewContext?.projectId ?? detectedProjectId;
     const useProjectContext = Boolean(interviewContext?.projectId) || knowledgeRoute.useProjectMemory;
-    const factMatches = projectMemoryRepository?.searchFacts(profileId, normalizedQuestion, { projectId: targetProjectId, limit: 5 }) ?? [];
+    const factMatches = projectMemoryRepository?.searchFacts(profileId, normalizedQuestion, {
+      projectId: interviewContext?.projectId,
+      detectedProjectId,
+      questionType: questionAnalysis.type,
+      limit: 5,
+      minScore: 0.18
+    }) ?? [];
     const relevantFactMatches = (useProjectContext || (factMatches[0]?.score ?? 0) >= 0.28) ? factMatches : [];
     const verifiedFactExperience = relevantFactMatches.filter((hit) => hit.fact.verified)
       .map((hit) => `结构化项目事实（${hit.fact.type}，已确认，来源 ${hit.fact.sourceIds.join("、")}）：\n${hit.fact.title}\n${hit.fact.content}`);
@@ -1479,29 +1485,46 @@ if (hasSingleInstanceLock) {
     const jobContext = jobMatches.map((hit) => `岗位要求（${hit.requirement.importance}，匹配度 ${Math.round(hit.score * 100)}%）：${hit.requirement.requirement}`);
     const chunks = knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? [];
     const retrievalOptions = { chunks, topK: 3, candidateK: 12, reranker: new KeywordReranker() };
-    let retrieved = await new HybridKnowledgeRetriever(retrievalOptions).search(normalizedQuestion);
+    const keywordTiming: RetrievalTiming = {};
+    const keywordRetrieval = new HybridKnowledgeRetriever({ ...retrievalOptions, timings: keywordTiming }).search(normalizedQuestion);
+    let retrieved = await keywordRetrieval;
+    let retrievalDiagnostics = {
+      keywordRetrievalMs: keywordTiming.totalRetrievalMs ?? 0,
+      embeddingMs: 0,
+      rerankMs: keywordTiming.rerankMs ?? 0,
+      totalRetrievalMs: keywordTiming.totalRetrievalMs ?? 0,
+      embeddingTimedOut: false
+    };
     const embeddingSettings = providerConfigStore?.get("embedding");
     if (embeddingSettings?.apiKey && embeddingSettings.model && chunks.length > 0) {
       const embeddingKey = `${embeddingSettings.baseUrl}|${embeddingSettings.model}|${normalizedQuestion.toLowerCase()}`;
       const cachedVector = embeddingCache.get(embeddingKey);
       if (cachedVector) {
-        retrieved = await new HybridKnowledgeRetriever({ ...retrievalOptions, embeddingProvider: { embed: () => cachedVector } }).search(normalizedQuestion);
+        const embeddingTiming: RetrievalTiming = {};
+        retrieved = await new HybridKnowledgeRetriever({ ...retrievalOptions, embeddingProvider: { embed: () => cachedVector }, timings: embeddingTiming }).search(normalizedQuestion);
+        retrievalDiagnostics = { ...retrievalDiagnostics, embeddingMs: 0, rerankMs: embeddingTiming.rerankMs ?? 0, totalRetrievalMs: embeddingTiming.totalRetrievalMs ?? retrievalDiagnostics.totalRetrievalMs };
       } else {
-        // Keyword retrieval is returned immediately. The first embedding is
-        // prepared in the background for a later repeated/follow-up question
-        // instead of blocking the live answer's critical path.
-        void new OpenAICompatibleEmbeddingProvider(embeddingSettings).embed(normalizedQuestion)
-          .then((vector) => rememberEmbedding(embeddingKey, vector))
-          .catch(() => undefined);
+        const embeddingTiming: RetrievalTiming = {};
+        const embeddingStartedAt = performance.now();
+        const embeddingProvider = new OpenAICompatibleEmbeddingProvider(embeddingSettings);
+        const embeddingRetrieval = embeddingProvider.embed(normalizedQuestion).then((vector) => {
+          embeddingTiming.embeddingMs = Math.max(0, performance.now() - embeddingStartedAt);
+          rememberEmbedding(embeddingKey, vector);
+          return new HybridKnowledgeRetriever({ ...retrievalOptions, embeddingProvider: { embed: () => vector }, timings: embeddingTiming }).search(normalizedQuestion);
+        });
+        const race = await fastRetrievalRace({ keyword: keywordRetrieval, embedding: embeddingRetrieval, keywordTiming, embeddingTiming, budgetMs: 100 });
+        retrieved = race.results;
+        retrievalDiagnostics = race;
       }
     }
     retrievalRepository?.record({
       profileId,
       query: normalizedQuestion,
       route: knowledgeRoute.reason,
+      metadata: retrievalDiagnostics,
       hits: [
         ...(questionBankMatch ? [{ resultType: "question" as const, resultId: questionBankMatch.question.id, score: questionBankMatch.score, verified: questionBankMatch.question.verified, preview: questionBankMatch.question.canonicalText, metadata: { scope: questionBankMatch.question.scope, type: questionBankMatch.question.type } }] : []),
-        ...factMatches.map((hit) => ({ resultType: "project-fact" as const, resultId: hit.fact.id, score: hit.score, verified: hit.fact.verified, preview: `${hit.fact.title}: ${hit.fact.content}`, metadata: { projectId: hit.fact.projectId, type: hit.fact.type } })),
+        ...factMatches.map((hit) => ({ resultType: "project-fact" as const, resultId: hit.fact.id, score: hit.finalScore, verified: hit.fact.verified, preview: `${hit.fact.title}: ${hit.fact.content}`, metadata: { projectId: hit.fact.projectId, type: hit.fact.type, lexicalScore: hit.lexicalScore, vectorScore: hit.vectorScore, typeScore: hit.typeScore, projectScore: hit.projectScore, verifiedBoost: hit.verifiedBoost, reason: hit.reason } })),
         ...jobMatches.map((hit) => ({ resultType: "job-requirement" as const, resultId: hit.requirement.id, score: hit.score, verified: hit.requirement.verified, preview: hit.requirement.requirement, metadata: { category: hit.requirement.category, importance: hit.requirement.importance } })),
         ...retrieved.slice(0, 3).map((hit) => ({ resultType: "document-chunk" as const, resultId: hit.id, score: hit.score, preview: hit.text, metadata: hit.metadata as unknown as Record<string, unknown> }))
       ]

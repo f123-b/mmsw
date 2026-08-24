@@ -507,6 +507,8 @@ export class QuestionDetector {
 export * from "./answer";
 export * from "./answer/interview-answer-formatter";
 export * from "./answer/answer-quality-checker";
+export * from "./answer/streaming-answer-sanitizer";
+export * from "./follow-up-context";
 export * from "./profile";
 export * from "./knowledge";
 export * from "./agent";
@@ -519,6 +521,7 @@ export * from "./analysis";
 export * from "./vad";
 export * from "./question-detector-2";
 export * from "./interview-memory";
+export * from "./question-trace";
 export * from "./question";
 export * from "./profile-builder";
 export * from "./interview-brain";

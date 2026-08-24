@@ -8,12 +8,21 @@
 export interface TerminologyRule {
   canonical: string;
   pattern: RegExp;
+  context?: RegExp;
+  priority?: number;
+  source?: "embedded" | "general" | "project";
 }
 
 export interface TerminologyCorrection {
   raw: string;
   canonical: string;
-  source: "embedded" | "general";
+  source: "embedded" | "general" | "project";
+}
+
+export interface TerminologyDictionary {
+  readonly rules: readonly TerminologyRule[];
+  add(rule: TerminologyRule): void;
+  addMany(rules: readonly TerminologyRule[]): void;
 }
 
 /**
@@ -92,13 +101,13 @@ export const EMBEDDED_TERMINOLOGY_RULES: readonly TerminologyRule[] = [
   { canonical: "Park", pattern: /p\s*a\s*r\s*k/gi },
   { canonical: "SVPWM", pattern: /s\s*v\s*p\s*w\s*m/gi },
   { canonical: "PID", pattern: /p\s*i\s*d/gi },
-  { canonical: "FOC", pattern: /f\s*o\s*c/gi },
-  { canonical: "DMA", pattern: /d\s*m\s*a/gi },
+  { canonical: "FOC", pattern: /\bf\s*o\s*c\b/gi, priority: 100 },
+  { canonical: "DMA", pattern: /\bd\s*m\s*a\b/gi, priority: 100 },
   { canonical: "ADC", pattern: /a\s*d\s*c/gi },
   { canonical: "DAC", pattern: /d\s*a\s*c/gi },
   { canonical: "GPIO", pattern: /g\s*p\s*i\s*o/gi },
   { canonical: "PWM", pattern: /p\s*w\s*m/gi },
-  { canonical: "CAN", pattern: /c\s*a\s*n/gi },
+  { canonical: "CAN", pattern: /\bc\s*a\s*n\b/gi, priority: 100 },
   { canonical: "MQTT", pattern: /m\s*q\s*t\s*t/gi },
   { canonical: "Modbus", pattern: /m\s*o\s*d\s*b\s*u\s*s/gi },
   { canonical: "TCP/IP", pattern: /t\s*c\s*p\s*(?:\/|每)?\s*i\s*p/gi },
@@ -136,8 +145,12 @@ export const INTERVIEW_TERMINOLOGY_RULES: readonly TerminologyRule[] = [
 
 function applyRules(text: string, rules: readonly TerminologyRule[], source: TerminologyCorrection["source"], corrections: TerminologyCorrection[]): string {
   let normalized = text;
-  for (const rule of rules) {
+  for (const rule of [...rules].sort((left, right) => (right.priority ?? 0) - (left.priority ?? 0))) {
     normalized = normalized.replace(rule.pattern, (raw) => {
+      if (rule.context) {
+        const flags = rule.context.flags.replace(/g/g, "");
+        if (!new RegExp(rule.context.source, flags).test(normalized)) return raw;
+      }
       if (raw !== rule.canonical) corrections.push({ raw, canonical: rule.canonical, source });
       return rule.canonical;
     });
@@ -145,9 +158,10 @@ function applyRules(text: string, rules: readonly TerminologyRule[], source: Ter
   return normalized;
 }
 
-export function normalizeTechnicalTermsWithCorrections(text: string): { text: string; corrections: TerminologyCorrection[] } {
+export function normalizeTechnicalTermsWithCorrections(text: string, projectRules: readonly TerminologyRule[] = []): { text: string; corrections: TerminologyCorrection[] } {
   const corrections: TerminologyCorrection[] = [];
   let normalized = text.replace(/\s+/g, " ").trim();
+  normalized = applyRules(normalized, projectRules, "project", corrections);
   normalized = applyRules(normalized, EMBEDDED_TERMINOLOGY_RULES, "embedded", corrections);
   normalized = applyRules(normalized, INTERVIEW_TERMINOLOGY_RULES, "general", corrections);
   return { text: normalized, corrections };
@@ -155,4 +169,13 @@ export function normalizeTechnicalTermsWithCorrections(text: string): { text: st
 
 export function normalizeTechnicalTerms(text: string): string {
   return normalizeTechnicalTermsWithCorrections(text).text;
+}
+
+export function createTerminologyDictionary(initialRules: readonly TerminologyRule[] = []): TerminologyDictionary {
+  const rules = [...initialRules];
+  return {
+    get rules() { return rules; },
+    add(rule) { rules.push(rule); },
+    addMany(nextRules) { rules.push(...nextRules); }
+  };
 }

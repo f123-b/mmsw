@@ -1,8 +1,10 @@
 import type { InterviewMemorySnapshot } from "./interview-memory";
 import { AnswerQualityChecker, type AnswerQualityResult } from "./answer/answer-quality-checker";
 import { InterviewAnswerFormatter } from "./answer/interview-answer-formatter";
+import { sanitizeStreamingAnswer, StreamingAnswerSanitizer } from "./answer/streaming-answer-sanitizer";
 import { normalizeTechnicalTerms } from "./terminology";
 import { PersonalAnswerValidator, QuestionAnalyzer } from "./knowledge/index";
+import type { FollowUpContext } from "./follow-up-context";
 
 export type AnswerMode = "FAST" | "NORMAL" | "DEEP";
 
@@ -11,6 +13,7 @@ export type AnswerQuestionKind =
   | "concept"
   | "comparison"
   | "system-design"
+  | "embedded-debugging"
   | "troubleshooting"
   | "code"
   | "project"
@@ -43,6 +46,7 @@ export interface AnswerContextInput {
   preparedAnswer?: { content: string; score: number; verified: boolean; source?: string };
   recentTranscript?: string[];
   interviewMemory?: InterviewMemorySnapshot;
+  followUpContext?: FollowUpContext;
 }
 
 export interface ContextPack {
@@ -56,6 +60,7 @@ export interface ContextPack {
   preparedAnswer?: { content: string; score: number; verified: boolean; source?: string };
   recentTranscript: string[];
   interviewMemory?: InterviewMemorySnapshot;
+  followUpContext?: FollowUpContext;
 }
 
 const ANSWER_KIND_HINTS: Record<string, AnswerQuestionKind> = {
@@ -75,6 +80,7 @@ export function classifyAnswerQuestion(text: string, hint?: string): AnswerQuest
   if (/代码|编程|手写|实现一个|写一个|补全|伪代码|算法题|时间复杂度|空间复杂度|输出结果|leetcode|debug|修复这段|code\b/i.test(normalized)) return "code";
   if (/系统设计|架构设计|设计一个系统|高并发|可扩展|容灾|降级|限流|服务拆分|数据库设计|缓存设计|消息队列/.test(normalized)) return "system-design";
   if (/区别|对比|比较|优缺点|取舍|权衡|为什么不用|选型|差异/.test(normalized)) return "comparison";
+  if (/低速抖动|IIC.*卡死|HardFault|DMA.*异常|CAN.*丢帧|丢帧|数据异常/.test(normalized)) return "embedded-debugging";
   if (/排查|定位|故障|报错|异常|线上问题|怎么解决|如何解决|怎么验证|监控|告警/.test(normalized)) return "troubleshooting";
   if (/团队|冲突|压力|困难|失败|沟通|协作|领导|决策|优势|缺点|成长/.test(normalized) && /你|我|经历|遇到|如何/.test(normalized)) return "behavioral";
   if (/项目|负责|主导|经历|做过|落地|交付|简历|成果|业绩|为什么.*设计|怎么.*实现|遇到什么问题|怎么解决|具体实现/.test(normalized)) return "project";
@@ -118,13 +124,14 @@ export class ContextRouter {
       retrievedKnowledge: (input.retrievedKnowledge ?? []).slice(0, 6),
       preparedAnswer: input.preparedAnswer,
       recentTranscript,
-      interviewMemory: input.interviewMemory
+      interviewMemory: input.interviewMemory,
+      followUpContext: input.followUpContext
     };
   }
 }
 
 export interface PromptSection {
-  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "experience-context" | "retrieval-context" | "recent-transcript" | "interview-memory" | "conversation-history" | "question" | "output-format";
+  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "experience-context" | "retrieval-context" | "recent-transcript" | "interview-memory" | "follow-up-context" | "conversation-history" | "question" | "output-format";
   content: string;
 }
 
@@ -142,21 +149,35 @@ export class PromptBuilder {
     if (context.personalMemoryEvidence.length > 0) sections.push({ name: "experience-context", content: `以下是优先级最高的个人工程经验。必须用第一人称，只使用其中有证据的内容；没有记录的内容明确说资料不足：\n${context.personalMemoryEvidence.join("\n---\n")}` });
     if (experienceRequested && context.experienceContext.length > 0) sections.push({ name: "experience-context", content: `以下是真实经历素材。只使用与问题直接相关的内容，不能补写未出现的事实：\n${context.experienceContext.join("\n---\n")}` });
     if (context.retrievedKnowledge.length > 0) sections.push({ name: "retrieval-context", content: context.retrievedKnowledge.join("\n---\n") });
-    if (context.recentTranscript.length > 0) sections.push({ name: "recent-transcript", content: `最近必要对话：\n${context.recentTranscript.join("\n")}` });
+    if (context.followUpContext) {
+      const followUp = context.followUpContext;
+      sections.push({ name: "follow-up-context", content: [
+        `Root Question：${followUp.rootQuestion}`,
+        `Parent Question：${followUp.parentQuestion}`,
+        followUp.parentAnswer ? `Parent Answer：${followUp.parentAnswer}` : "",
+        `Current Follow-up：${followUp.currentQuestion}`,
+        followUp.currentTopic ? `Current Topic：${followUp.currentTopic}` : "",
+        followUp.relatedProject ? `Related Project：${followUp.relatedProject}` : "",
+        followUp.relatedTechnicalTopic ? `Related Technical Topic：${followUp.relatedTechnicalTopic}` : ""
+      ].filter(Boolean).join("\n") });
+    } else if (context.recentTranscript.length > 0) {
+      sections.push({ name: "recent-transcript", content: `最近必要对话：\n${context.recentTranscript.join("\n")}` });
+    }
     if (context.interviewMemory) {
       const memory = context.interviewMemory;
-      const turns = memory.turns.slice(-10).map((turn) => `问题：${turn.question}${turn.answer ? `\n回答：${turn.answer}` : ""}`).join("\n");
-      sections.push({ name: "interview-memory", content: [`当前主题：${memory.currentTopic || "未确定"}`, turns].filter(Boolean).join("\n") });
+      const turns = context.followUpContext ? "" : memory.turns.slice(-10).map((turn) => `问题：${turn.question}${turn.answer ? `\n回答：${turn.answer}` : ""}`).join("\n");
+      if (!context.followUpContext || memory.currentTopic) sections.push({ name: "interview-memory", content: [`当前主题：${memory.currentTopic || "未确定"}`, turns].filter(Boolean).join("\n") });
     }
     sections.push({ name: "question", content: question.text });
     const length = kind === "code"
       ? mode === "FAST" ? "先给最小可运行代码和一句解释" : "完整代码、关键解释、复杂度和边界情况"
-      : mode === "FAST" ? "30-80" : mode === "DEEP" ? "150-250" : "80-150";
+      : mode === "FAST" ? "20-60" : mode === "DEEP" ? "120-250" : "60-130";
     const strategy = {
       code: "先说明思路，再给完整代码块（题目未指定语言时默认 C++17），然后解释关键行、时间/空间复杂度和边界情况；代码不要只写片段，也不要声称来自候选人的项目。",
       "system-design": "按需求和约束、整体架构、核心链路、数据一致性/稳定性、扩展性和权衡回答；只有明确问到项目时才引用项目。",
       comparison: "先给结论，再按核心差异、适用场景、优缺点和选型依据对比，不要强行加入项目经历。",
       troubleshooting: "按现象、可能原因、定位步骤、修复方案和验证方式回答；不要把排查方案包装成候选人已经做过的经历。",
+      "embedded-debugging": "先说现象，再给最可能原因和排查顺序，最后说明如何验证；优先覆盖信号/时序、硬件连接、驱动状态和边界条件，不要虚构候选人的实际经历。",
       project: "只使用提供的简历、项目和面试素材，按‘核心回答、项目经历、具体实现、问题解决’组织，但要像面试口述一样自然，不要机械套模板；资料没有的内容明确说没有证据。",
       behavioral: "使用真实经历回答，按情境、任务、行动、结果和反思组织；没有对应经历就说明资料不足，不要编造。",
       "follow-up": "承接上一轮上下文，只补充面试官追问的新增信息，不重复整段答案。",
@@ -276,16 +297,19 @@ export class AnswerAgent {
       maxRetries: options.maxRetries
     };
     let text = "";
+    const sanitizer = new StreamingAnswerSanitizer();
     if (options.directDisplay && provider.complete) {
       text = await provider.complete(providerRequest, signal);
     } else {
       for await (const delta of provider.stream(providerRequest, signal)) {
         if (!delta) continue;
         text += delta;
-        if (options.emitDeltas !== false && !options.directDisplay) yield { type: "answer_delta", answerId, delta };
+        const safeDelta = sanitizer.push(delta);
+        if (options.emitDeltas !== false && !options.directDisplay && safeDelta) yield { type: "answer_delta", answerId, delta: safeDelta };
       }
     }
-    let formattedText = options.formatAnswer === false ? text.trim() : this.formatter.format(text, mode, kind);
+    const completedText = options.directDisplay && provider.complete ? sanitizeStreamingAnswer(text) : sanitizer.finalize();
+    let formattedText = options.formatAnswer === false ? completedText.trim() : this.formatter.format(completedText, mode, kind);
     const groundingText = [context.profileSummary, context.jobDescriptionSummary, ...context.skills.map((skill) => skill.content), ...context.personalMemoryEvidence, ...context.experienceContext, ...context.retrievedKnowledge].filter(Boolean).join("\n");
     let quality = this.qualityChecker.check({ question: routedQuestion.text, answer: formattedText, mode, kind, groundingText });
     if (context.personalMemoryEvidence.length > 0 || kind === "project" || kind === "behavioral") {
