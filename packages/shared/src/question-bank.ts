@@ -50,9 +50,11 @@ export interface QuestionBankQuestionRecord {
   jobRole?: string;
   source: QuestionBankSourceType;
   status: "active" | "archived";
+  stale?: boolean;
   confidence: number;
   verified: boolean;
   embedding?: number[];
+  factIds?: string[];
   variants: string[];
   answerCards: QuestionBankAnswerCardRecord[];
   skillIds: string[];
@@ -71,6 +73,8 @@ export interface QuestionBankAnswerCardRecord {
   limitations?: string;
   sourceType: QuestionBankSourceType;
   verified: boolean;
+  stale?: boolean;
+  factIds?: string[];
   version: number;
   createdAt: number;
   updatedAt: number;

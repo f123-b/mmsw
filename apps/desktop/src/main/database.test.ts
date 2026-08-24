@@ -162,7 +162,13 @@ describe("SQLite persistence", () => {
         modules: [{ id: "module-1", projectId: "memory-project-foc", moduleName: "电流环", description: "PWM同步采样", sourceIds: ["doc-1"] }],
         technicalPoints: [{ id: "point-1", projectId: "memory-project-foc", topic: "ADC", content: "DMA搬运采样数据", importance: "high", sourceIds: ["doc-1"] }],
         problems: [{ id: "problem-1", projectId: "memory-project-foc", problem: "低速抖动", cause: "量化噪声", solution: "速度观测器", result: "运行稳定", sourceIds: ["doc-1"] }],
-        interviewQuestions: [{ id: "question-1", projectId: "memory-project-foc", question: "为什么这么设计？", answerPoints: ["基于实时性约束"], keywords: ["设计"], sourceIds: ["doc-1"] }]
+        interviewQuestions: [{ id: "question-1", projectId: "memory-project-foc", question: "为什么这么设计？", answerPoints: ["基于实时性约束"], keywords: ["设计"], sourceIds: ["doc-1"], factIds: ["fact-responsibility"] }],
+        facts: [
+          { id: "fact-background", projectId: "memory-project-foc", type: "background", title: "项目背景", content: "电机控制", confidence: 0.9, verified: false, sourceIds: ["doc-1"], evidence: [{ sourceId: "doc-1", quote: "电机控制" }] },
+          { id: "fact-responsibility", projectId: "memory-project-foc", type: "responsibility", title: "个人职责", content: "负责固件", confidence: 0.9, verified: false, sourceIds: ["doc-1"], evidence: [{ sourceId: "doc-1", quote: "负责固件" }] },
+          { id: "fact-technology", projectId: "memory-project-foc", type: "technology", title: "ADC", content: "DMA搬运采样数据", confidence: 0.9, verified: false, sourceIds: ["doc-1"], evidence: [{ sourceId: "doc-1", quote: "DMA搬运采样数据" }] },
+          { id: "fact-challenge", projectId: "memory-project-foc", type: "challenge", title: "低速抖动", content: "原因：量化噪声\n解决：速度观测器\n结果：运行稳定", confidence: 0.9, verified: false, sourceIds: ["doc-1"], evidence: [{ sourceId: "doc-1", quote: "低速抖动" }] }
+        ]
       });
       expect(snapshot.projects[0]?.technologyStack).toEqual(["FOC", "DMA"]);
       expect(memory.stats("profile-1")).toEqual({ projects: 1, modules: 1, technicalPoints: 1, problems: 1, interviewQuestions: 1 });
@@ -188,6 +194,8 @@ describe("SQLite persistence", () => {
       const confirmedFact = memory.listFacts("profile-1").find((fact) => fact.type === "responsibility");
       expect(confirmedFact).toBeDefined();
       memory.setFactVerification(confirmedFact?.id ?? "", true, 40);
+      expect(questionBank.getQuestion("question-1")?.stale).toBe(true);
+      expect(questionBank.getQuestion("question-1")?.answerCards[0]?.stale).toBe(true);
       memory.replaceSnapshot("profile-1", snapshot, 50);
       expect(memory.getFact(confirmedFact?.id ?? "")?.verified).toBe(true);
       expect(memory.getSnapshot("other").projects).toHaveLength(0);

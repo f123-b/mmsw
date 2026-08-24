@@ -1093,7 +1093,7 @@ function registerIpc(): void {
   ipcMain.handle("knowledge:rename-base", (_event, knowledgeBaseId: string, name: string) => knowledgeRepository?.renameKnowledgeBase(knowledgeBaseId, name));
   ipcMain.handle("knowledge:delete-base", (_event, knowledgeBaseId: string) => { knowledgeRepository?.deleteKnowledgeBase(knowledgeBaseId); return true; });
   ipcMain.handle("knowledge:list-documents", (_event, knowledgeBaseId?: string) => knowledgeRepository?.listDocuments(knowledgeBaseId) ?? []);
-  ipcMain.handle("knowledge:ingest", async (_event, input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array; documentType?: KnowledgeDocumentTypeOption }) => {
+  ipcMain.handle("knowledge:ingest", async (_event, input: { knowledgeBaseId?: string; profileId?: string; projectId?: string; filename: string; mimeType: string; bytes: Uint8Array; documentType?: KnowledgeDocumentTypeOption }) => {
     if (!knowledgeRepository) throw new Error("Knowledge database is still initializing");
     const knowledgeBase = input.knowledgeBaseId ? knowledgeRepository.listKnowledgeBases().find((base) => base.id === input.knowledgeBaseId) : knowledgeRepository.ensureKnowledgeBase();
     if (!knowledgeBase) throw new Error("Knowledge base not found");
@@ -1106,6 +1106,10 @@ function registerIpc(): void {
       const chunks = chunkText(parsed.text, { documentId: parsed.documentId, filename: parsed.filename, documentType });
       knowledgeRepository.replaceChunks(document.id, chunks);
       const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, status: "ready" });
+      if (documentType === "project" && input.profileId && projectMemoryService) {
+        const assignment = projectMemoryService.assignDocument(input.profileId, saved.id, input.projectId);
+        return { ...saved, projectAssignment: assignment, ...(assignment.status === "needs_assignment" ? { error: assignment.message } : {}) };
+      }
       return saved;
     } catch (error) {
       const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, status: "error", error: String(error) });
@@ -1153,13 +1157,21 @@ function registerIpc(): void {
   ipcMain.handle("project-memory:get", (_event, profileId: string) => projectMemoryService?.get(profileId));
   ipcMain.handle("project-memory:stats", (_event, profileId: string) => projectMemoryRepository?.stats(profileId) ?? { projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0 });
   ipcMain.handle("project-memory:list-facts", (_event, profileId: string, projectId?: string) => projectMemoryRepository?.listFacts(profileId, projectId) ?? []);
+  ipcMain.handle("project-memory:add-candidate-fact", (_event, fact: import("@interview-copilot/shared").ProjectFact) => projectMemoryRepository?.addCandidateFact(fact));
   ipcMain.handle("project-memory:verify-fact", (_event, factId: string, verified: boolean) => projectMemoryRepository?.setFactVerification(factId, verified));
   ipcMain.handle("project-memory:analysis-runs", (_event, profileId: string) => knowledgeAnalysisRepository?.list(profileId) ?? []);
+  ipcMain.handle("project-memory:state", (_event, projectId: string) => knowledgeAnalysisRepository?.getProjectState(projectId));
+  ipcMain.handle("project-memory:assign-source", (_event, input: Parameters<NonNullable<typeof projectMemoryService>["assignSource"]>[0]) => { projectMemoryService?.assignSource(input); return true; });
+  ipcMain.handle("project-memory:assign-document", (_event, profileId: string, documentId: string, projectId?: string) => projectMemoryService?.assignDocument(profileId, documentId, projectId));
   ipcMain.handle("job-targets:list", (_event, profileId: string) => jobTargetRepository?.list(profileId) ?? []);
   ipcMain.handle("retrieval:list", (_event, profileId: string, limit?: number) => retrievalRepository?.list(profileId, limit) ?? []);
   ipcMain.handle("project-memory:rebuild", async (_event, profileId: string) => {
     if (!projectMemoryService) throw new Error("Project Memory is still initializing");
     return projectMemoryService.rebuild(profileId);
+  });
+  ipcMain.handle("project-memory:rebuild-project", async (_event, projectId: string) => {
+    if (!projectMemoryService) throw new Error("Project Memory is still initializing");
+    return projectMemoryService.rebuildProject(projectId);
   });
   ipcMain.handle("history:list", () => historyRepository?.listInterviews() ?? []);
   ipcMain.handle("history:get", (_event, interviewId: string) => historyRepository?.snapshot(interviewId));
@@ -1423,11 +1435,11 @@ if (hasSingleInstanceLock) {
       { generate: (input) => { const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings; return createProjectMemoryModel(answerProvider, { ...settings, model: taskModel(settings, "projectAnalyzerModel", "normalModel") }).generate(input); } },
       (profileId) => broadcast("project-memory:updated", { profileId, stats: projectMemoryRepository?.stats(profileId) }),
       knowledgeAnalysisRepository,
-      async (profileId) => {
+      async (profileId, projectId) => {
         const settings = providerConfigStore?.get("embedding");
         if (!settings?.apiKey || !settings.model || !projectMemoryRepository) return;
         const embeddingProvider = new OpenAICompatibleEmbeddingProvider(settings);
-        const result = await projectMemoryRepository.embedFacts(profileId, (text) => embeddingProvider.embed(text), { model: settings.model, version: "project-facts-v1", concurrency: 4 });
+        const result = await projectMemoryRepository.embedFacts(profileId, (text) => embeddingProvider.embed(text), { projectId, model: settings.model, version: "project-facts-v1", concurrency: 4 });
         if (result.failed > 0) appLogger?.warn("PROJECT_MEMORY_EMBEDDING_PARTIAL", { profileId, ...result });
       }
     );
@@ -1532,7 +1544,7 @@ if (hasSingleInstanceLock) {
       profileId,
       ...(targetProjectId ? { projectId: targetProjectId } : {})
     });
-    const candidateCard = questionBankMatch?.question.answerCards.find((card) => card.verified)
+    const candidateCard = questionBankMatch?.question.answerCards.find((card) => card.verified && !card.stale)
       ?? questionBankMatch?.question.answerCards.find((card) => questionBankMatch.question.type === "code" ? card.mode === "code" : card.mode === "standard")
       ?? questionBankMatch?.question.answerCards[0];
     const preparedCard = candidateCard && (questionBankMatch?.question.scope !== "project" || candidateCard.verified)

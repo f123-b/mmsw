@@ -37,7 +37,11 @@ import {
   type ProjectRetrievalHit,
   type ProjectTechnicalPoint,
   type ProjectFact,
-  type ProjectFactType
+  type ProjectFactType,
+  type ProjectSourceAssignment,
+  type ProjectSourceRelationship,
+  type ProjectSourceType,
+  type ProjectFactEvidence
 } from "@interview-copilot/shared";
 
 export const APP_DATA_DIRECTORY = "InterviewCopilot";
@@ -54,6 +58,10 @@ function id(prefix: string, now: number): string { return `${prefix}-${now}-${Ma
 
 function projectFactEmbeddingHash(title: string, content: string): string {
   return createHash("sha256").update(`${title}\n${content}`).digest("hex");
+}
+
+function slugDatabase(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/gi, "-").replace(/^-|-$/g, "").slice(0, 64) || `project-${Date.now()}`;
 }
 
 function wasmCandidates(): string[] {
@@ -462,7 +470,44 @@ export class SqliteDatabase {
         ALTER TABLE project_facts ADD COLUMN embedding_version TEXT;
         ALTER TABLE project_facts ADD COLUMN embedding_updated_at INTEGER;
         CREATE INDEX IF NOT EXISTS project_facts_embedding_idx ON project_facts(embedding_hash, embedding_model, embedding_version);
-      `]
+      `],
+      [15, `
+        ALTER TABLE projects ADD COLUMN aliases_json TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE knowledge_analysis_runs ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE CASCADE;
+        ALTER TABLE knowledge_analysis_runs ADD COLUMN started_at INTEGER;
+        ALTER TABLE knowledge_analysis_runs ADD COLUMN finished_at INTEGER;
+        ALTER TABLE knowledge_analysis_runs ADD COLUMN snapshot_version INTEGER;
+        ALTER TABLE question_bank_questions ADD COLUMN stale INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE question_bank_answer_cards ADD COLUMN stale INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE IF NOT EXISTS project_sources (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          source_type TEXT NOT NULL,
+          source_id TEXT NOT NULL,
+          relationship TEXT NOT NULL DEFAULT 'primary',
+          confidence REAL NOT NULL DEFAULT 1,
+          verified INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(project_id, source_type, source_id)
+        );
+        CREATE INDEX IF NOT EXISTS project_sources_project_idx ON project_sources(project_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS project_sources_source_idx ON project_sources(source_type, source_id);
+        CREATE TABLE IF NOT EXISTS project_analysis_state (
+          project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+          latest_analysis_id TEXT,
+          last_successful_analysis_id TEXT,
+          status TEXT NOT NULL,
+          snapshot_version INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS question_bank_question_facts (
+          question_id TEXT NOT NULL REFERENCES question_bank_questions(id) ON DELETE CASCADE,
+          fact_id TEXT NOT NULL REFERENCES project_facts(id) ON DELETE CASCADE,
+          PRIMARY KEY(question_id, fact_id)
+        );
+        CREATE INDEX IF NOT EXISTS question_bank_question_facts_fact_idx ON question_bank_question_facts(fact_id);
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -674,29 +719,99 @@ export interface ProjectFactMatch {
   reason: string;
 }
 
-/** Structured Project Memory persistence. Legacy projects/conversations remain compatible. */
-export class SqliteProjectMemoryRepository {
+export interface ProjectSourceRecord extends ProjectSourceAssignment {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export class SqliteProjectSourceRepository {
   constructor(private readonly database: SqliteDatabase) {}
 
+  listProjectSources(projectId: string): ProjectSourceRecord[] {
+    return this.database.all<Record<string, unknown>>("SELECT id, project_id AS projectId, source_type AS sourceType, source_id AS sourceId, relationship, confidence, verified, created_at AS createdAt, updated_at AS updatedAt FROM project_sources WHERE project_id = ? ORDER BY relationship = 'primary' DESC, updated_at DESC", [projectId]).map((row) => this.hydrate(row));
+  }
+
+  getBySource(sourceType: ProjectSourceType, sourceId: string): ProjectSourceRecord[] {
+    return this.database.all<Record<string, unknown>>("SELECT id, project_id AS projectId, source_type AS sourceType, source_id AS sourceId, relationship, confidence, verified, created_at AS createdAt, updated_at AS updatedAt FROM project_sources WHERE source_type = ? AND source_id = ? ORDER BY updated_at DESC", [sourceType, sourceId]).map((row) => this.hydrate(row));
+  }
+
+  assign(input: Omit<ProjectSourceAssignment, "id" | "createdAt" | "updatedAt"> & { id?: string }, now = Date.now()): ProjectSourceRecord {
+    const assignmentId = input.id ?? `project-source-${input.projectId}-${input.sourceType}-${input.sourceId}`;
+    this.database.run("INSERT INTO project_sources(id, project_id, source_type, source_id, relationship, confidence, verified, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, source_type, source_id) DO UPDATE SET relationship=excluded.relationship, confidence=excluded.confidence, verified=excluded.verified, updated_at=excluded.updated_at", [assignmentId, input.projectId, input.sourceType, input.sourceId, input.relationship, Math.max(0, Math.min(1, input.confidence)), input.verified ? 1 : 0, now, now]);
+    this.database.flushNow();
+    return this.listProjectSources(input.projectId).find((item) => item.sourceType === input.sourceType && item.sourceId === input.sourceId) as ProjectSourceRecord;
+  }
+
+  unassign(projectId: string, sourceType: ProjectSourceType, sourceId: string): void {
+    this.database.run("DELETE FROM project_sources WHERE project_id = ? AND source_type = ? AND source_id = ?", [projectId, sourceType, sourceId]);
+    this.database.flushNow();
+  }
+
+  private hydrate(row: Record<string, unknown>): ProjectSourceRecord {
+    return { id: String(row.id), projectId: String(row.projectId), sourceType: String(row.sourceType) as ProjectSourceType, sourceId: String(row.sourceId), relationship: String(row.relationship) as ProjectSourceRelationship, confidence: Number(row.confidence ?? 1), verified: Number(row.verified) === 1, createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
+  }
+}
+
+/** Structured Project Memory persistence. Legacy projects/conversations remain compatible. */
+export class SqliteProjectMemoryRepository {
+  private readonly sources: SqliteProjectSourceRepository;
+
+  constructor(private readonly database: SqliteDatabase) { this.sources = new SqliteProjectSourceRepository(database); }
+
+  listProjects(profileId: string): Array<{ id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[] }> {
+    return this.database.all<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, aliases_json AS aliasesJson, source_ids_json AS sourceIdsJson FROM projects WHERE profile_id = ? ORDER BY updated_at DESC", [profileId]).map((row) => ({ id: String(row.id), name: String(row.name), profileId: String(row.profileId), aliases: jsonArray(row.aliasesJson), sourceIds: jsonArray(row.sourceIdsJson) }));
+  }
+
+  getProject(projectId: string): { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[] } | undefined {
+    const row = this.database.first<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, aliases_json AS aliasesJson, source_ids_json AS sourceIdsJson FROM projects WHERE id = ?", [projectId]);
+    return row ? { id: String(row.id), name: String(row.name), profileId: String(row.profileId), aliases: jsonArray(row.aliasesJson), sourceIds: jsonArray(row.sourceIdsJson) } : undefined;
+  }
+
+  listProjectSources(projectId: string): ProjectSourceRecord[] { return this.sources.listProjectSources(projectId); }
+  assignSource(input: Omit<ProjectSourceAssignment, "id" | "createdAt" | "updatedAt"> & { id?: string }): ProjectSourceRecord { return this.sources.assign(input); }
+  sourcesFor(sourceType: ProjectSourceType, sourceId: string): ProjectSourceRecord[] { return this.sources.getBySource(sourceType, sourceId); }
+
+  ensureProject(input: { id?: string; profileId: string; name: string; aliases?: string[]; sourceIds?: string[] }, now = Date.now()): { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[] } {
+    const projectId = input.id ?? `memory-project-${slugDatabase(input.name)}`;
+    this.database.run("INSERT INTO projects(id, name, profile_id, aliases_json, source_ids_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, profile_id=excluded.profile_id, aliases_json=excluded.aliases_json, source_ids_json=excluded.source_ids_json, updated_at=excluded.updated_at", [projectId, input.name.trim() || "待确认项目", input.profileId, JSON.stringify(input.aliases ?? []), JSON.stringify(input.sourceIds ?? []), now, now]);
+    this.database.flushNow();
+    return this.getProject(projectId) as { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[] };
+  }
+
   getSnapshot(profileId: string): ProjectMemorySnapshot {
-    const projects = this.database.all<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, description, role, hardware_json AS hardwareJson, software_json AS softwareJson, technology_stack_json AS technologyStackJson, time, source_ids_json AS sourceIdsJson, confidence FROM projects WHERE profile_id = ? AND id LIKE 'memory-project-%' ORDER BY updated_at DESC", [profileId]).map((row) => ({
+    const projects = this.database.all<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, description, role, hardware_json AS hardwareJson, software_json AS softwareJson, technology_stack_json AS technologyStackJson, time, source_ids_json AS sourceIdsJson, confidence FROM projects WHERE profile_id = ? AND (id LIKE 'memory-project-%' OR id IN (SELECT project_id FROM project_sources)) ORDER BY updated_at DESC", [profileId]).filter((row) => {
+      const state = this.database.first<{ status: string; lastSuccessfulAnalysisId: string | null }>("SELECT status, last_successful_analysis_id AS lastSuccessfulAnalysisId FROM project_analysis_state WHERE project_id = ?", [String(row.id)]);
+      return !(state?.status === "failed" && !state.lastSuccessfulAnalysisId);
+    }).map((row) => ({
       id: String(row.id), profileId: String(row.profileId), name: String(row.name), description: String(row.description ?? ""), role: String(row.role ?? ""), hardware: jsonArray(row.hardwareJson), software: jsonArray(row.softwareJson), technologyStack: jsonArray(row.technologyStackJson), ...(row.time ? { time: String(row.time) } : {}), sourceIds: jsonArray(row.sourceIdsJson), confidence: Number(row.confidence ?? 1)
     }));
     const projectIds = projects.map((project) => project.id);
-    if (projectIds.length === 0) return { projects, modules: [], technicalPoints: [], problems: [], interviewQuestions: [] };
+    if (projectIds.length === 0) return { projects, modules: [], technicalPoints: [], problems: [], interviewQuestions: [], facts: [] };
     const placeholders = projectIds.map(() => "?").join(",");
     const modules = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, module_name AS moduleName, description, file_path AS filePath, source_ids_json AS sourceIdsJson FROM project_modules WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), moduleName: String(row.moduleName), description: String(row.description), ...(row.filePath ? { filePath: String(row.filePath) } : {}), sourceIds: jsonArray(row.sourceIdsJson) }));
     const technicalPoints = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, topic, content, importance, source_ids_json AS sourceIdsJson FROM technical_points WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), topic: String(row.topic), content: String(row.content), importance: String(row.importance) as ProjectTechnicalPoint["importance"], sourceIds: jsonArray(row.sourceIdsJson) }));
     const problems = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, problem, cause, solution, result, source_ids_json AS sourceIdsJson FROM project_problems WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), problem: String(row.problem), cause: String(row.cause), solution: String(row.solution), result: String(row.result), sourceIds: jsonArray(row.sourceIdsJson) }));
-    const interviewQuestions = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, question, answer_points_json AS answerPointsJson, keywords_json AS keywordsJson, source_ids_json AS sourceIdsJson FROM interview_questions WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), question: String(row.question), answerPoints: jsonArray(row.answerPointsJson), keywords: jsonArray(row.keywordsJson), sourceIds: jsonArray(row.sourceIdsJson) }));
-    return { projects, modules, technicalPoints, problems, interviewQuestions };
+    const interviewQuestions = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, question, answer_points_json AS answerPointsJson, keywords_json AS keywordsJson, source_ids_json AS sourceIdsJson FROM interview_questions WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), question: String(row.question), answerPoints: jsonArray(row.answerPointsJson), keywords: jsonArray(row.keywordsJson), sourceIds: jsonArray(row.sourceIdsJson), factIds: this.database.all<{ factId: string }>("SELECT fact_id AS factId FROM question_bank_question_facts WHERE question_id = ?", [String(row.id)]).map((item) => item.factId) }));
+    return { projects, modules, technicalPoints, problems, interviewQuestions, facts: this.listFacts(profileId) };
   }
 
-  replaceSnapshot(profileId: string, snapshot: ProjectMemorySnapshot, now = Date.now()): ProjectMemorySnapshot {
-    const previousFactVerification = new Map(this.database.all<{ id: string; verified: number }>("SELECT id, verified FROM project_facts WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ? AND id LIKE 'memory-project-%')", [profileId]).map((row) => [row.id, Number(row.verified) === 1] as const));
-    const previousFactEmbeddings = new Map(this.database.all<{ id: string; embeddingJson: string | null; embeddingHash: string | null; embeddingModel: string | null; embeddingVersion: string | null; embeddingUpdatedAt: number | null }>("SELECT id, embedding_json AS embeddingJson, embedding_hash AS embeddingHash, embedding_model AS embeddingModel, embedding_version AS embeddingVersion, embedding_updated_at AS embeddingUpdatedAt FROM project_facts WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ? AND id LIKE 'memory-project-%')", [profileId]).map((row) => [row.id, row] as const));
-    this.database.run("DELETE FROM question_bank_questions WHERE scope = 'project' AND profile_id = ? AND source = 'generated'", [profileId]);
-    this.database.run("DELETE FROM projects WHERE profile_id = ? AND id LIKE 'memory-project-%'", [profileId]);
+  replaceSnapshot(profileId: string, snapshot: ProjectMemorySnapshot, now = Date.now(), onlyProjectId?: string): ProjectMemorySnapshot {
+    const factScope = onlyProjectId ? "project_id = ?" : "project_id IN (SELECT id FROM projects WHERE profile_id = ? AND id LIKE 'memory-project-%')";
+    const projectFilterParams: Array<string | number> = onlyProjectId ? [onlyProjectId] : [profileId];
+    const previousAssignments = onlyProjectId ? this.sources.listProjectSources(onlyProjectId) : [];
+    const previousFactVerification = new Map(this.database.all<{ id: string; verified: number }>(`SELECT id, verified FROM project_facts WHERE ${factScope}`, projectFilterParams).map((row) => [row.id, Number(row.verified) === 1] as const));
+    const previousFactEmbeddings = new Map(this.database.all<{ id: string; embeddingJson: string | null; embeddingHash: string | null; embeddingModel: string | null; embeddingVersion: string | null; embeddingUpdatedAt: number | null }>(`SELECT id, embedding_json AS embeddingJson, embedding_hash AS embeddingHash, embedding_model AS embeddingModel, embedding_version AS embeddingVersion, embedding_updated_at AS embeddingUpdatedAt FROM project_facts WHERE ${factScope}`, projectFilterParams).map((row) => [row.id, row] as const));
+    const questionDelete = onlyProjectId ? "DELETE FROM question_bank_questions WHERE scope = 'project' AND profile_id = ? AND source = 'generated' AND project_id = ?" : "DELETE FROM question_bank_questions WHERE scope = 'project' AND profile_id = ? AND source = 'generated'";
+    this.database.run(questionDelete, onlyProjectId ? [profileId, onlyProjectId] : [profileId]);
+    if (onlyProjectId) {
+      this.database.run("DELETE FROM project_modules WHERE project_id = ?", [onlyProjectId]);
+      this.database.run("DELETE FROM technical_points WHERE project_id = ?", [onlyProjectId]);
+      this.database.run("DELETE FROM project_problems WHERE project_id = ?", [onlyProjectId]);
+      this.database.run("DELETE FROM interview_questions WHERE project_id = ?", [onlyProjectId]);
+      this.database.run("DELETE FROM project_facts WHERE project_id = ?", [onlyProjectId]);
+      if (onlyProjectId.startsWith("memory-project-")) this.database.run("DELETE FROM projects WHERE profile_id = ? AND id = ?", [profileId, onlyProjectId]);
+    } else this.database.run("DELETE FROM projects WHERE profile_id = ? AND id LIKE 'memory-project-%'", [profileId]);
     for (const project of snapshot.projects) {
       this.database.run("INSERT INTO projects(id, name, profile_id, description, role, hardware_json, software_json, technology_stack_json, time, source_ids_json, confidence, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, profile_id=excluded.profile_id, description=excluded.description, role=excluded.role, hardware_json=excluded.hardware_json, software_json=excluded.software_json, technology_stack_json=excluded.technology_stack_json, time=excluded.time, source_ids_json=excluded.source_ids_json, confidence=excluded.confidence, updated_at=excluded.updated_at", [project.id, project.name, profileId, project.description, project.role, JSON.stringify(project.hardware), JSON.stringify(project.software), JSON.stringify(project.technologyStack), project.time ?? null, JSON.stringify(project.sourceIds), project.confidence, now, now]);
     }
@@ -710,43 +825,60 @@ export class SqliteProjectMemoryRepository {
       const contentHash = projectFactEmbeddingHash(fact.title, fact.content);
       const previous = previousFactEmbeddings.get(fact.id);
       const keepEmbedding = previous?.embeddingHash === contentHash && Boolean(previous.embeddingJson);
-      this.database.run("INSERT INTO project_facts(id, project_id, fact_type, title, content, confidence, verified, status, embedding_json, embedding_hash, embedding_model, embedding_version, embedding_updated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, fact_type=excluded.fact_type, title=excluded.title, content=excluded.content, confidence=excluded.confidence, verified=excluded.verified, status=excluded.status, embedding_json=excluded.embedding_json, embedding_hash=excluded.embedding_hash, embedding_model=excluded.embedding_model, embedding_version=excluded.embedding_version, embedding_updated_at=excluded.embedding_updated_at, updated_at=excluded.updated_at", [fact.id, fact.projectId, fact.type, fact.title, fact.content, Math.max(0, Math.min(1, fact.confidence)), verified ? 1 : 0, keepEmbedding ? previous?.embeddingJson : null, keepEmbedding ? contentHash : null, keepEmbedding ? previous?.embeddingModel ?? null : null, keepEmbedding ? previous?.embeddingVersion ?? null : null, keepEmbedding ? previous?.embeddingUpdatedAt ?? null : null, fact.createdAt ?? now, fact.updatedAt ?? now]);
+      const persistedStatus = fact.evidence?.some((item) => item.quote.trim()) ? fact.status ?? "active" : "pending_review";
+      this.database.run("INSERT INTO project_facts(id, project_id, fact_type, title, content, confidence, verified, status, embedding_json, embedding_hash, embedding_model, embedding_version, embedding_updated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, fact_type=excluded.fact_type, title=excluded.title, content=excluded.content, confidence=excluded.confidence, verified=excluded.verified, status=excluded.status, embedding_json=excluded.embedding_json, embedding_hash=excluded.embedding_hash, embedding_model=excluded.embedding_model, embedding_version=excluded.embedding_version, embedding_updated_at=excluded.embedding_updated_at, updated_at=excluded.updated_at", [fact.id, fact.projectId, fact.type, fact.title, fact.content, Math.max(0, Math.min(1, fact.confidence)), verified ? 1 : 0, persistedStatus, keepEmbedding ? previous?.embeddingJson : null, keepEmbedding ? contentHash : null, keepEmbedding ? previous?.embeddingModel ?? null : null, keepEmbedding ? previous?.embeddingVersion ?? null : null, keepEmbedding ? previous?.embeddingUpdatedAt ?? null : null, fact.createdAt ?? now, fact.updatedAt ?? now]);
       this.database.run("DELETE FROM project_fact_sources WHERE fact_id = ?", [fact.id]);
-      for (const sourceId of fact.sourceIds) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, created_at) VALUES (?, ?, NULL, NULL, ?)", [fact.id, sourceId, now]);
+      const evidence = fact.evidence?.length ? fact.evidence : fact.sourceIds.map((sourceId) => ({ sourceId, quote: "", locator: undefined }));
+      for (const item of evidence) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, created_at) VALUES (?, ?, ?, ?, ?)", [fact.id, item.sourceId, item.quote || null, item.locator ?? null, now]);
     };
-    for (const project of snapshot.projects) {
-      saveFact({ id: `${project.id}-fact-background`, projectId: project.id, profileId, type: "background", title: "项目背景", content: project.description, confidence: project.confidence, verified: false, sourceIds: project.sourceIds, createdAt: now, updatedAt: now });
-      saveFact({ id: `${project.id}-fact-responsibility`, projectId: project.id, profileId, type: "responsibility", title: "个人职责", content: project.role, confidence: project.confidence, verified: false, sourceIds: project.sourceIds, createdAt: now, updatedAt: now });
-      if (project.technologyStack.length || project.hardware.length || project.software.length) saveFact({ id: `${project.id}-fact-technology`, projectId: project.id, profileId, type: "technology", title: "技术栈与平台", content: [`技术栈：${project.technologyStack.join("、")}`, `硬件：${project.hardware.join("、")}`, `软件：${project.software.join("、")}`].filter((item) => !item.endsWith("：")).join("\n"), confidence: project.confidence, verified: false, sourceIds: project.sourceIds, createdAt: now, updatedAt: now });
+    if (snapshot.facts?.length) for (const item of snapshot.facts) saveFact({ ...item, profileId, status: item.status ?? "active", createdAt: item.createdAt ?? now, updatedAt: now });
+    else {
+      for (const project of snapshot.projects) {
+        saveFact({ id: `${project.id}-fact-background`, projectId: project.id, profileId, type: "background", title: "项目背景", content: project.description, confidence: project.confidence, verified: false, sourceIds: project.sourceIds, createdAt: now, updatedAt: now });
+        saveFact({ id: `${project.id}-fact-responsibility`, projectId: project.id, profileId, type: "responsibility", title: "个人职责", content: project.role, confidence: project.confidence, verified: false, sourceIds: project.sourceIds, createdAt: now, updatedAt: now });
+        if (project.technologyStack.length || project.hardware.length || project.software.length) saveFact({ id: `${project.id}-fact-technology`, projectId: project.id, profileId, type: "technology", title: "技术栈与平台", content: [`技术栈：${project.technologyStack.join("、")}`, `硬件：${project.hardware.join("、")}`, `软件：${project.software.join("、")}`].filter((item) => !item.endsWith("：")).join("\n"), confidence: project.confidence, verified: false, sourceIds: project.sourceIds, createdAt: now, updatedAt: now });
+      }
+      for (const module of snapshot.modules) saveFact({ id: `${module.id}-fact`, projectId: module.projectId, profileId: projectById.get(module.projectId)?.profileId ?? profileId, type: "module", title: module.moduleName, content: module.description, confidence: projectById.get(module.projectId)?.confidence ?? 0.65, verified: false, sourceIds: module.sourceIds, createdAt: now, updatedAt: now });
+      for (const point of snapshot.technicalPoints) saveFact({ id: `${point.id}-fact`, projectId: point.projectId, profileId: projectById.get(point.projectId)?.profileId ?? profileId, type: "technology", title: point.topic, content: point.content, confidence: projectById.get(point.projectId)?.confidence ?? 0.65, verified: false, sourceIds: point.sourceIds, createdAt: now, updatedAt: now });
+      for (const problem of snapshot.problems) saveFact({ id: `${problem.id}-fact`, projectId: problem.projectId, profileId: projectById.get(problem.projectId)?.profileId ?? profileId, type: "challenge", title: problem.problem, content: [`原因：${problem.cause}`, `解决：${problem.solution}`, `结果：${problem.result}`].join("\n"), confidence: projectById.get(problem.projectId)?.confidence ?? 0.65, verified: false, sourceIds: problem.sourceIds, createdAt: now, updatedAt: now });
     }
-    for (const module of snapshot.modules) saveFact({ id: `${module.id}-fact`, projectId: module.projectId, profileId: projectById.get(module.projectId)?.profileId ?? profileId, type: "module", title: module.moduleName, content: module.description, confidence: projectById.get(module.projectId)?.confidence ?? 0.65, verified: false, sourceIds: module.sourceIds, createdAt: now, updatedAt: now });
-    for (const point of snapshot.technicalPoints) saveFact({ id: `${point.id}-fact`, projectId: point.projectId, profileId: projectById.get(point.projectId)?.profileId ?? profileId, type: "technology", title: point.topic, content: point.content, confidence: projectById.get(point.projectId)?.confidence ?? 0.65, verified: false, sourceIds: point.sourceIds, createdAt: now, updatedAt: now });
-    for (const problem of snapshot.problems) saveFact({ id: `${problem.id}-fact`, projectId: problem.projectId, profileId: projectById.get(problem.projectId)?.profileId ?? profileId, type: "challenge", title: problem.problem, content: [`原因：${problem.cause}`, `解决：${problem.solution}`, `结果：${problem.result}`].join("\n"), confidence: projectById.get(problem.projectId)?.confidence ?? 0.65, verified: false, sourceIds: problem.sourceIds, createdAt: now, updatedAt: now });
     const questionBank = new SqliteQuestionBankRepository(this.database);
     for (const question of snapshot.interviewQuestions) {
       const project = projectById.get(question.projectId);
-      questionBank.saveQuestion({ id: question.id, canonicalText: question.question, type: "project", scope: "project", profileId, projectId: question.projectId, source: "generated", confidence: project?.confidence ?? 0.65, verified: false, variants: question.keywords });
-      questionBank.saveAnswerCard({ id: `${question.id}-generated-answer`, questionId: question.id, content: question.answerPoints.join("\n"), keyPoints: question.answerPoints, sourceType: "generated", verified: false });
+      questionBank.saveQuestion({ id: question.id, canonicalText: question.question, type: "project", scope: "project", profileId, projectId: question.projectId, source: "generated", confidence: project?.confidence ?? 0.65, verified: false, variants: question.keywords, factIds: question.factIds });
+      questionBank.saveAnswerCard({ id: `${question.id}-generated-answer`, questionId: question.id, content: question.answerPoints.join("\n"), keyPoints: question.answerPoints, sourceType: "generated", verified: false, factIds: question.factIds });
     }
+    for (const assignment of previousAssignments) this.sources.assign(assignment);
     this.database.flushNow();
     return this.getSnapshot(profileId);
   }
 
   listFacts(profileId: string, projectId?: string): ProjectFact[] {
       const rows = projectId
-      ? this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.project_id = ? AND f.status = 'active' ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId, projectId])
-      : this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.status = 'active' ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId]);
+      ? this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.project_id = ? AND f.status IN ('active', 'pending_review', 'conflicting') ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId, projectId])
+      : this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.status IN ('active', 'pending_review', 'conflicting') ORDER BY f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId]);
     return rows.map((row) => this.hydrateFact(row));
   }
 
   getFact(factId: string): ProjectFact | undefined {
-    const row = this.database.first<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE f.id = ?", [factId]);
+    const row = this.database.first<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE f.id = ?", [factId]);
     return row ? this.hydrateFact(row) : undefined;
+  }
+
+  addCandidateFact(fact: ProjectFact, now = Date.now()): ProjectFact {
+    if (!fact.projectId || !fact.sourceIds.length || !fact.evidence?.length) throw new Error("PROJECT_FACT_EVIDENCE_REQUIRED");
+    this.database.run("INSERT INTO project_facts(id, project_id, fact_type, title, content, confidence, verified, status, embedding_json, embedding_hash, embedding_model, embedding_version, embedding_updated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, 'pending_review', NULL, NULL, NULL, NULL, NULL, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, content=excluded.content, confidence=excluded.confidence, status='pending_review', updated_at=excluded.updated_at", [fact.id, fact.projectId, fact.type, fact.title, fact.content, Math.max(0, Math.min(1, fact.confidence)), fact.createdAt ?? now, now]);
+    this.database.run("DELETE FROM project_fact_sources WHERE fact_id = ?", [fact.id]);
+    for (const item of fact.evidence) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, created_at) VALUES (?, ?, ?, ?, ?)", [fact.id, item.sourceId, item.quote, item.locator ?? null, now]);
+    this.database.flushNow();
+    return this.getFact(fact.id) as ProjectFact;
   }
 
   setFactVerification(factId: string, verified: boolean, now = Date.now()): ProjectFact | undefined {
     if (!this.getFact(factId)) return undefined;
-    this.database.run("UPDATE project_facts SET verified = ?, updated_at = ? WHERE id = ?", [verified ? 1 : 0, now, factId]);
+    this.database.run("UPDATE project_facts SET verified = ?, status = CASE WHEN ? = 1 AND status = 'pending_review' THEN 'active' ELSE status END, updated_at = ? WHERE id = ?", [verified ? 1 : 0, verified ? 1 : 0, now, factId]);
+    this.database.run("UPDATE question_bank_questions SET stale = 1, updated_at = ? WHERE id IN (SELECT question_id FROM question_bank_question_facts WHERE fact_id = ?)", [now, factId]);
+    this.database.run("UPDATE question_bank_answer_cards SET stale = 1, updated_at = ? WHERE question_id IN (SELECT question_id FROM question_bank_question_facts WHERE fact_id = ?)", [now, factId]);
     this.database.flushNow();
     return this.getFact(factId);
   }
@@ -773,8 +905,8 @@ export class SqliteProjectMemoryRepository {
     return this.getFact(factId);
   }
 
-  async embedFacts(profileId: string, embed: (text: string) => Promise<number[]>, options: { model?: string; version?: string; concurrency?: number } = {}): Promise<{ embedded: number; reused: number; failed: number }> {
-    const facts = this.listFacts(profileId);
+  async embedFacts(profileId: string, embed: (text: string) => Promise<number[]>, options: { projectId?: string; model?: string; version?: string; concurrency?: number } = {}): Promise<{ embedded: number; reused: number; failed: number }> {
+    const facts = this.listFacts(profileId, options.projectId).filter((fact) => fact.status === "active");
     const concurrency = Math.max(1, Math.min(8, Math.floor(options.concurrency ?? 4)));
     let embedded = 0;
     let reused = 0;
@@ -801,9 +933,10 @@ export class SqliteProjectMemoryRepository {
   }
 
   private hydrateFact(row: Record<string, unknown>): ProjectFact {
-    const sourceIds = this.database.all<{ sourceId: string }>("SELECT source_id AS sourceId FROM project_fact_sources WHERE fact_id = ? ORDER BY created_at", [String(row.id)]).map((item) => item.sourceId);
+    const evidence = this.database.all<{ sourceId: string; quote: string | null; locator: string | null }>("SELECT source_id AS sourceId, quote, locator FROM project_fact_sources WHERE fact_id = ? ORDER BY created_at", [String(row.id)]).map((item) => ({ sourceId: item.sourceId, quote: item.quote ?? "", ...(item.locator ? { locator: item.locator } : {}) } satisfies ProjectFactEvidence));
+    const sourceIds = evidence.map((item) => item.sourceId);
     const embedding = jsonArray<number>(row.embeddingJson);
-    return { id: String(row.id), projectId: String(row.projectId), profileId: String(row.profileId), type: String(row.type) as ProjectFactType, title: String(row.title), content: String(row.content), confidence: Number(row.confidence ?? 1), verified: Number(row.verified) === 1, sourceIds, ...(embedding.length ? { embedding } : {}), ...(row.embeddingHash ? { embeddingHash: String(row.embeddingHash) } : {}), ...(row.embeddingModel ? { embeddingModel: String(row.embeddingModel) } : {}), ...(row.embeddingVersion ? { embeddingVersion: String(row.embeddingVersion) } : {}), ...(row.embeddingUpdatedAt ? { embeddingUpdatedAt: Number(row.embeddingUpdatedAt) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
+    return { id: String(row.id), projectId: String(row.projectId), profileId: String(row.profileId), type: String(row.type) as ProjectFactType, factType: String(row.type) as ProjectFactType, title: String(row.title), content: String(row.content), confidence: Number(row.confidence ?? 1), verified: Number(row.verified) === 1, sourceIds, evidence, status: String(row.status ?? "active") as ProjectFact["status"], ...(embedding.length ? { embedding } : {}), ...(row.embeddingHash ? { embeddingHash: String(row.embeddingHash) } : {}), ...(row.embeddingModel ? { embeddingModel: String(row.embeddingModel) } : {}), ...(row.embeddingVersion ? { embeddingVersion: String(row.embeddingVersion) } : {}), ...(row.embeddingUpdatedAt ? { embeddingUpdatedAt: Number(row.embeddingUpdatedAt) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
   }
 
   stats(profileId: string): ProjectMemoryStats {
@@ -818,6 +951,7 @@ export type { RetrievalHitInput, RetrievalRunRecord } from "./database/retrieval
 export interface KnowledgeAnalysisRunRecord {
   id: string;
   profileId?: string;
+  projectId?: string;
   runType: string;
   inputHash: string;
   model?: string;
@@ -828,6 +962,18 @@ export interface KnowledgeAnalysisRunRecord {
   error?: string;
   createdAt: number;
   updatedAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  snapshotVersion?: number;
+}
+
+export interface ProjectAnalysisState {
+  projectId: string;
+  latestAnalysisId?: string;
+  lastSuccessfulAnalysisId?: string;
+  status: "running" | "completed" | "failed" | "stale";
+  snapshotVersion: number;
+  updatedAt: number;
 }
 
 export class SqliteKnowledgeAnalysisRepository {
@@ -836,13 +982,25 @@ export class SqliteKnowledgeAnalysisRepository {
   record(input: Omit<KnowledgeAnalysisRunRecord, "id" | "createdAt" | "updatedAt"> & { id?: string; now?: number }): KnowledgeAnalysisRunRecord {
     const now = input.now ?? Date.now();
     const runId = input.id ?? id("analysis", now);
-    this.database.run("INSERT INTO knowledge_analysis_runs(id, profile_id, run_type, input_hash, model, prompt_version, status, input_snapshot_json, output_json, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET profile_id=excluded.profile_id, run_type=excluded.run_type, input_hash=excluded.input_hash, model=excluded.model, prompt_version=excluded.prompt_version, status=excluded.status, input_snapshot_json=excluded.input_snapshot_json, output_json=excluded.output_json, error=excluded.error, updated_at=excluded.updated_at", [runId, input.profileId ?? null, input.runType, input.inputHash, input.model ?? null, input.promptVersion ?? null, input.status, JSON.stringify(input.inputSnapshot), input.output === undefined ? null : JSON.stringify(input.output), input.error ?? null, now, now]);
+    this.database.run("INSERT INTO knowledge_analysis_runs(id, profile_id, project_id, run_type, input_hash, model, prompt_version, status, input_snapshot_json, output_json, error, started_at, finished_at, snapshot_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET profile_id=excluded.profile_id, project_id=excluded.project_id, run_type=excluded.run_type, input_hash=excluded.input_hash, model=excluded.model, prompt_version=excluded.prompt_version, status=excluded.status, input_snapshot_json=excluded.input_snapshot_json, output_json=excluded.output_json, error=excluded.error, started_at=excluded.started_at, finished_at=excluded.finished_at, snapshot_version=excluded.snapshot_version, updated_at=excluded.updated_at", [runId, input.profileId ?? null, input.projectId ?? null, input.runType, input.inputHash, input.model ?? null, input.promptVersion ?? null, input.status, JSON.stringify(input.inputSnapshot), input.output === undefined ? null : JSON.stringify(input.output), input.error ?? null, input.startedAt ?? now, input.finishedAt ?? (input.status === "running" ? null : now), input.snapshotVersion ?? null, now, now]);
     this.database.flush();
-    return { id: runId, ...(input.profileId ? { profileId: input.profileId } : {}), runType: input.runType, inputHash: input.inputHash, ...(input.model ? { model: input.model } : {}), ...(input.promptVersion ? { promptVersion: input.promptVersion } : {}), status: input.status, inputSnapshot: input.inputSnapshot, ...(input.output === undefined ? {} : { output: input.output }), ...(input.error ? { error: input.error } : {}), createdAt: now, updatedAt: now };
+    return { id: runId, ...(input.profileId ? { profileId: input.profileId } : {}), ...(input.projectId ? { projectId: input.projectId } : {}), runType: input.runType, inputHash: input.inputHash, ...(input.model ? { model: input.model } : {}), ...(input.promptVersion ? { promptVersion: input.promptVersion } : {}), status: input.status, inputSnapshot: input.inputSnapshot, ...(input.output === undefined ? {} : { output: input.output }), ...(input.error ? { error: input.error } : {}), createdAt: now, updatedAt: now, startedAt: input.startedAt ?? now, ...(input.status === "running" ? {} : { finishedAt: input.finishedAt ?? now }), ...(input.snapshotVersion === undefined ? {} : { snapshotVersion: input.snapshotVersion }) };
   }
 
   list(profileId: string): KnowledgeAnalysisRunRecord[] {
-    return this.database.all<Record<string, unknown>>("SELECT id, profile_id AS profileId, run_type AS runType, input_hash AS inputHash, model, prompt_version AS promptVersion, status, input_snapshot_json AS inputSnapshotJson, output_json AS outputJson, error, created_at AS createdAt, updated_at AS updatedAt FROM knowledge_analysis_runs WHERE profile_id = ? ORDER BY updated_at DESC", [profileId]).map((row) => ({ id: String(row.id), profileId: String(row.profileId), runType: String(row.runType), inputHash: String(row.inputHash), ...(row.model ? { model: String(row.model) } : {}), ...(row.promptVersion ? { promptVersion: String(row.promptVersion) } : {}), status: String(row.status) as KnowledgeAnalysisRunRecord["status"], inputSnapshot: JSON.parse(String(row.inputSnapshotJson)), ...(row.outputJson ? { output: JSON.parse(String(row.outputJson)) } : {}), ...(row.error ? { error: String(row.error) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) }));
+    return this.database.all<Record<string, unknown>>("SELECT id, profile_id AS profileId, project_id AS projectId, run_type AS runType, input_hash AS inputHash, model, prompt_version AS promptVersion, status, input_snapshot_json AS inputSnapshotJson, output_json AS outputJson, error, started_at AS startedAt, finished_at AS finishedAt, snapshot_version AS snapshotVersion, created_at AS createdAt, updated_at AS updatedAt FROM knowledge_analysis_runs WHERE profile_id = ? ORDER BY updated_at DESC", [profileId]).map((row) => ({ id: String(row.id), profileId: String(row.profileId), ...(row.projectId ? { projectId: String(row.projectId) } : {}), runType: String(row.runType), inputHash: String(row.inputHash), ...(row.model ? { model: String(row.model) } : {}), ...(row.promptVersion ? { promptVersion: String(row.promptVersion) } : {}), status: String(row.status) as KnowledgeAnalysisRunRecord["status"], inputSnapshot: JSON.parse(String(row.inputSnapshotJson)), ...(row.outputJson ? { output: JSON.parse(String(row.outputJson)) } : {}), ...(row.error ? { error: String(row.error) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt), ...(row.startedAt ? { startedAt: Number(row.startedAt) } : {}), ...(row.finishedAt ? { finishedAt: Number(row.finishedAt) } : {}), ...(row.snapshotVersion ? { snapshotVersion: Number(row.snapshotVersion) } : {}) }));
+  }
+
+  setProjectState(input: Omit<ProjectAnalysisState, "updatedAt"> & { updatedAt?: number }): ProjectAnalysisState {
+    const now = input.updatedAt ?? Date.now();
+    this.database.run("INSERT INTO project_analysis_state(project_id, latest_analysis_id, last_successful_analysis_id, status, snapshot_version, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET latest_analysis_id=excluded.latest_analysis_id, last_successful_analysis_id=COALESCE(excluded.last_successful_analysis_id, project_analysis_state.last_successful_analysis_id), status=excluded.status, snapshot_version=excluded.snapshot_version, updated_at=excluded.updated_at", [input.projectId, input.latestAnalysisId ?? null, input.lastSuccessfulAnalysisId ?? null, input.status, input.snapshotVersion, now]);
+    this.database.flush();
+    return this.getProjectState(input.projectId) as ProjectAnalysisState;
+  }
+
+  getProjectState(projectId: string): ProjectAnalysisState | undefined {
+    const row = this.database.first<Record<string, unknown>>("SELECT project_id AS projectId, latest_analysis_id AS latestAnalysisId, last_successful_analysis_id AS lastSuccessfulAnalysisId, status, snapshot_version AS snapshotVersion, updated_at AS updatedAt FROM project_analysis_state WHERE project_id = ?", [projectId]);
+    return row ? { projectId: String(row.projectId), ...(row.latestAnalysisId ? { latestAnalysisId: String(row.latestAnalysisId) } : {}), ...(row.lastSuccessfulAnalysisId ? { lastSuccessfulAnalysisId: String(row.lastSuccessfulAnalysisId) } : {}), status: String(row.status) as ProjectAnalysisState["status"], snapshotVersion: Number(row.snapshotVersion), updatedAt: Number(row.updatedAt) } : undefined;
   }
 }
 
@@ -1191,8 +1349,10 @@ export interface QuestionBankQuestionInput {
   status?: "active" | "archived";
   confidence?: number;
   verified?: boolean;
+  stale?: boolean;
   embedding?: number[];
   variants?: string[];
+  factIds?: string[];
 }
 
 export interface QuestionBankAnswerCardInput {
@@ -1206,6 +1366,8 @@ export interface QuestionBankAnswerCardInput {
   limitations?: string;
   sourceType?: QuestionBankSourceType;
   verified?: boolean;
+  stale?: boolean;
+  factIds?: string[];
   version?: number;
 }
 
@@ -1264,6 +1426,7 @@ interface QuestionBankQuestionRow {
   status: "active" | "archived";
   confidence: number;
   verified: number;
+  stale: number;
   embeddingJson: string | null;
   createdAt: number;
   updatedAt: number;
@@ -1294,12 +1457,12 @@ export class SqliteQuestionBankRepository {
     }
     const limit = Math.max(1, Math.min(5000, options.limit ?? 200));
     params.push(limit);
-    const rows = this.database.all<QuestionBankQuestionRow>(`SELECT id, canonical_text AS canonicalText, normalized_text AS normalizedText, type, scope, profile_id AS profileId, project_id AS projectId, job_profile_id AS jobProfileId, difficulty, job_role AS jobRole, source, status, confidence, verified, embedding_json AS embeddingJson, created_at AS createdAt, updated_at AS updatedAt FROM question_bank_questions WHERE ${clauses.join(" AND ")} ORDER BY verified DESC, confidence DESC, updated_at DESC LIMIT ?`, params);
+    const rows = this.database.all<QuestionBankQuestionRow>(`SELECT id, canonical_text AS canonicalText, normalized_text AS normalizedText, type, scope, profile_id AS profileId, project_id AS projectId, job_profile_id AS jobProfileId, difficulty, job_role AS jobRole, source, status, confidence, verified, stale, embedding_json AS embeddingJson, created_at AS createdAt, updated_at AS updatedAt FROM question_bank_questions WHERE ${clauses.join(" AND ")} ORDER BY verified DESC, confidence DESC, updated_at DESC LIMIT ?`, params);
     return rows.map((row) => this.hydrateQuestion(row));
   }
 
   getQuestion(questionId: string): QuestionBankQuestionRecord | undefined {
-    const row = this.database.first<QuestionBankQuestionRow>("SELECT id, canonical_text AS canonicalText, normalized_text AS normalizedText, type, scope, profile_id AS profileId, project_id AS projectId, job_profile_id AS jobProfileId, difficulty, job_role AS jobRole, source, status, confidence, verified, embedding_json AS embeddingJson, created_at AS createdAt, updated_at AS updatedAt FROM question_bank_questions WHERE id = ?", [questionId]);
+    const row = this.database.first<QuestionBankQuestionRow>("SELECT id, canonical_text AS canonicalText, normalized_text AS normalizedText, type, scope, profile_id AS profileId, project_id AS projectId, job_profile_id AS jobProfileId, difficulty, job_role AS jobRole, source, status, confidence, verified, stale, embedding_json AS embeddingJson, created_at AS createdAt, updated_at AS updatedAt FROM question_bank_questions WHERE id = ?", [questionId]);
     return row ? this.hydrateQuestion(row) : undefined;
   }
 
@@ -1311,10 +1474,14 @@ export class SqliteQuestionBankRepository {
     const existing = input.id ? this.getQuestion(input.id) : undefined;
     const variants = input.variants ?? existing?.variants ?? [];
     const searchText = normalizeQuestionBankText([canonicalText, ...variants].join(" "));
-    this.database.run("INSERT INTO question_bank_questions(id, canonical_text, normalized_text, type, scope, profile_id, project_id, job_profile_id, difficulty, job_role, source, status, confidence, verified, embedding_json, search_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET canonical_text=excluded.canonical_text, normalized_text=excluded.normalized_text, type=excluded.type, scope=excluded.scope, profile_id=excluded.profile_id, project_id=excluded.project_id, job_profile_id=excluded.job_profile_id, difficulty=excluded.difficulty, job_role=excluded.job_role, source=excluded.source, status=excluded.status, confidence=excluded.confidence, verified=excluded.verified, embedding_json=excluded.embedding_json, search_text=excluded.search_text, updated_at=excluded.updated_at", [questionId, canonicalText, normalizedText, input.type ?? existing?.type ?? inferQuestionBankType(canonicalText), input.scope ?? existing?.scope ?? "global", input.profileId ?? existing?.profileId ?? null, input.projectId ?? existing?.projectId ?? null, input.jobProfileId ?? existing?.jobProfileId ?? null, input.difficulty ?? existing?.difficulty ?? "medium", input.jobRole?.trim() || existing?.jobRole || null, input.source ?? existing?.source ?? "manual", input.status ?? existing?.status ?? "active", Math.max(0, Math.min(1, input.confidence ?? existing?.confidence ?? 1)), input.verified ?? existing?.verified ?? false ? 1 : 0, input.embedding ? JSON.stringify(input.embedding) : existing?.embedding ? JSON.stringify(existing.embedding) : null, searchText, existing?.createdAt ?? now, now]);
+    this.database.run("INSERT INTO question_bank_questions(id, canonical_text, normalized_text, type, scope, profile_id, project_id, job_profile_id, difficulty, job_role, source, status, confidence, verified, stale, embedding_json, search_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET canonical_text=excluded.canonical_text, normalized_text=excluded.normalized_text, type=excluded.type, scope=excluded.scope, profile_id=excluded.profile_id, project_id=excluded.project_id, job_profile_id=excluded.job_profile_id, difficulty=excluded.difficulty, job_role=excluded.job_role, source=excluded.source, status=excluded.status, confidence=excluded.confidence, verified=excluded.verified, stale=excluded.stale, embedding_json=excluded.embedding_json, search_text=excluded.search_text, updated_at=excluded.updated_at", [questionId, canonicalText, normalizedText, input.type ?? existing?.type ?? inferQuestionBankType(canonicalText), input.scope ?? existing?.scope ?? "global", input.profileId ?? existing?.profileId ?? null, input.projectId ?? existing?.projectId ?? null, input.jobProfileId ?? existing?.jobProfileId ?? null, input.difficulty ?? existing?.difficulty ?? "medium", input.jobRole?.trim() || existing?.jobRole || null, input.source ?? existing?.source ?? "manual", input.status ?? existing?.status ?? "active", Math.max(0, Math.min(1, input.confidence ?? existing?.confidence ?? 1)), input.verified ?? existing?.verified ?? false ? 1 : 0, input.stale ?? existing?.stale ?? false ? 1 : 0, input.embedding ? JSON.stringify(input.embedding) : existing?.embedding ? JSON.stringify(existing.embedding) : null, searchText, existing?.createdAt ?? now, now]);
     if (input.variants) {
       this.database.run("DELETE FROM question_bank_variants WHERE question_id = ?", [questionId]);
       for (const variant of input.variants.map((item) => item.trim()).filter(Boolean)) this.database.run("INSERT INTO question_bank_variants(id, question_id, text, normalized_text, created_at) VALUES (?, ?, ?, ?, ?)", [id("bank-variant", now), questionId, variant, normalizeQuestionBankText(variant), now]);
+    }
+    if (input.factIds) {
+      this.database.run("DELETE FROM question_bank_question_facts WHERE question_id = ?", [questionId]);
+      for (const factId of input.factIds) this.database.run("INSERT OR IGNORE INTO question_bank_question_facts(question_id, fact_id) VALUES (?, ?)", [questionId, factId]);
     }
     this.database.flushNow();
     return this.getQuestion(questionId) as QuestionBankQuestionRecord;
@@ -1326,10 +1493,16 @@ export class SqliteQuestionBankRepository {
   }
 
   saveAnswerCard(input: QuestionBankAnswerCardInput, now = Date.now()): QuestionBankAnswerCardRecord {
-    if (!this.getQuestion(input.questionId)) throw new Error("QUESTION_BANK_QUESTION_NOT_FOUND: 题目不存在");
+    const question = this.getQuestion(input.questionId);
+    if (!question) throw new Error("QUESTION_BANK_QUESTION_NOT_FOUND: 题目不存在");
+    if (question.scope === "project" && input.sourceType === "generated" && !(input.factIds?.length || question.factIds?.length)) throw new Error("PROJECT_ANSWER_FACTS_REQUIRED: 项目答案必须关联 Project Facts");
     const cardId = input.id ?? id("bank-answer", now);
     const current = input.id ? this.getAnswerCard(input.id) : undefined;
-    this.database.run("INSERT INTO question_bank_answer_cards(id, question_id, mode, content, code_content, key_points_json, complexity, limitations, source_type, verified, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET question_id=excluded.question_id, mode=excluded.mode, content=excluded.content, code_content=excluded.code_content, key_points_json=excluded.key_points_json, complexity=excluded.complexity, limitations=excluded.limitations, source_type=excluded.source_type, verified=excluded.verified, version=excluded.version, updated_at=excluded.updated_at", [cardId, input.questionId, input.mode ?? "standard", input.content.trim(), input.codeContent?.trim() || null, JSON.stringify(input.keyPoints ?? []), input.complexity?.trim() || null, input.limitations?.trim() || null, input.sourceType ?? current?.sourceType ?? "manual", input.verified ? 1 : 0, input.version ?? (current?.version ?? 0) + 1, current?.createdAt ?? now, now]);
+    this.database.run("INSERT INTO question_bank_answer_cards(id, question_id, mode, content, code_content, key_points_json, complexity, limitations, source_type, verified, stale, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET question_id=excluded.question_id, mode=excluded.mode, content=excluded.content, code_content=excluded.code_content, key_points_json=excluded.key_points_json, complexity=excluded.complexity, limitations=excluded.limitations, source_type=excluded.source_type, verified=excluded.verified, stale=excluded.stale, version=excluded.version, updated_at=excluded.updated_at", [cardId, input.questionId, input.mode ?? "standard", input.content.trim(), input.codeContent?.trim() || null, JSON.stringify(input.keyPoints ?? []), input.complexity?.trim() || null, input.limitations?.trim() || null, input.sourceType ?? current?.sourceType ?? "manual", input.verified ? 1 : 0, input.stale ?? current?.stale ?? false ? 1 : 0, input.version ?? (current?.version ?? 0) + 1, current?.createdAt ?? now, now]);
+    if (input.factIds) {
+      this.database.run("DELETE FROM question_bank_question_facts WHERE question_id = ?", [input.questionId]);
+      for (const factId of input.factIds) this.database.run("INSERT OR IGNORE INTO question_bank_question_facts(question_id, fact_id) VALUES (?, ?)", [input.questionId, factId]);
+    }
     this.database.flushNow();
     return this.getAnswerCard(cardId) as QuestionBankAnswerCardRecord;
   }
@@ -1399,7 +1572,7 @@ export class SqliteQuestionBankRepository {
 
   matchQuestion(text: string, options: { threshold?: number; scope?: QuestionBankScope; profileId?: string; projectId?: string; jobProfileId?: string } = {}): QuestionBankMatch | undefined {
     const threshold = options.threshold ?? 0.72;
-    const matches = this.listQuestions({ limit: 5000, scope: options.scope, profileId: options.profileId, projectId: options.projectId, jobProfileId: options.jobProfileId }).map((question) => {
+    const matches = this.listQuestions({ limit: 5000, scope: options.scope, profileId: options.profileId, projectId: options.projectId, jobProfileId: options.jobProfileId }).filter((question) => !question.stale).map((question) => {
       const variantScore = question.variants.reduce((best, variant) => Math.max(best, questionBankSimilarity(text, variant)), 0);
       const baseScore = Math.max(questionBankSimilarity(text, question.canonicalText), variantScore);
       const trustBoost = question.verified ? 0.02 : question.confidence * 0.01;
@@ -1477,17 +1650,19 @@ export class SqliteQuestionBankRepository {
   private hydrateQuestion(row: QuestionBankQuestionRow): QuestionBankQuestionRecord {
     const variants = this.database.all<{ text: string }>("SELECT text FROM question_bank_variants WHERE question_id = ? ORDER BY created_at", [row.id]).map((item) => item.text);
     const skillIds = this.database.all<{ skillId: string }>("SELECT skill_id AS skillId FROM question_bank_question_skills WHERE question_id = ?", [row.id]).map((item) => item.skillId);
-    const answerCards = this.database.all<Record<string, unknown>>("SELECT id, question_id AS questionId, mode, content, code_content AS codeContent, key_points_json AS keyPointsJson, complexity, limitations, source_type AS sourceType, verified, version, created_at AS createdAt, updated_at AS updatedAt FROM question_bank_answer_cards WHERE question_id = ? ORDER BY verified DESC, updated_at DESC", [row.id]).map((item) => this.hydrateAnswerCard(item));
-    return { id: row.id, canonicalText: row.canonicalText, normalizedText: row.normalizedText, type: row.type, scope: row.scope || "global", ...(row.profileId ? { profileId: row.profileId } : {}), ...(row.projectId ? { projectId: row.projectId } : {}), ...(row.jobProfileId ? { jobProfileId: row.jobProfileId } : {}), difficulty: row.difficulty, ...(row.jobRole ? { jobRole: row.jobRole } : {}), source: row.source, status: row.status, confidence: Number(row.confidence ?? 1), verified: Number(row.verified) === 1, ...(row.embeddingJson ? { embedding: JSON.parse(row.embeddingJson) as number[] } : {}), variants, answerCards, skillIds, createdAt: row.createdAt, updatedAt: row.updatedAt };
+    const answerCards = this.database.all<Record<string, unknown>>("SELECT id, question_id AS questionId, mode, content, code_content AS codeContent, key_points_json AS keyPointsJson, complexity, limitations, source_type AS sourceType, verified, stale, version, created_at AS createdAt, updated_at AS updatedAt FROM question_bank_answer_cards WHERE question_id = ? ORDER BY verified DESC, updated_at DESC", [row.id]).map((item) => this.hydrateAnswerCard(item));
+    const factIds = this.database.all<{ factId: string }>("SELECT fact_id AS factId FROM question_bank_question_facts WHERE question_id = ?", [row.id]).map((item) => item.factId);
+    return { id: row.id, canonicalText: row.canonicalText, normalizedText: row.normalizedText, type: row.type, scope: row.scope || "global", ...(row.profileId ? { profileId: row.profileId } : {}), ...(row.projectId ? { projectId: row.projectId } : {}), ...(row.jobProfileId ? { jobProfileId: row.jobProfileId } : {}), difficulty: row.difficulty, ...(row.jobRole ? { jobRole: row.jobRole } : {}), source: row.source, status: row.status, stale: Number(row.stale) === 1, confidence: Number(row.confidence ?? 1), verified: Number(row.verified) === 1, ...(row.embeddingJson ? { embedding: JSON.parse(row.embeddingJson) as number[] } : {}), variants, answerCards, skillIds, factIds, createdAt: row.createdAt, updatedAt: row.updatedAt };
   }
 
   private getAnswerCard(answerCardId: string): QuestionBankAnswerCardRecord | undefined {
-    const row = this.database.first<Record<string, unknown>>("SELECT id, question_id AS questionId, mode, content, code_content AS codeContent, key_points_json AS keyPointsJson, complexity, limitations, source_type AS sourceType, verified, version, created_at AS createdAt, updated_at AS updatedAt FROM question_bank_answer_cards WHERE id = ?", [answerCardId]);
+    const row = this.database.first<Record<string, unknown>>("SELECT id, question_id AS questionId, mode, content, code_content AS codeContent, key_points_json AS keyPointsJson, complexity, limitations, source_type AS sourceType, verified, stale, version, created_at AS createdAt, updated_at AS updatedAt FROM question_bank_answer_cards WHERE id = ?", [answerCardId]);
     return row ? this.hydrateAnswerCard(row) : undefined;
   }
 
   private hydrateAnswerCard(row: Record<string, unknown>): QuestionBankAnswerCardRecord {
-    return { id: String(row.id), questionId: String(row.questionId), mode: String(row.mode) as QuestionBankAnswerMode, content: String(row.content), ...(row.codeContent ? { codeContent: String(row.codeContent) } : {}), keyPoints: JSON.parse(String(row.keyPointsJson)) as string[], ...(row.complexity ? { complexity: String(row.complexity) } : {}), ...(row.limitations ? { limitations: String(row.limitations) } : {}), sourceType: String(row.sourceType) as QuestionBankSourceType, verified: Number(row.verified) === 1, version: Number(row.version), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
+    const factIds = this.database.all<{ factId: string }>("SELECT fact_id AS factId FROM question_bank_question_facts WHERE question_id = ?", [String(row.questionId)]).map((item) => item.factId);
+    return { id: String(row.id), questionId: String(row.questionId), mode: String(row.mode) as QuestionBankAnswerMode, content: String(row.content), ...(row.codeContent ? { codeContent: String(row.codeContent) } : {}), keyPoints: JSON.parse(String(row.keyPointsJson)) as string[], ...(row.complexity ? { complexity: String(row.complexity) } : {}), ...(row.limitations ? { limitations: String(row.limitations) } : {}), sourceType: String(row.sourceType) as QuestionBankSourceType, verified: Number(row.verified) === 1, stale: Number(row.stale) === 1, factIds, version: Number(row.version), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
   }
 
   private hydrateSkill(row: Record<string, unknown>): QuestionBankSkillRecord {

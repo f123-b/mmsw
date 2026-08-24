@@ -4,6 +4,8 @@ export type { ProjectRetrievalHit, ProjectMemoryRetrievalOptions } from "./proje
 export * from "./importer";
 export * from "./analyzer";
 export * from "./project-memory";
+export * from "./project-identity";
+export * from "./project-facts";
 export * from "./retriever";
 export * from "./answer-validator";
 export * from "./knowledge-graph";

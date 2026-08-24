@@ -12,7 +12,7 @@ import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, 
 import type { SessionState } from "@interview-copilot/shared";
 import type { KnowledgeDocumentType, Profile, ProfileInput, ProjectFact, ProjectMemorySnapshot, ProviderSettings, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
+import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectAnalysisState, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 
 declare global {
@@ -104,9 +104,14 @@ declare global {
         get(profileId: string): Promise<ProjectMemorySnapshot | undefined>;
         stats(profileId: string): Promise<ProjectMemoryStats>;
         listFacts(profileId: string, projectId?: string): Promise<ProjectFact[]>;
+        addCandidateFact(fact: ProjectFact): Promise<ProjectFact | undefined>;
         verifyFact(factId: string, verified: boolean): Promise<ProjectFact | undefined>;
         analysisRuns(profileId: string): Promise<KnowledgeAnalysisRunRecord[]>;
+        state(projectId: string): Promise<ProjectAnalysisState | undefined>;
+        assignSource(input: { profileId: string; projectId: string; sourceType: "document" | "repository" | "resume_section" | "user_fact"; sourceId: string; relationship?: "primary" | "supporting" | "reference"; confidence?: number; verified?: boolean }): Promise<boolean>;
+        assignDocument(profileId: string, documentId: string, projectId?: string): Promise<unknown>;
         rebuild(profileId: string): Promise<ProjectMemorySnapshot>;
+        rebuildProject(projectId: string): Promise<ProjectMemorySnapshot>;
       };
       jobTargets: {
         list(profileId: string): Promise<JobTargetRecord[]>;
@@ -135,7 +140,7 @@ declare global {
         renameBase(knowledgeBaseId: string, name: string): Promise<{ id: string; name: string; createdAt: number; updatedAt: number } | undefined>;
         deleteBase(knowledgeBaseId: string): Promise<boolean>;
         listDocuments(knowledgeBaseId?: string): Promise<Array<{ id: string; knowledgeBaseId: string; filename: string; mimeType: string; documentType: KnowledgeDocumentType; status: string; error?: string }>>;
-        ingest(input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array; documentType?: KnowledgeDocumentType | "auto" }): Promise<unknown>;
+        ingest(input: { knowledgeBaseId?: string; profileId?: string; projectId?: string; filename: string; mimeType: string; bytes: Uint8Array; documentType?: KnowledgeDocumentType | "auto" }): Promise<unknown>;
         updateType(documentId: string, documentType: KnowledgeDocumentType): Promise<unknown>;
         delete(documentId: string): Promise<boolean>;
         reindex(documentId: string): Promise<unknown>;

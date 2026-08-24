@@ -1,12 +1,31 @@
-export type ProjectMemorySourceKind = "resume" | "project-document" | "repository" | "readme" | "interview" | "manual";
+export type ProjectMemorySourceKind = "resume" | "resume-section" | "project-document" | "repository" | "readme" | "interview" | "manual" | "user-fact";
+
+export type ProjectSourceType = "document" | "repository" | "resume_section" | "user_fact" | "interview_note";
+export type ProjectSourceRelationship = "primary" | "supporting" | "reference";
+
+export interface ProjectSourceAssignment {
+  id?: string;
+  projectId: string;
+  sourceType: ProjectSourceType;
+  sourceId: string;
+  relationship: ProjectSourceRelationship;
+  confidence: number;
+  verified: boolean;
+  createdAt?: number;
+  updatedAt?: number;
+}
 
 export interface ProjectMemorySource {
   id: string;
   kind: ProjectMemorySourceKind;
+  sourceType?: ProjectSourceType;
+  projectId?: string;
   title: string;
   text: string;
   filePath?: string;
   language?: string;
+  projectName?: string;
+  locator?: string;
   updatedAt?: number;
 }
 
@@ -26,18 +45,31 @@ export interface ProjectMemoryProject {
 
 export const PROJECT_FACT_TYPES = [
   "background",
+  "goal",
   "responsibility",
+  "hardware",
+  "software",
   "architecture",
   "module",
   "technology",
+  "technical_decision",
   "challenge",
   "decision",
+  "cause",
+  "solution",
   "result",
   "metric",
+  "timeline",
   "limitation"
 ] as const;
 
 export type ProjectFactType = typeof PROJECT_FACT_TYPES[number];
+
+export interface ProjectFactEvidence {
+  sourceId: string;
+  quote: string;
+  locator?: string;
+}
 
 export interface ProjectFact {
   id: string;
@@ -49,6 +81,10 @@ export interface ProjectFact {
   confidence: number;
   verified: boolean;
   sourceIds: string[];
+  evidence?: ProjectFactEvidence[];
+  factType?: ProjectFactType;
+  status?: "active" | "pending_review" | "rejected" | "conflicting";
+  conflictStatus?: "confirmed" | "conflicting" | "pending_review";
   embedding?: number[];
   embeddingHash?: string;
   embeddingModel?: string;
@@ -93,6 +129,7 @@ export interface ProjectInterviewQuestion {
   answerPoints: string[];
   keywords: string[];
   sourceIds: string[];
+  factIds?: string[];
 }
 
 export interface ProjectMemorySnapshot {
@@ -101,10 +138,13 @@ export interface ProjectMemorySnapshot {
   technicalPoints: ProjectTechnicalPoint[];
   problems: ProjectProblem[];
   interviewQuestions: ProjectInterviewQuestion[];
+  facts?: ProjectFact[];
 }
 
 export interface ProjectMemoryAnalysisInput {
   profileId?: string;
+  projectId?: string;
+  projectName?: string;
   sources: ProjectMemorySource[];
 }
 
