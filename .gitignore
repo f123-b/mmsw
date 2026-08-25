@@ -42,7 +42,6 @@ apps/desktop/release-portable*/
 release-portable*/
 apps/desktop/release-v2/
 apps/desktop/release-no-q8/
-apps/desktop/models/question-classifier/
 tools/question-classifier/data/
 apps/local-asr-service/**/__pycache__/
 *.db

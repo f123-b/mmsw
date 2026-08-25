@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "artifactId": "mmsw-question-classifier",
+  "artifactVersion": "2026-08-25.1",
+  "source": "tools/question-classifier/train_onnx.py",
+  "model": "char-ngram-tfidf-logistic-regression",
+  "files": {
+    "model.onnx": {
+      "sha256": "baf8b517617f7a6b341c619323094ea0b15db878af57b0a42027c640d768f978",
+      "minBytes": 100000
+    },
+    "labels.json": {
+      "sha256": "e7db258c4bd2be5b04b4633e173e59d2bd7b53b6177ab6d25fb41d0eba0599fe",
+      "minBytes": 16
+    },
+    "metrics.json": {
+      "sha256": "46ef892566e4b89030b5eda04c955d8fb455b8ccf4783bb42652584e07b7f93e",
+      "minBytes": 100
+    },
+    "model-card.json": {
+      "sha256": "adf14ab623ae3db1aa6c55f95ec2efc92fadbf027fcd2de52c00254bf9960c4e",
+      "minBytes": 100
+    }
+  }
+}

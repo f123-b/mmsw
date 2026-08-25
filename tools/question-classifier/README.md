@@ -12,10 +12,12 @@
 ## 训练
 
 ```powershell
-python tools/question-classifier/generate_dataset.py
-python tools/question-classifier/train_onnx.py
+npm ci
+npm run prepare:question-classifier
 ```
 
-产物会写入 `apps/desktop/models/question-classifier/`，包括 `model.onnx`、`labels.json`、`metrics.json` 和 `model-card.json`。这些生成产物默认不进入 Git，安装包构建时会作为本地资源打进去。
+发布 artifact 已随仓库版本化，`prepare:question-classifier` 会校验同一套 `model.onnx`、`labels.json`、`metrics.json`、`model-card.json` 及其 SHA256 manifest。这样 clean checkout、ONNX 单测、桌面运行时、Windows 打包和 `verify-package` 使用同一套固定字节内容。
+
+如需重新训练模型，先运行 `generate_dataset.py` 和 `train_onnx.py`，确认评估结果后更新 `artifact-manifest.json`，再运行 `npm run prepare:question-classifier`。没有 manifest、文件缺失、文件过小、JSON 无法解析或 SHA256 不匹配时，准备步骤会明确失败。
 
 当前模型是中文字符 n-gram TF-IDF + LogisticRegression 的领域化 ONNX 模型，不冒充 MiniLM。应用层只依赖 `LocalQuestionModel`，以后可以把同一接口替换为 MiniLM/DistilBERT ONNX 导出模型。

@@ -20,6 +20,9 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
+      - name: Prepare question classifier artifact
+        run: npm run prepare:question-classifier
+
       - name: Full dependency security audit
         run: npm audit --audit-level=high
 
@@ -27,16 +30,7 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
       - name: Ensure Electron runtime
-        shell: pwsh
-        run: |
-          $installScript = Join-Path $PWD "node_modules/electron/install.js"
-          if (-not (Test-Path -LiteralPath $installScript)) {
-            $installScript = Join-Path $PWD "apps/desktop/node_modules/electron/install.js"
-          }
-          if (-not (Test-Path -LiteralPath $installScript)) {
-            throw "Electron install script not found: $installScript"
-          }
-          node $installScript
+        run: npm run ensure:electron-runtime
 
       - name: Run JavaScript tests
         run: npm test
@@ -122,17 +116,11 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
+      - name: Prepare question classifier artifact
+        run: npm run prepare:question-classifier
+
       - name: Ensure Electron runtime
-        shell: pwsh
-        run: |
-          $installScript = Join-Path $PWD "node_modules/electron/install.js"
-          if (-not (Test-Path -LiteralPath $installScript)) {
-            $installScript = Join-Path $PWD "apps/desktop/node_modules/electron/install.js"
-          }
-          if (-not (Test-Path -LiteralPath $installScript)) {
-            throw "Electron install script not found: $installScript"
-          }
-          node $installScript
+        run: npm run ensure:electron-runtime
 
       - name: Build NSIS installer
         shell: pwsh

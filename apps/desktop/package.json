@@ -9,7 +9,7 @@
     "build": "electron-vite build",
     "build:sidecar": "cargo build --release --manifest-path ../../crates/audio-sidecar/Cargo.toml",
     "build:capture-helper": "cargo build --release --manifest-path ../../tools/capture-helper/Cargo.toml",
-    "package:win": "npm run build:sidecar && npm run build:capture-helper && npm run build && electron-builder --win",
+    "package:win": "node ../../tools/question-classifier/prepare-model.mjs && npm run build:sidecar && npm run build:capture-helper && npm run build && electron-builder --win",
     "smoke:production": "npm run build && node scripts/production-smoke.mjs",
     "capture-protection:smoke": "npm run build:capture-helper && npm run build && node scripts/capture-protection-smoke.mjs",
     "visual:smoke": "npm run build && node scripts/visual-smoke.mjs",
@@ -76,7 +76,8 @@
           "model.onnx",
           "labels.json",
           "metrics.json",
-          "model-card.json"
+          "model-card.json",
+          "artifact-manifest.json"
         ]
       },
       {
