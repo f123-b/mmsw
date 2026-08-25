@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import type { AsrLanguage, AsrProviderType, ProviderSettings } from "@interview-copilot/shared";
+import { QWEN_REALTIME_ASR_MODEL, QWEN_REALTIME_ASR_URL, type AsrLanguage, type AsrProviderType, type ProviderSettings } from "@interview-copilot/shared";
 import { APP_DATA_DIRECTORY, type SqliteDatabase } from "./database";
 
 export type ProviderSection = "llm" | "asr" | "embedding" | "reranker";
@@ -82,6 +82,20 @@ const DEFAULTS: Record<ProviderSection, ProviderSettings> = {
   embedding: { providerName: "OpenAI-compatible", baseUrl: "https://api.openai.com", apiKey: "", model: "text-embedding-3-small", timeoutMs: 15_000, maxRetries: 2 },
   reranker: { providerName: "Disabled", baseUrl: "", apiKey: "", model: "", timeoutMs: 10_000, maxRetries: 1 }
 };
+
+function normalizeQwenAsrSettings(settings: ProviderSettings): ProviderSettings {
+  if (settings.providerType !== "qwen") return settings;
+  const model = settings.model.trim();
+  const legacyModel = !model || /^qwen-audio-3\.0-asr-flash(?:-streaming)?$/i.test(model) || model === "qwen3-asr-flash-realtime-2026-02-10";
+  let baseUrl = settings.baseUrl.trim();
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.protocol !== "wss:" || !parsed.pathname.endsWith("/api-ws/v1/realtime")) baseUrl = QWEN_REALTIME_ASR_URL;
+  } catch {
+    baseUrl = QWEN_REALTIME_ASR_URL;
+  }
+  return { ...settings, baseUrl, model: legacyModel ? QWEN_REALTIME_ASR_MODEL : model };
+}
 
 export class ProviderConfigStore {
   constructor(private readonly database: SqliteDatabase, private readonly secrets: SecretStore, private readonly defaults: Partial<Record<ProviderSection, Partial<ProviderSettings>>> = {}) {}
@@ -174,7 +188,7 @@ export class ProviderConfigStore {
     const providerName = merged.providerName.toLowerCase();
     const providerType = (merged.providerType ?? (providerName.includes("custom") ? "custom-gateway" : providerName.includes("fun-asr") || providerName.includes("funasr") || providerName.includes("本地") ? "funasr-local" : providerName.includes("qwen") || providerName.includes("千问") ? "qwen" : "deepgram")) as AsrProviderType;
     const language = merged.language ? merged.language as AsrLanguage : undefined;
-    return { ...merged, providerType, language };
+    return normalizeQwenAsrSettings({ ...merged, providerType, language });
   }
 
   getPublic(): ProviderCenterPublicConfig {
@@ -189,7 +203,7 @@ export class ProviderConfigStore {
 
   update(section: ProviderSection, input: Partial<ProviderSettings>): PublicProviderSettings {
     const current = this.get(section);
-    const next = { ...current, ...input };
+    const next = section === "asr" ? normalizeQwenAsrSettings({ ...current, ...input }) : { ...current, ...input };
     if (section === "llm") {
       const { profiles, activeId } = this.ensureLlmProfiles();
       const activeProfile = profiles.find((profile) => profile.id === activeId) ?? profiles[0];

@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { providerCapabilities, providerEndpoint, type ProviderSettings } from "@interview-copilot/shared";
+import { providerCapabilities, providerEndpoint, QWEN_REALTIME_ASR_MODEL, QWEN_REALTIME_ASR_URL, type ProviderSettings } from "@interview-copilot/shared";
 import type { ProviderSection } from "./settings-store";
 
 export type ProviderCheckStatus = "unconfigured" | "testing" | "ready" | "auth_failed" | "model_not_found" | "bad_request" | "rate_limited" | "server_error" | "invalid_response" | "network_failed" | "timeout";
@@ -128,9 +128,9 @@ async function testAsr(settings: ProviderSettings, signal: AbortSignal): Promise
   const isQwen = settings.providerType === "qwen";
   const isLocal = settings.providerType === "funasr-local";
   if (!configured(section, settings)) return { section, configured: false, reachable: false, status: "unconfigured", message: settings.providerType === "custom-gateway" ? "未配置 Custom Gateway" : isLocal ? "未配置本地 ASR 服务地址或模型" : isQwen ? "未配置千问 API Key" : "未配置 Deepgram API Key" };
-  const url = new URL(settings.baseUrl || (isQwen ? "wss://dashscope.aliyuncs.com/api-ws/v1/realtime" : "wss://api.deepgram.com/v1/listen"));
+  const url = new URL(settings.baseUrl || (isQwen ? QWEN_REALTIME_ASR_URL : "wss://api.deepgram.com/v1/listen"));
   if (isQwen) {
-    url.searchParams.set("model", settings.model || "qwen3-asr-flash-realtime-2026-02-10");
+    url.searchParams.set("model", settings.model || QWEN_REALTIME_ASR_MODEL);
   } else if (settings.providerType !== "custom-gateway" && !isLocal) {
     url.searchParams.set("model", settings.model);
     url.searchParams.set("language", settings.language ?? "zh-CN");

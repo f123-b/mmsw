@@ -1,5 +1,8 @@
 import type { TranscriptSegment } from "@interview-copilot/protocol";
 
+export const QWEN_REALTIME_ASR_MODEL = "qwen3-asr-flash-realtime";
+export const QWEN_REALTIME_ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
+
 export interface SplitStereoPcmResult {
   mic: Uint8Array;
   system: Uint8Array;
@@ -330,7 +333,7 @@ export class QwenRealtimeAsrProvider implements StreamingAsrProvider {
     let url: string;
     try {
       const parsed = new URL(this.settings.baseUrl || "wss://dashscope.aliyuncs.com/api-ws/v1/realtime");
-      parsed.searchParams.set("model", this.settings.model || "qwen3-asr-flash-realtime-2026-02-10");
+      parsed.searchParams.set("model", this.settings.model || QWEN_REALTIME_ASR_MODEL);
       url = parsed.toString();
     } catch (error) {
       throw qwenProviderError(error, source, "CONNECTION_FAILED", "千问 ASR URL 无效");

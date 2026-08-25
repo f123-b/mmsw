@@ -14,6 +14,7 @@ import {
   PcmBackpressureQueue,
   ProviderError,
   QwenRealtimeAsrProvider,
+  QWEN_REALTIME_ASR_MODEL,
   LocalFunASRProvider,
   StereoAsrChannelRouter,
   TranscriptStabilizer,
@@ -370,7 +371,7 @@ export class RealtimeSession extends EventEmitter {
       this.handleDirectFailure(new ProviderError("AUTH_FAILED", `${providerType === "qwen" ? "千问" : "Deepgram"} API Key 未配置，请先在设置中保存 API Key`, false), generation);
       return;
     }
-    const model = options.model || settings?.model || (providerType === "qwen" ? "qwen3-asr-flash-realtime-2026-02-10" : providerType === "funasr-local" ? "funasr-nano:q8" : "nova-3");
+    const model = options.model || settings?.model || (providerType === "qwen" ? QWEN_REALTIME_ASR_MODEL : providerType === "funasr-local" ? "funasr-nano:q8" : "nova-3");
     const language = options.language || settings?.language || "zh-CN";
     const createProvider = () => providerType === "funasr-local"
       ? new LocalFunASRProvider(this.localSocketFactory, "remote", { url: options.url || settings?.baseUrl, model, language, sampleRate: 16_000, channels: 1, vad: true })

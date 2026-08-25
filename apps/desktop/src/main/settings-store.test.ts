@@ -28,6 +28,18 @@ describe("ProviderConfigStore", () => {
     }
   });
 
+  it("migrates legacy Qwen ASR model and incompatible endpoint to the realtime defaults", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const config = new ProviderConfigStore(database, new MemorySecretStore());
+      config.update("asr", { providerName: "Qwen Realtime ASR", providerType: "qwen", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-audio-3.0-asr-flash", apiKey: "secret" });
+      expect(config.get("asr")).toMatchObject({ providerType: "qwen", baseUrl: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime", model: "qwen3-asr-flash-realtime" });
+      expect(config.getPublic().asr).toMatchObject({ baseUrl: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime", model: "qwen3-asr-flash-realtime", hasApiKey: true });
+    } finally {
+      database.close();
+    }
+  });
+
   it("preserves an existing API key when only the model changes", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
