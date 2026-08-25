@@ -56,5 +56,7 @@ child.once("exit", (code, signal) => {
     process.exitCode = 1;
     return;
   }
-  process.exitCode = result.ok === true && code === 0 ? 0 : 1;
+  const status = result.result ?? (result.environmentUnsupported ? "UNSUPPORTED_ENVIRONMENT" : result.ok === true ? "PASS" : "FAIL");
+  if (status === "UNSUPPORTED_ENVIRONMENT") console.warn(`CAPTURE_PROTECTION_UNSUPPORTED_ENVIRONMENT ${result.environmentReason ?? "No independent desktop composition was observable"}`);
+  process.exitCode = (status === "PASS" || status === "UNSUPPORTED_ENVIRONMENT") && code === 0 ? 0 : 1;
 });

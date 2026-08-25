@@ -86,7 +86,7 @@ const localAsrServiceManager = new LocalAsrServiceManager({
       join(app.getAppPath(), "..", "..", "apps", "local-asr-service"),
       join(__dirname, "..", "..", "..", "..", "apps", "local-asr-service")
     ];
-    return candidates.filter((candidate): candidate is string => typeof candidate === "string").find((candidate) => existsSync(join(candidate, "server.py")));
+    return candidates.filter((candidate): candidate is string => typeof candidate === "string").find((candidate) => existsSync(candidate));
   },
   resolveOpenAsrPath: () => firstExistingLocalPath([
     process.env.INTERVIEW_COPILOT_OPENASR_PATH,
@@ -677,6 +677,14 @@ function nativeWindowId(window: BrowserWindow): string {
   return nativeHandle.length >= 8 ? nativeHandle.readBigUInt64LE(0).toString() : nativeHandle.readUInt32LE(0).toString();
 }
 
+function captureProtectionEnvironmentReason(error: unknown): string | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  if (process.env.GITHUB_ACTIONS === "true" && /no visible pixels|returned no frame|desktop DC unavailable|Graphics Capture returned no frame/i.test(message)) {
+    return `GitHub Hosted Windows runner did not expose an independently observable desktop composition; local capture evidence was: ${message}`;
+  }
+  return undefined;
+}
+
 async function runCaptureProtectionSmoke(main: BrowserWindow): Promise<void> {
   await mainRendererLoad;
   const artifactDirectory = process.env.INTERVIEW_COPILOT_CAPTURE_ARTIFACT_DIR ?? join(process.cwd(), "artifacts", "capture-protection-v2");
@@ -685,7 +693,7 @@ async function runCaptureProtectionSmoke(main: BrowserWindow): Promise<void> {
   const overlay = manager?.show();
   const unsupported = !manager?.captureProtectionSupported;
   if (!overlay || unsupported) {
-    const result = { ok: true, environmentUnsupported: true, supported: false, windowCapture: "ENV_UNSUPPORTED", displayCapture: "ENV_UNSUPPORTED" };
+    const result = { ok: false, supported: false, result: "UNSUPPORTED_ENVIRONMENT", environmentReason: !manager ? "Overlay manager was not created" : "Capture protection API is not supported on this platform", windowCapture: "UNSUPPORTED_ENVIRONMENT", displayCapture: "UNSUPPORTED_ENVIRONMENT" };
     process.stdout.write(`CAPTURE_PROTECTION_SMOKE_RESULT ${JSON.stringify(result)}\n`);
     app.exit(0);
     return;
@@ -745,7 +753,9 @@ async function runCaptureProtectionSmoke(main: BrowserWindow): Promise<void> {
   if (windowDiff.diffPng) await writeFile(join(artifactDirectory, "external-window-diff.png"), windowDiff.diffPng);
   if (displayDiff.diffPng) await writeFile(join(artifactDirectory, "external-display-diff.png"), displayDiff.diffPng);
   const result = {
-    ok: environmentUnsupported || (windowStatus === "PASS" && displayStatus === "PASS"),
+    ok: !environmentUnsupported && windowStatus === "PASS" && displayStatus === "PASS",
+    result: environmentUnsupported ? "UNSUPPORTED_ENVIRONMENT" : windowStatus === "PASS" && displayStatus === "PASS" ? "PASS" : "FAIL",
+    ...(environmentUnsupported ? { environmentReason: [windowOff, windowOn, displayOff, displayOn].find((probe) => probe.unsupported)?.error ?? "Capture probes did not expose observable control pixels on the CI runner" } : {}),
     supported: true,
     environmentUnsupported,
     windowsVersion: process.platform === "win32" ? osVersion() : "unsupported",
@@ -790,7 +800,7 @@ async function runCaptureProtectionSmoke(main: BrowserWindow): Promise<void> {
     `KNOWN LIMITATIONS: ${environmentUnsupported ? "The current capture session did not expose an independently observable desktop." : displayStatus === "FAIL" ? "The independent Windows Graphics Capture display image did not contain the OFF control marker; display result is FAIL." : "No known local limitation."}`,
     `ARTIFACTS: ${artifactDirectory}`,
     "",
-    result.ok ? "Result: PASS / ENV_UNSUPPORTED" : "Result: FAIL (the selected independent capture path did not satisfy the OFF control and ON protected experiment)."
+    result.result === "UNSUPPORTED_ENVIRONMENT" ? `Result: UNSUPPORTED_ENVIRONMENT (${result.environmentReason})` : result.result === "PASS" ? "Result: PASS" : "Result: FAIL (the selected independent capture path did not satisfy the OFF control and ON protected experiment)."
   ].join("\n");
   await writeFile(join(artifactDirectory, "CAPTURE_PROTECTION_V2_REPORT.md"), v2Report, "utf8");
   if (app.isPackaged) await writeFile(join(artifactDirectory, "PACKAGED_CAPTURE_TEST_REPORT.md"), v2Report, "utf8");
@@ -798,7 +808,7 @@ async function runCaptureProtectionSmoke(main: BrowserWindow): Promise<void> {
   process.stdout.write(`CAPTURE_PROTECTION_EXTERNAL_WINDOW_${windowStatus}\n`);
   process.stdout.write(`CAPTURE_PROTECTION_EXTERNAL_DISPLAY_${displayStatus}\n`);
   process.stdout.write(`CAPTURE_PROTECTION_SMOKE_RESULT ${JSON.stringify(result)}\n`);
-  app.exit(result.ok ? 0 : 1);
+  app.exit(result.result === "UNSUPPORTED_ENVIRONMENT" || result.ok ? 0 : 1);
 }
 
 const MAX_AGENT_FILE_BYTES = 1_000_000;
@@ -1898,8 +1908,12 @@ if (hasSingleInstanceLock) {
       await runCaptureProtectionSmoke(createdMainWindow);
     } catch (error) {
       appLogger?.error("CAPTURE_PROTECTION_SMOKE_FAILED", { error: String(error) });
-      process.stdout.write(`CAPTURE_PROTECTION_SMOKE_RESULT ${JSON.stringify({ ok: false, supported: overlayManager?.captureProtectionSupported ?? false, capturePath: "WINDOW_CAPTURE", control: "ERROR", protected: "ERROR", error: String(error) })}\n`);
-      process.exitCode = 1;
+      const environmentReason = captureProtectionEnvironmentReason(error);
+      const result = environmentReason
+        ? { ok: false, supported: overlayManager?.captureProtectionSupported ?? false, result: "UNSUPPORTED_ENVIRONMENT", environmentReason, controlCapture: "NOT_OBSERVABLE", protectedCapture: "NOT_OBSERVABLE" }
+        : { ok: false, supported: overlayManager?.captureProtectionSupported ?? false, result: "FAIL", capturePath: "WINDOW_CAPTURE", control: "ERROR", protected: "ERROR", error: String(error) };
+      process.stdout.write(`CAPTURE_PROTECTION_SMOKE_RESULT ${JSON.stringify(result)}\n`);
+      process.exitCode = environmentReason ? 0 : 1;
       app.quit();
     }
   } else if (productionSmokeRequested) await runProductionSmoke(createdMainWindow);

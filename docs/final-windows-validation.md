@@ -74,6 +74,12 @@
 - [ ] VAD 诊断明确显示 `provider=silero|energy`、`fallback`、`ready`、`reason`；Silero 失败时明确记录 fallback 原因。
 - [ ] QuestionTrace 记录 `questionTraceId`、ASR final/speech end、检测/确认、检索、LLM 首 token、答案完成时间及派生延迟；不包含原始转写文本或 API Key。
 
+## Capture Protection 发布门禁语义
+
+自动 capture smoke 只允许输出三种结果：`PASS`、`FAIL`、`UNSUPPORTED_ENVIRONMENT`。后者表示运行环境没有提供可独立观察的真实桌面合成/捕获帧，日志必须同时包含环境原因；它不是 capture protection 已验证，也不是产品 PASS。GitHub Hosted Windows runner 若报告该结果，CI 可以保持绿灯但 Release Decision 必须保留 `NO-GO_PENDING_REAL_WINDOWS_CAPTURE_VALIDATION`。
+
+真实 Windows 桌面必须人工完成：关闭保护时外部 window/display capture 能看到 overlay marker，开启保护后对应 capture 不再看到 marker；同时记录 control/protected 图片、capture backend、系统版本和安装包版本。若真实桌面返回可见帧却保护前后 marker 不符合预期，结果必须记为 `FAIL` 并阻塞发布。
+
 ## 结构化 Chat 与审批安全
 
 - [ ] 结构化回答中的 sources/cards/actions 能在 UI 恢复显示，普通 Markdown 仍按普通回答显示。
