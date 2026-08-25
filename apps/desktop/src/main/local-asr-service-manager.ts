@@ -121,19 +121,21 @@ export class LocalAsrServiceManager {
    */
   async getHealthCheck(startOptions: LocalAsrStartOptions = {}): Promise<LocalAsrHealthCheck> {
     const serviceRoot = this.options.resolveServiceRoot();
+    const serviceRootExists = Boolean(serviceRoot && existsSync(serviceRoot));
+    const serverScript = serviceRoot ? join(serviceRoot, "server.py") : undefined;
     const serviceRootCheck = {
-      ok: Boolean(serviceRoot && existsSync(join(serviceRoot, "server.py"))),
+      ok: Boolean(serverScript && existsSync(serverScript)),
       ...(serviceRoot ? { path: serviceRoot } : {}),
-      reason: serviceRoot ? "server.py found" : "local-asr-service/server.py not found"
+      reason: !serviceRoot ? "local-asr-service service root not resolved" : !serviceRootExists ? "service root not found" : !serverScript || !existsSync(serverScript) ? "server.py not found" : "server.py found"
     };
     const python = this.resolvePython(serviceRoot ?? process.cwd());
     const pythonProbe = await probeExecutable(python.command, [...python.args, "-c", "print('mmsw-python-ok')"], serviceRoot ?? process.cwd());
     const pythonPath = python.command.includes("\\") || python.command.includes("/") ? python.command : undefined;
     const venvPath = firstExistingPath(serviceRoot ? [join(serviceRoot, ".venv", "Scripts", "python.exe"), join(serviceRoot, ".venv", "bin", "python")] : []);
     const requirementsPath = serviceRoot ? join(serviceRoot, "requirements.txt") : undefined;
-    const dependencyProbe = pythonProbe.ok && requirementsPath && existsSync(requirementsPath)
+    const dependencyProbe = serviceRootCheck.ok && pythonProbe.ok && requirementsPath && existsSync(requirementsPath)
       ? await probeExecutable(python.command, [...python.args, "-c", "import httpx, websockets"], serviceRoot ?? process.cwd())
-      : { ok: false, reason: !requirementsPath || !existsSync(requirementsPath) ? "requirements.txt not found" : `python unavailable: ${pythonProbe.reason}` };
+      : { ok: false, reason: !serviceRootCheck.ok ? serviceRootCheck.reason : !requirementsPath || !existsSync(requirementsPath) ? "requirements.txt not found" : `python unavailable: ${pythonProbe.reason}` };
     const openAsrCommand = this.resolveOpenAsrCommand();
     const openAsrProbe = await probeExecutable(openAsrCommand, ["--version"], serviceRoot ?? process.cwd());
     const model = startOptions.model || DEFAULT_MODEL;
@@ -148,7 +150,9 @@ export class LocalAsrServiceManager {
       backendRunning: Boolean(this.backendProcess && this.backendProcess.exitCode === null),
       facadeRunning: Boolean(this.facadeProcess && this.facadeProcess.exitCode === null)
     };
-    const checks = [serviceRootCheck.ok, pythonProbe.ok, dependencyProbe.ok, openAsrProbe.ok || backendReachable, Boolean(modelPath) || backendReachable, facadeReachable || runtime.facadeRunning];
+    const openAsr = { ok: openAsrProbe.ok || backendReachable, command: openAsrCommand, reason: openAsrProbe.ok ? openAsrProbe.reason : backendReachable ? "backend port already reachable" : openAsrProbe.reason };
+    const modelCheck = { ok: Boolean(modelPath) || backendReachable, ...(modelPath ? { path: modelPath } : {}), reason: modelPath ? `${model} model pack found` : backendReachable ? "backend already reachable" : `${model} model pack not found` };
+    const checks = [serviceRootCheck.ok, pythonProbe.ok, Boolean(venvPath), dependencyProbe.ok, openAsr.ok, modelCheck.ok, facadeReachable || runtime.facadeRunning, backendReachable || runtime.backendRunning];
     const overall = checks.every(Boolean) ? "ready" : checks.some(Boolean) ? "degraded" : "not_ready";
     return {
       checkedAt: Date.now(),
@@ -156,10 +160,10 @@ export class LocalAsrServiceManager {
       state: this.state,
       serviceRoot: serviceRootCheck,
       python: { ok: pythonProbe.ok, ...(pythonPath ? { command: pythonPath } : { command: python.command }), reason: pythonProbe.reason },
-      openasr: { ok: openAsrProbe.ok || backendReachable, command: openAsrCommand, reason: openAsrProbe.ok ? openAsrProbe.reason : backendReachable ? "backend port already reachable" : openAsrProbe.reason },
-      venv: { ok: Boolean(venvPath), ...(venvPath ? { path: venvPath } : {}), reason: venvPath ? "venv found" : "venv not found" },
+      openasr: openAsr,
+      venv: { ok: Boolean(venvPath), ...(venvPath ? { path: venvPath } : {}), reason: venvPath ? "venv found" : serviceRootCheck.ok ? "venv not found" : "venv not checked because service root is unavailable" },
       dependencies: { ok: dependencyProbe.ok, ...(requirementsPath ? { requirementsPath } : {}), reason: dependencyProbe.reason },
-      model: { ok: Boolean(modelPath) || backendReachable, ...(modelPath ? { path: modelPath } : {}), reason: modelPath ? `${model} model pack found` : backendReachable ? "backend already reachable" : `${model} model pack not found` },
+      model: modelCheck,
       facadePort: { ok: facadeReachable, host: webSocketEndpoint.host, port: webSocketEndpoint.port, reason: facadeReachable ? "reachable" : "not reachable" },
       backendPort: { ok: backendReachable, host: upstreamEndpoint.host, port: upstreamEndpoint.port, reason: backendReachable ? "reachable" : "not reachable" },
       runtime
