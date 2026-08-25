@@ -12,7 +12,9 @@ import {
   ContextAnchorResolver,
   ContextAnchorStore,
   SpeechActClassifier,
+  shouldHardRejectSpeechAct,
   QuestionTrace,
+  questionTraceTextMetadata,
   QuestionDetector,
   QuestionDetector2,
   SessionStateMachine,
@@ -381,7 +383,7 @@ export class InterviewCoordinator extends EventEmitter {
         this.emit("event", { type: "realtime_message", message: { type: "answer_end", answerId, text: preparedText } });
         const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
         this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: preparedText, model: "question-bank", mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
-        this.currentQuestionTrace?.mark("llmRequestStarted", startedAt).mark("firstToken", finishedAt).mark("answerEnded", finishedAt);
+        this.currentQuestionTrace?.update({ answerSource: "question-bank" }).mark("answerLookupStarted", startedAt).mark("answerVisible", finishedAt).mark("answerEnded", finishedAt);
         this.emitQuestionTrace();
         this.memory.recordAnswer(preparedText, { question: question.text, createdAt: finishedAt });
         this.detector.markAnswered(question.id);
@@ -395,7 +397,7 @@ export class InterviewCoordinator extends EventEmitter {
         return;
       }
       const context = { ...providerContext, recentTranscript: providerContext.recentTranscript ?? [...this.recentTranscript], interviewMemory: memorySnapshot, ...(followUpContext ? { followUpContext } : {}) };
-      this.currentQuestionTrace?.mark("llmRequestStarted", this.now());
+      this.currentQuestionTrace?.update({ answerSource: "llm" }).mark("llmRequestStarted", this.now());
       for await (const event of this.options.answerAgent.stream({ id: question.id, text: question.text, ...(isFollowUp ? { kind: "follow-up" as const } : {}) }, mode, context, controller.signal, {
         ...streamOptions,
         // Expose provider deltas so the overlay can show the first useful
@@ -672,26 +674,25 @@ export class InterviewCoordinator extends EventEmitter {
     });
     trace.update({
       source: utterance.source,
-      rawText: utterance.text,
-      normalizedText: correctedText,
+      ...questionTraceTextMetadata(utterance.text),
       speechAct: speech.speechAct,
       contextTopic: anchorSnapshot.currentTopic,
       isFollowUp: speech.speechAct === "FOLLOW_UP"
     });
     const promotesStatement = speech.speechAct === "STATEMENT" && Boolean(speech.topic || speech.entities.length);
-    if (!speech.shouldAnswer) {
-      if (speech.speechAct === "TOPIC_ANCHOR" || promotesStatement) {
-        const anchor = this.anchorStore.addAnchor({
-          text: correctedText,
-          speechAct: speech.codeContext ? "CODE_CONTEXT" : "TOPIC_ANCHOR",
-          confidence: speech.confidence,
-          topic: speech.topic,
-          entities: speech.entities,
-          createdAt: detectionStartedAt,
-          ttlMs: speech.codeContext ? 12_000 : 7_000
-        });
-        this.memory.recordQuestion(anchor.text, { questionId: anchor.id, topic: anchor.topic, createdAt: anchor.createdAt });
-      }
+    if (speech.speechAct === "TOPIC_ANCHOR" || promotesStatement) {
+      const anchor = this.anchorStore.addAnchor({
+        text: correctedText,
+        speechAct: speech.codeContext ? "CODE_CONTEXT" : "TOPIC_ANCHOR",
+        confidence: speech.confidence,
+        topic: speech.topic,
+        entities: speech.entities,
+        createdAt: detectionStartedAt,
+        ttlMs: speech.codeContext ? 12_000 : 7_000
+      });
+      this.memory.recordQuestion(anchor.text, { questionId: anchor.id, topic: anchor.topic, createdAt: anchor.createdAt });
+    }
+    if (shouldHardRejectSpeechAct(speech)) {
       trace.update({ finalScore: 0, decision: "reject", decisionReason: speech.reason }).mark("questionDetected", this.now());
       this.currentQuestionTrace = trace;
       if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
@@ -739,11 +740,10 @@ export class InterviewCoordinator extends EventEmitter {
       decision = this.brain.analyze({ text: canonicalQuestion, analysis, memory: detectionContext.memory, recentTranscript: previousTranscript });
     }
     trace.update({
-      normalizedText: decision.normalizedQuestion || canonicalQuestion,
       speechAct: analysis.speechAct,
       ruleScore: analysis.score.ruleScore,
       semanticScore: analysis.score.semanticScore,
-      localClassifierScore: analysis.score.semanticScore,
+      ...(analysis.score.localClassifierScore !== undefined ? { localClassifierScore: analysis.score.localClassifierScore } : {}),
       llmScore: analysis.score.llmScore,
       finalScore: analysis.score.finalScore,
       contextTopic: anchorSnapshot.currentTopic,

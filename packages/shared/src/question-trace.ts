@@ -1,15 +1,14 @@
 export interface QuestionTraceInput {
   questionTraceId: string;
   source?: string;
-  rawText?: string;
-  normalizedText?: string;
+  textLength?: number;
+  textHash?: string;
   speechAct?: string;
   ruleScore?: number;
   semanticScore?: number;
   localClassifierScore?: number;
   llmScore?: number;
   contextTopic?: string;
-  parentQuestion?: string;
   parentQuestionId?: string;
   isFollowUp?: boolean;
   finalScore?: number;
@@ -29,6 +28,7 @@ export interface QuestionTraceInput {
   projectId?: string;
   jobTargetId?: string;
   retrievalRoute?: string;
+  answerSource?: "llm" | "question-bank" | "project-memory" | "other";
   llmRequestAt?: number;
   answerFinishedAt?: number;
 }
@@ -44,6 +44,7 @@ export interface QuestionTraceMetrics {
   llmFirstTokenMs?: number;
   answerGenerationMs?: number;
   answerTotalMs?: number;
+  answerLookupMs?: number;
   endToEndMs?: number;
 }
 
@@ -51,6 +52,8 @@ export interface QuestionTraceSnapshot extends QuestionTraceInput {
   retrievalStartedAt?: number;
   retrievalEndedAt?: number;
   retrievalFinishedAt?: number;
+  answerLookupStartedAt?: number;
+  answerVisibleAt?: number;
   llmRequestStartedAt?: number;
   firstTokenAt?: number;
   answerEndedAt?: number;
@@ -58,37 +61,31 @@ export interface QuestionTraceSnapshot extends QuestionTraceInput {
 }
 
 const elapsed = (end?: number, start?: number): number | undefined => end === undefined || start === undefined ? undefined : Math.max(0, end - start);
-const redactTraceText = (value: string | undefined): string | undefined => {
-  if (!value) return value;
-  return value
-    .replace(/(api[-_ ]?key|authorization|bearer|token|password|secret)\s*[:=：]\s*[^\s,;]+/gi, "$1:[REDACTED]")
-    .slice(0, 240);
-};
-
-function sanitizeInput(input: QuestionTraceInput): QuestionTraceInput {
-  return {
-    ...input,
-    ...(input.rawText !== undefined ? { rawText: redactTraceText(input.rawText) } : {}),
-    ...(input.normalizedText !== undefined ? { normalizedText: redactTraceText(input.normalizedText) } : {}),
-    ...(input.parentQuestion !== undefined ? { parentQuestion: redactTraceText(input.parentQuestion) } : {})
-  };
+/** Non-reversible, bounded metadata for production traces. Raw transcript is never stored. */
+export function questionTraceTextMetadata(text: string): Pick<QuestionTraceInput, "textLength" | "textHash"> {
+  let hash = 2166136261;
+  for (const character of text) {
+    hash ^= character.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 16777619);
+  }
+  return { textLength: text.length, textHash: (hash >>> 0).toString(16).padStart(8, "0") };
 }
 
-/** Safe, bounded per-question timing state. It never stores transcript text. */
+/** Safe, bounded per-question timing state. Production snapshots contain no transcript text. */
 export class QuestionTrace {
   private value: QuestionTraceSnapshot;
 
   constructor(input: QuestionTraceInput) {
-    this.value = { ...sanitizeInput(input), metrics: {} };
+    this.value = { ...input, metrics: {} };
   }
 
   update(input: Partial<QuestionTraceInput>): this {
-    this.value = { ...this.value, ...sanitizeInput(input as QuestionTraceInput), metrics: this.value.metrics };
+    this.value = { ...this.value, ...input, metrics: this.value.metrics };
     this.refreshMetrics();
     return this;
   }
 
-  mark(stage: "asrFinalReceived" | "asrFinal" | "speechEnd" | "utteranceFinalized" | "questionDetectionStarted" | "questionDetected" | "questionConfirmed" | "retrievalStarted" | "retrievalEnded" | "retrievalFinished" | "llmRequest" | "llmRequestStarted" | "firstToken" | "answerFinished" | "answerEnded", at: number): this {
+  mark(stage: "asrFinalReceived" | "asrFinal" | "speechEnd" | "utteranceFinalized" | "questionDetectionStarted" | "questionDetected" | "questionConfirmed" | "retrievalStarted" | "retrievalEnded" | "retrievalFinished" | "answerLookupStarted" | "answerVisible" | "llmRequest" | "llmRequestStarted" | "firstToken" | "answerFinished" | "answerEnded", at: number): this {
     const key = {
       asrFinalReceived: "asrFinalReceivedAt",
       asrFinal: "asrFinalAt",
@@ -100,6 +97,8 @@ export class QuestionTrace {
       retrievalStarted: "retrievalStartedAt",
       retrievalEnded: "retrievalEndedAt",
       retrievalFinished: "retrievalFinishedAt",
+      answerLookupStarted: "answerLookupStartedAt",
+      answerVisible: "answerVisibleAt",
       llmRequest: "llmRequestAt",
       llmRequestStarted: "llmRequestStartedAt",
       firstToken: "firstTokenAt",
@@ -133,6 +132,7 @@ export class QuestionTrace {
       asrToQuestionMs: elapsed(this.value.questionConfirmedAt, asrFinalReceivedAt),
       questionToRetrievalMs: elapsed(this.value.retrievalStartedAt, this.value.questionConfirmedAt),
       retrievalMs: elapsed(retrievalFinishedAt, this.value.retrievalStartedAt),
+      answerLookupMs: elapsed(this.value.answerVisibleAt, this.value.answerLookupStartedAt),
       llmFirstTokenMs: elapsed(this.value.firstTokenAt, llmRequestAt),
       answerGenerationMs: elapsed(answerFinishedAt, llmRequestAt),
       answerTotalMs: elapsed(answerFinishedAt, llmRequestAt),

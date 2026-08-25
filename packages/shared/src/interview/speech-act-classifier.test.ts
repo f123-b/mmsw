@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SpeechActClassifier } from "./speech-act-classifier";
+import { SpeechActClassifier, shouldHardRejectSpeechAct } from "./speech-act-classifier";
 
 describe("interview speech acts", () => {
   const classifier = new SpeechActClassifier();
@@ -20,5 +20,16 @@ describe("interview speech acts", () => {
     const context = { currentTopic: "TCP", latestAnchor: { text: "TCP 三次握手", topic: "TCP", speechAct: "QUESTION" as const } };
     expect(classifier.classify("讲一下", context).speechAct).toBe("FOLLOW_UP");
     expect(classifier.classify("那核心竞争力在哪？", context).speechAct).toBe("QUESTION");
+  });
+
+  it.each([
+    "那你这个项目低速的时候……",
+    "你在这个地方主要负责……",
+    "如果速度再低一点……",
+    "CAN 这里你具体讲……",
+    "那 FreeRTOS 这个……"
+  ])("does not treat ASR-fragment candidate prompts as hard rejects: %s", (text) => {
+    const result = classifier.classify(text, { currentTopic: "FOC" });
+    expect(shouldHardRejectSpeechAct(result)).toBe(false);
   });
 });

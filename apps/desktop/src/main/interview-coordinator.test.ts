@@ -89,11 +89,18 @@ describe("InterviewCoordinator software E2E", () => {
       now: () => 1_000
     });
     const messages: unknown[] = [];
-    coordinator.on("event", (event: { type: string; message?: unknown }) => { if (event.type === "realtime_message") messages.push(event.message); });
+    const traces: Array<Record<string, unknown>> = [];
+    coordinator.on("event", (event: { type: string; message?: unknown; name?: string; fields?: Record<string, unknown> }) => {
+      if (event.type === "realtime_message") messages.push(event.message);
+      if (event.type === "telemetry" && event.name === "QUESTION_TRACE" && event.fields) traces.push(event.fields);
+    });
     await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
     await coordinator.answerQuestionText("volatile 的作用是什么？");
     expect(modelCalled).toBe(false);
     expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({ type: "answer_end", text: expect.stringContaining("volatile") })]));
+    expect(traces.at(-1)).toEqual(expect.objectContaining({ answerSource: "question-bank" }));
+    expect(traces.at(-1)?.llmRequestAt).toBeUndefined();
+    expect(traces.at(-1)?.firstTokenAt).toBeUndefined();
     await coordinator.stop();
   });
 

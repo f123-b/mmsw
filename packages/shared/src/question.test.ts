@@ -134,6 +134,22 @@ describe("question scoring", () => {
     expect(result.reason).toContain("decision-answer_request");
   });
 
+  it.each([
+    "那你这个项目低速的时候……",
+    "你在这个地方主要负责……",
+    "如果速度再低一点……",
+    "CAN 这里你具体讲……",
+    "那 FreeRTOS 这个……"
+  ])("allows local/context signals to rescue a low-confidence speech act: %s", async (text) => {
+    const detector = new QuestionDetector2({
+      localClassifier: { predict: async () => ({ type: "QUESTION", confidence: 0.96 }) }
+    });
+    const result = await detector.analyze(text, "面试官：请介绍一下 FOC 项目。候选人：我负责控制环和 RTOS 任务。", true);
+    expect(result.isQuestion).toBe(true);
+    expect(result.speechAct).toMatch(/QUESTION|FOLLOW_UP/);
+    expect(result.score.localClassifierScore).toBe(0.96);
+  });
+
   it.each(["嗯", "好的", "下一个问题", "现在考你一个代码题", "CAN"]) ("rejects conflicting non-answer speech acts: %s", async (text) => {
     const result = await new QuestionDetector2().analyze(text, "当前主题：CAN", true);
     expect(result.isQuestion).toBe(false);

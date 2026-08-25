@@ -2,7 +2,7 @@ import { classifyNonQuestionSpeechAct, classifyQuestion, type QuestionCategory, 
 import type { LocalQuestionModel, LocalQuestionResult } from "./local-classifier";
 import type { QuestionAnalysis, QuestionDetectionContext, QuestionDetectionType, QuestionLLMConfirmer, QuestionScore, QuestionSpeechAct } from "./types";
 import { normalizeTechnicalTerms } from "../terminology";
-import { classifyInterviewSpeechAct } from "../interview/speech-act-classifier";
+import { classifyInterviewSpeechAct, shouldHardRejectSpeechAct } from "../interview/speech-act-classifier";
 
 const RULE_KEYWORDS = /什么|为什么|为何|怎么|如何|介绍|原理|区别|优化|请问|能不能|是否|有没有|哪些|哪种|哪个|哪里|解释|说明|讲一下|说一下|说说|展开|常见误区|作用|困难|挑战|设计|架构|系统|如果.*(重新|改|换|设计)/;
 const ROBUST_QUESTION_FORM = /为什么|为何|什么是|哪些|哪种|区别|原理|介绍|解释|说明|常见误区|作用|请问|怎么(?:排查|解决|定位|判断|验证|设计|优化)|如何(?:排查|解决|定位|判断|验证|设计|优化)|如果.*(?:重新|改|换|设计)|会怎么优化|设计.*(?:系统|架构|方案|模块)/;
@@ -77,6 +77,7 @@ export interface QuestionDecisionInput {
   speechConfidence: number;
   ruleScore: number;
   semanticScore: number;
+  localClassifierScore?: number;
   llmScore: number;
   llmIsQuestion?: boolean;
   llmConfidence?: number;
@@ -96,7 +97,7 @@ export interface QuestionDecision {
 }
 
 const ANSWERABLE_SPEECH_ACTS = new Set<QuestionSpeechAct>(["QUESTION", "ANSWER_REQUEST", "CODE_REQUEST", "FOLLOW_UP"]);
-const NON_ANSWERABLE_SPEECH_ACTS = new Set<QuestionSpeechAct>(["TOPIC_ANCHOR", "ACKNOWLEDGEMENT", "CONTROL", "META_CONVERSATION", "STATEMENT", "SMALL_TALK", "INSTRUCTION"]);
+const HARD_REJECT_SPEECH_ACTS = new Set<QuestionSpeechAct>(["ACKNOWLEDGEMENT", "CONTROL", "META_CONVERSATION", "SMALL_TALK", "INSTRUCTION"]);
 
 /**
  * Combines speech act, rule, semantic, local/LLM and context signals into one
@@ -108,10 +109,11 @@ export function decideQuestion(input: QuestionDecisionInput): QuestionDecision {
   const finalScore = clamp(input.finalScore);
   const weightedScore = clamp(0.3 * input.ruleScore + 0.5 * input.semanticScore + 0.2 * input.llmScore);
   const strongSpeechAct = ANSWERABLE_SPEECH_ACTS.has(input.speechAct) && speechConfidence >= 0.86;
-  const hardReject = NON_ANSWERABLE_SPEECH_ACTS.has(input.speechAct);
+  const hardReject = HARD_REJECT_SPEECH_ACTS.has(input.speechAct);
   const llmStrongNegative = input.llmIsQuestion === false && (input.llmConfidence ?? 0) >= 0.95;
   const localOrRuleSupport = input.semanticScore >= 0.5 || input.ruleScore >= 0.35 || input.llmIsQuestion === true;
-  const scoreAccepted = finalScore >= input.threshold || input.robustRuleQuestion || input.followUpRescue || weightedScore >= input.threshold;
+  const localRescue = (input.localClassifierScore ?? 0) >= 0.86;
+  const scoreAccepted = finalScore >= input.threshold || input.robustRuleQuestion || input.followUpRescue || weightedScore >= input.threshold || localRescue;
 
   if (!input.final) return { shouldAnswer: false, confidence: finalScore, reason: "partial-utterance" };
   if (!input.candidateQuestion) return { shouldAnswer: false, confidence: 0, reason: "non-candidate-speech" };
@@ -166,7 +168,7 @@ export class QuestionDetector {
             : [];
         const local = await this.localClassifier.predict(text, localContext);
         const localClassifier = { classify: () => fuseLocalClassification(preliminary.classification, local) };
-        preliminary = buildAnalysisWithClassifier(text, { ...context, contextText }, final, localClassifier, undefined, this.threshold);
+        preliminary = buildAnalysisWithClassifier(text, { ...context, contextText }, final, localClassifier, undefined, this.threshold, local.confidence);
       } catch {
         // The local model is an accelerator. Rules and the optional LLM remain
         // the compatibility path if the model is missing or cannot load.
@@ -179,7 +181,7 @@ export class QuestionDetector {
     try {
       const confirmation = await this.llmConfirmer(preliminary.normalizedQuestion, contextText);
       const effectiveClassifier = { classify: () => preliminary.classification };
-      return buildAnalysisWithClassifier(text, { ...context, contextText }, final, effectiveClassifier, confirmation, this.threshold);
+      return buildAnalysisWithClassifier(text, { ...context, contextText }, final, effectiveClassifier, confirmation, this.threshold, preliminary.score.localClassifierScore);
     } catch {
       return preliminary;
     }
@@ -192,7 +194,8 @@ function buildAnalysisWithClassifier(
   final: boolean,
   classifier: { classify(text: string, contextText?: string, final?: boolean): QuestionClassification },
   llm?: { confidence: number; isQuestion: boolean; label?: QuestionSpeechAct; type?: QuestionDetectionType; reason?: string },
-  threshold = 0.85
+  threshold = 0.85,
+  localClassifierScore?: number
 ): QuestionAnalysis {
   const normalized = normalize(text).replace(/^(?:面试官|interviewer)\s*[:：]\s*/i, "");
   const contextText = normalize(context.contextText || [context.memory?.currentTopic, ...(context.recentTranscript || [])].filter(Boolean).join(" "));
@@ -220,7 +223,7 @@ function buildAnalysisWithClassifier(
       confidence: 0,
       normalizedQuestion: normalized,
       reason: nonQuestionClassification.reason,
-      score: { ruleScore, semanticScore: 0, llmScore: 0, finalScore: 0 },
+      score: { ruleScore, semanticScore: 0, ...(localClassifierScore !== undefined ? { localClassifierScore } : {}), llmScore: 0, finalScore: 0 },
       llmUsed: Boolean(llm),
       classification: nonQuestionClassification,
       legacyCategory: nonQuestionClassification.category,
@@ -228,7 +231,7 @@ function buildAnalysisWithClassifier(
       ...(speech.codeContext ? { codeContext: true } : {})
     };
   }
-  if (!speech.shouldAnswer) {
+  if (shouldHardRejectSpeechAct(speech)) {
     const nonQuestionClassification = { ...classification, isQuestion: false, confidence: 0, reason: speech.reason };
     const isFiller = speech.speechAct === "ACKNOWLEDGEMENT" || speech.speechAct === "CONTROL" || speech.speechAct === "META_CONVERSATION";
     const ruleScore = isFiller ? 0 : ruleScoreFor(normalized, final);
@@ -240,7 +243,7 @@ function buildAnalysisWithClassifier(
       confidence: isFiller ? 0 : speech.confidence,
       normalizedQuestion: normalized,
       reason: speech.reason,
-      score: { ruleScore, semanticScore: 0, llmScore: 0, finalScore: 0 },
+      score: { ruleScore, semanticScore: 0, ...(localClassifierScore !== undefined ? { localClassifierScore } : {}), llmScore: 0, finalScore: 0 },
       llmUsed: Boolean(llm),
       classification: nonQuestionClassification,
       legacyCategory: nonQuestionClassification.category,
@@ -275,6 +278,7 @@ function buildAnalysisWithClassifier(
     speechConfidence: speech.confidence,
     ruleScore,
     semanticScore,
+    localClassifierScore,
     llmScore,
     llmIsQuestion: llm?.isQuestion,
     llmConfidence: llm?.confidence,
@@ -292,17 +296,20 @@ function buildAnalysisWithClassifier(
     : llm?.type && isQuestion
       ? llm.type
       : inferType(normalized, classification.category, contextualFollowUp);
-  const speechAct = effectiveSpeechAct || (llm?.label && isQuestion ? llm.label : inferSpeechAct(normalized, isQuestion, contextualFollowUp));
+  const inferredAnswerSpeechAct = contextualFollowUp ? "FOLLOW_UP" : "QUESTION";
+  const speechAct = isQuestion && (effectiveSpeechAct === "STATEMENT" || effectiveSpeechAct === "TOPIC_ANCHOR")
+    ? inferredAnswerSpeechAct
+    : effectiveSpeechAct || (llm?.label && isQuestion ? llm.label : inferSpeechAct(normalized, isQuestion, contextualFollowUp));
   const effectiveFinalScore = isQuestion ? Math.max(finalScore, decision.confidence) : finalScore;
   return {
     text: normalized,
     isQuestion,
     type: isQuestion ? type : "not_question",
-    speechAct: isQuestion ? speechAct : SMALL_TALK.test(normalized) ? "SMALL_TALK" : "STATEMENT",
+    speechAct: isQuestion ? speechAct : !final ? "STATEMENT" : SMALL_TALK.test(normalized) ? "SMALL_TALK" : speech.speechAct,
     confidence: effectiveFinalScore,
     normalizedQuestion: isQuestion ? normalized.replace(/[。！!]+$/, "") : normalized,
     reason: `${decision.reason}:${speech.reason || llm?.reason || classification.reason}`,
-    score: { ruleScore, semanticScore, llmScore, finalScore: effectiveFinalScore },
+    score: { ruleScore, semanticScore, ...(localClassifierScore !== undefined ? { localClassifierScore } : {}), llmScore, finalScore: effectiveFinalScore },
     llmUsed: Boolean(llm),
     classification,
     legacyCategory: classification.category,

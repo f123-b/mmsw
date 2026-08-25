@@ -8,6 +8,8 @@ export type QuestionSpeechAct = InterviewSpeechAct | "SMALL_TALK" | "INSTRUCTION
 export interface QuestionScore {
   ruleScore: number;
   semanticScore: number;
+  /** Undefined when the optional local classifier did not run. */
+  localClassifierScore?: number;
   llmScore: number;
   finalScore: number;
 }

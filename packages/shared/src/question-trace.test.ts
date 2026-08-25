@@ -29,12 +29,21 @@ describe("QuestionTrace", () => {
     expect((trace.snapshot() as unknown as Record<string, unknown>).startMs).toBeUndefined();
   });
 
-  it("keeps bounded, redacted candidate metadata for diagnostics", () => {
-    const trace = new QuestionTrace({ questionTraceId: "candidate-1", source: "remote", rawText: "请说明 token=secret-value 的问题", normalizedText: "请说明 token=secret-value 的问题", speechAct: "QUESTION", ruleScore: 0.8, semanticScore: 0.9, localClassifierScore: 0.88, llmScore: 0.86, contextTopic: "DMA", isFollowUp: false, finalScore: 0.87, decision: "answer", decisionReason: "decision-question" });
+  it("keeps only bounded text metadata and answer-source diagnostics", () => {
+    const trace = new QuestionTrace({ questionTraceId: "candidate-1", source: "remote", textLength: 18, textHash: "a1b2c3d4", speechAct: "QUESTION", ruleScore: 0.8, semanticScore: 0.9, localClassifierScore: 0.88, llmScore: 0.86, contextTopic: "DMA", isFollowUp: false, finalScore: 0.87, decision: "answer", decisionReason: "decision-question", answerSource: "question-bank" });
     const snapshot = trace.snapshot();
-    expect(snapshot).toMatchObject({ source: "remote", speechAct: "QUESTION", contextTopic: "DMA", finalScore: 0.87, decision: "answer" });
-    expect(snapshot.rawText).toContain("[REDACTED]");
-    expect(snapshot.normalizedText).toContain("[REDACTED]");
-    expect(snapshot.rawText?.length).toBeLessThanOrEqual(240);
+    expect(snapshot).toMatchObject({ source: "remote", textLength: 18, textHash: "a1b2c3d4", speechAct: "QUESTION", contextTopic: "DMA", finalScore: 0.87, decision: "answer", answerSource: "question-bank" });
+    expect((snapshot as unknown as Record<string, unknown>).rawText).toBeUndefined();
+    expect((snapshot as unknown as Record<string, unknown>).normalizedText).toBeUndefined();
+    expect(JSON.stringify(snapshot)).not.toContain("secret-value");
+  });
+
+  it("tracks question-bank lookup without fabricating LLM latency", () => {
+    const trace = new QuestionTrace({ questionTraceId: "bank-1", answerSource: "question-bank" });
+    trace.mark("answerLookupStarted", 100).mark("answerVisible", 135).mark("answerEnded", 135);
+    expect(trace.snapshot()).toMatchObject({ answerSource: "question-bank", answerLookupStartedAt: 100, answerVisibleAt: 135 });
+    expect(trace.snapshot().llmRequestAt).toBeUndefined();
+    expect(trace.snapshot().firstTokenAt).toBeUndefined();
+    expect(trace.snapshot().metrics.answerLookupMs).toBe(35);
   });
 });

@@ -36,6 +36,7 @@ export interface SpeechActClassification {
   topic?: string;
   entities: string[];
   codeContext?: boolean;
+  candidateSpeech?: boolean;
 }
 
 const ACKNOWLEDGEMENT = /^(?:嗯+|呃+|啊+|哦+|好+|好的|对|那|明白了?|知道了?|可以|行)[。！？?！\s，,、]*$/i;
@@ -53,6 +54,8 @@ const ELLIPTICAL_FOLLOW_UP = /^(?:为什么|为何|怎么|如何|具体(?:呢)?|
 const ELLIPTICAL_ANSWER_REQUEST = /^(?:讲一下|讲讲|说一下|说说|展开讲一下|详细讲述|具体说)[？?。！!\s]*$/i;
 const STRONG_TOPIC = /(?:STL|TCP|UDP|IIC|I2C|SPI|UART|CAN|MQTT|Modbus|FOC|DMA|PWM|ADC|FreeRTOS|RTOS|C\+\+|C语言|虚函数|堆和栈|进程间通信|进程线程|链表|字符串|排序|同步机制|三次握手|四次挥手|容器|上拉电阻|EEPROM|Flash|内存管理|低速抖动|系统架构|完整过程|实现过程)/i;
 const ASSERTIVE_STATEMENT = /^(?:我|我们|系统|项目|这个项目|当前项目|当前|这个方案|这次优化|它|该模块).*(?:是|为|通过|使用|采用|完成|下降|提升|增加|减少|切换|实现了|负责了)[^？?]*[。！!]$/;
+const SMALL_TALK = /^(?:你好|您好|谢谢|辛苦了|哈哈|嗨)[。！？?！\s]*$/i;
+const CANDIDATE_SPEECH = /^(?:我|我们|本人|候选人).*(?:负责|做过|参与|实现|采用|使用|认为|觉得|已经|目前|先|会|可以).*[。！!]$/;
 
 const KNOWN_ENTITIES = [
   "STL", "TCP", "UDP", "IIC", "I2C", "SPI", "UART", "CAN", "MQTT", "Modbus", "FOC", "DMA", "PWM", "ADC", "FreeRTOS", "RTOS", "C++", "虚函数", "堆", "栈", "EEPROM", "Flash", "链表", "字符串", "进程间通信", "三次握手", "四次挥手"
@@ -97,6 +100,18 @@ function isFollowUp(text: string, context: SpeechActContext): boolean {
   return (FOLLOW_UP_PREFIX.test(text) || shortInterrogativeFollowUp) && compact.length <= 16 && (!hasCompleteQuestion(text) || completeWhyHowFollowUp || contextualCompleteFollowUp || shortInterrogativeFollowUp);
 }
 
+/**
+ * Only clear acknowledgements, controls, meta conversation and explicit
+ * candidate statements may be rejected before the question detector runs.
+ * Topic anchors and ordinary statements remain recoverable signals because
+ * ASR frequently drops the interrogative tail.
+ */
+export function shouldHardRejectSpeechAct(classification: SpeechActClassification): boolean {
+  if (["ACKNOWLEDGEMENT", "CONTROL", "META_CONVERSATION"].includes(classification.speechAct)) return true;
+  if (SMALL_TALK.test(classification.normalizedText)) return true;
+  return classification.speechAct === "STATEMENT" && classification.candidateSpeech === true;
+}
+
 /** Deterministic interview speech-act classification before QuestionDetector. */
 export class SpeechActClassifier {
   classify(text: string, context: SpeechActContext = {}): SpeechActClassification {
@@ -112,10 +127,10 @@ export class SpeechActClassifier {
     if (CODE_REQUEST.test(normalizedText)) return { speechAct: "CODE_REQUEST", shouldAnswer: true, confidence: 0.98, normalizedText, reason: "code-request", topic, entities };
     if (ANSWER_REQUEST.test(normalizedText) || TRAILING_ANSWER_REQUEST.test(normalizedText)) return { speechAct: isFollowUp(normalizedText, context) ? "FOLLOW_UP" : "ANSWER_REQUEST", shouldAnswer: true, confidence: 0.96, normalizedText, reason: "answer-request", topic, entities };
     if (isFollowUp(normalizedText, context)) return { speechAct: "FOLLOW_UP", shouldAnswer: true, confidence: 0.94, normalizedText, reason: "elliptical-follow-up", topic, entities };
-    if (/^(?:我|我们).*(?:说明|介绍|解释|讲一下|说一下).*[。！!]$/.test(normalizedText)) return { speechAct: "STATEMENT", shouldAnswer: false, confidence: 0.94, normalizedText, reason: "declarative-explanation", topic, entities };
+    if (/^(?:我|我们).*(?:说明|介绍|解释|讲一下|说一下).*[。！!]$/.test(normalizedText)) return { speechAct: "STATEMENT", shouldAnswer: false, confidence: 0.94, normalizedText, reason: "declarative-explanation", topic, entities, candidateSpeech: true };
     if (!ASSERTIVE_STATEMENT.test(normalizedText) && (hasCompleteQuestion(normalizedText) || QUESTION_FORM.test(normalizedText))) return { speechAct: "QUESTION", shouldAnswer: true, confidence: 0.94, normalizedText, reason: "interrogative-form", topic, entities };
     if (STRONG_TOPIC.test(normalizedText)) return { speechAct: "TOPIC_ANCHOR", shouldAnswer: false, confidence: 0.9, normalizedText, reason: "technical-topic-anchor", topic, entities };
-    return { speechAct: "STATEMENT", shouldAnswer: false, confidence: clamp(normalizedText.length >= 8 ? 0.65 : 0.45), normalizedText, reason: "statement", topic, entities };
+    return { speechAct: "STATEMENT", shouldAnswer: false, confidence: clamp(normalizedText.length >= 8 ? 0.65 : 0.45), normalizedText, reason: "statement", topic, entities, ...(CANDIDATE_SPEECH.test(normalizedText) ? { candidateSpeech: true } : {}) };
   }
 }
 
