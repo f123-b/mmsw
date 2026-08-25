@@ -10,6 +10,18 @@ export interface VADResult {
   confidence?: number;
 }
 
+export interface VADStatus {
+  /** Effective backend currently producing VAD decisions. */
+  provider: "silero" | "energy";
+  /** True when Silero could not be used and EnergyVAD is active. */
+  fallback: boolean;
+  /** False while the Silero model/session is warming up. */
+  ready: boolean;
+  /** Stable diagnostic reason suitable for UI and release logs. */
+  reason: string;
+  modelPath?: string;
+}
+
 export interface VADProvider {
   process(pcm: Uint8Array): VADResult;
   /** Optional async form used by deterministic tests and offline callers. */
@@ -17,6 +29,8 @@ export interface VADProvider {
   reset(): void;
   readonly providerName: "energy" | "silero";
   readonly fallback: boolean;
+  /** Explicit runtime status; optional for compatibility with injected test providers. */
+  getStatus?(): VADStatus;
 }
 
 export interface EnergyVADOptions {

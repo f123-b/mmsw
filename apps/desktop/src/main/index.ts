@@ -19,7 +19,7 @@ import { parseDocument } from "./document-parsers";
 import { SafeLogger } from "./logger";
 import { buildConversationHistory } from "./chat-context";
 import { ShutdownController } from "./shutdown-controller";
-import { LocalAsrServiceManager } from "./local-asr-service-manager";
+import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-service-manager";
 import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
 import { createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
@@ -1178,7 +1178,11 @@ function registerIpc(): void {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
       }
       const raw = String(error);
-      const code = raw.split(":", 1)[0] || "AUDIO_DEVICE_FAILED";
+      // Electron wraps errors from an IPC handler as
+      // "Error invoking remote method ...: Error: CODE: message". Splitting
+      // at the first colon therefore loses the real diagnostic code and used
+      // to turn every failed probe into the generic AUDIO_DEVICE_FAILED.
+      const code = raw.match(/\b(?:AUDIO|ASR|LLM|PROFILE|PROJECT|JOB_TARGET|SIDECAR|DATABASE)_[A-Z0-9_]+\b/)?.[0] ?? "AUDIO_DEVICE_FAILED";
       const allowed = new Set(["AUDIO_BUSY", "AUDIO_DEVICE_FAILED", "AUDIO_PROBE_REQUIRED", "AUDIO_PROBE_FAILED", "AUDIO_PROBE_MIC_FAILED", "AUDIO_PROBE_SYSTEM_FAILED", "AUDIO_PROBE_PROCESS_FAILED", "AUDIO_PROBE_PROCESS_CRASHED", "AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT", "AUDIO_PROBE_TIMEOUT", "ASR_AUTH_FAILED", "ASR_CONNECT_FAILED", "LLM_NOT_CONFIGURED", "LLM_CONNECT_FAILED", "PROFILE_NOT_FOUND", "SIDECAR_NOT_FOUND", "DATABASE_ERROR"]);
       const mappedCode = allowed.has(code) ? code : raw.includes("ASR") ? "ASR_CONNECT_FAILED" : raw.includes("LLM") ? "LLM_CONNECT_FAILED" : raw.includes("database") ? "DATABASE_ERROR" : "AUDIO_DEVICE_FAILED";
       const message = userFacingError(error);
@@ -1460,6 +1464,7 @@ function registerIpc(): void {
     }
     return testCachedProviderConnection(section, settings, providerPreflightCache);
   });
+  ipcMain.handle("local-asr:health", (_event, options?: LocalAsrStartOptions) => localAsrServiceManager.getHealthCheck(options));
   ipcMain.handle("settings:preflight", (_event, checkReachability = false) => {
     if (!providerConfigStore) throw new Error("Settings are still initializing");
     return runProviderPreflight({ llm: providerConfigStore.get("llm"), asr: providerConfigStore.get("asr"), embedding: providerConfigStore.get("embedding") }, Boolean(checkReachability), providerPreflightCache);

@@ -125,6 +125,21 @@ describe("question scoring", () => {
     expect(classifyQuestion(text, "面试官：介绍一下你的项目？", true).isQuestion).toBe(false);
   });
 
+  it("does not let an answerable speech act bypass explicit signal checks", async () => {
+    const detector = new QuestionDetector2({
+      classifier: { classify: () => ({ isQuestion: false, confidence: 0, category: "technical", questionText: "", reason: "forced-negative" }) }
+    });
+    const result = await detector.analyze("介绍一下你的项目", "", true);
+    expect(result.isQuestion).toBe(true);
+    expect(result.reason).toContain("decision-answer_request");
+  });
+
+  it.each(["嗯", "好的", "下一个问题", "现在考你一个代码题", "CAN"]) ("rejects conflicting non-answer speech acts: %s", async (text) => {
+    const result = await new QuestionDetector2().analyze(text, "当前主题：CAN", true);
+    expect(result.isQuestion).toBe(false);
+    expect(result.shouldAnswer).toBe(false);
+  });
+
   it("passes the semantic detector result through the temporal gate", () => {
     const detector = new QuestionDetector();
     const analysis = new QuestionDetector2().analyzeSync("你主要负责什么", "面试官：介绍一下你的项目？", true);

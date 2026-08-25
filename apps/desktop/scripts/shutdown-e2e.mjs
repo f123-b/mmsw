@@ -290,7 +290,7 @@ results.push(await runScenario("active-interview", async (renderer, userDataDire
   const interviewId = await renderer.evaluate(`window.interviewCopilot.interview.start(${JSON.stringify({ profileId, url: `ws://127.0.0.1:${asrPort}/realtime`, inputDeviceId: "mock-mic", outputDeviceId: "mock-system", automationMode: "MANUAL", answerMode: "NORMAL", providerType: "custom-gateway" })})`);
   if (!interviewId) throw new Error("active-interview: interview did not start");
   await waitForNode(() => pcmPackets > 0, "active-interview: mock ASR did not receive PCM");
-  await renderer.evaluate(`window.interviewCopilot.interview.answerQuestion(${JSON.stringify(marker)})`);
+  await renderer.evaluate(`void window.interviewCopilot.interview.answerQuestion(${JSON.stringify(marker)}); true`);
   await waitForNode(() => answerRequestSeen, "active-interview: direct-display LLM request was not observed");
   await closeThroughElectron(renderer);
   await closeAllRendererWindows(processInfo.port);
@@ -299,7 +299,7 @@ results.push(await runScenario("active-interview", async (renderer, userDataDire
   const latest = database.latest;
   const answer = database.snapshot?.answers.find((item) => item.cancelReason === "user");
   if (!latest || latest.status !== "ended" || !latest.endedAt) throw new Error("active-interview: reopened interview is not ended");
-  if (!answer || answer.cancelReason !== "user") throw new Error("active-interview: in-flight answer or user cancel reason was not persisted");
+  if (!answer || answer.cancelReason !== "user") throw new Error(`active-interview: in-flight answer or user cancel reason was not persisted; snapshot=${JSON.stringify({ latest, questions: database.snapshot?.questions ?? [], answers: database.snapshot?.answers ?? [] })}`);
   return { processExit: "PASS", sqliteReopen: "PASS", endedAt: latest.endedAt, status: latest.status, answerText: answer.text, cancelReason: answer.cancelReason };
 }));
 

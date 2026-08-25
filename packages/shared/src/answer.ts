@@ -319,27 +319,67 @@ export class AnswerAgent {
       ...context.skills.map((skill) => skill.content),
       ...context.retrievedKnowledge
     ].filter(Boolean).join("\n");
-    let quality = this.qualityChecker.check({ question: routedQuestion.text, answer: formattedText, mode, kind, groundingText });
-    if (personalContextRequested && (context.personalMemoryEvidence.length > 0 || kind === "project" || kind === "behavioral")) {
-      const validation = new PersonalAnswerValidator().validate({ question: routedQuestion.text, answer: formattedText, analysis: new QuestionAnalyzer().analyze(routedQuestion.text), evidence: context.personalMemoryEvidence.length > 0 ? context.personalMemoryEvidence : context.experienceContext });
-      quality = { ...quality, score: Math.min(quality.score, validation.score), issues: [...quality.issues, ...validation.issues], suggestions: [...quality.suggestions, ...validation.suggestions], needsRepair: quality.needsRepair || !validation.valid };
-    }
+    const personalAnswerValidator = new PersonalAnswerValidator();
+    const personalQuestionAnalysis = new QuestionAnalyzer().analyze(routedQuestion.text);
+    const evaluateQuality = (answer: string): AnswerQualityResult => {
+      let result = this.qualityChecker.check({ question: routedQuestion.text, answer, mode, kind, groundingText });
+      if (personalContextRequested && (context.personalMemoryEvidence.length > 0 || kind === "project" || kind === "behavioral")) {
+        const validation = personalAnswerValidator.validate({
+          question: routedQuestion.text,
+          answer,
+          analysis: personalQuestionAnalysis,
+          evidence: context.personalMemoryEvidence.length > 0 ? context.personalMemoryEvidence : context.experienceContext
+        });
+        result = {
+          ...result,
+          score: Math.min(result.score, validation.score),
+          issues: [...result.issues, ...validation.issues],
+          suggestions: [...result.suggestions, ...validation.suggestions],
+          needsRepair: result.needsRepair || !validation.valid
+        };
+      }
+      return result;
+    };
+    let quality = evaluateQuality(formattedText);
     // Repair only when grounded profile material exists. This keeps the
     // realtime path low-latency for generic answers while preventing a
     // clearly poor or ungrounded answer from being shown as final.
-    if (options.allowQualityRepair !== false && quality.needsRepair && groundingText.trim()) {
+    const repairableFormatIssue = quality.issues.some((issue) => [
+      "answer-too-short",
+      "answer-too-long",
+      "too-formal",
+      "question-mismatch",
+      "not-first-person"
+    ].includes(issue));
+    if (options.allowQualityRepair !== false && quality.needsRepair && (groundingText.trim() || repairableFormatIssue)) {
+      const repairInstruction = [
+        "这是同一个面试问题的答案修正，不是新问题。只输出修正后的最终答案。",
+        `原始问题：${routedQuestion.text}`,
+        `上一版答案 A：\n${formattedText || "（上一版为空）"}`,
+        `检测到的质量问题：${quality.issues.length > 0 ? quality.issues.join("、") : "未命名问题"}`,
+        `修改建议：${quality.suggestions.length > 0 ? quality.suggestions.join("；") : "直接回答问题并保持信息完整"}`,
+        `可使用的 grounding evidence（只能使用这些事实）：\n${groundingText || "无；不得新增任何个人经历、数字、芯片型号、职责或结果"}`,
+        kind === "project" || kind === "behavioral"
+          ? "个人经历必须使用候选人第一人称；证据中没有的内容明确说资料不足，不能补写。"
+          : "不要强行添加项目经历；保留技术结论、完整代码和必要解释。",
+        "修正后重新检查：第一句回应原始问题，删除无证据的个人断言，不要输出修正过程或资料标签。"
+      ].join("\n");
       let repaired = "";
       for await (const delta of provider.stream({
         model: selection.model,
-        sections: [...sections, { name: "output-format", content: `请修正上一版答案：${kind === "project" || kind === "behavioral" ? "只保留有证据的个人经历" : "不要强行添加项目经历"}，直接回答问题，保留代码题的完整代码和解释，不要在中途截断。只输出修正后的答案。` }],
+        sections: [
+          ...sections,
+          ...(groundingText.trim() ? [{ name: "experience-context" as const, content: `修正时可引用的 grounding evidence：\n${groundingText}` }] : []),
+          { name: "output-format", content: repairInstruction }
+        ],
         attachments: options.attachments,
         thinking: mode === "DEEP",
         maxOutputTokens: options.maxOutputTokens ?? answerTokenBudget(mode, kind),
         maxRetries: options.maxRetries
       }, signal)) repaired += delta;
       const repairedText = this.formatter.format(repaired, mode, kind);
-      const repairedQuality = this.qualityChecker.check({ question: routedQuestion.text, answer: repairedText, mode, kind, groundingText });
-      if (repairedText && repairedQuality.score >= quality.score) {
+      const repairedQuality = evaluateQuality(repairedText);
+      if (repairedText.trim() && repairedQuality.score >= quality.score) {
         formattedText = repairedText;
         quality = repairedQuality;
       }
@@ -367,12 +407,20 @@ export class StableAnswerStateMachine {
   }
 
   start(answerId: string): StableAnswerSnapshot {
-    this.value = { displayedText: "", displayedAnswerId: undefined, pendingAnswerId: answerId, pendingText: "", streaming: true };
+    // Keep answer A visible while answer B is still speculative. A replacement
+    // becomes visible only after its first non-empty delta arrives.
+    this.value = {
+      displayedText: this.value.displayedText,
+      displayedAnswerId: this.value.displayedAnswerId,
+      pendingAnswerId: answerId,
+      pendingText: "",
+      streaming: true
+    };
     return this.snapshot;
   }
 
   delta(answerId: string, delta: string): StableAnswerSnapshot {
-    if (this.value.pendingAnswerId !== answerId) return this.snapshot;
+    if (this.value.pendingAnswerId !== answerId || !delta) return this.snapshot;
     const pendingText = this.value.pendingText + delta;
     this.value = {
       ...this.value,
@@ -385,7 +433,12 @@ export class StableAnswerStateMachine {
 
   end(answerId: string, text: string): StableAnswerSnapshot {
     if (this.value.pendingAnswerId !== answerId) return this.snapshot;
-    this.value = { displayedText: text || this.value.pendingText, displayedAnswerId: answerId, pendingText: "", streaming: false };
+    const finalText = text || this.value.pendingText;
+    if (!finalText) {
+      this.value = { ...this.value, pendingAnswerId: undefined, pendingText: "", streaming: false };
+      return this.snapshot;
+    }
+    this.value = { displayedText: finalText, displayedAnswerId: answerId, pendingText: "", streaming: false };
     return this.snapshot;
   }
 

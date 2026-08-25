@@ -14,6 +14,7 @@ import type { ChatAction, KnowledgeDocumentType, Profile, ProfileInput, ProjectF
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectAnalysisState, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
+import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 
 declare global {
   interface Window {
@@ -59,6 +60,9 @@ declare global {
         connect(options: RealtimeConnectOptions): Promise<boolean>;
         disconnect(): Promise<boolean>;
         getTranscript(): Promise<Partial<Record<"mic" | "remote", TranscriptSnapshot>>>;
+      };
+      localAsr: {
+        health(options?: LocalAsrStartOptions): Promise<LocalAsrHealthCheck>;
       };
       interview: {
         start(options: InterviewStartOptions): Promise<string>;

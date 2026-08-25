@@ -82,11 +82,24 @@ describe("Answer routing and generation", () => {
 
   it("repairs a low-quality grounded answer before finalizing", async () => {
     let calls = 0;
-    const repairProvider: AnswerProvider = { stream: async function* () { calls += 1; yield calls === 1 ? "技术说明。" : "我在项目中使用CAN做实时通信，主要看重它的仲裁和稳定性。"; } };
+    const requests = [] as Array<Parameters<NonNullable<AnswerProvider["stream"]>>[0]>;
+    const repairProvider: AnswerProvider = {
+      stream: async function* (request) {
+        calls += 1;
+        requests.push(request);
+        yield calls === 1 ? "技术说明。" : "我在项目中使用CAN做实时通信，主要看重它的仲裁和稳定性。";
+      }
+    };
     let final = "";
     for await (const event of new AnswerAgent({ normal: repairProvider }, new ModelRouter({ normal: "test-model" })).stream({ id: "q-repair", text: "为什么使用CAN" }, "NORMAL", { experienceContext: ["项目证据：使用 CAN 做实时通信"] })) if (event.type === "answer_end") final = event.text;
     expect(calls).toBe(2);
     expect(final).toContain("我在项目中使用CAN");
+    const repairPrompt = requests[1]?.sections.map((section) => section.content).join("\n") ?? "";
+    expect(repairPrompt).toContain("原始问题：为什么使用CAN");
+    expect(repairPrompt).toContain("上一版答案 A：");
+    expect(repairPrompt).toContain("技术说明");
+    expect(repairPrompt).toContain("answer-too-short");
+    expect(repairPrompt).toContain("项目证据：使用 CAN 做实时通信");
   });
 
   it("can return one stable completed answer without deltas or repair", async () => {
@@ -117,16 +130,28 @@ describe("Answer routing and generation", () => {
 });
 
 describe("StableAnswerStateMachine", () => {
-  it("clears the previous answer when a replacement answer starts", () => {
+  it("keeps answer A until the first valid delta of replacement answer B", () => {
     const state = new StableAnswerStateMachine();
     state.start("a1");
     state.delta("a1", "旧答案");
     state.end("a1", "旧答案");
     state.start("a2");
-    expect(state.snapshot.displayedText).toBe("");
+    expect(state.snapshot.displayedText).toBe("旧答案");
+    state.delta("a2", "");
+    expect(state.snapshot.displayedText).toBe("旧答案");
     state.delta("a2", "新");
     expect(state.snapshot.displayedText).toBe("新");
     state.cancel("a2");
     expect(state.snapshot.displayedText).toBe("新");
+  });
+
+  it("keeps answer A when replacement B is cancelled before any delta", () => {
+    const state = new StableAnswerStateMachine();
+    state.start("a1");
+    state.end("a1", "旧答案");
+    state.start("a2");
+    state.cancel("a2");
+    expect(state.snapshot.displayedText).toBe("旧答案");
+    expect(state.snapshot.displayedAnswerId).toBe("a1");
   });
 });

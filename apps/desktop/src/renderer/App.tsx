@@ -456,7 +456,7 @@ const useAudioStore = create<AudioStore>((set) => ({
   automationMode: "AUTO",
   answerMode: "NORMAL",
   realtimeState: "disconnected",
-  asrDiagnostics: { provider: "unknown", model: "", language: "", micState: "stopped", remoteState: "stopped", reconnectCount: 0, droppedPcmPackets: 0, vadProvider: "unknown", speechProbability: { mic: 0, remote: 0 }, micSpeech: false, remoteSpeech: false, fallback: false, lastSpeechStart: {}, lastSpeechEnd: {} },
+  asrDiagnostics: { provider: "unknown", model: "", language: "", micState: "stopped", remoteState: "stopped", reconnectCount: 0, droppedPcmPackets: 0, vadProvider: "unknown", speechProbability: { mic: 0, remote: 0 }, micSpeech: false, remoteSpeech: false, fallback: false, vadReady: false, vadReason: "not-initialized", lastSpeechStart: {}, lastSpeechEnd: {} },
   remoteTranscript: { source: "remote", final: [] },
   micTranscript: { source: "mic", final: [] },
   questionDiagnostics: [],
@@ -507,7 +507,7 @@ const useAudioStore = create<AudioStore>((set) => ({
   setRealtimeState: (realtimeState) => set({ realtimeState }),
   setAsrDiagnostics: (asrDiagnostics) => set({ asrDiagnostics }),
   applyTranscript: (snapshot) => set(snapshot.source === "remote" ? { remoteTranscript: snapshot } : { micTranscript: snapshot }),
-  applyQuestion: (event) => set((current) => event.type === "question_diagnostic" ? { questionDiagnostics: [...current.questionDiagnostics.slice(-19), event] } : event.type === "question_confirmed" || event.type === "question_superseded" ? (stableAnswer.reset(), { question: event.question, answerText: "", answerStreaming: false, answerId: undefined, notice: event.type === "question_superseded" ? "新问题已覆盖上一题" : current.notice }) : current),
+  applyQuestion: (event) => set((current) => event.type === "question_diagnostic" ? { questionDiagnostics: [...current.questionDiagnostics.slice(-19), event] } : event.type === "question_confirmed" || event.type === "question_superseded" ? { question: event.question, notice: event.type === "question_superseded" ? "新问题已覆盖上一题" : current.notice } : current),
   applyRealtimeMessage: (message) => {
     if (message.type === "runtime_error") { set({ notice: `${message.code}: ${message.message}${message.recoverable ? " · 可重试" : ""}` }); return; }
     const snapshot = message.type === "answer_start"
@@ -519,7 +519,7 @@ const useAudioStore = create<AudioStore>((set) => ({
         : message.type === "answer_cancelled"
             ? stableAnswer.cancel(message.answerId)
             : message.type === "answer_reset"
-              ? stableAnswer.reset()
+              ? stableAnswer.snapshot
             : stableAnswer.snapshot;
     set({ answerText: snapshot.displayedText, answerStreaming: snapshot.streaming, answerId: snapshot.displayedAnswerId, ...(message.type === "answer_start" ? { answerMode: message.mode } : {}) });
   }
@@ -1367,6 +1367,14 @@ export function App(): JSX.Element {
       if (section === "asr") await window.interviewCopilot.settings.update("asr", { providerName: asrProviderLabel(asrProviderType), providerType: asrProviderType, baseUrl: asrBaseUrl.trim(), model: asrModel.trim() || asrDefaultModel(asrProviderType), language: asrLanguage, apiKey: asrApiKey || undefined, timeoutMs: 15_000, maxRetries: 2 });
       if (section === "embedding") await window.interviewCopilot.settings.update("embedding", { providerName: "OpenAI-compatible", baseUrl: embeddingBaseUrl.trim(), model: embeddingModel.trim() || "text-embedding-3-small", apiKey: embeddingApiKey || undefined, timeoutMs: 15_000, maxRetries: 2 });
       applyProviderSettings(await window.interviewCopilot.settings.get());
+      if (section === "asr" && asrProviderType === "funasr-local") {
+        const health = await window.interviewCopilot.localAsr.health({ webSocketUrl: asrBaseUrl.trim(), model: asrModel.trim() || asrDefaultModel(asrProviderType) });
+        if (health.overall === "not_ready") {
+          const failed = [health.serviceRoot, health.python, health.openasr, health.venv, health.dependencies, health.model, health.facadePort, health.backendPort].filter((check) => !check.ok).map((check) => check.reason);
+          setProviderTests((current) => ({ ...current, asr: `本地 ASR 未就绪 · ${failed.join("；") || "请检查服务状态"}` }));
+          return;
+        }
+      }
       const result = await window.interviewCopilot.settings.testConnection(section);
       setProviderTests((current) => ({ ...current, [section]: result.status === "ready" ? "正常" : `${result.status}${result.message ? ` · ${result.message}` : ""}` }));
     } catch (error) { setProviderTests((current) => ({ ...current, [section]: userFacingError(error) })); }

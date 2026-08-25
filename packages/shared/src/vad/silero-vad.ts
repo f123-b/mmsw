@@ -8,7 +8,8 @@ import type {
   SileroTensor,
   SileroVADOptions,
   VADProvider,
-  VADResult
+  VADResult,
+  VADStatus
 } from "./types";
 
 const WINDOW_SAMPLES = 512;
@@ -82,6 +83,7 @@ export class SileroVADProvider implements VADProvider {
   private generation = 0;
   private fallbackValue = false;
   private diagnosticEmitted = false;
+  private statusReason = "model-loading";
 
   constructor(options: SileroVADOptions = {}) {
     this.modelPath = options.modelPath;
@@ -109,6 +111,15 @@ export class SileroVADProvider implements VADProvider {
 
   get fallback(): boolean { return this.fallbackValue; }
   get ready(): boolean { return this.lastResult.ready ?? false; }
+  getStatus(): VADStatus {
+    return {
+      provider: this.fallbackValue ? "energy" : "silero",
+      fallback: this.fallbackValue,
+      ready: this.lastResult.ready ?? false,
+      reason: this.statusReason,
+      ...(this.modelPath ? { modelPath: this.modelPath } : {})
+    };
+  }
 
   process(pcm: Uint8Array): VADResult {
     if (this.fallbackProvider) return this.fallbackProvider.process(pcm);
@@ -171,6 +182,7 @@ export class SileroVADProvider implements VADProvider {
     try {
       const session = await this.loadSession();
       if (generation !== this.generation) return this.lastResult;
+      this.statusReason = "silero-model-ready";
       const input = new Float32Array(CONTEXT_SAMPLES + WINDOW_SAMPLES);
       input.set(this.context);
       input.set(window, CONTEXT_SAMPLES);
@@ -243,6 +255,7 @@ export class SileroVADProvider implements VADProvider {
   private activateFallback(reason: string): void {
     this.fallbackProvider ??= new EnergyVADProvider(this.fallbackOptions);
     this.fallbackValue = true;
+    this.statusReason = `fallback-to-energy:${reason}`;
     if (this.diagnosticEmitted) return;
     this.diagnosticEmitted = true;
     this.onDiagnostic?.({ code: "VAD_FALLBACK_TO_ENERGY", provider: "silero", modelPath: this.modelPath, reason });

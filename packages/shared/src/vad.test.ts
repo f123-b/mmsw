@@ -34,6 +34,7 @@ describe("VAD providers", () => {
   it("rejects silence", () => {
     const vad = new SileroVADProvider({ sampleRate: 16_000, minSpeechMs: 20, endSilenceMs: 20 });
     expect(vad.process(pcm16(0)).speech).toBe(false);
+    expect(vad.getStatus()).toMatchObject({ provider: "energy", fallback: true, ready: true });
   });
 
   it("detects continuous speech and exposes the audio range", () => {
@@ -78,6 +79,7 @@ describe("VAD providers", () => {
     expect(ended.speechEnded).toBe(true);
     expect(vad.providerName).toBe("silero");
     expect(vad.fallback).toBe(false);
+    expect(vad.getStatus()).toMatchObject({ provider: "silero", fallback: false, ready: true, reason: "silero-model-ready" });
   });
 
   it("falls back to EnergyVAD and emits an explicit diagnostic when model load fails", async () => {
@@ -91,6 +93,7 @@ describe("VAD providers", () => {
     const result = await vad.processAsync(pcm16(5_000));
     expect(vad.fallback).toBe(true);
     expect(result.ready).toBe(true);
+    expect(vad.getStatus()).toMatchObject({ provider: "energy", fallback: true, ready: true });
     expect(diagnostic).toHaveBeenCalledWith(expect.objectContaining({ code: "VAD_FALLBACK_TO_ENERGY" }));
   });
 

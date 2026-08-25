@@ -5,7 +5,7 @@ describe("QuestionTrace", () => {
   it("computes safe stage timings without retaining question text", () => {
     const trace = new QuestionTrace({ questionTraceId: "trace-1", asrFinalAt: 100, questionScore: 0.92, questionType: "follow-up", followUp: true, projectId: "p1" });
     trace.mark("utteranceFinalized", 140).mark("questionDetected", 160).mark("questionConfirmed", 180).mark("retrievalStarted", 190).mark("retrievalEnded", 205).mark("llmRequestStarted", 210).mark("firstToken", 260).mark("answerEnded", 700);
-    expect(trace.snapshot()).toEqual(expect.objectContaining({ questionTraceId: "trace-1", questionType: "follow-up", projectId: "p1" }));
+    expect(trace.snapshot()).toEqual(expect.objectContaining({ questionTraceId: "trace-1", questionType: "follow-up", projectId: "p1", speechEndAt: 140, retrievalFinishedAt: 205, llmRequestAt: 210, answerFinishedAt: 700 }));
     expect(trace.snapshot().metrics).toEqual({
       asrFinalToUtteranceMs: 40,
       utteranceToDetectionMs: 20,
@@ -27,5 +27,14 @@ describe("QuestionTrace", () => {
     trace.mark("questionDetectionStarted", 10_190).mark("questionDetected", 10_210).mark("questionConfirmed", 10_260).mark("retrievalStarted", 10_270).mark("retrievalEnded", 10_300).mark("llmRequestStarted", 10_305).mark("firstToken", 10_360).mark("answerEnded", 10_700);
     expect(trace.snapshot().metrics).toMatchObject({ asrFinalToUtteranceMs: 180, utteranceToDetectionMs: 30, detectionToConfirmationMs: 50, confirmationToRetrievalMs: 10, endToEndMs: 700 });
     expect((trace.snapshot() as unknown as Record<string, unknown>).startMs).toBeUndefined();
+  });
+
+  it("keeps bounded, redacted candidate metadata for diagnostics", () => {
+    const trace = new QuestionTrace({ questionTraceId: "candidate-1", source: "remote", rawText: "请说明 token=secret-value 的问题", normalizedText: "请说明 token=secret-value 的问题", speechAct: "QUESTION", ruleScore: 0.8, semanticScore: 0.9, localClassifierScore: 0.88, llmScore: 0.86, contextTopic: "DMA", isFollowUp: false, finalScore: 0.87, decision: "answer", decisionReason: "decision-question" });
+    const snapshot = trace.snapshot();
+    expect(snapshot).toMatchObject({ source: "remote", speechAct: "QUESTION", contextTopic: "DMA", finalScore: 0.87, decision: "answer" });
+    expect(snapshot.rawText).toContain("[REDACTED]");
+    expect(snapshot.normalizedText).toContain("[REDACTED]");
+    expect(snapshot.rawText?.length).toBeLessThanOrEqual(240);
   });
 });

@@ -24,6 +24,21 @@ export interface LocalAsrStartOptions {
 
 export type LocalAsrServiceState = "stopped" | "starting" | "ready" | "error";
 
+export interface LocalAsrHealthCheck {
+  checkedAt: number;
+  overall: "ready" | "degraded" | "not_ready";
+  state: LocalAsrServiceState;
+  serviceRoot: { ok: boolean; path?: string; reason: string };
+  python: { ok: boolean; command: string; reason: string };
+  openasr: { ok: boolean; command: string; reason: string };
+  venv: { ok: boolean; path?: string; reason: string };
+  dependencies: { ok: boolean; requirementsPath?: string; reason: string };
+  model: { ok: boolean; path?: string; reason: string };
+  facadePort: { ok: boolean; host: string; port: number; reason: string };
+  backendPort: { ok: boolean; host: string; port: number; reason: string };
+  runtime: { backendPid?: number; facadePid?: number; backendRunning: boolean; facadeRunning: boolean };
+}
+
 type Endpoint = {
   host: string;
   port: number;
@@ -69,6 +84,23 @@ function firstExistingPath(candidates: Array<string | undefined>): string | unde
   return candidates.find((candidate) => candidate && existsSync(candidate));
 }
 
+function probeExecutable(command: string, args: string[], cwd: string, timeoutMs = 2_000): Promise<{ ok: boolean; reason: string }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const child = spawn(command, args, { cwd, windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+    const finish = (ok: boolean, reason: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill();
+      resolve({ ok, reason });
+    };
+    const timer = setTimeout(() => finish(false, `probe timeout: ${command}`), timeoutMs);
+    child.once("error", (error) => finish(false, error.message));
+    child.once("exit", (code) => finish(code === 0, code === 0 ? "ok" : `exit code ${code ?? "unknown"}`));
+  });
+}
+
 export class LocalAsrServiceManager {
   private backendProcess: ChildProcess | undefined;
   private facadeProcess: ChildProcess | undefined;
@@ -80,6 +112,58 @@ export class LocalAsrServiceManager {
 
   getStatus(): { state: LocalAsrServiceState; error?: string } {
     return { state: this.state, error: this.lastError };
+  }
+
+  /**
+   * Read-only preflight for the local ASR stack. It deliberately reports each
+   * layer separately so a packaged build can distinguish missing Python,
+   * dependencies, OpenASR/model assets, facade and port failures.
+   */
+  async getHealthCheck(startOptions: LocalAsrStartOptions = {}): Promise<LocalAsrHealthCheck> {
+    const serviceRoot = this.options.resolveServiceRoot();
+    const serviceRootCheck = {
+      ok: Boolean(serviceRoot && existsSync(join(serviceRoot, "server.py"))),
+      ...(serviceRoot ? { path: serviceRoot } : {}),
+      reason: serviceRoot ? "server.py found" : "local-asr-service/server.py not found"
+    };
+    const python = this.resolvePython(serviceRoot ?? process.cwd());
+    const pythonProbe = await probeExecutable(python.command, [...python.args, "-c", "print('mmsw-python-ok')"], serviceRoot ?? process.cwd());
+    const pythonPath = python.command.includes("\\") || python.command.includes("/") ? python.command : undefined;
+    const venvPath = firstExistingPath(serviceRoot ? [join(serviceRoot, ".venv", "Scripts", "python.exe"), join(serviceRoot, ".venv", "bin", "python")] : []);
+    const requirementsPath = serviceRoot ? join(serviceRoot, "requirements.txt") : undefined;
+    const dependencyProbe = pythonProbe.ok && requirementsPath && existsSync(requirementsPath)
+      ? await probeExecutable(python.command, [...python.args, "-c", "import httpx, websockets"], serviceRoot ?? process.cwd())
+      : { ok: false, reason: !requirementsPath || !existsSync(requirementsPath) ? "requirements.txt not found" : `python unavailable: ${pythonProbe.reason}` };
+    const openAsrCommand = this.resolveOpenAsrCommand();
+    const openAsrProbe = await probeExecutable(openAsrCommand, ["--version"], serviceRoot ?? process.cwd());
+    const model = startOptions.model || DEFAULT_MODEL;
+    const modelPath = this.options.resolveModelPack?.(model);
+    const webSocketEndpoint = endpointFromUrl(startOptions.webSocketUrl || DEFAULT_WEBSOCKET_URL, 8765);
+    const upstreamEndpoint = endpointFromUrl(startOptions.upstreamUrl || this.options.upstreamUrl || DEFAULT_UPSTREAM_URL, 8080);
+    const facadeReachable = await isTcpReachable(webSocketEndpoint);
+    const backendReachable = await isTcpReachable(upstreamEndpoint);
+    const runtime = {
+      ...(this.backendProcess?.pid ? { backendPid: this.backendProcess.pid } : {}),
+      ...(this.facadeProcess?.pid ? { facadePid: this.facadeProcess.pid } : {}),
+      backendRunning: Boolean(this.backendProcess && this.backendProcess.exitCode === null),
+      facadeRunning: Boolean(this.facadeProcess && this.facadeProcess.exitCode === null)
+    };
+    const checks = [serviceRootCheck.ok, pythonProbe.ok, dependencyProbe.ok, openAsrProbe.ok || backendReachable, Boolean(modelPath) || backendReachable, facadeReachable || runtime.facadeRunning];
+    const overall = checks.every(Boolean) ? "ready" : checks.some(Boolean) ? "degraded" : "not_ready";
+    return {
+      checkedAt: Date.now(),
+      overall,
+      state: this.state,
+      serviceRoot: serviceRootCheck,
+      python: { ok: pythonProbe.ok, ...(pythonPath ? { command: pythonPath } : { command: python.command }), reason: pythonProbe.reason },
+      openasr: { ok: openAsrProbe.ok || backendReachable, command: openAsrCommand, reason: openAsrProbe.ok ? openAsrProbe.reason : backendReachable ? "backend port already reachable" : openAsrProbe.reason },
+      venv: { ok: Boolean(venvPath), ...(venvPath ? { path: venvPath } : {}), reason: venvPath ? "venv found" : "venv not found" },
+      dependencies: { ok: dependencyProbe.ok, ...(requirementsPath ? { requirementsPath } : {}), reason: dependencyProbe.reason },
+      model: { ok: Boolean(modelPath) || backendReachable, ...(modelPath ? { path: modelPath } : {}), reason: modelPath ? `${model} model pack found` : backendReachable ? "backend already reachable" : `${model} model pack not found` },
+      facadePort: { ok: facadeReachable, host: webSocketEndpoint.host, port: webSocketEndpoint.port, reason: facadeReachable ? "reachable" : "not reachable" },
+      backendPort: { ok: backendReachable, host: upstreamEndpoint.host, port: upstreamEndpoint.port, reason: backendReachable ? "reachable" : "not reachable" },
+      runtime
+    };
   }
 
   async ensureRunning(startOptions: LocalAsrStartOptions = {}): Promise<void> {
@@ -141,13 +225,17 @@ export class LocalAsrServiceManager {
   }
 
   private spawnOpenAsr(model: string): ChildProcess {
-    const command = this.options.openAsrPath || process.env.INTERVIEW_COPILOT_OPENASR_PATH || this.options.resolveOpenAsrPath?.() || "openasr";
+    const command = this.resolveOpenAsrCommand();
     const modelPack = this.options.resolveModelPack?.(model);
     const args = ["serve"];
     if (modelPack) args.push("--model-pack", modelPack);
     const openAsrHome = this.options.resolveOpenAsrHome?.();
     const env = openAsrHome ? { ...process.env, OPENASR_HOME: openAsrHome } : undefined;
     return this.spawnManaged(command, args, process.cwd(), "OpenASR", env);
+  }
+
+  private resolveOpenAsrCommand(): string {
+    return this.options.openAsrPath || process.env.INTERVIEW_COPILOT_OPENASR_PATH || this.options.resolveOpenAsrPath?.() || "openasr";
   }
 
   private spawnFacade(input: { serviceRoot?: string; host: string; port: number; model: string; upstreamUrl: string }): ChildProcess {

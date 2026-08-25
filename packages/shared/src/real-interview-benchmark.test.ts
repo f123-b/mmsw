@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fixtures from "../../../tests/fixtures/real-interview-regression-20260824.json";
+import v2Fixtures from "../../../tests/fixtures/real-interview-question-dataset.json";
 import {
   ContextAnchorResolver,
   ContextAnchorStore,
@@ -149,5 +150,94 @@ describe("real interview regression benchmark", () => {
     expect(metrics.duplicateRate).toBeLessThanOrEqual(0.05);
     expect(metrics.wrongContextRate).toBeLessThanOrEqual(0.05);
     expect(expected.filter((item) => item.fixture.expectedSpeechAct !== item.speechAct), JSON.stringify(expected.map((item) => ({ id: item.fixture.id, expected: item.fixture.expectedSpeechAct, actual: item.speechAct, canonical: item.canonicalQuestion })))).toHaveLength(0);
+  });
+
+  it("benchmarks the v2 real-interview question dataset across speech conditions", async () => {
+    type V2Fixture = {
+      id: string;
+      text: string;
+      context?: string;
+      expectedSpeechAct: InterviewSpeechAct;
+      shouldAnswer: boolean;
+      category: string;
+      final?: boolean;
+    };
+    const all = v2Fixtures as V2Fixture[];
+    expect(all.length).toBeGreaterThanOrEqual(150);
+    const detector = new QuestionDetector2();
+    const failures: Array<{ id: string; text: string; expected: unknown; actual: unknown; reason: string }> = [];
+    let truePositive = 0;
+    let falsePositive = 0;
+    let falseNegative = 0;
+    let trueNegative = 0;
+    let followUpCorrect = 0;
+    let followUpTotal = 0;
+    let controlCorrect = 0;
+    let controlTotal = 0;
+    let candidateCorrect = 0;
+    let candidateTotal = 0;
+    let partialPrematureTriggers = 0;
+    const latencies: number[] = [];
+
+    for (const fixture of all) {
+      const startedAt = performance.now();
+      const analysis = await detector.analyze(fixture.text, fixture.context ?? "", fixture.final ?? true, fixture.context ? {
+        recentTranscript: [fixture.context]
+      } : {});
+      latencies.push(performance.now() - startedAt);
+      const predicted = analysis.isQuestion;
+      if (fixture.shouldAnswer && predicted) truePositive += 1;
+      else if (!fixture.shouldAnswer && predicted) falsePositive += 1;
+      else if (fixture.shouldAnswer) falseNegative += 1;
+      else trueNegative += 1;
+      if (fixture.expectedSpeechAct === "FOLLOW_UP") {
+        followUpTotal += 1;
+        if (analysis.speechAct === "FOLLOW_UP" && predicted) followUpCorrect += 1;
+      }
+      if (["CONTROL", "ACKNOWLEDGEMENT", "META_CONVERSATION", "TOPIC_ANCHOR"].includes(fixture.expectedSpeechAct)) {
+        controlTotal += 1;
+        if (!predicted && analysis.speechAct === fixture.expectedSpeechAct) controlCorrect += 1;
+      }
+      if (fixture.category === "candidate-answer") {
+        candidateTotal += 1;
+        // Candidate speech may be promoted to a short-lived TOPIC_ANCHOR for
+        // follow-up context; the safety requirement is that it never triggers
+        // an answer, not that every candidate utterance has one label.
+        if (!predicted) candidateCorrect += 1;
+      }
+      if (fixture.final === false && predicted) partialPrematureTriggers += 1;
+      if (predicted !== fixture.shouldAnswer || analysis.speechAct !== fixture.expectedSpeechAct) {
+        failures.push({ id: fixture.id, text: fixture.text, expected: { shouldAnswer: fixture.shouldAnswer, speechAct: fixture.expectedSpeechAct }, actual: { shouldAnswer: predicted, speechAct: analysis.speechAct }, reason: analysis.reason });
+      }
+    }
+    const precision = truePositive / Math.max(1, truePositive + falsePositive);
+    const recall = truePositive / Math.max(1, truePositive + falseNegative);
+    const f1 = 2 * precision * recall / Math.max(0.0001, precision + recall);
+    const falsePositiveRate = falsePositive / Math.max(1, falsePositive + trueNegative);
+    const missRate = falseNegative / Math.max(1, truePositive + falseNegative);
+    const metrics = {
+      samples: all.length,
+      precision: Number(precision.toFixed(4)),
+      recall: Number(recall.toFixed(4)),
+      f1: Number(f1.toFixed(4)),
+      falsePositiveRate: Number(falsePositiveRate.toFixed(4)),
+      missRate: Number(missRate.toFixed(4)),
+      followUpAccuracy: Number((followUpCorrect / Math.max(1, followUpTotal)).toFixed(4)),
+      controlRejectionRate: Number((controlCorrect / Math.max(1, controlTotal)).toFixed(4)),
+      candidateRejectionRate: Number((candidateCorrect / Math.max(1, candidateTotal)).toFixed(4)),
+      partialPrematureTriggerRate: Number((partialPrematureTriggers / Math.max(1, all.filter((fixture) => fixture.final === false).length)).toFixed(4)),
+      averageLatencyMs: Number((latencies.reduce((sum, value) => sum + value, 0) / Math.max(1, latencies.length)).toFixed(3)),
+      failedSamples: failures
+    };
+    console.log(`REAL_INTERVIEW_DATASET_V2 ${JSON.stringify(metrics)}`);
+    expect(metrics.precision, JSON.stringify(failures.slice(0, 20))).toBeGreaterThanOrEqual(0.95);
+    expect(metrics.recall, JSON.stringify(failures.slice(0, 20))).toBeGreaterThanOrEqual(0.95);
+    expect(metrics.f1, JSON.stringify(failures.slice(0, 20))).toBeGreaterThanOrEqual(0.95);
+    expect(metrics.falsePositiveRate).toBeLessThanOrEqual(0.05);
+    expect(metrics.missRate).toBeLessThanOrEqual(0.05);
+    expect(metrics.followUpAccuracy).toBeGreaterThanOrEqual(0.9);
+    expect(metrics.controlRejectionRate).toBeGreaterThanOrEqual(0.95);
+    expect(metrics.candidateRejectionRate).toBeGreaterThanOrEqual(0.95);
+    expect(metrics.partialPrematureTriggerRate).toBe(0);
   });
 });

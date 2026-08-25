@@ -72,6 +72,65 @@ function fuseLocalClassification(base: QuestionClassification, local: LocalQuest
   };
 }
 
+export interface QuestionDecisionInput {
+  speechAct: QuestionSpeechAct;
+  speechConfidence: number;
+  ruleScore: number;
+  semanticScore: number;
+  llmScore: number;
+  llmIsQuestion?: boolean;
+  llmConfidence?: number;
+  finalScore: number;
+  threshold: number;
+  final: boolean;
+  candidateQuestion: boolean;
+  contextualFollowUp: boolean;
+  robustRuleQuestion: boolean;
+  followUpRescue: boolean;
+}
+
+export interface QuestionDecision {
+  shouldAnswer: boolean;
+  confidence: number;
+  reason: string;
+}
+
+const ANSWERABLE_SPEECH_ACTS = new Set<QuestionSpeechAct>(["QUESTION", "ANSWER_REQUEST", "CODE_REQUEST", "FOLLOW_UP"]);
+const NON_ANSWERABLE_SPEECH_ACTS = new Set<QuestionSpeechAct>(["TOPIC_ANCHOR", "ACKNOWLEDGEMENT", "CONTROL", "META_CONVERSATION", "STATEMENT", "SMALL_TALK", "INSTRUCTION"]);
+
+/**
+ * Combines speech act, rule, semantic, local/LLM and context signals into one
+ * explicit decision. A speech classifier is an important signal, but its old
+ * boolean `shouldAnswer` result must not bypass conflict and candidate checks.
+ */
+export function decideQuestion(input: QuestionDecisionInput): QuestionDecision {
+  const speechConfidence = clamp(input.speechConfidence);
+  const finalScore = clamp(input.finalScore);
+  const weightedScore = clamp(0.3 * input.ruleScore + 0.5 * input.semanticScore + 0.2 * input.llmScore);
+  const strongSpeechAct = ANSWERABLE_SPEECH_ACTS.has(input.speechAct) && speechConfidence >= 0.86;
+  const hardReject = NON_ANSWERABLE_SPEECH_ACTS.has(input.speechAct);
+  const llmStrongNegative = input.llmIsQuestion === false && (input.llmConfidence ?? 0) >= 0.95;
+  const localOrRuleSupport = input.semanticScore >= 0.5 || input.ruleScore >= 0.35 || input.llmIsQuestion === true;
+  const scoreAccepted = finalScore >= input.threshold || input.robustRuleQuestion || input.followUpRescue || weightedScore >= input.threshold;
+
+  if (!input.final) return { shouldAnswer: false, confidence: finalScore, reason: "partial-utterance" };
+  if (!input.candidateQuestion) return { shouldAnswer: false, confidence: 0, reason: "non-candidate-speech" };
+  if (hardReject) return { shouldAnswer: false, confidence: 0, reason: `speech-act-${input.speechAct.toLowerCase()}` };
+  if (llmStrongNegative && !strongSpeechAct && !input.robustRuleQuestion && !input.followUpRescue) {
+    return { shouldAnswer: false, confidence: finalScore, reason: "llm-negative-confirmation" };
+  }
+  if (input.speechAct === "FOLLOW_UP" && !input.contextualFollowUp && !input.robustRuleQuestion && !scoreAccepted) {
+    return { shouldAnswer: false, confidence: finalScore, reason: "follow-up-without-context" };
+  }
+  if (strongSpeechAct && (localOrRuleSupport || input.speechAct === "CODE_REQUEST" || input.speechAct === "ANSWER_REQUEST" || (input.speechAct === "FOLLOW_UP" && input.contextualFollowUp && input.followUpRescue))) {
+    return { shouldAnswer: true, confidence: Math.max(finalScore, speechConfidence, 0.86), reason: `decision-${input.speechAct.toLowerCase()}` };
+  }
+  if (scoreAccepted && localOrRuleSupport) {
+    return { shouldAnswer: true, confidence: Math.max(finalScore, weightedScore), reason: "decision-multi-signal" };
+  }
+  return { shouldAnswer: false, confidence: finalScore, reason: "insufficient-question-signals" };
+}
+
 /** Rules + local semantic classifier + selective LLM confirmation. */
 export class QuestionDetector {
   private readonly classifier: { classify(text: string, contextText?: string, final?: boolean): QuestionClassification };
@@ -211,17 +270,30 @@ function buildAnalysisWithClassifier(
   const finalScore = robustRuleQuestion || followUpRescue ? Math.max(rawFinalScore, 0.86) : rawFinalScore;
   const candidateQuestion = !FILLER_ONLY.test(normalized) && !SMALL_TALK.test(normalized) && !META_PROMPT_ONLY.test(normalized);
   const llmRescue = Boolean(llm?.isQuestion && llm.confidence >= 0.82 && (ruleScore >= 0.35 || contextualFollowUp));
-  const legacyIsQuestion = candidateQuestion
-    && (robustRuleQuestion || followUpRescue || (llm?.isQuestion ?? classification.isQuestion))
-    && (finalScore >= threshold || llmRescue || robustRuleQuestion);
-  const isQuestion = speech.shouldAnswer || legacyIsQuestion;
+  const decision = decideQuestion({
+    speechAct: effectiveSpeechAct,
+    speechConfidence: speech.confidence,
+    ruleScore,
+    semanticScore,
+    llmScore,
+    llmIsQuestion: llm?.isQuestion,
+    llmConfidence: llm?.confidence,
+    finalScore,
+    threshold,
+    final,
+    candidateQuestion,
+    contextualFollowUp,
+    robustRuleQuestion,
+    followUpRescue: followUpRescue || llmRescue
+  });
+  const isQuestion = decision.shouldAnswer;
   const type = effectiveSpeechAct === "FOLLOW_UP"
     ? "follow_up"
     : llm?.type && isQuestion
       ? llm.type
       : inferType(normalized, classification.category, contextualFollowUp);
   const speechAct = effectiveSpeechAct || (llm?.label && isQuestion ? llm.label : inferSpeechAct(normalized, isQuestion, contextualFollowUp));
-  const effectiveFinalScore = speech.shouldAnswer ? Math.max(finalScore, speech.confidence, speech.speechAct === "CODE_REQUEST" || speech.speechAct === "ANSWER_REQUEST" ? 0.9 : 0.86) : finalScore;
+  const effectiveFinalScore = isQuestion ? Math.max(finalScore, decision.confidence) : finalScore;
   return {
     text: normalized,
     isQuestion,
@@ -229,12 +301,12 @@ function buildAnalysisWithClassifier(
     speechAct: isQuestion ? speechAct : SMALL_TALK.test(normalized) ? "SMALL_TALK" : "STATEMENT",
     confidence: effectiveFinalScore,
     normalizedQuestion: isQuestion ? normalized.replace(/[。！!]+$/, "") : normalized,
-    reason: speech.reason || llm?.reason || classification.reason,
+    reason: `${decision.reason}:${speech.reason || llm?.reason || classification.reason}`,
     score: { ruleScore, semanticScore, llmScore, finalScore: effectiveFinalScore },
     llmUsed: Boolean(llm),
     classification,
     legacyCategory: classification.category,
-    shouldAnswer: speech.shouldAnswer,
+    shouldAnswer: decision.shouldAnswer,
     ...(speech.codeContext ? { codeContext: true } : {})
   };
 }

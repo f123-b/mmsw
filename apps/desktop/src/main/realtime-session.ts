@@ -24,7 +24,7 @@ import {
   type TranscriptSnapshot,
   splitStereoPcm
 } from "@interview-copilot/shared";
-import { createVADProvider, type VADDiagnostic, type VADProvider, type VADResult } from "@interview-copilot/shared/vad";
+import { createVADProvider, type VADDiagnostic, type VADProvider, type VADResult, type VADStatus } from "@interview-copilot/shared/vad";
 import type { LocalAsrServiceManager } from "./local-asr-service-manager";
 
 export type RealtimeConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting" | "error";
@@ -68,6 +68,8 @@ export interface AsrRuntimeDiagnostics {
   micSpeech: boolean;
   remoteSpeech: boolean;
   fallback: boolean;
+  vadReady: boolean;
+  vadReason: string;
   lastSpeechStart: { mic?: number; remote?: number };
   lastSpeechEnd: { mic?: number; remote?: number };
 }
@@ -118,6 +120,15 @@ function defaultVADProviderFactory(source: "mic" | "remote", onDiagnostic: (diag
     minSpeechMs: 80,
     endSilenceMs: 320
   });
+}
+
+function vadStatus(provider: VADProvider, result?: VADResult): VADStatus {
+  return provider.getStatus?.() ?? {
+    provider: provider.providerName,
+    fallback: provider.fallback,
+    ready: result?.ready ?? false,
+    reason: provider.fallback ? "fallback-to-energy" : provider.providerName === "silero" ? "model-status-unavailable" : "energy-threshold"
+  };
 }
 
 class WsStreamingAsrSocket implements StreamingAsrSocket {
@@ -190,6 +201,8 @@ export class RealtimeSession extends EventEmitter {
     micSpeech: false,
     remoteSpeech: false,
     fallback: false,
+    vadReady: false,
+    vadReason: "not-initialized",
     lastSpeechStart: {},
     lastSpeechEnd: {}
   };
@@ -210,7 +223,9 @@ export class RealtimeSession extends EventEmitter {
     this.diagnostics = {
       ...this.diagnostics,
       vadProvider: this.micVad.providerName,
-      fallback: this.micVad.fallback || this.remoteVad.fallback
+      fallback: this.micVad.fallback || this.remoteVad.fallback,
+      vadReady: vadStatus(this.micVad).ready && vadStatus(this.remoteVad).ready,
+      vadReason: vadStatus(this.micVad).reason
     };
   }
 
@@ -552,6 +567,8 @@ export class RealtimeSession extends EventEmitter {
       micSpeech: source === "mic" ? result.speech : previous.micSpeech,
       remoteSpeech: source === "remote" ? result.speech : previous.remoteSpeech,
       fallback: provider.fallback || this.micVad.fallback || this.remoteVad.fallback,
+      vadReady: vadStatus(this.micVad, source === "mic" ? result : undefined).ready && vadStatus(this.remoteVad, source === "remote" ? result : undefined).ready,
+      vadReason: vadStatus(provider, result).reason,
       lastSpeechStart,
       lastSpeechEnd
     };
@@ -566,7 +583,7 @@ export class RealtimeSession extends EventEmitter {
   }
 
   private handleVADDiagnostic(diagnostic: VADDiagnostic): void {
-    this.diagnostics = { ...this.diagnostics, vadProvider: diagnostic.provider, fallback: true };
+    this.diagnostics = { ...this.diagnostics, vadProvider: diagnostic.provider, fallback: true, vadReady: true, vadReason: diagnostic.reason };
     this.emit("diagnostic", diagnostic.code);
     this.emitDiagnostics();
   }
@@ -579,6 +596,8 @@ export class RealtimeSession extends EventEmitter {
       micSpeech: false,
       remoteSpeech: false,
       fallback: this.micVad.fallback || this.remoteVad.fallback,
+      vadReady: vadStatus(this.micVad).ready && vadStatus(this.remoteVad).ready,
+      vadReason: vadStatus(this.micVad).reason,
       lastSpeechStart: {},
       lastSpeechEnd: {}
     };

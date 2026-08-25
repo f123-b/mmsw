@@ -518,9 +518,6 @@ export class InterviewCoordinator extends EventEmitter {
       trace.mark("questionConfirmed", this.now());
       this.currentQuestionTrace = trace;
       this.pendingQuestionTrace = undefined;
-      // The renderer must never keep showing the previous answer under a new
-      // question while context retrieval or model generation is still pending.
-      this.emit("event", { type: "realtime_message", message: { type: "answer_reset", questionId: event.question.id } });
       this.memory.recordQuestion(event.question.text, { questionId: event.question.id, parentQuestionId: event.question.parentQuestionId, rootQuestionId: event.question.rootQuestionId, createdAt: event.question.detectedAt });
       this.anchorStore.recordConfirmedQuestion({ id: event.question.id, text: event.question.text, confidence: event.question.score, topic: this.memory.snapshot().currentTopic, createdAt: event.question.detectedAt });
       if (this.activeInterviewId) {
@@ -673,6 +670,14 @@ export class InterviewCoordinator extends EventEmitter {
       pendingCodeContext: Boolean(anchorSnapshot.pendingCodeContext),
       now: detectionStartedAt
     });
+    trace.update({
+      source: utterance.source,
+      rawText: utterance.text,
+      normalizedText: correctedText,
+      speechAct: speech.speechAct,
+      contextTopic: anchorSnapshot.currentTopic,
+      isFollowUp: speech.speechAct === "FOLLOW_UP"
+    });
     const promotesStatement = speech.speechAct === "STATEMENT" && Boolean(speech.topic || speech.entities.length);
     if (!speech.shouldAnswer) {
       if (speech.speechAct === "TOPIC_ANCHOR" || promotesStatement) {
@@ -687,7 +692,10 @@ export class InterviewCoordinator extends EventEmitter {
         });
         this.memory.recordQuestion(anchor.text, { questionId: anchor.id, topic: anchor.topic, createdAt: anchor.createdAt });
       }
+      trace.update({ finalScore: 0, decision: "reject", decisionReason: speech.reason }).mark("questionDetected", this.now());
+      this.currentQuestionTrace = trace;
       if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
+      this.emitQuestionTrace();
       return;
     }
     const resolved = this.anchorResolver.resolve({ text: correctedText, speechAct: speech.speechAct, anchors: anchorSnapshot });
@@ -702,26 +710,52 @@ export class InterviewCoordinator extends EventEmitter {
     analysis = {
       ...analysis,
       text: canonicalQuestion,
-      isQuestion: true,
-      type: speech.speechAct === "FOLLOW_UP" ? "follow_up" : analysis.type === "not_question" ? "technical" : analysis.type,
-      speechAct: speech.speechAct,
-      shouldAnswer: true,
+      type: analysis.isQuestion
+        ? speech.speechAct === "FOLLOW_UP" ? "follow_up" : analysis.type
+        : "not_question",
+      speechAct: analysis.isQuestion ? speech.speechAct : analysis.speechAct,
       normalizedQuestion: canonicalQuestion,
       anchorUsedId: resolved.anchorUsed?.id,
-      score: { ...analysis.score, finalScore: Math.max(analysis.score.finalScore, speech.confidence, 0.86), semanticScore: Math.max(analysis.score.semanticScore, speech.confidence) },
-      confidence: Math.max(analysis.confidence, speech.confidence, 0.86),
+      shouldAnswer: analysis.shouldAnswer,
       reason: `${speech.reason}+${resolved.reason}`,
       ...(speech.codeContext ? { codeContext: true } : {})
     };
     let decision = this.brain.analyze({ text: canonicalQuestion, analysis, memory: detectionContext.memory, recentTranscript: previousTranscript });
     if (this.detector2.hasLocalClassifier || (!decision.isQuestion && analysis.score.finalScore >= 0.5)) {
       analysis = await this.detector2.analyze(canonicalQuestion, contextText, true, detectionContext);
-      analysis = { ...analysis, text: canonicalQuestion, isQuestion: true, type: speech.speechAct === "FOLLOW_UP" ? "follow_up" : analysis.type === "not_question" ? "technical" : analysis.type, speechAct: speech.speechAct, shouldAnswer: true, normalizedQuestion: canonicalQuestion, anchorUsedId: resolved.anchorUsed?.id, score: { ...analysis.score, finalScore: Math.max(analysis.score.finalScore, speech.confidence, 0.86), semanticScore: Math.max(analysis.score.semanticScore, speech.confidence) }, confidence: Math.max(analysis.confidence, speech.confidence, 0.86), reason: `${speech.reason}+${resolved.reason}`, ...(speech.codeContext ? { codeContext: true } : {}) };
+      analysis = {
+        ...analysis,
+        text: canonicalQuestion,
+        type: analysis.isQuestion
+          ? speech.speechAct === "FOLLOW_UP" ? "follow_up" : analysis.type
+          : "not_question",
+        speechAct: analysis.isQuestion ? speech.speechAct : analysis.speechAct,
+        normalizedQuestion: canonicalQuestion,
+        anchorUsedId: resolved.anchorUsed?.id,
+        shouldAnswer: analysis.shouldAnswer,
+        reason: `${speech.reason}+${resolved.reason}`,
+        ...(speech.codeContext ? { codeContext: true } : {})
+      };
       decision = this.brain.analyze({ text: canonicalQuestion, analysis, memory: detectionContext.memory, recentTranscript: previousTranscript });
     }
+    trace.update({
+      normalizedText: decision.normalizedQuestion || canonicalQuestion,
+      speechAct: analysis.speechAct,
+      ruleScore: analysis.score.ruleScore,
+      semanticScore: analysis.score.semanticScore,
+      localClassifierScore: analysis.score.semanticScore,
+      llmScore: analysis.score.llmScore,
+      finalScore: analysis.score.finalScore,
+      contextTopic: anchorSnapshot.currentTopic,
+      ...(resolved.parentQuestionId ? { parentQuestionId: resolved.parentQuestionId } : {}),
+      isFollowUp: analysis.speechAct === "FOLLOW_UP"
+    });
     // Elliptical follow-ups such as “好，说说” are promoted by
     // InterviewBrain immediately when a topic exists in memory.
     if (!decision.isQuestion || !this.activeInterviewId || sessionGeneration !== this.sessionGeneration) {
+      trace.update({ decision: "reject", decisionReason: decision.reason }).mark("questionDetected", this.now());
+      this.currentQuestionTrace = trace;
+      this.emitQuestionTrace();
       if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
       return;
     }
@@ -739,6 +773,10 @@ export class InterviewCoordinator extends EventEmitter {
         score: { ...analysis.score, finalScore: Math.max(analysis.score.finalScore, decision.confidence), semanticScore: Math.max(analysis.score.semanticScore, decision.confidence) }
       };
     trace.update({
+      decision: "answer",
+      decisionReason: decision.reason,
+      finalScore: effectiveAnalysis.score.finalScore,
+      speechAct: effectiveAnalysis.speechAct,
       questionScore: effectiveAnalysis.score.finalScore,
       questionType: effectiveAnalysis.type,
       followUp: effectiveAnalysis.speechAct === "FOLLOW_UP"
@@ -814,15 +852,20 @@ export class InterviewCoordinator extends EventEmitter {
     this.answerGeneration += 1;
     const answerId = this.answerId;
     const questionId = this.answerQuestionId;
+    const inFlight = Boolean(answerId || this.answerController || this.answerStartedAt !== undefined || this.accumulatedAnswerText);
+    const persistedQuestionId = questionId ?? (inFlight ? this.currentQuestion?.id : undefined);
     const now = this.now();
     this.answerController?.abort();
     this.answerController = undefined;
     this.answerId = undefined;
-    if (answerId) {
-      this.emitAnswerCancelled(answerId, reason);
+    if (answerId) this.emitAnswerCancelled(answerId, reason);
+    // Persist cancellation even if the provider was aborted between request
+    // creation and the first answer_start event. The old answerId-only guard
+    // dropped exactly that in-flight record during window-close shutdown.
+    if (persistedQuestionId && inFlight) {
       this.currentQuestionTrace?.mark("answerEnded", now);
       this.emitQuestionTrace();
-      if (questionId) this.history.addAnswer({ questionId: this.historyQuestionIds.get(questionId) ?? questionId, text: this.accumulatedAnswerText, model: this.answerModel ?? "unknown", mode: this.answerMode, startedAt: this.answerStartedAt, firstTokenAt: this.answerFirstTokenAt, finishedAt: now, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - (this.questionConfirmedAt.get(questionId) ?? now), latencyTotal: now - (this.questionConfirmedAt.get(questionId) ?? now), cancelReason: reason, createdAt: now });
+      this.history.addAnswer({ questionId: this.historyQuestionIds.get(persistedQuestionId) ?? persistedQuestionId, text: this.accumulatedAnswerText, model: this.answerModel ?? "unknown", mode: this.answerMode, startedAt: this.answerStartedAt ?? now, firstTokenAt: this.answerFirstTokenAt, finishedAt: now, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - (this.questionConfirmedAt.get(persistedQuestionId) ?? now), latencyTotal: now - (this.questionConfirmedAt.get(persistedQuestionId) ?? now), cancelReason: reason, createdAt: now });
     }
     this.answerQuestionId = undefined;
     this.answerMode = undefined;

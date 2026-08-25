@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyzeCodeFile, buildKnowledgeGraph, inferSourceKind, normalizeImportedSource, ProjectAnalyzerAgent, buildDeterministicProjectMemory, PersonalAnswerValidator, ProjectMemoryRetriever, QuestionAnalyzer, routeKnowledge } from "./index";
+import { analyzeCodeFile, buildKnowledgeGraph, inferSourceKind, normalizeImportedSource, ClaimEvidenceValidator, ProjectAnalyzerAgent, buildDeterministicProjectMemory, PersonalAnswerValidator, ProjectMemoryRetriever, QuestionAnalyzer, routeKnowledge } from "./index";
 
 describe("Personal Engineering Memory", () => {
   const input = {
@@ -27,6 +27,17 @@ describe("Personal Engineering Memory", () => {
     const result = new PersonalAnswerValidator().validate({ question: "你项目里面遇到什么问题，怎么解决？", answer: "首先，我在项目中使用了STM32H7，后来解决了问题。", analysis, evidence: ["项目使用 STM32F405 和 DMA"] });
     expect(result.issues).toEqual(expect.arrayContaining(["ai-style", "unsupported-technical-claim"]));
     expect(result.valid).toBe(false);
+  });
+
+  it("classifies claim evidence as supported, partial and conflicting deterministically", () => {
+    const validator = new ClaimEvidenceValidator();
+    const supported = validator.validate("我负责 STM32F405 固件开发，结果延迟降到 5ms。", ["个人职责：负责 STM32F405 固件开发；结果：延迟降到 5ms"]);
+    expect(supported.claims.some((claim) => claim.status === "supported")).toBe(true);
+    const partial = validator.validate("我使用 STM32F405 和 RK3568。", ["项目使用 STM32F405"]);
+    expect(partial.claims.some((claim) => claim.status === "partial")).toBe(true);
+    const conflicting = validator.validate("我负责 STM32H7 驱动，结果延迟降到 5ms。", ["个人职责：负责 STM32F405 驱动；结果：延迟降到 8ms"]);
+    expect(conflicting.conflictingClaims.map((claim) => claim.type)).toEqual(expect.arrayContaining(["hardware", "metric"]));
+    expect(conflicting.needsRepair).toBe(true);
   });
 
   it("extracts code modules and functions", () => {

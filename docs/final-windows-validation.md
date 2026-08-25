@@ -45,6 +45,46 @@
 - [ ] API Key 不出现在 Renderer、URL、日志、诊断消息和 SQLite 明文配置中。
 - [ ] MIC transcript 进入 History/recent context，但绝不进入 QuestionDetector。
 
+## 自动化发布前门禁
+
+在仓库根目录执行，记录完整命令输出和日期；任何失败都不能标记 GO：
+
+- [ ] `npm test`
+- [ ] `npm run benchmark:question`
+- [ ] `npm run benchmark:real-interview`
+- [ ] `npm run test:soak`
+- [ ] `npm run typecheck`
+- [ ] `npm run build`
+- [ ] `npm run functional:e2e`
+- [ ] `npm run probe-failure:e2e`
+- [ ] `npm run shutdown-process:e2e`
+- [ ] `npm run package:win`
+- [ ] `npm run verify:package`
+- [ ] `cargo fmt --manifest-path crates/audio-sidecar/Cargo.toml --all -- --check`
+- [ ] `cargo test --manifest-path crates/audio-sidecar/Cargo.toml --all`
+- [ ] `cargo check --manifest-path crates/audio-sidecar/Cargo.toml --all`
+
+## 免安装包与运行时探针
+
+- [ ] 解压/运行 unpacked 目录或免安装包时，主窗口可见且 renderer 无白屏。
+- [ ] `verify-package` 确认 `resources/app.asar`、capture helper、VAD 资产和 local-asr-service 资源路径。
+- [ ] 首次启动不依赖当前仓库、Node/npm、开发服务器或 PowerShell 窗口。
+- [ ] 关闭窗口后 Electron、capture helper、OpenASR、Python facade 均退出；不能残留后台进程。
+- [ ] 启用 Local Fun-ASR-Nano 时，诊断分别显示 Python、venv、requirements、OpenASR、model、facade/backend port、runtime 状态。
+- [ ] VAD 诊断明确显示 `provider=silero|energy`、`fallback`、`ready`、`reason`；Silero 失败时明确记录 fallback 原因。
+- [ ] QuestionTrace 记录 `questionTraceId`、ASR final/speech end、检测/确认、检索、LLM 首 token、答案完成时间及派生延迟；不包含原始转写文本或 API Key。
+
+## 结构化 Chat 与审批安全
+
+- [ ] 结构化回答中的 sources/cards/actions 能在 UI 恢复显示，普通 Markdown 仍按普通回答显示。
+- [ ] 每个 action 都显示 pending 和 requiresConfirmation；未点击确认不写入项目事实、题库或其他 SQLite 数据。
+- [ ] 审批时校验 conversation、message、action id、payload 和 source evidence；篡改 payload、缺少 evidence、重复审批都得到可理解错误。
+- [ ] action 执行后卡片状态变为 approved/failed，并能在重新打开会话后恢复。
+
+## 失败注记模板
+
+每个未执行或失败项至少记录：时间、命令/操作、环境、日志路径、现象、是否可复现、阻塞发布的原因和下一步负责人。不能用 mock、静态代码存在或历史 CI 结果替代真实 Windows 音频、真实 Provider、安装包启动和进程关闭证据。
+
 ## 发布结论
 
 - 自动化测试：PASS / FAIL

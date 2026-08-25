@@ -40,4 +40,32 @@ describe("ProjectMemoryService project isolation", () => {
       database.close();
     }
   });
+
+  it("persists a project with multiple bound sources without duplicate derived ids", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const knowledge = new SqliteKnowledgeRepository(database);
+      const history = new SqliteInterviewHistoryRepository(database);
+      const memories = new SqliteProjectMemoryRepository(database);
+      const analyses = new SqliteKnowledgeAnalysisRepository(database);
+      const base = knowledge.createKnowledgeBase("多来源项目资料");
+      const profile = profiles.save({ name: "多来源测试", language: "zh-CN", skills: [], knowledgeBaseIds: [base.id] });
+      const primary = knowledge.saveDocument({ id: "doc-primary", knowledgeBaseId: base.id, filename: "FOC.md", mimeType: "text/markdown", sha256: "primary", text: "项目背景：实时电机控制系统\n个人职责：负责控制固件\n技术栈：STM32F405、FOC、ADC、DMA\n## 核心模块\n- 电流环\n问题：低速抖动\n解决方案：增加观测器", sections: [], documentType: "project", status: "ready" });
+      const supporting = knowledge.saveDocument({ id: "doc-supporting", knowledgeBaseId: base.id, filename: "FOC-notes.md", mimeType: "text/markdown", sha256: "supporting", text: "项目背景：实时电机控制系统补充说明\n个人职责：负责保护逻辑\n技术栈：CAN、UART\n## 核心模块\n- 保护状态机\n问题：通信超时\n解决方案：增加重试", sections: [], documentType: "technical-doc", status: "ready" });
+      const service = new ProjectMemoryService(profiles, knowledge, history, memories, undefined, undefined, analyses);
+      const assignment = service.assignDocument(profile.id, primary.id);
+      expect(assignment.projectId).toBeTruthy();
+      service.assignSource({ profileId: profile.id, projectId: assignment.projectId as string, sourceType: "document", sourceId: supporting.id, relationship: "supporting" });
+      await expect(service.rebuildProject(assignment.projectId as string)).resolves.toBeTruthy();
+      const snapshot = memories.getSnapshot(profile.id);
+      expect(snapshot.modules.length).toBeGreaterThan(0);
+      expect(new Set(snapshot.modules.map((item) => item.id)).size).toBe(snapshot.modules.length);
+      expect(new Set(snapshot.technicalPoints.map((item) => item.id)).size).toBe(snapshot.technicalPoints.length);
+      expect(new Set(snapshot.problems.map((item) => item.id)).size).toBe(snapshot.problems.length);
+      expect(new Set(snapshot.interviewQuestions.map((item) => item.id)).size).toBe(snapshot.interviewQuestions.length);
+    } finally {
+      database.close();
+    }
+  });
 });

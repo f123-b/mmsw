@@ -74,6 +74,7 @@ const mockServer = createServer(async (request, response) => {
   try { payload = JSON.parse(body || "{}"); } catch { /* the provider will report a normal failure */ }
   const messageContents = (payload.messages ?? []).map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content)).join("\n");
   const serializedMessages = JSON.stringify(payload.messages ?? []);
+  const isQuestionClassifier = messageContents.includes("面试语音问题分类器");
   const isChatFirstTurn = messageContents.includes("用户问题：帮我分析 FOC 项目");
   const isChatSecondTurn = messageContents.includes("用户问题：把你刚才第二点详细展开");
   const isChatStructured = messageContents.includes("用户问题：结构化卡片与动作审批 E2E");
@@ -93,7 +94,7 @@ const mockServer = createServer(async (request, response) => {
     return;
   }
   if (payload.stream === false) {
-    if (!isChatFirstTurn && !isChatSecondTurn && !isChatStructured) answerRequests.push(payload);
+    if (!isQuestionClassifier && !isChatFirstTurn && !isChatSecondTurn && !isChatStructured) answerRequests.push(payload);
     const answer = imageMessage
       ? "Mock vision answer... 已分析截图内容。"
       : messageContents.includes("Mock manual question") ? "Mock LLM answer for manual question..." : "Mock LLM answer... 已使用 Profile 和当前问题生成。";
@@ -109,7 +110,7 @@ const mockServer = createServer(async (request, response) => {
     response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: preparationAnswer } }] })}\n\ndata: [DONE]\n\n`);
     return;
   }
-  if (!isChatFirstTurn && !isChatSecondTurn && !isChatStructured) answerRequests.push(payload);
+  if (!isQuestionClassifier && !isChatFirstTurn && !isChatSecondTurn && !isChatStructured) answerRequests.push(payload);
   const slow = messageContents.includes("中断服务程序");
   const structuredAnswer = JSON.stringify({ text: "结构化缺口已识别", sources: [{ id: "e2e-source", label: "E2E 题库资料", kind: "question-bank" }], cards: [{ id: "e2e-coverage-card", kind: "coverage", title: "题库覆盖", body: "建议补充一张可核验答案卡。", data: { coverage: 50 } }], actions: [{ id: "e2e-create-question", type: "create_question", label: "加入题库", rationale: "保留为下一轮复习题。", payload: { canonicalText: "结构化覆盖 E2E 题" }, requiresConfirmation: true }] });
   const answer = isChatStructured
@@ -349,13 +350,13 @@ try {
   evidence.push("Remote Transcript: PASS; Question Confirmed: PASS; AUTO_3_QUESTIONS: PASS; AUTO Answer: PASS; Overlay: PASS");
 
   const beforeManualMode = answerRequests.length;
-  await main.evaluate("window.interviewCopilot.interview.setAutomationMode('MANUAL')");
+  await main.evaluate("void window.interviewCopilot.interview.setAutomationMode('MANUAL'); true");
   requireQuestion("手动模式问题：不要自动回答", "q4", 6_000);
   await waitFor(() => document.body.innerText.includes("手动模式问题"), 10_000, overlay);
   await sleep(1_000);
   if (answerRequests.length !== beforeManualMode) throw new Error("MANUAL_NO_AUTO_ANSWER failed");
   evidence.push("MANUAL_NO_AUTO_ANSWER: PASS");
-  await main.evaluate("window.interviewCopilot.interview.setAutomationMode('AUTO')");
+  await main.evaluate("void window.interviewCopilot.interview.setAutomationMode('AUTO'); true");
   await waitFor(() => window.interviewCopilot.interview.getState().then((state) => state.automationMode === "AUTO"), 5_000);
   await sleep(300);
   requireQuestion("为什么自动切换后应该立即回答？", "q5", 8_000);

@@ -39,6 +39,7 @@ release-final/
 output/
 artifacts/
 apps/desktop/release-portable*/
+release-portable*/
 apps/desktop/release-v2/
 apps/desktop/release-no-q8/
 apps/desktop/models/question-classifier/

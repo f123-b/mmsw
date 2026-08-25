@@ -1,4 +1,4 @@
-import type { EnergyVADOptions, VADProvider, VADResult } from "./types";
+import type { EnergyVADOptions, VADProvider, VADResult, VADStatus } from "./types";
 
 /** Dependency-free fallback VAD. It is deliberately conservative and PCM16-only. */
 export class EnergyVADProvider implements VADProvider {
@@ -51,6 +51,8 @@ export class EnergyVADProvider implements VADProvider {
   }
 
   processAsync(pcm: Uint8Array): Promise<VADResult> { return Promise.resolve(this.process(pcm)); }
+
+  getStatus(): VADStatus { return { provider: "energy", fallback: false, ready: true, reason: "energy-threshold" }; }
 
   reset(): void {
     this.sampleCursor = 0;

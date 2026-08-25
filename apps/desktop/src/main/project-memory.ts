@@ -145,6 +145,7 @@ export class ProjectMemoryService {
       this.onUpdated?.(project.profileId, project.id);
       return saved;
     } catch (error) {
+      this.onTrace?.("PROJECT_PARSE_FAILED", { projectId, sourceCount: sources.length, error: String(error) });
       this.analysisRuns?.record({ id: runId, profileId: project.profileId, projectId: project.id, runType: "project-memory", inputHash, status: "failed", inputSnapshot, error: String(error), snapshotVersion });
       this.analysisRuns?.setProjectState({ projectId: project.id, latestAnalysisId: runId, status: previousState?.lastSuccessfulAnalysisId ? "stale" : "failed", snapshotVersion });
       throw error;

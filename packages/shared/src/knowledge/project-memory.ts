@@ -34,7 +34,7 @@ function buildModules(project: ProjectMemoryProject, source: ProjectMemoryAnalys
   const structure = parseMarkdownProjectDocument(source.text);
   const headingModules = structure.sections.filter((section) => /模块|子系统|驱动|控制环|通信|数据采集|状态机/i.test(section.title)).flatMap((section) => [...section.paragraphs, ...section.bullets].map((content) => ({ title: section.title, content })));
   const candidates = [...moduleFacts.map((item) => ({ title: item.title, content: item.content })), ...headingModules];
-  return candidates.slice(0, 24).filter((item, index, all) => item.title && all.findIndex((other) => other.title === item.title && other.content === item.content) === index).map((item, index) => ({ id: `${project.id}-module-${index + 1}`, projectId: project.id, moduleName: item.title.slice(0, 80), description: item.content.slice(0, 500), ...(source.filePath ? { filePath: source.filePath } : {}), sourceIds: [source.id] }));
+  return candidates.slice(0, 24).filter((item, index, all) => item.title && all.findIndex((other) => other.title === item.title && other.content === item.content) === index).map((item, index) => ({ id: `${project.id}-module-${slug(source.id)}-${index + 1}`, projectId: project.id, moduleName: item.title.slice(0, 80), description: item.content.slice(0, 500), ...(source.filePath ? { filePath: source.filePath } : {}), sourceIds: [source.id] }));
 }
 
 function buildTechnicalPoints(project: ProjectMemoryProject, source: ProjectMemoryAnalysisInput["sources"][number]): ProjectTechnicalPoint[] {
@@ -44,7 +44,7 @@ function buildTechnicalPoints(project: ProjectMemoryProject, source: ProjectMemo
   return terms.flatMap((term) => {
     const match = candidates.find((item) => `${item.title} ${item.content}`.toLowerCase().includes(term.toLowerCase()));
     return match ? [{ term, text: match.content, sourceIds: match.sourceIds }] : [];
-  }).slice(0, 24).map(({ term, text, sourceIds }, index) => ({ id: `${project.id}-point-${index + 1}`, projectId: project.id, topic: term, content: text.slice(0, 600), importance: /ADC|DMA|PWM|FOC|架构|同步|状态机/.test(term) ? "high" : "medium", sourceIds }));
+  }).slice(0, 24).map(({ term, text, sourceIds }, index) => ({ id: `${project.id}-point-${slug(source.id)}-${index + 1}`, projectId: project.id, topic: term, content: text.slice(0, 600), importance: /ADC|DMA|PWM|FOC|架构|同步|状态机/.test(term) ? "high" : "medium", sourceIds }));
 }
 
 function buildProblems(project: ProjectMemoryProject, source: ProjectMemoryAnalysisInput["sources"][number]): ProjectProblem[] {
@@ -53,7 +53,7 @@ function buildProblems(project: ProjectMemoryProject, source: ProjectMemoryAnaly
   return challenges.slice(0, 20).map((challenge, index) => {
     const sameSection = (fact: ProjectFact): boolean => Boolean(challenge.sectionPath?.join("/") && fact.sectionPath?.join("/") === challenge.sectionPath?.join("/"));
     const pick = (type: ProjectFactType): string => facts.find((item) => item.type === type && sameSection(item))?.content ?? facts.find((item) => item.type === type)?.content ?? "资料未明确记录";
-    return { id: `${project.id}-problem-${index + 1}`, projectId: project.id, problem: challenge.content.slice(0, 500), cause: pick("cause").slice(0, 500), solution: pick("solution").slice(0, 600), result: pick("result").slice(0, 500), sourceIds: challenge.sourceIds };
+    return { id: `${project.id}-problem-${slug(source.id)}-${index + 1}`, projectId: project.id, problem: challenge.content.slice(0, 500), cause: pick("cause").slice(0, 500), solution: pick("solution").slice(0, 600), result: pick("result").slice(0, 500), sourceIds: challenge.sourceIds };
   });
 }
 
@@ -69,7 +69,8 @@ function buildInterviewQuestions(project: ProjectMemoryProject, points: ProjectT
   if (designFactIds.length) result.push({ id: `${project.id}-question-design`, projectId: project.id, question: `你在${project.name}里面为什么这么设计？`, answerPoints: [`我的设计依据是${project.technologyStack.slice(0, 4).join("、") || "资料中记录的项目约束"}。`, project.description, `我个人负责的部分是${project.role}。`].filter(Boolean), keywords: unique([project.name, ...project.technologyStack, "设计", "取舍"]), sourceIds: project.sourceIds, factIds: designFactIds });
   const problemFactIds = factIds(["challenge", "cause", "solution", "result"]);
   if (problems.length && problemFactIds.length) result.push({ id: `${project.id}-question-problem`, projectId: project.id, question: `你在${project.name}中遇到什么问题，怎么解决？`, answerPoints: [problems[0].problem, `原因：${problems[0].cause}`, `后来通过${problems[0].solution}，结果：${problems[0].result}`], keywords: unique([project.name, ...problems[0].problem.split(/\s+/), "问题", "解决"]), sourceIds: problems[0].sourceIds, factIds: problemFactIds });
-  for (const point of points.slice(0, 8)) {
+  const uniquePoints = points.filter((point, index, all) => all.findIndex((item) => item.topic.toLowerCase() === point.topic.toLowerCase()) === index);
+  for (const point of uniquePoints.slice(0, 8)) {
     const pointFactIds = factIdsForTopic(point.topic);
     if (pointFactIds.length) result.push({ id: `${project.id}-question-${slug(point.topic)}`, projectId: project.id, question: `你在${project.name}中具体怎么实现${point.topic}？`, answerPoints: [point.content, `这部分和${project.role}直接相关。`], keywords: unique([project.name, point.topic, ...project.technologyStack]), sourceIds: point.sourceIds, factIds: pointFactIds });
   }

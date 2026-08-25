@@ -16,6 +16,7 @@ import type { ChatAction, Profile, ProfileInput, ProjectFact, ProviderSettings, 
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
 import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
+import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 
 const api = {
   diagnostics: {
@@ -59,6 +60,9 @@ const api = {
     connect: (options: RealtimeConnectOptions) => ipcRenderer.invoke("realtime:connect", options),
     disconnect: () => ipcRenderer.invoke("realtime:disconnect"),
     getTranscript: (): Promise<Partial<Record<"mic" | "remote", TranscriptSnapshot>>> => ipcRenderer.invoke("realtime:get-transcript")
+  },
+  localAsr: {
+    health: (options?: LocalAsrStartOptions): Promise<LocalAsrHealthCheck> => ipcRenderer.invoke("local-asr:health", options)
   },
   interview: {
     start: (options: InterviewStartOptions) => ipcRenderer.invoke("interview:start", options) as Promise<string>,
