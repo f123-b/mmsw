@@ -2,6 +2,8 @@ export type ProjectMemorySourceKind = "resume" | "resume-section" | "project-doc
 
 export type ProjectSourceType = "document" | "repository" | "resume_section" | "user_fact" | "interview_note";
 export type ProjectSourceRelationship = "primary" | "supporting" | "reference";
+export type ProjectSourceRole = "overview" | "code" | "resume" | "responsibility" | "debug" | "test" | "architecture" | "reference" | "other";
+export type ProjectSourceAssignmentMethod = "explicit" | "matched" | "manual" | "imported";
 
 export interface ProjectSourceAssignment {
   id?: string;
@@ -9,6 +11,8 @@ export interface ProjectSourceAssignment {
   sourceType: ProjectSourceType;
   sourceId: string;
   relationship: ProjectSourceRelationship;
+  sourceRole?: ProjectSourceRole;
+  assignmentMethod?: ProjectSourceAssignmentMethod;
   confidence: number;
   verified: boolean;
   createdAt?: number;
@@ -19,6 +23,7 @@ export interface ProjectMemorySource {
   id: string;
   kind: ProjectMemorySourceKind;
   sourceType?: ProjectSourceType;
+  sourceRole?: ProjectSourceRole;
   projectId?: string;
   title: string;
   text: string;
@@ -70,10 +75,12 @@ export interface ProjectFactEvidence {
   sourceId: string;
   quote: string;
   locator?: string;
+  relation?: "support" | "refute";
 }
 
 export type ProjectFactScope = "project" | "module" | "problem" | "architecture";
-export type ProjectFactEvidenceLevel = "confirmed-user" | "confirmed-code" | "inferred" | "pending" | "risk" | "not-measured";
+export type ProjectFactEvidenceLevel = "confirmed-user" | "confirmed-code" | "confirmed-document" | "inferred" | "pending" | "risk" | "not-measured";
+export type ProjectFactOwnership = "project" | "self" | "team" | "unknown";
 
 export interface ProjectFact {
   id: string;
@@ -93,6 +100,9 @@ export interface ProjectFact {
   factType?: ProjectFactType;
   status?: "active" | "pending_review" | "rejected" | "conflicting";
   conflictStatus?: "confirmed" | "conflicting" | "pending_review";
+  conflictGroupId?: string;
+  ownership?: ProjectFactOwnership;
+  stale?: boolean;
   embedding?: number[];
   embeddingHash?: string;
   embeddingModel?: string;

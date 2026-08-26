@@ -115,10 +115,16 @@ const api = {
     listFacts: (profileId: string, projectId?: string): Promise<ProjectFact[]> => ipcRenderer.invoke("project-memory:list-facts", profileId, projectId),
     verifyFact: (factId: string, verified: boolean): Promise<ProjectFact | undefined> => ipcRenderer.invoke("project-memory:verify-fact", factId, verified),
     reviewFact: (factId: string, status: "active" | "pending_review" | "rejected" | "conflicting"): Promise<ProjectFact | undefined> => ipcRenderer.invoke("project-memory:review-fact", factId, status),
+    resolveConflict: (conflictGroupId: string, selectedFactId: string, keepBoth?: boolean) => ipcRenderer.invoke("project-memory:resolve-conflict", conflictGroupId, selectedFactId, keepBoth),
     sources: (projectId: string): Promise<unknown[]> => ipcRenderer.invoke("project-memory:sources", projectId),
     completeness: (profileId: string, projectId: string): Promise<unknown> => ipcRenderer.invoke("project-memory:completeness", profileId, projectId),
     analysisRuns: (profileId: string): Promise<KnowledgeAnalysisRunRecord[]> => ipcRenderer.invoke("project-memory:analysis-runs", profileId),
-    rebuild: (profileId: string) => ipcRenderer.invoke("project-memory:rebuild", profileId)
+    state: (projectId: string) => ipcRenderer.invoke("project-memory:state", projectId),
+    assignSource: (input: { profileId: string; projectId: string; sourceType: "document" | "repository" | "resume_section" | "user_fact"; sourceId: string; relationship?: "primary" | "supporting" | "reference"; sourceRole?: string; assignmentMethod?: string; confidence?: number; verified?: boolean }) => ipcRenderer.invoke("project-memory:assign-source", input),
+    unassignSource: (projectId: string, sourceType: string, sourceId: string) => ipcRenderer.invoke("project-memory:unassign-source", projectId, sourceType, sourceId),
+    assignDocument: (profileId: string, documentId: string, projectId?: string) => ipcRenderer.invoke("project-memory:assign-document", profileId, documentId, projectId),
+    rebuild: (profileId: string) => ipcRenderer.invoke("project-memory:rebuild", profileId),
+    rebuildProject: (projectId: string) => ipcRenderer.invoke("project-memory:rebuild-project", projectId)
   },
   jobTargets: {
     list: (profileId: string): Promise<JobTargetRecord[]> => ipcRenderer.invoke("job-targets:list", profileId)
@@ -148,7 +154,7 @@ const api = {
     renameBase: (knowledgeBaseId: string, name: string) => ipcRenderer.invoke("knowledge:rename-base", knowledgeBaseId, name),
     deleteBase: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:delete-base", knowledgeBaseId) as Promise<boolean>,
     listDocuments: (knowledgeBaseId?: string) => ipcRenderer.invoke("knowledge:list-documents", knowledgeBaseId),
-    ingest: (input: { knowledgeBaseId?: string; filename: string; mimeType: string; bytes: Uint8Array; documentType?: string }) => ipcRenderer.invoke("knowledge:ingest", input),
+    ingest: (input: { knowledgeBaseId?: string; profileId?: string; projectId?: string; sourceRole?: string; filename: string; mimeType: string; bytes: Uint8Array; documentType?: string }) => ipcRenderer.invoke("knowledge:ingest", input),
     updateType: (documentId: string, documentType: string) => ipcRenderer.invoke("knowledge:update-type", documentId, documentType),
     delete: (documentId: string) => ipcRenderer.invoke("knowledge:delete", documentId),
     reindex: (documentId: string) => ipcRenderer.invoke("knowledge:reindex", documentId)

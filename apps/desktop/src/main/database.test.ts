@@ -228,6 +228,18 @@ describe("SQLite persistence", () => {
     } finally { database.close(); }
   });
 
+  it("round-trips rich project fact fields and evidence relations", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      new SqliteProfileRepository(database).save({ id: "profile-rich", name: "Rich", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
+      const memory = new SqliteProjectMemoryRepository(database);
+      memory.replaceSnapshot("profile-rich", { projects: [{ id: "project-rich", profileId: "profile-rich", name: "Rich", description: "", role: "", hardware: [], software: [], technologyStack: [], sourceIds: ["doc-a", "doc-b"], confidence: 1 }], modules: [], technicalPoints: [], problems: [], interviewQuestions: [], facts: [{ id: "fact-rich", projectId: "project-rich", type: "technology", title: "MCU", content: "STM32G431", confidence: .9, verified: false, sourceIds: ["doc-a", "doc-b"], evidence: [{ sourceId: "doc-a", quote: "STM32G431", relation: "support" }, { sourceId: "doc-b", quote: "STM32F405", relation: "refute" }], evidenceLevel: "confirmed-document", scope: "architecture", sectionPath: ["架构", "主控"], subtype: "mcu", conflictStatus: "conflicting", conflictGroupId: "group-mcu", ownership: "project", stale: false, status: "conflicting" }] });
+      const fact = memory.getFact("fact-rich");
+      expect(fact).toMatchObject({ evidenceLevel: "confirmed-document", scope: "architecture", sectionPath: ["架构", "主控"], subtype: "mcu", conflictStatus: "conflicting", conflictGroupId: "group-mcu", ownership: "project", stale: false });
+      expect(fact?.evidence?.map((item) => item.relation)).toEqual(["support", "refute"]);
+    } finally { database.close(); }
+  });
+
   it("supports server-side question pagination, bulk review and duplicate merge", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {

@@ -1,14 +1,14 @@
-import type { AnswerProvider, ProjectMemoryAnalysisInput, ProjectMemoryModel, ProjectMemorySource, ProjectMemorySnapshot } from "@interview-copilot/shared";
-import { analyzeCodeFile, extractResumeProjectSections, languageForFilename, parseMarkdownProjectDocument, ProjectAnalyzerAgent as ProjectAnalyzerAgentClass, resolveProjectAssignment, resolveProjectIdentity } from "@interview-copilot/shared";
+import type { AnswerProvider, ProjectMemoryAnalysisInput, ProjectMemoryModel, ProjectMemorySource, ProjectMemorySnapshot, ProjectSourceRole, ProjectSourceAssignmentMethod } from "@interview-copilot/shared";
+import { analyzeCodeFile, extractResumeProjectSections, languageForFilename, parseMarkdownProjectDocument, ProjectAnalyzerAgent as ProjectAnalyzerAgentClass, resolveProjectAssignment } from "@interview-copilot/shared";
 import { createHash } from "node:crypto";
 import { SqliteInterviewHistoryRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectMemoryRepository } from "./database";
 
-function projectSourceFromDocument(document: ReturnType<SqliteKnowledgeRepository["getDocument"]>, projectName: string): ProjectMemorySource | undefined {
+function projectSourceFromDocument(document: ReturnType<SqliteKnowledgeRepository["getDocument"]>, projectName: string, sourceRole?: ProjectSourceRole): ProjectMemorySource | undefined {
   if (!document || document.status !== "ready") return undefined;
   const language = languageForFilename(document.filename);
   const code = language === "unknown" ? undefined : analyzeCodeFile({ filePath: document.filename, text: document.text, language });
   const codeSummary = code ? `\n代码分析：模块 ${code.modules.map((item) => item.name).join("、") || "未识别"}；函数 ${code.functions.map((item) => item.name).join("、") || "未识别"}；关键词 ${code.keywords.join("、")}` : "";
-  return { id: document.id, kind: "project-document", sourceType: "document", title: document.filename, projectName, text: `${document.text}${codeSummary}`, language, updatedAt: document.updatedAt };
+  return { id: document.id, kind: "project-document", sourceType: "document", title: document.filename, projectName, text: `${document.text}${codeSummary}`, language, updatedAt: document.updatedAt, ...(sourceRole ? { sourceRole } : {}) } as ProjectMemorySource & { sourceRole?: ProjectSourceRole };
 }
 
 export class ProjectMemoryService {
@@ -64,21 +64,16 @@ export class ProjectMemoryService {
     const source: ProjectMemorySource = { id: document.id, kind: "project-document", sourceType: "document", title: document.filename, text: document.text, updatedAt: document.updatedAt };
     const projects = this.memories.listProjects(profileId);
     const assignment = resolveProjectAssignment(source, projects, explicitProjectId);
-    let projectId = assignment.projectId;
-    if (!projectId && assignment.status === "needs_assignment") {
-      const identity = resolveProjectIdentity(source);
-      const canCreate = identity.confidence >= 0.78 && identity.name !== "待确认项目" && projects.every((project) => project.name !== identity.name);
-      if (canCreate) projectId = this.memories.ensureProject({ profileId, name: identity.name, aliases: identity.aliases }).id;
-    }
+    const projectId = assignment.projectId;
     if (!projectId) return { status: "needs_assignment", confidence: assignment.confidence, message: "NEEDS_PROJECT_ASSIGNMENT：请选择该资料属于哪个项目" };
-    this.memories.assignSource({ projectId, sourceType: "document", sourceId: documentId, relationship: "primary", confidence: assignment.confidence, verified: Boolean(explicitProjectId) });
+    this.memories.assignSource({ projectId, sourceType: "document", sourceId: documentId, relationship: "primary", confidence: assignment.confidence, verified: Boolean(explicitProjectId), sourceRole: "overview", assignmentMethod: explicitProjectId ? "explicit" : "matched" });
     return { status: "assigned", projectId, confidence: assignment.confidence, message: "项目资料已绑定" };
   }
 
-  assignSource(input: { profileId: string; projectId: string; sourceType: "document" | "repository" | "resume_section" | "user_fact"; sourceId: string; relationship?: "primary" | "supporting" | "reference"; confidence?: number; verified?: boolean }): void {
+  assignSource(input: { profileId: string; projectId: string; sourceType: "document" | "repository" | "resume_section" | "user_fact"; sourceId: string; relationship?: "primary" | "supporting" | "reference"; sourceRole?: ProjectSourceRole; assignmentMethod?: ProjectSourceAssignmentMethod; confidence?: number; verified?: boolean }): void {
     const project = this.memories.getProject(input.projectId);
     if (!project || project.profileId !== input.profileId) throw new Error("PROJECT_NOT_FOUND");
-    this.memories.assignSource({ projectId: input.projectId, sourceType: input.sourceType, sourceId: input.sourceId, relationship: input.relationship ?? "supporting", confidence: input.confidence ?? 1, verified: input.verified ?? true });
+    this.memories.assignSource({ projectId: input.projectId, sourceType: input.sourceType, sourceId: input.sourceId, relationship: input.relationship ?? (input.sourceRole === "reference" ? "reference" : "supporting"), sourceRole: input.sourceRole ?? "other", assignmentMethod: input.assignmentMethod ?? "explicit", confidence: input.confidence ?? 1, verified: input.verified ?? true });
   }
 
   private async ensureProjectAssignments(profileId: string): Promise<void> {
@@ -88,20 +83,21 @@ export class ProjectMemoryService {
       if (this.memories.listProjectSources(project.id).length > 0) continue;
       for (const sourceId of project.sourceIds) {
         const documentId = sourceId.match(/^memory-document-(.+)$/)?.[1] ?? sourceId.match(/^memory-code-(.+?)-\d+$/)?.[1];
-        if (documentId && this.knowledge.getDocument(documentId)) this.memories.assignSource({ projectId: project.id, sourceType: "document", sourceId: documentId, relationship: "primary", confidence: project.name === "待确认项目" ? 0.4 : 0.7, verified: false });
+        if (documentId && this.knowledge.getDocument(documentId)) this.memories.assignSource({ projectId: project.id, sourceType: "document", sourceId: documentId, relationship: "primary", sourceRole: "overview", assignmentMethod: "imported", confidence: project.name === "待确认项目" ? 0.4 : 0.7, verified: false });
       }
     }
     const documents = this.knowledge.listDocuments().filter((document) => profile.knowledgeBaseIds.includes(document.knowledgeBaseId) && document.status === "ready" && document.documentType === "project");
     for (const document of documents) {
       if (this.memories.sourcesFor("document", document.id).some((item) => item.projectId && this.memories.getProject(item.projectId)?.profileId === profileId)) continue;
-      this.assignDocument(profileId, document.id);
+      const result = this.assignDocument(profileId, document.id);
+      if (result.status === "needs_assignment") this.onTrace?.("PROJECT_ASSIGNMENT_REQUIRED", { profileId, documentId: document.id, message: result.message });
     }
     const projects = this.memories.listProjects(profileId);
     if (profile.resume?.rawContent) {
       for (const section of extractResumeProjectSections(profile.resume.rawContent, `resume-section-${profileId}`)) {
         const source: ProjectMemorySource = { id: section.sourceId, kind: "resume-section", sourceType: "resume_section", title: section.projectName, text: section.text, projectName: section.projectName, locator: section.locator, updatedAt: profile.updatedAt };
         const assignment = resolveProjectAssignment(source, projects);
-        if (assignment.status === "assigned" && assignment.projectId) this.memories.assignSource({ projectId: assignment.projectId, sourceType: "resume_section", sourceId: `${section.sourceId}:${section.locator}`, relationship: "supporting", confidence: assignment.confidence, verified: false });
+        if (assignment.status === "assigned" && assignment.projectId) this.memories.assignSource({ projectId: assignment.projectId, sourceType: "resume_section", sourceId: `${section.sourceId}:${section.locator}`, relationship: "supporting", sourceRole: "resume", assignmentMethod: "matched", confidence: assignment.confidence, verified: false });
       }
     }
   }
@@ -112,7 +108,7 @@ export class ProjectMemoryService {
     const result: ProjectMemorySource[] = [];
     for (const assignment of this.memories.listProjectSources(project.id)) {
       if (assignment.sourceType === "document" || assignment.sourceType === "repository") {
-        const source = projectSourceFromDocument(this.knowledge.getDocument(assignment.sourceId), project.name);
+        const source = projectSourceFromDocument(this.knowledge.getDocument(assignment.sourceId), project.name, assignment.sourceRole);
         if (source) result.push({ ...source, sourceType: assignment.sourceType, projectId: project.id });
       } else if (assignment.sourceType === "resume_section" && profile.resume?.rawContent) {
         const sections = extractResumeProjectSections(profile.resume.rawContent, `resume-section-${profileId}`);
@@ -161,7 +157,7 @@ export function createProjectMemoryModel(answerProvider: AnswerProvider, setting
       const sources = input.sources.map((source) => {
         const structure = parseMarkdownProjectDocument(source.text);
         const sections = structure.sections.slice(0, 20).map((section) => ({ path: section.path, title: section.title, paragraphs: section.paragraphs.slice(0, 6), bullets: section.bullets.slice(0, 12), tables: section.tables.slice(0, 4) }));
-        return { id: source.id, kind: source.kind, title: source.title, filePath: source.filePath, language: source.language, locator: source.locator, markdownTitle: structure.title, sections };
+        return { id: source.id, kind: source.kind, sourceRole: source.sourceRole, title: source.title, filePath: source.filePath, language: source.language, locator: source.locator, markdownTitle: structure.title, sections };
       });
       for await (const delta of answerProvider.stream({ model: settings.model, maxOutputTokens: 4_000, sections: [
         { name: "system/base", content: "你是 Project Fact Extractor。输入已经绑定到一个项目，只能提取有 source id、quote 且能在对应资料中逐字定位的原子事实。禁止把 Resume 整体、其他项目、面试 AI 回答或通用技能写入当前项目。项目职责只能来自明确的项目级职责字段；时间只能是日期范围、持续周期或明确未知。不要把‘同步’‘划分’‘平台’等普通句子片段当成字段值。" },

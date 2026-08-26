@@ -26,6 +26,7 @@ import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-s
 import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
 import { createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
+import { isFactEligible } from "@interview-copilot/shared";
 import type { ChatAction, ChatCancelReason, ChatResponse } from "@interview-copilot/shared";
 import type { QuestionBankBulkPatch, QuestionBankListOptions } from "./database";
 
@@ -851,8 +852,8 @@ function chatContext(profileId?: string, userMessage = "", projectId?: string): 
   const project = snapshot?.projects.find((item) => item.id === projectId) ?? (snapshot?.projects.length === 1 ? snapshot.projects[0] : undefined);
   if (project) {
     const projectFacts = snapshot?.facts ?? [];
-    const facts = projectFacts.filter((fact) => fact.projectId === project.id && fact.verified && fact.status !== "rejected").slice(0, 24);
-    const pendingFacts = projectFacts.filter((fact) => fact.projectId === project.id && !fact.verified && fact.status !== "rejected").slice(0, 30);
+    const facts = projectFacts.filter((fact) => fact.projectId === project.id && isFactEligible(fact)).slice(0, 24);
+    const pendingFacts = projectFacts.filter((fact) => fact.projectId === project.id && !isFactEligible(fact) && fact.status !== "rejected" && !fact.stale).slice(0, 30);
     const conflictingFacts = pendingFacts.filter((fact) => fact.status === "conflicting" || fact.conflictStatus === "conflicting");
     const completeness = profileId ? projectMemoryRepository?.getProjectCompleteness(profileId, project.id) : undefined;
     const modules = snapshot?.modules.filter((item) => item.projectId === project.id).slice(0, 12) ?? [];
@@ -863,11 +864,11 @@ function chatContext(profileId?: string, userMessage = "", projectId?: string): 
       `背景：${project.description || "未补充"}`,
       `职责：${project.role || "未确认"}`,
       `技术栈：${project.technologyStack.join("、") || "未确认"}`,
-      facts.length ? `已确认事实：\n${facts.map((fact) => `- [${fact.id}] [${fact.type}] ${fact.title}：${fact.content}`).join("\n")}` : "已确认事实：无",
-      pendingFacts.length ? `待确认/冲突事实：\n${pendingFacts.map((fact) => `- [${fact.id}] [${fact.status === "conflicting" ? "冲突" : "待确认"}] [${fact.type}] ${fact.title}：${fact.content}${fact.evidence?.[0]?.quote ? `；证据：“${fact.evidence[0].quote.slice(0, 240)}”` : "；无引用证据"}`).join("\n")}` : "待确认/冲突事实：无",
+      facts.length ? `AUTHORITATIVE（可用于第一人称回答）：\n${facts.map((fact) => `- [${fact.id}] [${fact.type}] ${fact.title}：${fact.content}`).join("\n")}` : "AUTHORITATIVE：无",
+      pendingFacts.length ? `REVIEW_REQUIRED（禁止直接当作事实）：\n${pendingFacts.map((fact) => `- [${fact.id}] [${fact.status === "conflicting" ? "冲突" : "待确认"}] [${fact.type}] ${fact.title}：${fact.content}${fact.evidence?.[0]?.quote ? `；证据：“${fact.evidence[0].quote.slice(0, 240)}”` : "；无引用证据"}`).join("\n")}` : "REVIEW_REQUIRED：无",
       modules.length ? `模块：\n${modules.map((item) => `- ${item.moduleName}：${item.description}`).join("\n")}` : "模块：无",
       problems.length ? `问题与解决：\n${problems.map((item) => `- ${item.problem}；原因：${item.cause}；方案：${item.solution}；结果：${item.result}`).join("\n")}` : "问题与解决：无",
-      completeness ? `项目资料状态：准备度 ${completeness.interviewReadinessScore}%；缺失类型 ${completeness.missingFactTypes.join("、") || "无"}；弱证据 ${completeness.weakEvidence.length} 项；冲突 ${conflictingFacts.length} 项。` : "项目资料状态：尚未计算"
+      completeness ? `DERIVED_VIEW（由 active facts 推导，仅供展示）：准备度 ${completeness.interviewReadinessScore}%；缺失类型 ${completeness.missingFactTypes.join("、") || "无"}；弱证据 ${completeness.weakEvidence.length} 项；冲突 ${conflictingFacts.length} 项。` : "DERIVED_VIEW：尚未计算"
     ].join("\n"));
     sources.push(...(project.sourceIds ?? []).slice(0, 8));
     const details = projectMemoryRepository?.listSourceDetails(project.id).slice(0, 5) ?? [];
@@ -1322,7 +1323,7 @@ function registerIpc(): void {
   ipcMain.handle("knowledge:rename-base", (_event, knowledgeBaseId: string, name: string) => knowledgeRepository?.renameKnowledgeBase(knowledgeBaseId, name));
   ipcMain.handle("knowledge:delete-base", (_event, knowledgeBaseId: string) => { knowledgeRepository?.deleteKnowledgeBase(knowledgeBaseId); return true; });
   ipcMain.handle("knowledge:list-documents", (_event, knowledgeBaseId?: string) => knowledgeRepository?.listDocuments(knowledgeBaseId) ?? []);
-  ipcMain.handle("knowledge:ingest", async (_event, input: { knowledgeBaseId?: string; profileId?: string; projectId?: string; filename: string; mimeType: string; bytes: Uint8Array; documentType?: KnowledgeDocumentTypeOption }) => {
+  ipcMain.handle("knowledge:ingest", async (_event, input: { knowledgeBaseId?: string; profileId?: string; projectId?: string; sourceRole?: import("@interview-copilot/shared").ProjectSourceRole; filename: string; mimeType: string; bytes: Uint8Array; documentType?: KnowledgeDocumentTypeOption }) => {
     if (!knowledgeRepository) throw new Error("Knowledge database is still initializing");
     const knowledgeBase = input.knowledgeBaseId ? knowledgeRepository.listKnowledgeBases().find((base) => base.id === input.knowledgeBaseId) : knowledgeRepository.ensureKnowledgeBase();
     if (!knowledgeBase) throw new Error("Knowledge base not found");
@@ -1338,8 +1339,9 @@ function registerIpc(): void {
       // Omitting it here used to overwrite every imported project as "other",
       // which prevented automatic project assignment and left Project Library empty.
       const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, documentType, status: "ready" });
-      if (documentType === "project" && input.profileId && projectMemoryService) {
+      if ((documentType === "project" || documentType === "technical-doc") && input.profileId && projectMemoryService) {
         const assignment = projectMemoryService.assignDocument(input.profileId, saved.id, input.projectId);
+        if (assignment.status === "assigned" && input.sourceRole) projectMemoryService.assignSource({ profileId: input.profileId, projectId: assignment.projectId as string, sourceType: "document", sourceId: saved.id, relationship: input.sourceRole === "reference" ? "reference" : "primary", sourceRole: input.sourceRole, assignmentMethod: input.projectId ? "explicit" : "matched", confidence: assignment.confidence, verified: Boolean(input.projectId) });
         return { ...saved, projectAssignment: assignment, ...(assignment.status === "needs_assignment" ? { error: assignment.message } : {}) };
       }
       return saved;
@@ -1348,7 +1350,7 @@ function registerIpc(): void {
       return saved;
     }
   });
-  ipcMain.handle("knowledge:delete", (_event, documentId: string) => { knowledgeRepository?.deleteDocument(documentId); return true; });
+  ipcMain.handle("knowledge:delete", (_event, documentId: string) => { for (const assignment of projectMemoryRepository?.sourcesFor("document", documentId) ?? []) projectMemoryRepository?.unassignSource(assignment.projectId, "document", documentId); knowledgeRepository?.deleteDocument(documentId); return true; });
   ipcMain.handle("knowledge:update-type", (_event, documentId: string, documentType: KnowledgeDocumentType) => knowledgeRepository?.updateDocumentType(documentId, documentType));
   ipcMain.handle("knowledge:reindex", async (_event, documentId: string) => {
     if (!knowledgeRepository) throw new Error("Knowledge database is still initializing");
@@ -1397,11 +1399,13 @@ function registerIpc(): void {
   ipcMain.handle("project-memory:add-candidate-fact", (_event, fact: import("@interview-copilot/shared").ProjectFact) => projectMemoryRepository?.addCandidateFact(fact));
   ipcMain.handle("project-memory:verify-fact", (_event, factId: string, verified: boolean) => projectMemoryRepository?.setFactVerification(factId, verified));
   ipcMain.handle("project-memory:review-fact", (_event, factId: string, status: import("@interview-copilot/shared").ProjectFact["status"]) => projectMemoryRepository?.setFactReviewStatus(factId, status));
+  ipcMain.handle("project-memory:resolve-conflict", (_event, conflictGroupId: string, selectedFactId: string, keepBoth?: boolean) => projectMemoryRepository?.resolveConflict(conflictGroupId, selectedFactId, Boolean(keepBoth)) ?? []);
   ipcMain.handle("project-memory:sources", (_event, projectId: string) => projectMemoryRepository?.listSourceDetails(projectId) ?? []);
   ipcMain.handle("project-memory:completeness", (_event, profileId: string, projectId: string) => projectMemoryRepository?.getProjectCompleteness(profileId, projectId));
   ipcMain.handle("project-memory:analysis-runs", (_event, profileId: string) => knowledgeAnalysisRepository?.list(profileId) ?? []);
   ipcMain.handle("project-memory:state", (_event, projectId: string) => knowledgeAnalysisRepository?.getProjectState(projectId));
   ipcMain.handle("project-memory:assign-source", (_event, input: Parameters<NonNullable<typeof projectMemoryService>["assignSource"]>[0]) => { projectMemoryService?.assignSource(input); return true; });
+  ipcMain.handle("project-memory:unassign-source", (_event, projectId: string, sourceType: import("@interview-copilot/shared").ProjectSourceType, sourceId: string) => { projectMemoryRepository?.unassignSource(projectId, sourceType, sourceId); return true; });
   ipcMain.handle("project-memory:assign-document", (_event, profileId: string, documentId: string, projectId?: string) => projectMemoryService?.assignDocument(profileId, documentId, projectId));
   ipcMain.handle("job-targets:list", (_event, profileId: string) => jobTargetRepository?.list(profileId) ?? []);
   ipcMain.handle("retrieval:list", (_event, profileId: string, limit?: number) => retrievalRepository?.list(profileId, limit) ?? []);

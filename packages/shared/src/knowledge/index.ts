@@ -6,6 +6,8 @@ export * from "./analyzer";
 export * from "./project-memory";
 export * from "./project-identity";
 export * from "./project-facts";
+export * from "./project-fact-eligibility";
+export * from "./project-view";
 export * from "./project-completeness";
 export * from "./project-document-parser";
 export * from "./project-timeline";

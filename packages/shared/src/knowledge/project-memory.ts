@@ -3,6 +3,7 @@ import { extractProjectFacts, ProjectFactConflictResolver, ProjectFactValidator 
 import { parseMarkdownProjectDocument } from "./project-document-parser";
 import { isUsableProjectTimeline } from "./project-timeline";
 import { resolveProjectIdentity } from "./project-identity";
+import { isFactEligible } from "./project-fact-eligibility";
 import { PROJECT_FACT_TYPES, type ProjectFact, type ProjectFactEvidence, type ProjectFactType, type ProjectMemoryAnalysisInput, type ProjectInterviewQuestion, type ProjectMemoryModel, type ProjectMemoryModule, type ProjectMemoryProject, type ProjectMemorySnapshot, type ProjectProblem, type ProjectTechnicalPoint } from "./types";
 
 function unique(values: string[]): string[] { return [...new Set(values.map((value) => value.trim()).filter(Boolean))]; }
@@ -16,7 +17,7 @@ function factsForSource(source: ProjectMemoryAnalysisInput["sources"][number], p
 
 function buildProject(source: ProjectMemoryAnalysisInput["sources"][number], profileId?: string): ProjectMemoryProject {
   const name = projectName(source);
-  const projectId = source.projectId ?? `memory-project-${slug(name)}`;
+  const projectId = source.projectId ?? `project-${slug(name)}`;
   const facts = factsForSource(source, projectId, name, profileId);
   const hardware = unique(facts.filter((item) => item.type === "hardware").map((item) => item.title));
   const software = unique(facts.filter((item) => item.type === "software").map((item) => item.title));
@@ -58,6 +59,7 @@ function buildProblems(project: ProjectMemoryProject, source: ProjectMemoryAnaly
 }
 
 function buildInterviewQuestions(project: ProjectMemoryProject, points: ProjectTechnicalPoint[], problems: ProjectProblem[], facts: ProjectFact[]): ProjectInterviewQuestion[] {
+  facts = facts.filter((fact) => isFactEligible(fact));
   const factIds = (types: string[]) => facts.filter((item) => types.includes(item.type)).map((item) => item.id);
   const factIdsForTopic = (topic: string) => facts.filter((item) => ["technology", "hardware", "software", "module"].includes(item.type)).filter((item) => {
     const factTitle = normalizeTechnicalTerms(item.title).toLowerCase();
@@ -78,7 +80,7 @@ function buildInterviewQuestions(project: ProjectMemoryProject, points: ProjectT
 }
 
 export function buildDeterministicProjectMemory(input: ProjectMemoryAnalysisInput): ProjectMemorySnapshot {
-  const allowed = input.sources.filter((source) => source.kind !== "resume" && source.kind !== "interview" && (source.kind !== "manual" || source.sourceType === "user_fact"));
+  const allowed = input.sources.filter((source) => source.sourceRole !== "reference" && source.kind !== "resume" && source.kind !== "interview" && (source.kind !== "manual" || source.sourceType === "user_fact"));
   if (allowed.length === 0) return { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [], facts: [] };
   const groups = input.projectId ? [allowed] : [...new Map(allowed.map((source) => [source.projectId ?? source.id, allowed.filter((item) => (item.projectId ?? item.id) === (source.projectId ?? source.id))])).values()];
   const projects: ProjectMemoryProject[] = [];
@@ -130,13 +132,13 @@ function parseCandidateFacts(raw: string, input: ProjectMemoryAnalysisInput): Pr
     const evidenceItems: ProjectFactEvidence[] = [];
     for (const item of candidateEvidence) {
       const source = item.sourceId ? sources.get(item.sourceId) : undefined;
-      if (!source || !item.quote?.trim() || !evidenceExists(source.text, item.quote)) continue;
+      if (!source || source.sourceRole === "reference" || !item.quote?.trim() || !evidenceExists(source.text, item.quote)) continue;
       evidenceItems.push({ sourceId: source.id, quote: item.quote.trim().slice(0, 800), ...(item.locator ? { locator: item.locator } : {}) });
     }
     if (!evidenceItems.length) continue;
     const firstSource = sources.get(evidenceItems[0]?.sourceId ?? "");
     if (!firstSource) continue;
-    const evidenceLevel = ["confirmed-user", "confirmed-code", "inferred", "pending", "risk", "not-measured"].includes(String(candidate.evidenceLevel)) ? candidate.evidenceLevel as ProjectFact["evidenceLevel"] : undefined;
+    const evidenceLevel = ["confirmed-user", "confirmed-code", "confirmed-document", "inferred", "pending", "risk", "not-measured"].includes(String(candidate.evidenceLevel)) ? candidate.evidenceLevel as ProjectFact["evidenceLevel"] : undefined;
     const candidateFact: ProjectFact = {
       id: candidate.id?.trim() || `${projectId}-llm-fact-${slug(candidate.title)}-${slug(candidate.content).slice(0, 18)}`,
       projectId,
@@ -150,6 +152,7 @@ function parseCandidateFacts(raw: string, input: ProjectMemoryAnalysisInput): Pr
       evidence: evidenceItems,
       scope: candidate.scope === "module" || candidate.scope === "problem" || candidate.scope === "architecture" ? candidate.scope : "project",
       ...(evidenceLevel ? { evidenceLevel } : {}),
+      ownership: type === "responsibility" ? "unknown" : "project",
       status: "pending_review"
     };
     const sanitized = ProjectFactValidator.sanitize(candidateFact);

@@ -37,7 +37,20 @@ function slug(value: string): string {
 }
 
 function sourceAllowed(source: ProjectMemorySource): boolean {
+  // Reference material can explain a concept, but it is not evidence that
+  // this project used it or that the user owned the work. It becomes usable
+  // project evidence only after an explicit reclassification by the user.
+  if (source.sourceRole === "reference") return false;
   return source.kind === "project-document" || source.kind === "repository" || source.kind === "readme" || source.kind === "resume-section" || source.kind === "manual" || source.kind === "user-fact";
+}
+
+function inferredEvidenceLevel(source: ProjectMemorySource, explicit?: ProjectFactEvidenceLevel): ProjectFactEvidenceLevel {
+  if (explicit) return explicit;
+  if (source.sourceRole === "responsibility" || source.sourceRole === "resume") return "confirmed-user";
+  if (source.kind === "repository" || source.kind === "readme") return "confirmed-code";
+  if (source.kind === "project-document") return "confirmed-document";
+  if (source.kind === "resume-section" || source.kind === "user-fact" || source.kind === "manual") return "confirmed-user";
+  return "pending";
 }
 
 function sourceLines(text: string): string[] { return text.replace(/\r/g, "").split("\n"); }
@@ -90,6 +103,8 @@ function inferScope(section: ProjectMarkdownSection | undefined): ProjectFactSco
 
 function fact(projectId: string, source: ProjectMemorySource, type: ProjectFactType, title: string, content: string, lineIndex: number, options: { quote?: string; scope?: ProjectFactScope; sectionPath?: string[]; evidenceLevel?: ProjectFactEvidenceLevel; subtype?: string; confidence?: number } = {}): ProjectFact {
   const itemEvidence = evidence(source, options.quote ?? content, lineIndex);
+  const evidenceLevel = inferredEvidenceLevel(source, options.evidenceLevel);
+  const ownership = type === "responsibility" ? (source.sourceRole === "responsibility" || source.sourceRole === "resume" || source.kind === "resume-section" || source.kind === "user-fact" || source.kind === "manual" ? "self" : "unknown") : "project";
   return {
     id: `${projectId}-fact-${type}-${slug(title)}-${slug(content).slice(0, 18)}`,
     projectId,
@@ -103,7 +118,8 @@ function fact(projectId: string, source: ProjectMemorySource, type: ProjectFactT
     evidence: [itemEvidence],
     scope: options.scope ?? "project",
     ...(options.sectionPath ? { sectionPath: options.sectionPath } : {}),
-    ...(options.evidenceLevel ? { evidenceLevel: options.evidenceLevel } : {}),
+    evidenceLevel,
+    ownership,
     ...(options.subtype ? { subtype: options.subtype } : {}),
     status: "active"
   };
@@ -338,13 +354,14 @@ export class ProjectFactConflictResolver {
     }
     return [...groups.values()].flatMap((group) => {
       if (group.length <= 1) return group;
+      const conflictGroupId = `conflict-${slug(group[0]?.projectId ?? "project")}-${slug(group[0]?.type ?? "fact")}-${slug(group[0]?.title ?? "fact")}`;
       const contents = new Set(group.map((item) => normalizeTechnicalTerms(item.content).toLowerCase()));
       if (contents.size <= 1) return [this.merge(group, "confirmed")];
       const scores = group.map((item) => item.sourceIds.reduce((total, sourceId) => total + trust(sourceById.get(sourceId) ?? { id: sourceId, kind: "manual", title: "", text: "" }), 0));
       const best = Math.max(...scores);
       const leaders = group.filter((_item, index) => scores[index] === best);
-      if (leaders.length === 1 && best >= 3) return [{ ...this.merge(leaders, "confirmed"), conflictStatus: "pending_review", status: "pending_review" }];
-      return group.map((item) => ({ ...item, conflictStatus: "conflicting" as const, status: "conflicting" as const }));
+      if (leaders.length === 1 && best >= 3) return [{ ...this.merge(leaders, "confirmed"), conflictStatus: "pending_review", conflictGroupId, status: "pending_review" }];
+      return group.map((item) => ({ ...item, conflictStatus: "conflicting" as const, conflictGroupId, status: "conflicting" as const }));
     });
   }
 

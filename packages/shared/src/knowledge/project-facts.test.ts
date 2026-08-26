@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { extractProjectFacts, ProjectFactConflictResolver, ProjectFactValidator } from "./project-facts";
+import { buildDeterministicProjectMemory } from "./project-memory";
 
 describe("project facts", () => {
   it("extracts only evidence-backed atomic entities from a scoped project", () => {
@@ -14,6 +15,12 @@ describe("project facts", () => {
     expect(ProjectFactValidator.validateProjectName("FOC 负责人 | 2026 技术栈：C++").status).toBe("rejected");
     expect(ProjectFactValidator.validateRole("负责固件\n技术栈：C++").status).toBe("rejected");
     expect(ProjectFactValidator.validate({ id: "x", projectId: "p", type: "technology", title: "STM32", content: "STM32", confidence: 1, verified: false, sourceIds: [] }).status).toBe("rejected");
+  });
+
+  it("does not turn reference material into project facts", () => {
+    const snapshot = buildDeterministicProjectMemory({ projectId: "foc", projectName: "FOC", sources: [{ id: "freertos-manual", kind: "project-document", sourceRole: "reference", title: "FreeRTOS 官方说明.md", text: "技术栈：FreeRTOS\n个人职责：负责任务划分" }] });
+    expect(snapshot.facts).toEqual([]);
+    expect(snapshot.projects).toEqual([]);
   });
 
   it("keeps conflicting high-quality facts pending review", () => {
