@@ -29,6 +29,20 @@ describe("ProjectMemoryService project isolation", () => {
       memories.assignSource({ projectId: "project-stale", sourceType: "document", sourceId: "doc-1", relationship: "primary", sourceRole: "code", assignmentMethod: "explicit", confidence: 1, verified: true });
       memories.unassignSource("project-stale", "document", "doc-1");
       expect(memories.getFact("fact-stale")?.stale).toBe(true);
+      expect(memories.listFacts(profile.id, "project-stale")).toHaveLength(0);
+      expect(memories.listFacts(profile.id, "project-stale", { includeStale: true })).toHaveLength(1);
+    } finally { database.close(); }
+  });
+
+  it("stores manual responsibility as an eligible confirmed-user fact", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const memories = new SqliteProjectMemoryRepository(database);
+      const profile = profiles.save({ name: "职责确认", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const project = memories.createProject(profile.id, "项目");
+      const fact = memories.addUserResponsibility(profile.id, project.id, "我负责 CAN 驱动和故障恢复");
+      expect(fact).toMatchObject({ type: "responsibility", ownership: "self", evidenceLevel: "confirmed-user", status: "active", conflictStatus: "confirmed" });
     } finally { database.close(); }
   });
 

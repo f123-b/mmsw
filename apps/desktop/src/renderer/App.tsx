@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import type { JSX } from "react";
 import { create } from "zustand";
 import type { AudioDevices, AudioDrift, AudioSidecarEvent, ProbeResult, RealtimeServerMessage } from "@interview-copilot/protocol";
-import { QUESTION_BANK_TYPE_LABELS, QUESTION_BANK_TYPES, validateLlmModelConfiguration } from "@interview-copilot/shared";
+import { QUESTION_BANK_TYPE_LABELS, QUESTION_BANK_TYPES, isFactReviewRequired, validateLlmModelConfiguration } from "@interview-copilot/shared";
 import { QWEN_REALTIME_ASR_MODEL, QWEN_REALTIME_ASR_URL, type AsrProviderType, type ChatAction, type ChatResponse, type ProjectFact, type ProjectMemorySnapshot, type QuestionBankCoverageResult, type QuestionBankJobProfileRecord, type QuestionBankQuestionRecord, type QuestionBankSkillRecord, type QuestionBankType, type QuestionCandidate, type QuestionEvent, type SessionState, type TranscriptSnapshot } from "@interview-copilot/shared";
 import type { Profile } from "@interview-copilot/shared";
 import type { JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectMemoryStats, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, RetrievalRunRecord } from "../main/database";
@@ -92,6 +92,7 @@ interface ProjectLibraryManagerProps {
   memory: ProjectMemorySnapshot;
   stats: ProjectMemoryStats;
   facts: ProjectFact[];
+  staleFacts?: ProjectFact[];
   documents: KnowledgeDocumentItem[];
   analysisRuns: KnowledgeAnalysisRunRecord[];
   rebuilding: boolean;
@@ -101,6 +102,9 @@ interface ProjectLibraryManagerProps {
   onOpenSources: () => void;
   onCreateProject?: () => Promise<void>;
   onReviewFact: (factId: string, status: "active" | "pending_review" | "rejected" | "conflicting") => Promise<void>;
+  onResolveConflict: (conflictGroupId: string, selectedFactId: string, keepBoth?: boolean) => Promise<void>;
+  onUnassignSource: (projectId: string, sourceType: string, sourceId: string) => Promise<void>;
+  onAddResponsibility: (projectId: string, content: string) => Promise<void>;
   agentMessages: ChatMessage[];
   agentSending: boolean;
   agentProjectId?: string;
@@ -119,6 +123,8 @@ function ProjectLibraryManager(props: ProjectLibraryManagerProps): JSX.Element {
   const [agentInput, setAgentInput] = useState("");
   const [sourceDialog, setSourceDialog] = useState(false);
   const [sourceRole, setSourceRole] = useState("overview");
+  const [factFilter, setFactFilter] = useState<"review" | "conflict" | "responsibility" | "all" | "stale">("review");
+  const [responsibilityInput, setResponsibilityInput] = useState("");
   const selectedProject = props.memory.projects.find((project) => project.id === selectedProjectId) ?? props.memory.projects[0];
   useEffect(() => {
     if (!selectedProject) return;
@@ -126,15 +132,17 @@ function ProjectLibraryManager(props: ProjectLibraryManagerProps): JSX.Element {
     void window.interviewCopilot.projectMemory.completeness(props.profileId, selectedProject.id).then((value) => setCompleteness(value as Record<string, unknown> | undefined)).catch(() => setCompleteness(undefined));
     void window.interviewCopilot.projectMemory.sources(selectedProject.id).then((value) => setSources(value as Array<Record<string, unknown>>)).catch(() => setSources([]));
   }, [props.profileId, selectedProject?.id]);
-  const projectFacts = selectedProject ? props.facts.filter((fact) => fact.projectId === selectedProject.id) : [];
+  const allProjectFacts = selectedProject ? props.facts.filter((fact) => fact.projectId === selectedProject.id) : [];
+  const staleProjectFacts = selectedProject ? (props.staleFacts ?? []).filter((fact) => fact.projectId === selectedProject.id) : [];
+  const projectFacts = factFilter === "stale" ? staleProjectFacts : allProjectFacts.filter((fact) => factFilter === "review" ? isFactReviewRequired(fact) : factFilter === "conflict" ? fact.status === "conflicting" || fact.conflictStatus === "conflicting" : factFilter === "responsibility" ? fact.type === "responsibility" : true);
   const dimensions = Array.isArray(completeness?.dimensions) ? completeness.dimensions as Array<Record<string, unknown>> : [];
   const projectQuestions = selectedProject ? props.memory.interviewQuestions.filter((question) => question.projectId === selectedProject.id) : [];
   const projectProblems = selectedProject ? props.memory.problems.filter((problem) => problem.projectId === selectedProject.id) : [];
   const health = completeness?.dataHealth as Record<string, unknown> | undefined;
   const healthIssues = Array.isArray(health?.issues) ? health.issues as Array<Record<string, unknown>> : [];
-  const timelineEvidence = projectFacts.find((fact) => fact.type === "timeline" && fact.title === "Git开发窗口");
+  const timelineEvidence = allProjectFacts.find((fact) => fact.type === "timeline" && fact.title === "Git开发窗口");
   const score = (key: string): string => completeness?.[key] === undefined ? "—" : `${String(completeness[key])}%`;
-  const statusText = (fact: ProjectFact): string => fact.status === "rejected" ? "已拒绝" : fact.status === "conflicting" ? "冲突" : fact.verified ? "已确认" : "待确认";
+  const statusText = (fact: ProjectFact): string => fact.stale ? "已失效" : fact.status === "rejected" ? "已拒绝" : fact.status === "conflicting" || fact.conflictStatus === "conflicting" ? "冲突" : isFactReviewRequired(fact) ? (fact.type === "responsibility" ? "待本人确认" : "待确认") : fact.evidenceLevel === "confirmed-code" ? "代码证据" : fact.evidenceLevel === "confirmed-document" ? "文档证据" : fact.evidenceLevel === "confirmed-user" ? "本人确认" : "可用于回答";
   const sourceTitle = (sourceId: string): string => String(sources.find((source) => source.sourceId === sourceId)?.title ?? sourceId);
   const visibleAgentMessages = props.agentProjectId === selectedProject?.id ? props.agentMessages.slice(-10) : [];
   const sendToAgent = async (): Promise<void> => {
@@ -144,22 +152,23 @@ function ProjectLibraryManager(props: ProjectLibraryManagerProps): JSX.Element {
     await props.onSendAgent(selectedProject.id, content);
   };
   return <section className="simple-page project-library-manager">
+    {selectedProject && <div className="inline-responsibility-form"><label htmlFor="project-responsibility">补充我的职责</label><textarea id="project-responsibility" rows={2} value={responsibilityInput} onChange={(event) => setResponsibilityInput(event.target.value)} placeholder="补充你真实负责的模块、实现细节和边界" /><button className="outline-pill" disabled={!responsibilityInput.trim()} onClick={async () => { await props.onAddResponsibility(selectedProject.id, responsibilityInput.trim()); setResponsibilityInput(""); }}>保存职责</button></div>}
     <div className="page-heading"><div><span className="page-kicker">PROJECT LIBRARY</span><h1>项目库</h1><p className="page-note">围绕项目背景、职责、证据和面试准备管理个人工程经验。每份资料必须绑定到已有项目，避免误建项目。</p></div><div className="detail-actions"><button className="outline-pill" onClick={() => void props.onCreateProject?.()}>新建项目</button><button className="dark-pill" disabled={!selectedProject} onClick={() => setSourceDialog(true)}>添加项目资料</button><button className="outline-pill" disabled={props.rebuilding || !selectedProject} onClick={() => selectedProject && props.onRebuild(selectedProject.id)}>{props.rebuilding ? "分析中…" : "重新分析"}</button></div></div>
-    <div className="project-library-summary"><span>项目 <strong>{props.memory.projects.length}</strong></span><span>待确认事实 <strong>{props.facts.filter((fact) => !fact.verified && fact.status !== "rejected").length}</strong></span><span>冲突 <strong>{props.facts.filter((fact) => fact.status === "conflicting").length}</strong></span><span>项目题 <strong>{props.stats.interviewQuestions}</strong></span></div>
-    <div className="project-library-switcher">{props.memory.projects.map((project) => <button className={project.id === selectedProject?.id ? "selected" : ""} key={project.id} onClick={() => { setSelectedProjectId(project.id); setTab("overview"); }}><strong>{project.name}</strong><small>{project.description || "项目背景待补充"}</small></button>)}{props.memory.projects.length === 0 && <div className="knowledge-empty"><strong>还没有结构化项目</strong><span>上传项目文档后重新分析。</span></div>}</div>
+    <div className="project-library-summary"><span>项目 <strong>{props.stats.projects}</strong></span><span>可信事实 <strong>{props.stats.eligibleFacts}</strong></span><span>待本人确认 <strong>{props.stats.reviewRequiredFacts}</strong></span><span>冲突 <strong>{props.stats.conflictingFacts}</strong></span><span>项目题 <strong>{props.stats.interviewQuestions}</strong></span>{props.stats.staleFacts > 0 && <span>已失效 <strong>{props.stats.staleFacts}</strong></span>}</div>
+    <div className="project-library-switcher">{props.memory.projects.map((project) => <button className={project.id === selectedProject?.id ? "selected" : ""} key={project.id} onClick={() => { setSelectedProjectId(project.id); setTab("overview"); }}><strong>{project.name}</strong><small>{project.description ? project.description.replace(/[#*_`]/g, "").slice(0, 100) : "项目背景待补充"}</small></button>)}{props.memory.projects.length === 0 && <div className="knowledge-empty"><strong>还没有结构化项目</strong><span>上传项目文档后重新分析。</span></div>}</div>
     {selectedProject && <>
-      <header className="project-detail-heading"><div><span className="page-kicker">PROJECT DETAIL</span><h2>{selectedProject.name}</h2><p>{selectedProject.description || "项目背景待补充"}</p></div><span className="project-completeness-score">{score("interviewReadinessScore")}<small>面试准备度</small></span></header>
-      <div className="project-memory-metrics"><div><span>资料覆盖</span><strong>{score("sourceCoverageScore")}</strong></div><div><span>人工确认</span><strong>{score("verificationScore")}</strong></div><div><span>面试准备</span><strong>{score("interviewReadinessScore")}</strong></div>{health?.needsReanalysis === true && <p className="page-note">项目资料需重新分析：{healthIssues.map((item) => String(item.message)).join("；")}</p>}</div>
+      <header className="project-detail-heading"><div><span className="page-kicker">PROJECT DETAIL</span><h2>{selectedProject.name}</h2><p>{selectedProject.description ? selectedProject.description.replace(/[#*_`]/g, "") : "项目背景待补充"}</p></div><span className="project-completeness-score">{score("interviewReadinessScore")}<small>面试准备度</small></span></header>
+      <div className="project-memory-metrics"><div><span>资料覆盖</span><strong>{score("sourceCoverageScore")}</strong></div><div><span>可信度</span><strong>{score("trustScore")}</strong></div><div><span>关键审核</span><strong>{score("criticalReviewScore")}</strong></div><div><span>面试准备</span><strong>{score("interviewReadinessScore")}</strong></div>{health?.needsReanalysis === true && <p className="page-note">项目资料需重新分析：{healthIssues.map((item) => String(item.message)).join("；")}</p>}</div>
       <nav className="project-detail-tabs" aria-label="项目详情"><button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>项目概览</button><button className={tab === "facts" ? "active" : ""} onClick={() => setTab("facts")}>项目事实 <small>{projectFacts.length}</small></button><button className={tab === "problems" ? "active" : ""} onClick={() => setTab("problems")}>问题与复盘 <small>{projectProblems.length}</small></button><button className={tab === "sources" ? "active" : ""} onClick={() => setTab("sources")}>资料与证据 <small>{sources.length}</small></button><button className={tab === "questions" ? "active" : ""} onClick={() => setTab("questions")}>项目面试题 <small>{projectQuestions.length}</small></button></nav>
       {tab === "overview" && <div className="project-overview-grid"><article className="detail-sheet"><h3>项目背景</h3><p>{selectedProject.description || "待补充"}</p><h3>个人职责</h3><p>{selectedProject.role || "待确认"}</p><h3>项目时间</h3><p>{selectedProject.time || "待补充"}</p>{!selectedProject.time && timelineEvidence && <small>辅助代码窗口：{timelineEvidence.content}</small>}</article><article className="detail-sheet"><h3>技术栈</h3><div className="tag-list">{selectedProject.technologyStack.map((item) => <span key={item}>{item}</span>)}{selectedProject.technologyStack.length === 0 && <small>待补充</small>}</div><h3>硬件</h3><div className="tag-list">{selectedProject.hardware.map((item) => <span key={item}>{item}</span>)}{selectedProject.hardware.length === 0 && <small>待补充</small>}</div><h3>软件</h3><div className="tag-list">{selectedProject.software.map((item) => <span key={item}>{item}</span>)}{selectedProject.software.length === 0 && <small>待补充</small>}</div></article><article className="detail-sheet completeness-card"><h3>项目资料状态</h3>{dimensions.map((dimension) => <div className="completeness-row" key={String(dimension.key)}><span>{String(dimension.label)}</span><strong className={`completeness-${String(dimension.sourceStatus ?? dimension.status)}`}>{dimension.sourceStatus === "covered" ? "已覆盖" : dimension.sourceStatus === "weak" ? "证据较弱" : dimension.sourceStatus === "conflicting" ? "有冲突" : dimension.missingKind === "not_measured" ? "未测量" : "待补充"}</strong></div>)}{dimensions.length === 0 && <p className="page-note">分析完成后显示资料状态。</p>}</article></div>}
-      {tab === "facts" && <div className="fact-review-grid"><div className="project-fact-cards">{[...projectFacts].sort((a, b) => (b.conflictStatus === "conflicting" ? 1 : 0) - (a.conflictStatus === "conflicting" ? 1 : 0) || (b.type === "responsibility" ? 1 : 0) - (a.type === "responsibility" ? 1 : 0)).map((fact) => <article className={`fact-review-card fact-review-${fact.status ?? "active"}`} key={fact.id}><header><div><span className="fact-type-label">{PROJECT_FACT_LABELS[fact.type]}</span><h3>{fact.title}</h3></div><strong>{statusText(fact)}</strong></header><p>{fact.content}</p><div className="fact-evidence-line"><span>来源：{fact.sourceIds.map(sourceTitle).join("、") || "未关联"}</span><span>{fact.evidenceLevel ?? "pending"} · {fact.ownership ?? "unknown"} · 置信度 {Math.round(fact.confidence * 100)}%</span></div>{fact.evidence?.[0] && <button className="evidence-link" onClick={() => setSelectedEvidence(fact)}>查看证据：“{fact.evidence[0].quote.slice(0, 80)}”</button>}{fact.conflictGroupId && <small className="page-note">冲突组：{fact.conflictGroupId}</small>}<footer>{fact.status !== "rejected" && <button className="dark-pill" onClick={() => void (fact.conflictGroupId ? window.interviewCopilot.projectMemory.resolveConflict(fact.conflictGroupId, fact.id, false) : props.onReviewFact(fact.id, "active"))}>{fact.verified ? "已确认" : fact.status === "conflicting" ? "采用此版本" : "确认"}</button>}{fact.status !== "rejected" && <button className="outline-pill" onClick={() => void props.onReviewFact(fact.id, "rejected")}>{fact.status === "conflicting" ? "排除此版本" : "不正确"}</button>}{fact.status === "rejected" && <button className="outline-pill" onClick={() => void props.onReviewFact(fact.id, "pending_review")}>恢复待确认</button>}</footer></article>)}{projectFacts.length === 0 && <div className="knowledge-empty"><strong>暂无项目事实</strong><span>重新分析或补充项目资料。</span></div>}</div><aside className="fact-review-summary"><strong>优先审核</strong><span>职责必须本人确认</span><span>冲突事实需成组处理</span><span>结果/指标需要证据</span><span>待确认 {projectFacts.filter((fact) => !fact.verified && fact.status !== "rejected").length}</span></aside></div>}
+      {tab === "facts" && <div className="fact-review-grid"><div className="fact-review-toolbar" role="tablist" aria-label="事实筛选"><button className={factFilter === "review" ? "active" : ""} onClick={() => setFactFilter("review")}>待审核 {props.stats.reviewRequiredFacts}</button><button className={factFilter === "conflict" ? "active" : ""} onClick={() => setFactFilter("conflict")}>冲突 {props.stats.conflictingFacts}</button><button className={factFilter === "responsibility" ? "active" : ""} onClick={() => setFactFilter("responsibility")}>职责</button><button className={factFilter === "all" ? "active" : ""} onClick={() => setFactFilter("all")}>全部</button>{props.stats.staleFacts > 0 && <button className={factFilter === "stale" ? "active" : ""} onClick={() => setFactFilter("stale")}>已失效 {props.stats.staleFacts}</button>}</div><div className="project-fact-cards">{[...projectFacts].sort((a, b) => (b.conflictStatus === "conflicting" ? 1 : 0) - (a.conflictStatus === "conflicting" ? 1 : 0) || (b.type === "responsibility" ? 1 : 0) - (a.type === "responsibility" ? 1 : 0)).map((fact) => <article className={`fact-review-card fact-review-${fact.status ?? "active"}`} key={fact.id}><header><div><span className="fact-type-label">{PROJECT_FACT_LABELS[fact.type]}</span><h3>{fact.title}</h3></div><strong>{statusText(fact)}</strong></header><p>{fact.content}</p><div className="fact-evidence-line"><span>来源：{fact.sourceIds.map(sourceTitle).join("、") || "未关联"}</span><span>{fact.evidenceLevel ?? "pending"} · {fact.ownership ?? "unknown"} · 置信度 {Math.round(fact.confidence * 100)}%</span></div>{fact.evidence?.[0] && <button className="evidence-link" onClick={() => setSelectedEvidence(fact)}>查看证据：“{fact.evidence[0].quote.slice(0, 80)}”</button>}{fact.conflictGroupId && <small className="page-note">冲突组：{fact.conflictGroupId}</small>}<footer>{!fact.stale && fact.status !== "rejected" && isFactReviewRequired(fact) && <button className="dark-pill" onClick={() => void (fact.conflictGroupId ? props.onResolveConflict(fact.conflictGroupId, fact.id, false) : props.onReviewFact(fact.id, "active"))}>{fact.status === "conflicting" ? "采用此版本" : fact.type === "responsibility" ? "确认本人职责" : "确认事实"}</button>}{!fact.stale && fact.status !== "rejected" && <button className="outline-pill" onClick={() => void props.onReviewFact(fact.id, "rejected")}>{fact.status === "conflicting" ? "排除此版本" : "不正确"}</button>}{fact.status === "rejected" && <button className="outline-pill" onClick={() => void props.onReviewFact(fact.id, "pending_review")}>恢复待确认</button>}</footer></article>)}{projectFacts.length === 0 && <div className="knowledge-empty"><strong>暂无符合条件的事实</strong><span>{factFilter === "review" ? "当前没有待审核事实。" : "重新分析或补充项目资料。"}</span></div>}</div><aside className="fact-review-summary"><strong>风险优先</strong><span>职责必须本人确认</span><span>冲突事实需成组处理</span><span>结果 / 指标需要证据</span><span>当前筛选 {projectFacts.length} 条</span></aside></div>}
       {tab === "problems" && <div className="project-question-list">{projectProblems.map((problem) => <article className="project-question-card" key={problem.id}><div><span className="fact-type-label">问题与复盘</span><h3>{problem.problem}</h3><p>原因：{problem.cause}</p><p>解决：{problem.solution}</p><p>结果：{problem.result}</p></div><aside><span>{problem.sourceIds.length} 个来源</span></aside></article>)}{projectProblems.length === 0 && <div className="knowledge-empty"><strong>暂无问题记录</strong><span>在项目资料中补充“问题 / 原因 / 解决方案 / 结果”。</span></div>}</div>}
-      {tab === "sources" && <div className="source-evidence-layout"><div className="source-detail-list">{sources.map((source) => <article className="source-detail-card" key={String(source.id)}><strong>{String(source.title)}</strong><span>{String(source.documentType ?? source.sourceType)} · {String(source.sourceRole ?? "other")} · {String(source.relationship ?? "supporting")}</span><small>{String(source.status ?? "未验证")} · {new Date(Number(source.updatedAt ?? Date.now())).toLocaleString()}</small><button className="text-button danger-text" onClick={() => void window.interviewCopilot.projectMemory.unassignSource(selectedProject.id, String(source.sourceType), String(source.sourceId)).then(() => window.interviewCopilot.projectMemory.sources(selectedProject.id).then((next) => setSources(next as Array<Record<string, unknown>>)))}>解除绑定</button></article>)}{sources.length === 0 && <div className="knowledge-empty"><strong>暂无绑定资料</strong><span>点击“添加项目资料”并选择材料类型。</span></div>}</div><aside className="evidence-drawer-placeholder"><h3>Evidence Drawer</h3>{selectedEvidence ? <><strong>{selectedEvidence.title}</strong>{selectedEvidence.evidence?.map((item) => <div className="evidence-quote" key={`${item.sourceId}-${item.quote}`}><small>{sourceTitle(item.sourceId)}</small><p>“{item.quote}”</p><span>confidence {Math.round(selectedEvidence.confidence * 100)}%</span></div>)}</> : <p className="page-note">在“项目事实”中点击证据即可查看来源引用。</p>}</aside></div>}
+      {tab === "sources" && <div className="source-evidence-layout"><div className="source-detail-list">{sources.map((source) => <article className="source-detail-card" key={String(source.id)}><strong>{String(source.title)}</strong><span>{String(source.documentType ?? source.sourceType)} · {String(source.sourceRole ?? "other")} · {String(source.relationship ?? "supporting")}</span><small>{String(source.status ?? "未验证")} · {new Date(Number(source.updatedAt ?? Date.now())).toLocaleString()}</small><button className="text-button danger-text" onClick={() => void props.onUnassignSource(selectedProject.id, String(source.sourceType), String(source.sourceId))}>解除绑定</button></article>)}{sources.length === 0 && <div className="knowledge-empty"><strong>暂无绑定资料</strong><span>点击“添加项目资料”并选择材料类型。</span></div>}</div><aside className="evidence-drawer-placeholder"><h3>Evidence Drawer</h3>{selectedEvidence ? <><strong>{selectedEvidence.title}</strong>{selectedEvidence.evidence?.map((item) => <div className="evidence-quote" key={`${item.sourceId}-${item.quote}`}><small>{sourceTitle(item.sourceId)}</small><p>“{item.quote}”</p><span>confidence {Math.round(selectedEvidence.confidence * 100)}%</span></div>)}</> : <p className="page-note">在“项目事实”中点击证据即可查看来源引用。</p>}</aside></div>}
       {tab === "questions" && <div className="project-question-list">{projectQuestions.map((question) => <article className="project-question-card" key={question.id}><div><span className="fact-type-label">项目题</span><h3>{question.question}</h3><p>{question.answerPoints.join("；")}</p></div><aside><span>{question.factIds?.length ?? 0} 个关联事实</span><span>{question.stale ? "已过期" : "当前"}</span></aside></article>)}{projectQuestions.length === 0 && <div className="knowledge-empty"><strong>暂无项目面试题</strong><span>项目事实确认后重新生成。</span></div>}</div>}
       <section className="project-agent-panel" aria-label="项目资料 AI Agent">
         <header><div><span className="page-kicker">PROJECT AGENT</span><h3>项目资料整理助手</h3><p>基于当前项目资料找缺口、冲突和不确定项；任何写入都需要你确认。</p></div><span className="agent-scope-chip">当前项目 · {selectedProject.name}</span></header>
         <div className="project-agent-quick-actions"><button onClick={() => setAgentInput("检查当前项目资料中的冲突、缺失和不确定项，按优先级告诉我需要确认什么。")}>检查冲突与缺口</button><button onClick={() => setAgentInput("根据现有资料整理一份可以直接用于面试的项目介绍，并标出所有没有证据的说法。")}>整理面试项目介绍</button><button onClick={() => setAgentInput("基于已确认事实生成这个项目最可能被追问的问题和答题要点。")}>生成追问题库</button></div>
-        <div className="project-agent-conversation">{visibleAgentMessages.length ? visibleAgentMessages.map((message) => { const failed = message.role === "assistant" && message.status === "failed"; return <article className={`project-agent-message ${message.role} ${failed ? "failed" : ""}`} key={message.id}><strong>{message.role === "user" ? "我" : "项目 Agent"}{failed ? " · 生成失败" : ""}</strong><MarkdownAnswer text={message.content || (message.status === "streaming" ? "正在分析项目资料…" : failed ? chatFailureText(message.errorCode, message.model) : "未返回内容")} />{failed && <div className="project-agent-recovery"><button className="outline-pill" disabled={props.agentSending} onClick={() => void props.onRetryAgent(message.id)}>重新生成</button><button className="outline-pill" onClick={props.onOpenSettings}>检查模型设置</button></div>}</article>; }) : <div className="knowledge-empty"><strong>从资料到可信项目库</strong><span>可以直接问“哪些地方冲突”“我的职责还缺什么证据”，也可以让 Agent 提议补充事实。它不会未经确认写入。</span></div>}</div>
+        <div className="project-agent-conversation">{visibleAgentMessages.length ? visibleAgentMessages.map((message) => { const failed = message.role === "assistant" && message.status === "failed"; return <article className={`project-agent-message ${message.role} ${failed ? "failed" : ""}`} key={message.id}><strong>{message.role === "user" ? "我" : "项目 Agent"}{failed ? " · 生成失败" : ""}</strong><p className="agent-plain-text">{message.content || (message.status === "streaming" ? "正在分析项目资料…" : failed ? chatFailureText(message.errorCode, message.model) : "未返回内容")}</p>{failed && <div className="project-agent-recovery"><button className="outline-pill" disabled={props.agentSending} onClick={() => void props.onRetryAgent(message.id)}>重新生成</button><button className="outline-pill" onClick={props.onOpenSettings}>检查模型设置</button></div>}</article>; }) : <div className="knowledge-empty"><strong>从资料到可信项目库</strong><span>可以直接问“哪些地方冲突”“我的职责还缺什么证据”，也可以让 Agent 提议补充事实。它不会未经确认写入。</span></div>}</div>
         <ChatResponseSupplement messages={visibleAgentMessages} onApproveAction={props.onApproveAgentAction} />
         <div className="project-agent-composer"><textarea rows={3} value={agentInput} onChange={(event) => setAgentInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendToAgent(); } }} placeholder="告诉 Agent 你的真实职责、实现细节，或让它检查资料冲突…" /><button className="dark-pill" disabled={!agentInput.trim() || props.agentSending} onClick={() => void sendToAgent()}>{props.agentSending ? "分析中…" : "发送"}</button></div>
       </section>
@@ -830,9 +839,10 @@ export function App(): JSX.Element {
   const [profileBuilderArtifact, setProfileBuilderArtifact] = useState<ProfileBuilderArtifactRecord>();
   const [profileBuilderRunning, setProfileBuilderRunning] = useState(false);
   const [projectMemory, setProjectMemory] = useState<ProjectMemorySnapshot>();
-  const [projectMemoryStats, setProjectMemoryStats] = useState<ProjectMemoryStats>({ projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0 });
+  const [projectMemoryStats, setProjectMemoryStats] = useState<ProjectMemoryStats>({ projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0, facts: 0, eligibleFacts: 0, reviewRequiredFacts: 0, conflictingFacts: 0, staleFacts: 0 });
   const [projectMemoryRunning, setProjectMemoryRunning] = useState(false);
   const [projectFacts, setProjectFacts] = useState<ProjectFact[]>([]);
+  const [staleProjectFacts, setStaleProjectFacts] = useState<ProjectFact[]>([]);
   const [jobTargets, setJobTargets] = useState<JobTargetRecord[]>([]);
   const [knowledgeAnalysisRuns, setKnowledgeAnalysisRuns] = useState<KnowledgeAnalysisRunRecord[]>([]);
   const [retrievalRuns, setRetrievalRuns] = useState<RetrievalRunRecord[]>([]);
@@ -1090,8 +1100,9 @@ export function App(): JSX.Element {
     if (!profileId) {
       setProfileBuilderArtifact(undefined);
       setProjectMemory(undefined);
-      setProjectMemoryStats({ projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0 });
+      setProjectMemoryStats({ projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0, facts: 0, eligibleFacts: 0, reviewRequiredFacts: 0, conflictingFacts: 0, staleFacts: 0 });
       setProjectFacts([]);
+      setStaleProjectFacts([]);
       setJobTargets([]);
       setKnowledgeAnalysisRuns([]);
       setRetrievalRuns([]);
@@ -1100,11 +1111,13 @@ export function App(): JSX.Element {
     void window.interviewCopilot.profileBuilder.get(profileId).then(setProfileBuilderArtifact).catch(() => setProfileBuilderArtifact(undefined));
     void Promise.all([window.interviewCopilot.projectMemory.get(profileId), window.interviewCopilot.projectMemory.stats(profileId)]).then(([memory, stats]) => { setProjectMemory(memory); setProjectMemoryStats(stats); }).catch(() => undefined);
     void Promise.all([window.interviewCopilot.projectMemory.listFacts(profileId), window.interviewCopilot.jobTargets.list(profileId), window.interviewCopilot.projectMemory.analysisRuns(profileId), window.interviewCopilot.retrieval.list(profileId, 20)]).then(([facts, targets, analyses, retrievals]) => { setProjectFacts(facts); setJobTargets(targets); setKnowledgeAnalysisRuns(analyses); setRetrievalRuns(retrievals); }).catch(() => undefined);
+    void window.interviewCopilot.projectMemory.listFacts(profileId, undefined, { includeStale: true, includeRejected: true }).then((facts) => setStaleProjectFacts(facts.filter((fact) => fact.stale))).catch(() => setStaleProjectFacts([]));
     return window.interviewCopilot.events.onProfileBuilderUpdated((record) => {
       if (record.profileId === profileId) {
         setProfileBuilderArtifact(record);
         void Promise.all([window.interviewCopilot.projectMemory.get(profileId), window.interviewCopilot.projectMemory.stats(profileId)]).then(([memory, stats]) => { setProjectMemory(memory); setProjectMemoryStats(stats); }).catch(() => undefined);
         void Promise.all([window.interviewCopilot.projectMemory.listFacts(profileId), window.interviewCopilot.jobTargets.list(profileId), window.interviewCopilot.projectMemory.analysisRuns(profileId), window.interviewCopilot.retrieval.list(profileId, 20)]).then(([facts, targets, analyses, retrievals]) => { setProjectFacts(facts); setJobTargets(targets); setKnowledgeAnalysisRuns(analyses); setRetrievalRuns(retrievals); }).catch(() => undefined);
+        void window.interviewCopilot.projectMemory.listFacts(profileId, undefined, { includeStale: true, includeRejected: true }).then((facts) => setStaleProjectFacts(facts.filter((fact) => fact.stale))).catch(() => setStaleProjectFacts([]));
         void window.interviewCopilot.profiles.get(profileId).then((updated) => {
           if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile));
         });
@@ -1291,6 +1304,7 @@ export function App(): JSX.Element {
     const imported = await window.interviewCopilot.knowledge.ingest({ profileId: selectedProfile?.id, projectId, sourceRole, knowledgeBaseId, filename: file.name, mimeType: file.type || "application/octet-stream", documentType: projectId ? "project" : documentType, bytes: new Uint8Array(await file.arrayBuffer()) }) as { status?: string; error?: string; projectAssignment?: { status?: string; message?: string } };
       if (imported?.status === "error") throw new Error(imported.error || "文件解析或索引失败");
       setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId));
+      await refreshProjectState(profileId);
     store.setNotice(`${imported.projectAssignment?.status === "needs_assignment" ? "NEEDS_PROJECT_ASSIGNMENT：请在项目资料中选择所属项目" : `已导入知识文档：${file.name}${documentType === "auto" ? "（已自动分类）" : ""}`}`);
     } catch (error) {
       store.setNotice(`知识文档导入失败：${userFacingError(error)}`);
@@ -1314,9 +1328,7 @@ export function App(): JSX.Element {
     if (typeof name !== "string" || !name.trim()) return;
     const created = await window.interviewCopilot.projects.create({ name: name.trim(), profileId });
     if (created) {
-      const memory = await window.interviewCopilot.projectMemory.get(profileId);
-      setProjectMemory(memory);
-      setProjectMemoryStats(await window.interviewCopilot.projectMemory.stats(profileId));
+      await refreshProjectState(profileId);
       store.setNotice(`已创建项目“${created.name}”，现在可以添加项目资料`);
     }
   };
@@ -1345,6 +1357,19 @@ export function App(): JSX.Element {
     }
   };
   const selectedProfile = profiles.find((profile) => profile.id === profileId);
+  const refreshProjectState = async (profile = profileId): Promise<void> => {
+    if (!profile) return;
+    const [memory, stats, facts, allFacts, targets, analyses, retrievals] = await Promise.all([
+      window.interviewCopilot.projectMemory.get(profile),
+      window.interviewCopilot.projectMemory.stats(profile),
+      window.interviewCopilot.projectMemory.listFacts(profile),
+      window.interviewCopilot.projectMemory.listFacts(profile, undefined, { includeStale: true, includeRejected: true }),
+      window.interviewCopilot.jobTargets.list(profile),
+      window.interviewCopilot.projectMemory.analysisRuns(profile),
+      window.interviewCopilot.retrieval.list(profile, 20)
+    ]);
+    setProjectMemory(memory); setProjectMemoryStats(stats); setProjectFacts(facts); setStaleProjectFacts(allFacts.filter((fact) => fact.stale)); setJobTargets(targets); setKnowledgeAnalysisRuns(analyses); setRetrievalRuns(retrievals);
+  };
   const refreshProfiles = async () => { const next = await window.interviewCopilot.profiles.list(); setProfiles(next); };
   const renameProfile = async () => { if (!selectedProfile) return; const name = await requestDialog({ kind: "form", title: "重命名 Profile", label: "Profile 名称", defaultValue: selectedProfile.name, required: true, confirmLabel: "保存" }); if (typeof name === "string" && name.trim()) { await window.interviewCopilot.profiles.save({ ...selectedProfile, name: name.trim() }); await refreshProfiles(); } };
   const cloneProfile = async () => { if (!selectedProfile) return; const clone = await window.interviewCopilot.profiles.clone(selectedProfile.id, `${selectedProfile.name} 副本`); if (clone) { await refreshProfiles(); setProfileId(clone.id); } };
@@ -1376,10 +1401,8 @@ export function App(): JSX.Element {
     setProjectMemoryRunning(true);
     try {
       const memory = projectId ? await window.interviewCopilot.projectMemory.rebuildProject(projectId) : await window.interviewCopilot.projectMemory.rebuild(selectedProfile.id);
-      setProjectMemory(memory);
-      setProjectMemoryStats(await window.interviewCopilot.projectMemory.stats(selectedProfile.id));
-      const [facts, targets, analyses, retrievals] = await Promise.all([window.interviewCopilot.projectMemory.listFacts(selectedProfile.id), window.interviewCopilot.jobTargets.list(selectedProfile.id), window.interviewCopilot.projectMemory.analysisRuns(selectedProfile.id), window.interviewCopilot.retrieval.list(selectedProfile.id, 20)]);
-      setProjectFacts(facts); setJobTargets(targets); setKnowledgeAnalysisRuns(analyses); setRetrievalRuns(retrievals);
+      void memory;
+      await refreshProjectState(selectedProfile.id);
       store.setNotice("个人工程经验已更新");
     } catch (error) {
       store.setNotice(`项目记忆分析失败：${userFacingError(error)}`);
@@ -1388,7 +1411,7 @@ export function App(): JSX.Element {
   const verifyProjectFact = async (factId: string, verified: boolean) => {
     const updated = await window.interviewCopilot.projectMemory.verifyFact(factId, verified);
     if (updated) {
-      setProjectFacts((current) => current.map((fact) => fact.id === updated.id ? updated : fact));
+      await refreshProjectState(profileId);
       store.setNotice(verified ? "事实已确认，后续项目回答可以优先使用" : "事实已取消确认");
     }
   };
@@ -1468,8 +1491,27 @@ export function App(): JSX.Element {
   const reviewProjectFact = async (factId: string, status: "active" | "pending_review" | "rejected" | "conflicting") => {
     const updated = await window.interviewCopilot.projectMemory.reviewFact(factId, status);
     if (updated) {
-      setProjectFacts((current) => current.map((fact) => fact.id === updated.id ? updated : fact));
+      await refreshProjectState(profileId);
       store.setNotice(status === "rejected" ? "事实已标记为不正确" : status === "active" ? "事实已确认" : "事实状态已更新");
+    }
+  };
+  const resolveProjectConflict = async (conflictGroupId: string, selectedFactId: string, keepBoth = false): Promise<void> => {
+    await window.interviewCopilot.projectMemory.resolveConflict(conflictGroupId, selectedFactId, keepBoth);
+    await refreshProjectState(profileId);
+    store.setNotice(keepBoth ? "冲突候选已全部保留并确认" : "冲突已解决，已采用所选版本");
+  };
+  const unassignProjectSource = async (projectId: string, sourceType: string, sourceId: string): Promise<void> => {
+    await window.interviewCopilot.projectMemory.unassignSource(projectId, sourceType, sourceId);
+    await refreshProjectState(profileId);
+    store.setNotice("资料已解除绑定，相关派生事实已标记为失效");
+  };
+  const addProjectResponsibility = async (projectId: string, content: string): Promise<void> => {
+    try {
+      await window.interviewCopilot.projectMemory.addResponsibility(profileId, projectId, content);
+      await refreshProjectState(profileId);
+      store.setNotice("个人职责已保存，并已进入可信事实链");
+    } catch (error) {
+      store.setNotice(`职责保存失败：${userFacingError(error)}`);
     }
   };
   const continueChatMessage = async (messageId: string) => {
@@ -1491,6 +1533,7 @@ export function App(): JSX.Element {
     if (!activeConversationId) return;
     try {
       await window.interviewCopilot.chat.approveAction({ conversationId: activeConversationId, messageId, action });
+      await refreshProjectState(profileId);
       setChatMessages((current) => current.map((message) => message.id === messageId && message.structuredResponse ? { ...message, structuredResponse: { ...message.structuredResponse, actions: (message.structuredResponse.actions ?? []).map((item) => item.id === action.id ? { ...item, status: "approved" as const } : item) } } : message));
       store.setNotice("操作已确认并写入本地数据");
     } catch (error) {
@@ -1564,7 +1607,7 @@ export function App(): JSX.Element {
   const specialPageContent = page === "knowledge"
     ? <KnowledgePage knowledgeBases={knowledgeBases} knowledgeBaseId={knowledgeBaseId} knowledgeDocuments={knowledgeDocuments} requestDialog={requestDialog} onSelectBase={setKnowledgeBaseId} onCreateBase={async (name) => { const created = await window.interviewCopilot.knowledge.createBase(name); if (created) { setKnowledgeBases((current) => [created, ...current]); setKnowledgeBaseId(created.id); setKnowledgeDocuments([]); } }} onRenameBase={async (id, name) => { const updated = await window.interviewCopilot.knowledge.renameBase(id, name); if (updated) setKnowledgeBases((current) => current.map((item) => item.id === updated.id ? updated : item)); }} onDeleteBase={async (id, name) => { const confirmed = await requestDialog({ kind: "confirm", title: `删除 ${name}？`, description: "删除后资料库和其中的文档会一起删除。", confirmLabel: "删除" }); if (confirmed === true) { await window.interviewCopilot.knowledge.deleteBase(id); const next = await window.interviewCopilot.knowledge.listBases(); const nextId = next[0]?.id ?? ""; setKnowledgeBases(next); setKnowledgeBaseId(nextId); setKnowledgeDocuments(nextId ? await window.interviewCopilot.knowledge.listDocuments(nextId) : []); } }} onUpload={uploadKnowledgeFile} onUpdateType={async (id, type) => { await window.interviewCopilot.knowledge.updateType(id, type); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onReindex={async (id) => { await window.interviewCopilot.knowledge.reindex(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onDeleteDocument={async (id) => { await window.interviewCopilot.knowledge.delete(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} />
     : page === "project-library"
-      ? <ProjectLibraryManager profileId={profileId} memory={projectMemory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] }} stats={projectMemoryStats} facts={projectFacts} documents={knowledgeDocuments} analysisRuns={knowledgeAnalysisRuns} rebuilding={projectMemoryRunning} onUploadProject={(file, projectId, sourceRole) => uploadKnowledgeFile(file, "project", projectId, sourceRole)} onCreateProject={createProjectMemory} onRebuild={(projectId) => void rebuildProjectMemory(projectId)} onVerifyFact={verifyProjectFact} onReviewFact={reviewProjectFact} onOpenSources={() => setPage("knowledge")} agentMessages={chatMessages} agentSending={chatSending} agentProjectId={conversations.find((item) => item.id === activeConversationId)?.projectId} onSendAgent={sendProjectAgent} onRetryAgent={retryChatMessage} onOpenSettings={() => setPage("settings")} onApproveAgentAction={approveChatAction} />
+      ? <ProjectLibraryManager profileId={profileId} memory={projectMemory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] }} stats={projectMemoryStats} facts={projectFacts} staleFacts={staleProjectFacts} documents={knowledgeDocuments} analysisRuns={knowledgeAnalysisRuns} rebuilding={projectMemoryRunning} onUploadProject={(file, projectId, sourceRole) => uploadKnowledgeFile(file, "project", projectId, sourceRole)} onCreateProject={createProjectMemory} onRebuild={(projectId) => void rebuildProjectMemory(projectId)} onVerifyFact={verifyProjectFact} onReviewFact={reviewProjectFact} onResolveConflict={resolveProjectConflict} onUnassignSource={unassignProjectSource} onAddResponsibility={addProjectResponsibility} onOpenSources={() => setPage("knowledge")} agentMessages={chatMessages} agentSending={chatSending} agentProjectId={conversations.find((item) => item.id === activeConversationId)?.projectId} onSendAgent={sendProjectAgent} onRetryAgent={retryChatMessage} onOpenSettings={() => setPage("settings")} onApproveAgentAction={approveChatAction} />
       : page === "job-targets"
       ? <JobTargetsPage targets={jobTargets} onUploadJob={uploadJobDescription} onOpenProfile={() => setPage("profiles")} />
       : undefined;

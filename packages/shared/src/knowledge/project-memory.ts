@@ -1,5 +1,5 @@
 import { normalizeTechnicalTerms } from "../terminology";
-import { extractProjectFacts, ProjectFactConflictResolver, ProjectFactValidator } from "./project-facts";
+import { clampEvidenceLevel, extractProjectFacts, ProjectFactConflictResolver, ProjectFactValidator, systemEvidenceLevel } from "./project-facts";
 import { parseMarkdownProjectDocument } from "./project-document-parser";
 import { isUsableProjectTimeline } from "./project-timeline";
 import { resolveProjectIdentity } from "./project-identity";
@@ -49,7 +49,7 @@ function buildTechnicalPoints(project: ProjectMemoryProject, source: ProjectMemo
 }
 
 function buildProblems(project: ProjectMemoryProject, source: ProjectMemoryAnalysisInput["sources"][number]): ProjectProblem[] {
-  const facts = factsForSource(source, project.id, project.name);
+  const facts = factsForSource(source, project.id, project.name).filter((fact) => isFactEligible(fact));
   const challenges = facts.filter((item) => item.type === "challenge");
   return challenges.slice(0, 20).map((challenge, index) => {
     const sameSection = (fact: ProjectFact): boolean => Boolean(challenge.sectionPath?.join("/") && fact.sectionPath?.join("/") === challenge.sectionPath?.join("/"));
@@ -58,9 +58,12 @@ function buildProblems(project: ProjectMemoryProject, source: ProjectMemoryAnaly
   });
 }
 
-function buildInterviewQuestions(project: ProjectMemoryProject, points: ProjectTechnicalPoint[], problems: ProjectProblem[], facts: ProjectFact[]): ProjectInterviewQuestion[] {
+function buildInterviewQuestions(project: ProjectMemoryProject, points: ProjectTechnicalPoint[], _problems: ProjectProblem[], facts: ProjectFact[]): ProjectInterviewQuestion[] {
+  // The question bank is a derived view of eligible facts only. Never use the
+  // legacy project's free-form fields here: they may predate source tracking.
   facts = facts.filter((fact) => isFactEligible(fact));
   const factIds = (types: string[]) => facts.filter((item) => types.includes(item.type)).map((item) => item.id);
+  const factText = (types: string[], limit = 4): string[] => facts.filter((item) => types.includes(item.type)).slice(0, limit).map((item) => item.content.trim()).filter(Boolean);
   const factIdsForTopic = (topic: string) => facts.filter((item) => ["technology", "hardware", "software", "module"].includes(item.type)).filter((item) => {
     const factTitle = normalizeTechnicalTerms(item.title).toLowerCase();
     const normalizedTopic = normalizeTechnicalTerms(topic).toLowerCase();
@@ -68,13 +71,18 @@ function buildInterviewQuestions(project: ProjectMemoryProject, points: ProjectT
   }).map((item) => item.id);
   const result: ProjectInterviewQuestion[] = [];
   const designFactIds = factIds(["background", "goal", "responsibility", "architecture", "technical_decision"]);
-  if (designFactIds.length) result.push({ id: `${project.id}-question-design`, projectId: project.id, question: `你在${project.name}里面为什么这么设计？`, answerPoints: [`我的设计依据是${project.technologyStack.slice(0, 4).join("、") || "资料中记录的项目约束"}。`, project.description, `我个人负责的部分是${project.role}。`].filter(Boolean), keywords: unique([project.name, ...project.technologyStack, "设计", "取舍"]), sourceIds: project.sourceIds, factIds: designFactIds });
+  const designPoints = factText(["background", "goal", "architecture", "technical_decision", "responsibility"], 5);
+  if (designFactIds.length) result.push({ id: `${project.id}-question-design`, projectId: project.id, question: `你在${project.name}里面为什么这么设计？`, answerPoints: designPoints, keywords: unique([project.name, ...facts.filter((item) => ["technology", "hardware", "software"].includes(item.type)).map((item) => item.title).slice(0, 8), "设计", "取舍"]), sourceIds: unique(facts.filter((item) => designFactIds.includes(item.id)).flatMap((item) => item.sourceIds)), factIds: designFactIds });
   const problemFactIds = factIds(["challenge", "cause", "solution", "result"]);
-  if (problems.length && problemFactIds.length) result.push({ id: `${project.id}-question-problem`, projectId: project.id, question: `你在${project.name}中遇到什么问题，怎么解决？`, answerPoints: [problems[0].problem, `原因：${problems[0].cause}`, `后来通过${problems[0].solution}，结果：${problems[0].result}`], keywords: unique([project.name, ...problems[0].problem.split(/\s+/), "问题", "解决"]), sourceIds: problems[0].sourceIds, factIds: problemFactIds });
+  const problemPoints = factText(["challenge", "cause", "solution", "result"], 6);
+  if (problemFactIds.length && problemPoints.length) result.push({ id: `${project.id}-question-problem`, projectId: project.id, question: `你在${project.name}中遇到什么问题，怎么解决？`, answerPoints: problemPoints, keywords: unique([project.name, "问题", "原因", "解决", "结果"]), sourceIds: unique(facts.filter((item) => problemFactIds.includes(item.id)).flatMap((item) => item.sourceIds)), factIds: problemFactIds });
   const uniquePoints = points.filter((point, index, all) => all.findIndex((item) => item.topic.toLowerCase() === point.topic.toLowerCase()) === index);
   for (const point of uniquePoints.slice(0, 8)) {
     const pointFactIds = factIdsForTopic(point.topic);
-    if (pointFactIds.length) result.push({ id: `${project.id}-question-${slug(point.topic)}`, projectId: project.id, question: `你在${project.name}中具体怎么实现${point.topic}？`, answerPoints: [point.content, `这部分和${project.role}直接相关。`], keywords: unique([project.name, point.topic, ...project.technologyStack]), sourceIds: point.sourceIds, factIds: pointFactIds });
+    if (pointFactIds.length) {
+      const pointFacts = facts.filter((fact) => pointFactIds.includes(fact.id));
+      result.push({ id: `${project.id}-question-${slug(point.topic)}`, projectId: project.id, question: `你在${project.name}中具体怎么实现${point.topic}？`, answerPoints: pointFacts.map((fact) => fact.content).filter(Boolean), keywords: unique([project.name, point.topic, ...pointFacts.map((fact) => fact.title)]), sourceIds: unique(pointFacts.flatMap((fact) => fact.sourceIds)), factIds: pointFactIds });
+    }
   }
   return result;
 }
@@ -138,7 +146,13 @@ function parseCandidateFacts(raw: string, input: ProjectMemoryAnalysisInput): Pr
     if (!evidenceItems.length) continue;
     const firstSource = sources.get(evidenceItems[0]?.sourceId ?? "");
     if (!firstSource) continue;
-    const evidenceLevel = ["confirmed-user", "confirmed-code", "confirmed-document", "inferred", "pending", "risk", "not-measured"].includes(String(candidate.evidenceLevel)) ? candidate.evidenceLevel as ProjectFact["evidenceLevel"] : undefined;
+    const requestedEvidenceLevel = ["confirmed-user", "confirmed-code", "confirmed-document", "inferred", "pending", "risk", "not-measured"].includes(String(candidate.evidenceLevel)) ? candidate.evidenceLevel as ProjectFact["evidenceLevel"] : undefined;
+    const sourceEvidence = evidenceItems.map((item) => sources.get(item.sourceId)).filter((source): source is NonNullable<typeof source> => Boolean(source));
+    const systemLevel = sourceEvidence.map(systemEvidenceLevel).sort((a, b) => {
+      const rank = (level: NonNullable<ProjectFact["evidenceLevel"]>): number => ({ pending: 0, inferred: 0, risk: 0, "not-measured": 0, "confirmed-document": 1, "confirmed-code": 2, "confirmed-user": 3 }[level]);
+      return rank(b) - rank(a);
+    })[0] ?? "pending";
+    const evidenceLevel = clampEvidenceLevel(systemLevel, requestedEvidenceLevel);
     const candidateFact: ProjectFact = {
       id: candidate.id?.trim() || `${projectId}-llm-fact-${slug(candidate.title)}-${slug(candidate.content).slice(0, 18)}`,
       projectId,
@@ -151,7 +165,7 @@ function parseCandidateFacts(raw: string, input: ProjectMemoryAnalysisInput): Pr
       sourceIds: [...new Set(evidenceItems.map((item) => item.sourceId))],
       evidence: evidenceItems,
       scope: candidate.scope === "module" || candidate.scope === "problem" || candidate.scope === "architecture" ? candidate.scope : "project",
-      ...(evidenceLevel ? { evidenceLevel } : {}),
+      evidenceLevel,
       ownership: type === "responsibility" ? "unknown" : "project",
       status: "pending_review"
     };

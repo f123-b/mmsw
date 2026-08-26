@@ -44,13 +44,35 @@ function sourceAllowed(source: ProjectMemorySource): boolean {
   return source.kind === "project-document" || source.kind === "repository" || source.kind === "readme" || source.kind === "resume-section" || source.kind === "manual" || source.kind === "user-fact";
 }
 
-function inferredEvidenceLevel(source: ProjectMemorySource, explicit?: ProjectFactEvidenceLevel): ProjectFactEvidenceLevel {
-  if (explicit) return explicit;
-  if (source.sourceRole === "responsibility" || source.sourceRole === "resume") return "confirmed-user";
-  if (source.kind === "repository" || source.kind === "readme") return "confirmed-code";
-  if (source.kind === "project-document") return "confirmed-document";
-  if (source.kind === "resume-section" || source.kind === "user-fact" || source.kind === "manual") return "confirmed-user";
+const EVIDENCE_RANK: Record<ProjectFactEvidenceLevel, number> = {
+  "pending": 0,
+  "inferred": 0,
+  "risk": 0,
+  "not-measured": 0,
+  "confirmed-document": 1,
+  "confirmed-code": 2,
+  "confirmed-user": 3
+};
+
+/** The maximum evidence level a source can establish without a user decision. */
+export function systemEvidenceLevel(source: ProjectMemorySource): ProjectFactEvidenceLevel {
+  if (source.sourceRole === "responsibility" || source.sourceRole === "resume" || source.kind === "resume-section" || source.kind === "user-fact" || source.sourceType === "user_fact" || source.kind === "manual") return "confirmed-user";
+  if (source.sourceRole === "code" || source.kind === "repository" || source.kind === "readme") return "confirmed-code";
+  if (source.sourceRole === "test" || source.sourceRole === "architecture" || source.sourceRole === "overview" || source.kind === "project-document") return "confirmed-document";
   return "pending";
+}
+
+/** Clamp model-provided labels so an LLM can never upgrade source trust. */
+export function clampEvidenceLevel(sourceLevel: ProjectFactEvidenceLevel, requested?: ProjectFactEvidenceLevel): ProjectFactEvidenceLevel {
+  if (!requested) return sourceLevel;
+  if (requested === "confirmed-user" || requested === "confirmed-code" || requested === "confirmed-document") {
+    return EVIDENCE_RANK[requested] <= EVIDENCE_RANK[sourceLevel] ? requested : sourceLevel;
+  }
+  return requested;
+}
+
+function inferredEvidenceLevel(source: ProjectMemorySource, explicit?: ProjectFactEvidenceLevel): ProjectFactEvidenceLevel {
+  return clampEvidenceLevel(systemEvidenceLevel(source), explicit);
 }
 
 function sourceLines(text: string): string[] { return text.replace(/\r/g, "").split("\n"); }
@@ -360,7 +382,9 @@ export class ProjectFactConflictResolver {
       const scores = group.map((item) => item.sourceIds.reduce((total, sourceId) => total + trust(sourceById.get(sourceId) ?? { id: sourceId, kind: "manual", title: "", text: "" }), 0));
       const best = Math.max(...scores);
       const leaders = group.filter((_item, index) => scores[index] === best);
-      if (leaders.length === 1 && best >= 3) return [{ ...this.merge(leaders, "confirmed"), conflictStatus: "pending_review", conflictGroupId, status: "pending_review" }];
+      // Keep every candidate when values disagree. A higher quality source is
+      // a useful ranking signal, but it is not permission to silently discard
+      // a contradictory claim before the user resolves it.
       return group.map((item) => ({ ...item, conflictStatus: "conflicting" as const, conflictGroupId, status: "conflicting" as const }));
     });
   }

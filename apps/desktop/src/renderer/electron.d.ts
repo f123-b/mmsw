@@ -112,8 +112,9 @@ declare global {
       projectMemory: {
         get(profileId: string): Promise<ProjectMemorySnapshot | undefined>;
         stats(profileId: string): Promise<ProjectMemoryStats>;
-        listFacts(profileId: string, projectId?: string): Promise<ProjectFact[]>;
+        listFacts(profileId: string, projectId?: string, options?: { includeStale?: boolean; includeRejected?: boolean }): Promise<ProjectFact[]>;
         addCandidateFact(fact: ProjectFact): Promise<ProjectFact | undefined>;
+        addResponsibility(profileId: string, projectId: string, content: string): Promise<ProjectFact | undefined>;
         verifyFact(factId: string, verified: boolean): Promise<ProjectFact | undefined>;
         reviewFact(factId: string, status: "active" | "pending_review" | "rejected" | "conflicting"): Promise<ProjectFact | undefined>;
         resolveConflict(conflictGroupId: string, selectedFactId: string, keepBoth?: boolean): Promise<ProjectFact[]>;

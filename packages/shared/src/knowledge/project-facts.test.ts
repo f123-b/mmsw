@@ -23,7 +23,16 @@ describe("project facts", () => {
     expect(snapshot.projects).toEqual([]);
   });
 
-  it("keeps conflicting high-quality facts pending review", () => {
+  it("derives evidence level from source role and clamps explicit upgrades", () => {
+    const facts = extractProjectFacts({ projectId: "p", projectName: "P", sources: [
+      { id: "code", kind: "project-document", sourceRole: "code", title: "main.c", text: "技术栈：CAN" },
+      { id: "test", kind: "project-document", sourceRole: "test", title: "test.md", text: "性能指标：10ms" }
+    ] });
+    expect(facts.find((fact) => fact.sourceIds.includes("code"))?.evidenceLevel).toBe("confirmed-code");
+    expect(facts.find((fact) => fact.sourceIds.includes("test"))?.evidenceLevel).toBe("confirmed-document");
+  });
+
+  it("keeps every conflicting candidate for explicit review", () => {
     const resolver = new ProjectFactConflictResolver();
     const result = resolver.resolve([
       { id: "a", projectId: "p", type: "hardware", title: "MCU", content: "STM32F405", confidence: 0.9, verified: false, sourceIds: ["resume"], evidence: [{ sourceId: "resume", quote: "STM32F405" }] },
@@ -32,7 +41,8 @@ describe("project facts", () => {
       { id: "resume", kind: "resume-section", title: "Resume", text: "" },
       { id: "doc", kind: "project-document", title: "project.md", text: "" }
     ]);
-    expect(result).toHaveLength(1);
-    expect(result[0]?.status).toBe("pending_review");
+    expect(result).toHaveLength(2);
+    expect(result.every((fact) => fact.status === "conflicting" && fact.conflictStatus === "conflicting")).toBe(true);
+    expect(new Set(result.map((fact) => fact.conflictGroupId)).size).toBe(1);
   });
 });

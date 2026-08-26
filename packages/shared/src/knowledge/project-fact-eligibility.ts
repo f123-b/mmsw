@@ -4,7 +4,7 @@ import type { ProjectFact } from "./types";
 export function isFactEligible(fact: ProjectFact): boolean {
   if (fact.stale || fact.status !== "active" || !fact.evidence?.some((item) => item.quote.trim() && item.relation !== "refute")) return false;
   if (fact.conflictStatus === "conflicting" || fact.conflictStatus === "pending_review") return false;
-  if (fact.type === "responsibility") return fact.ownership === "self" && (fact.evidenceLevel === "confirmed-user" || fact.evidenceLevel === "confirmed-code" || fact.verified);
+  if (fact.type === "responsibility") return fact.ownership === "self" && (fact.evidenceLevel === "confirmed-user" || fact.verified);
   if (fact.type === "result" || fact.type === "metric") return fact.evidenceLevel === "confirmed-user" || fact.evidenceLevel === "confirmed-document";
   return fact.evidenceLevel === "confirmed-user" || fact.evidenceLevel === "confirmed-code" || fact.evidenceLevel === "confirmed-document" || fact.verified;
 }

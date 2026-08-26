@@ -113,7 +113,7 @@ export class ProjectMemoryService {
       } else if (assignment.sourceType === "resume_section" && profile.resume?.rawContent) {
         const sections = extractResumeProjectSections(profile.resume.rawContent, `resume-section-${profileId}`);
         const section = sections.find((item) => `${item.sourceId}:${item.locator}` === assignment.sourceId);
-        if (section) result.push({ id: assignment.sourceId, kind: "resume-section", sourceType: "resume_section", projectId: project.id, title: section.projectName, projectName: project.name, text: section.text, locator: section.locator, updatedAt: profile.updatedAt });
+        if (section) result.push({ id: assignment.sourceId, kind: "resume-section", sourceType: "resume_section", sourceRole: "resume", projectId: project.id, title: section.projectName, projectName: project.name, text: section.text, locator: section.locator, updatedAt: profile.updatedAt });
       }
     }
     return result.filter((source, index, all) => all.findIndex((item) => item.id === source.id) === index);

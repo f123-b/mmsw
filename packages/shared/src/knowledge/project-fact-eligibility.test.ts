@@ -7,12 +7,18 @@ const base: ProjectFact = { id: "f", projectId: "p", type: "technology", title: 
 describe("project fact eligibility", () => {
   it("allows evidenced code/document facts without a manual click", () => {
     expect(isFactEligible(base)).toBe(true);
+    expect(isFactEligible({ ...base, evidenceLevel: "confirmed-code" })).toBe(true);
+    expect(isFactEligible({ ...base, evidenceLevel: "confirmed-document" })).toBe(true);
+    expect(isFactEligible({ ...base, verified: true, evidenceLevel: "pending" })).toBe(true);
     expect(isFactEligible({ ...base, stale: true })).toBe(false);
+    expect(isFactEligible({ ...base, status: "conflicting", conflictStatus: "conflicting" })).toBe(false);
     expect(isFactEligible({ ...base, evidence: [{ sourceId: "s", quote: "CAN", relation: "refute" }] })).toBe(false);
   });
   it("requires self ownership for responsibility and evidence for results", () => {
     expect(isFactEligible({ ...base, type: "responsibility", evidenceLevel: "confirmed-user", ownership: "unknown" })).toBe(false);
     expect(isFactEligible({ ...base, type: "responsibility", evidenceLevel: "confirmed-user", ownership: "self" })).toBe(true);
+    expect(isFactEligible({ ...base, type: "responsibility", evidenceLevel: "confirmed-code", ownership: "self" })).toBe(false);
+    expect(isFactEligible({ ...base, type: "responsibility", evidenceLevel: "confirmed-user", ownership: "unknown" })).toBe(false);
     expect(isFactEligible({ ...base, type: "result", evidenceLevel: "pending" })).toBe(false);
     expect(factPriority({ ...base, type: "responsibility" })).toBe(100);
   });

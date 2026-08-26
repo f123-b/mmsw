@@ -170,8 +170,8 @@ describe("SQLite persistence", () => {
           { id: "fact-challenge", projectId: "memory-project-foc", type: "challenge", title: "低速抖动", content: "原因：量化噪声\n解决：速度观测器\n结果：运行稳定", confidence: 0.9, verified: false, sourceIds: ["doc-1"], evidence: [{ sourceId: "doc-1", quote: "低速抖动" }] }
         ]
       });
-      expect(snapshot.projects[0]?.technologyStack).toEqual(["FOC", "DMA"]);
-      expect(memory.stats("profile-1")).toEqual({ projects: 1, modules: 1, technicalPoints: 1, problems: 1, interviewQuestions: 1 });
+      expect(snapshot.projects[0]?.technologyStack).toEqual(["ADC"]);
+      expect(memory.stats("profile-1")).toMatchObject({ projects: 1, modules: 1, technicalPoints: 1, problems: 1, interviewQuestions: 1 });
       expect(memory.listFacts("profile-1").some((fact) => fact.type === "challenge" && fact.title === "低速抖动")).toBe(true);
       expect(memory.searchFacts("profile-1", "DMA 采样").some((item) => item.fact.title === "ADC" || item.fact.content.includes("DMA"))).toBe(true);
       const firstEmbeddingRun = await memory.embedFacts("profile-1", async () => [1, 0, 0], { model: "test-embedding", version: "project-facts-v1" });
@@ -226,6 +226,33 @@ describe("SQLite persistence", () => {
       expect(result.duplicatesMerged).toBe(1);
       expect(questionBank.listQuestions({ limit: 5000 })).toHaveLength(2);
     } finally { database.close(); }
+  });
+
+  it("repairs legacy trust defaults when migration 21 is applied", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "interview-copilot-migration-"));
+    const filePath = join(directory, "legacy.sqlite");
+    try {
+      const first = await SqliteDatabase.open(filePath);
+      const profile = new SqliteProfileRepository(first).save({ id: "profile-migration", name: "迁移", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
+      const memory = new SqliteProjectMemoryRepository(first);
+      memory.replaceSnapshot(profile.id, { projects: [{ id: "project-migration", profileId: profile.id, name: "Legacy", description: "", role: "", hardware: [], software: [], technologyStack: [], sourceIds: ["legacy-doc"], confidence: 1 }], modules: [], technicalPoints: [], problems: [], interviewQuestions: [], facts: [
+        { id: "legacy-code", projectId: "project-migration", type: "technology", title: "CAN", content: "CAN", confidence: 1, verified: false, sourceIds: ["legacy-doc"], evidence: [{ sourceId: "legacy-doc", quote: "CAN" }] },
+        { id: "legacy-role", projectId: "project-migration", type: "responsibility", title: "个人职责", content: "负责驱动", confidence: 1, verified: true, sourceIds: ["legacy-doc"], evidence: [{ sourceId: "legacy-doc", quote: "负责驱动" }] }
+      ] });
+      memory.assignSource({ projectId: "project-migration", sourceType: "repository", sourceId: "legacy-doc", relationship: "primary", sourceRole: "code", confidence: 1, verified: true });
+      first.run("UPDATE project_facts SET evidence_level='pending', conflict_status='pending_review', ownership='project' WHERE project_id='project-migration'");
+      first.run("UPDATE project_facts SET verified=1 WHERE id='legacy-role'");
+      first.run("DELETE FROM schema_migrations WHERE version=21");
+      first.flushNow();
+      first.close();
+      const second = await SqliteDatabase.open(filePath);
+      try {
+        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(21);
+        const repaired = new SqliteProjectMemoryRepository(second);
+        expect(repaired.getFact("legacy-code")).toMatchObject({ evidenceLevel: "confirmed-code", conflictStatus: "confirmed" });
+        expect(repaired.getFact("legacy-role")).toMatchObject({ evidenceLevel: "confirmed-user", ownership: "self" });
+      } finally { second.close(); }
+    } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
   it("round-trips rich project fact fields and evidence relations", async () => {

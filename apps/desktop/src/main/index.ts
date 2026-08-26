@@ -856,29 +856,20 @@ function chatContext(profileId?: string, userMessage = "", projectId?: string): 
     const pendingFacts = projectFacts.filter((fact) => fact.projectId === project.id && !isFactEligible(fact) && fact.status !== "rejected" && !fact.stale).slice(0, 30);
     const conflictingFacts = pendingFacts.filter((fact) => fact.status === "conflicting" || fact.conflictStatus === "conflicting");
     const completeness = profileId ? projectMemoryRepository?.getProjectCompleteness(profileId, project.id) : undefined;
-    const modules = snapshot?.modules.filter((item) => item.projectId === project.id).slice(0, 12) ?? [];
-    const problems = snapshot?.problems.filter((item) => item.projectId === project.id).slice(0, 8) ?? [];
     sections.push([
-      `当前项目：${project.name}`,
-      `项目 ID：${project.id}`,
-      `背景：${project.description || "未补充"}`,
-      `职责：${project.role || "未确认"}`,
-      `技术栈：${project.technologyStack.join("、") || "未确认"}`,
-      facts.length ? `AUTHORITATIVE（可用于第一人称回答）：\n${facts.map((fact) => `- [${fact.id}] [${fact.type}] ${fact.title}：${fact.content}`).join("\n")}` : "AUTHORITATIVE：无",
+      facts.length ? `AUTHORITATIVE（可用于第一人称回答，必须以这些事实为准）：\n${facts.map((fact) => `- [${fact.id}] [${fact.type}] [证据 ${fact.evidenceLevel ?? "pending"}] [归属 ${fact.ownership ?? "unknown"}] ${fact.title}：${fact.content}`).join("\n")}` : "AUTHORITATIVE：无",
       pendingFacts.length ? `REVIEW_REQUIRED（禁止直接当作事实）：\n${pendingFacts.map((fact) => `- [${fact.id}] [${fact.status === "conflicting" ? "冲突" : "待确认"}] [${fact.type}] ${fact.title}：${fact.content}${fact.evidence?.[0]?.quote ? `；证据：“${fact.evidence[0].quote.slice(0, 240)}”` : "；无引用证据"}`).join("\n")}` : "REVIEW_REQUIRED：无",
-      modules.length ? `模块：\n${modules.map((item) => `- ${item.moduleName}：${item.description}`).join("\n")}` : "模块：无",
-      problems.length ? `问题与解决：\n${problems.map((item) => `- ${item.problem}；原因：${item.cause}；方案：${item.solution}；结果：${item.result}`).join("\n")}` : "问题与解决：无",
-      completeness ? `DERIVED_VIEW（由 active facts 推导，仅供展示）：准备度 ${completeness.interviewReadinessScore}%；缺失类型 ${completeness.missingFactTypes.join("、") || "无"}；弱证据 ${completeness.weakEvidence.length} 项；冲突 ${conflictingFacts.length} 项。` : "DERIVED_VIEW：尚未计算"
+      completeness ? `DERIVED_VIEW（由 active facts 推导，仅供展示）：项目 ${project.name}（${project.id}）；准备度 ${completeness.interviewReadinessScore}%；缺失类型 ${completeness.missingFactTypes.join("、") || "无"}；弱证据 ${completeness.weakEvidence.length} 项；冲突 ${conflictingFacts.length} 项。` : `DERIVED_VIEW：项目 ${project.name}（${project.id}），尚未计算完整度`
     ].join("\n"));
     sources.push(...(project.sourceIds ?? []).slice(0, 8));
     const details = projectMemoryRepository?.listSourceDetails(project.id).slice(0, 5) ?? [];
-    if (details.length) sections.push(`项目来源（写入建议必须引用这里的 sourceId）：\n${details.map((source) => `- ${source.sourceId}：${source.title}`).join("\n")}`);
+    if (details.length) sections.push(`DERIVED_VIEW（来源索引，仅用于引用，不代表事实）：\n${details.map((source) => `- ${source.sourceId}：${source.title}`).join("\n")}`);
   } else if (plan.includeProjectMemory && snapshot?.projects.length) {
     const projectSummary = snapshot.projects.slice(0, 8).map((item) => {
       const result = profileId ? projectMemoryRepository?.getProjectCompleteness(profileId, item.id) : undefined;
       return `${item.name}：${result?.completeness ?? 0}%${result?.missingFactTypes.length ? `，缺少 ${result.missingFactTypes.join("、")}` : ""}`;
     }).join("；");
-    sections.push(`项目记忆：当前档案有 ${snapshot.projects.length} 个项目。${projectSummary ? `项目完整度摘要：${projectSummary}` : ""}\n用户未指定项目时，不要把不同项目的经历混写；请先澄清项目名称。`);
+    sections.push(`DERIVED_VIEW：当前档案有 ${snapshot.projects.length} 个项目。${projectSummary ? `项目完整度摘要：${projectSummary}` : ""}\n用户未指定项目时，不要把不同项目的经历混写；请先澄清项目名称。`);
   }
 
   if (plan.includeQuestionBank && questionBankRepository) {
@@ -1394,9 +1385,10 @@ function registerIpc(): void {
     return profileBuilderService.rebuild(profileId);
   });
   ipcMain.handle("project-memory:get", (_event, profileId: string) => projectMemoryService?.get(profileId));
-  ipcMain.handle("project-memory:stats", (_event, profileId: string) => projectMemoryRepository?.stats(profileId) ?? { projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0 });
-  ipcMain.handle("project-memory:list-facts", (_event, profileId: string, projectId?: string) => projectMemoryRepository?.listFacts(profileId, projectId) ?? []);
+  ipcMain.handle("project-memory:stats", (_event, profileId: string) => projectMemoryRepository?.stats(profileId) ?? { projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0, facts: 0, eligibleFacts: 0, reviewRequiredFacts: 0, conflictingFacts: 0, staleFacts: 0 });
+  ipcMain.handle("project-memory:list-facts", (_event, profileId: string, projectId?: string, options?: { includeStale?: boolean; includeRejected?: boolean }) => projectMemoryRepository?.listFacts(profileId, projectId, options) ?? []);
   ipcMain.handle("project-memory:add-candidate-fact", (_event, fact: import("@interview-copilot/shared").ProjectFact) => projectMemoryRepository?.addCandidateFact(fact));
+  ipcMain.handle("project-memory:add-responsibility", (_event, profileId: string, projectId: string, content: string) => projectMemoryRepository?.addUserResponsibility(profileId, projectId, content));
   ipcMain.handle("project-memory:verify-fact", (_event, factId: string, verified: boolean) => projectMemoryRepository?.setFactVerification(factId, verified));
   ipcMain.handle("project-memory:review-fact", (_event, factId: string, status: import("@interview-copilot/shared").ProjectFact["status"]) => projectMemoryRepository?.setFactReviewStatus(factId, status));
   ipcMain.handle("project-memory:resolve-conflict", (_event, conflictGroupId: string, selectedFactId: string, keepBoth?: boolean) => projectMemoryRepository?.resolveConflict(conflictGroupId, selectedFactId, Boolean(keepBoth)) ?? []);
@@ -1769,8 +1761,8 @@ if (hasSingleInstanceLock) {
       });
     }
     const relevantFactMatches = (useProjectContext || (factMatches[0]?.score ?? 0) >= 0.28) ? factMatches : [];
-    const verifiedFactExperience = relevantFactMatches.filter((hit) => hit.fact.verified)
-      .map((hit) => `结构化项目事实（${hit.fact.type}，已确认，来源 ${hit.fact.sourceIds.join("、")}）：\n${hit.fact.title}\n${hit.fact.content}`);
+    const trustedFactExperience = relevantFactMatches.filter((hit) => isFactEligible(hit.fact))
+      .map((hit) => `结构化项目事实（${hit.fact.type}，证据级别 ${hit.fact.evidenceLevel ?? "pending"}，归属 ${hit.fact.ownership ?? "unknown"}，来源 ${hit.fact.sourceIds.join("、")}）：\n${hit.fact.title}\n${hit.fact.content}`);
     const artifactExperience = retrieveProfileExperience(normalizedQuestion, profileBuilderService?.get(profileId)?.artifact).map((hit) => hit.text);
     // Profile Builder is asynchronous and may not exist yet on the first
     // question. Retrieve relevant resume excerpts directly so the first
@@ -1787,9 +1779,9 @@ if (hasSingleInstanceLock) {
     }
     const resumeExperience = new HybridRetriever().search(normalizedQuestion, resumeChunks, { topK: 2, candidateK: 8 }).map((hit) => `Resume（相关经历）：${hit.text}`);
     const experience = useProjectContext
-      ? verifiedFactExperience.slice(0, 6)
+      ? trustedFactExperience.slice(0, 6)
       : [...artifactExperience, ...resumeExperience].slice(0, 6);
-    const personalEvidence = useProjectContext ? verifiedFactExperience.slice(0, 6) : [];
+    const personalEvidence = useProjectContext ? trustedFactExperience.slice(0, 6) : [];
     const questionBankMatch = questionBankRepository?.matchQuestion(normalizedQuestion, {
       ...(useProjectContext || questionAnalysis.type === "behavioral" || questionAnalysis.type === "follow-up" ? {} : { scope: "global" }),
       profileId,
@@ -1824,7 +1816,7 @@ if (hasSingleInstanceLock) {
       metadata: retrievalDiagnostics,
       hits: [
         ...(questionBankMatch ? [{ resultType: "question" as const, resultId: questionBankMatch.question.id, score: questionBankMatch.score, verified: questionBankMatch.question.verified, preview: questionBankMatch.question.canonicalText, metadata: { scope: questionBankMatch.question.scope, type: questionBankMatch.question.type } }] : []),
-        ...factMatches.map((hit) => ({ resultType: "project-fact" as const, resultId: hit.fact.id, score: hit.finalScore, verified: hit.fact.verified, preview: `${hit.fact.title}: ${hit.fact.content}`, metadata: { projectId: hit.fact.projectId, type: hit.fact.type, lexicalScore: hit.lexicalScore, vectorScore: hit.vectorScore, typeScore: hit.typeScore, projectScore: hit.projectScore, verifiedBoost: hit.verifiedBoost, reason: hit.reason } })),
+        ...factMatches.map((hit) => ({ resultType: "project-fact" as const, resultId: hit.fact.id, score: hit.finalScore, verified: hit.fact.verified, preview: `${hit.fact.title}: ${hit.fact.content}`, metadata: { projectId: hit.fact.projectId, type: hit.fact.type, evidenceLevel: hit.fact.evidenceLevel ?? "pending", ownership: hit.fact.ownership ?? "unknown", eligible: isFactEligible(hit.fact), stale: Boolean(hit.fact.stale), conflictStatus: hit.fact.conflictStatus ?? "confirmed", lexicalScore: hit.lexicalScore, vectorScore: hit.vectorScore, typeScore: hit.typeScore, projectScore: hit.projectScore, verifiedBoost: hit.verifiedBoost, reason: hit.reason } })),
         ...jobMatches.map((hit) => ({ resultType: "job-requirement" as const, resultId: hit.requirement.id, score: hit.score, verified: hit.requirement.verified, preview: hit.requirement.requirement, metadata: { category: hit.requirement.category, importance: hit.requirement.importance } })),
         ...retrieved.slice(0, 3).map((hit) => ({ resultType: "document-chunk" as const, resultId: hit.id, score: hit.score, preview: hit.text, metadata: hit.metadata as unknown as Record<string, unknown> }))
       ]

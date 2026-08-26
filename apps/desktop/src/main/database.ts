@@ -50,7 +50,9 @@ import {
   type ProjectCompletenessResult,
   type QuestionBankCoverageResult,
   deriveProjectView,
-  isFactEligible
+  isFactEligible,
+  isFactReviewRequired,
+  normalizeTechnicalTerms
 } from "@interview-copilot/shared";
 import type { ChatCancelReason, ChatMessageStatus, ChatResponse, ChatStreamTelemetry } from "@interview-copilot/shared";
 
@@ -572,6 +574,45 @@ export class SqliteDatabase {
         );
         CREATE INDEX IF NOT EXISTS project_skills_skill_idx ON project_skills(skill_id, project_id);
       `],
+      [21, `
+        -- Repair rows created before the trust pipeline had explicit defaults.
+        UPDATE project_facts
+        SET conflict_status = CASE WHEN status = 'conflicting' THEN 'conflicting' ELSE 'confirmed' END
+        WHERE status <> 'rejected' AND conflict_group_id IS NULL;
+        UPDATE project_facts
+        SET conflict_status = 'conflicting'
+        WHERE status = 'conflicting' AND status <> 'rejected';
+        UPDATE project_facts
+        SET ownership = 'self', evidence_level = 'confirmed-user'
+        WHERE status <> 'rejected' AND verified = 1 AND fact_type = 'responsibility';
+        UPDATE project_facts
+        SET evidence_level = 'confirmed-user'
+        WHERE status <> 'rejected' AND verified = 1 AND evidence_level = 'pending' AND fact_type <> 'responsibility';
+        UPDATE project_facts
+        SET evidence_level = CASE
+          WHEN EXISTS (
+            SELECT 1 FROM project_fact_sources pfs
+            JOIN project_sources ps ON ps.project_id = project_facts.project_id AND ps.source_id = pfs.source_id
+            WHERE pfs.fact_id = project_facts.id AND COALESCE(pfs.quote, '') <> ''
+              AND (ps.source_role = 'code' OR ps.source_type = 'repository')
+          ) THEN 'confirmed-code'
+          WHEN EXISTS (
+            SELECT 1 FROM project_fact_sources pfs
+            JOIN project_sources ps ON ps.project_id = project_facts.project_id AND ps.source_id = pfs.source_id
+            WHERE pfs.fact_id = project_facts.id AND COALESCE(pfs.quote, '') <> ''
+              AND (ps.source_role IN ('responsibility', 'resume') OR ps.source_type = 'user_fact')
+          ) THEN 'confirmed-user'
+          WHEN EXISTS (
+            SELECT 1 FROM project_fact_sources pfs
+            JOIN project_sources ps ON ps.project_id = project_facts.project_id AND ps.source_id = pfs.source_id
+            WHERE pfs.fact_id = project_facts.id AND COALESCE(pfs.quote, '') <> ''
+              AND (ps.source_role IN ('overview', 'architecture', 'test') OR ps.source_type = 'document')
+          ) THEN 'confirmed-document'
+          ELSE evidence_level
+        END
+        WHERE status <> 'rejected' AND verified = 0 AND evidence_level = 'pending'
+          AND EXISTS (SELECT 1 FROM project_fact_sources pfs WHERE pfs.fact_id = project_facts.id AND COALESCE(pfs.quote, '') <> '');
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -779,6 +820,11 @@ export interface ProjectMemoryStats {
   technicalPoints: number;
   problems: number;
   interviewQuestions: number;
+  facts: number;
+  eligibleFacts: number;
+  reviewRequiredFacts: number;
+  conflictingFacts: number;
+  staleFacts: number;
 }
 
 function jsonArray<T = string>(value: unknown): T[] {
@@ -955,18 +1001,6 @@ export class SqliteProjectMemoryRepository {
       for (const item of evidence) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)", [fact.id, item.sourceId, item.quote || null, item.locator ?? null, item.relation ?? "support", now]);
     };
     if (snapshot.facts?.length) for (const item of snapshot.facts) saveFact({ ...item, profileId, status: item.status ?? "active", createdAt: item.createdAt ?? now, updatedAt: now });
-    // Legacy snapshots carried duplicated project fields. Convert those values
-    // into evidenced facts once so the derived Project View has one source of truth.
-    if (snapshot.facts?.length) for (const project of snapshot.projects) {
-      const legacyFact = (type: ProjectFactType, title: string, content: string): void => {
-        if (!content.trim()) return;
-        const factId = `${project.id}-legacy-${type}-${slugDatabase(title)}`;
-        saveFact({ id: factId, projectId: project.id, profileId, type, title, content, confidence: project.confidence, verified: false, sourceIds: project.sourceIds, evidence: project.sourceIds.map((sourceId) => ({ sourceId, quote: content })), evidenceLevel: "confirmed-document", ownership: "project", status: "active", createdAt: now, updatedAt: now });
-      };
-      for (const item of project.technologyStack) legacyFact("technology", item, item);
-      for (const item of project.hardware) legacyFact("hardware", item, item);
-      for (const item of project.software) legacyFact("software", item, item);
-    }
     else {
       for (const project of snapshot.projects) {
         saveFact({ id: `${project.id}-fact-background`, projectId: project.id, profileId, type: "background", title: "项目背景", content: project.description, confidence: project.confidence, verified: false, sourceIds: project.sourceIds, createdAt: now, updatedAt: now });
@@ -989,10 +1023,14 @@ export class SqliteProjectMemoryRepository {
     return this.getSnapshot(profileId);
   }
 
-  listFacts(profileId: string, projectId?: string): ProjectFact[] {
-      const rows = projectId
-      ? this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.evidence_level AS evidenceLevel, f.scope, f.section_path_json AS sectionPathJson, f.subtype, f.conflict_status AS conflictStatus, f.conflict_group_id AS conflictGroupId, f.ownership, f.stale, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.project_id = ? AND f.status IN ('active', 'pending_review', 'conflicting', 'rejected') ORDER BY CASE WHEN f.conflict_status IN ('conflicting','pending_review') THEN 0 ELSE 1 END, f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId, projectId])
-      : this.database.all<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.evidence_level AS evidenceLevel, f.scope, f.section_path_json AS sectionPathJson, f.subtype, f.conflict_status AS conflictStatus, f.conflict_group_id AS conflictGroupId, f.ownership, f.stale, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE p.profile_id = ? AND f.status IN ('active', 'pending_review', 'conflicting', 'rejected') ORDER BY CASE WHEN f.conflict_status IN ('conflicting','pending_review') THEN 0 ELSE 1 END, f.verified DESC, f.confidence DESC, f.updated_at DESC", [profileId]);
+  listFacts(profileId: string, projectId?: string, options: { includeStale?: boolean; includeRejected?: boolean } = {}): ProjectFact[] {
+    const conditions = ["p.profile_id = ?"];
+    const params: Array<string | number> = [profileId];
+    if (projectId) { conditions.push("f.project_id = ?"); params.push(projectId); }
+    if (!options.includeStale) conditions.push("COALESCE(f.stale, 0) = 0");
+    if (!options.includeRejected) conditions.push("f.status <> 'rejected'");
+    else conditions.push("f.status IN ('active', 'pending_review', 'conflicting', 'rejected')");
+    const rows = this.database.all<Record<string, unknown>>(`SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.evidence_level AS evidenceLevel, f.scope, f.section_path_json AS sectionPathJson, f.subtype, f.conflict_status AS conflictStatus, f.conflict_group_id AS conflictGroupId, f.ownership, f.stale, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE ${conditions.join(" AND ")} ORDER BY CASE WHEN f.conflict_status IN ('conflicting','pending_review') THEN 0 ELSE 1 END, f.verified DESC, f.confidence DESC, f.updated_at DESC`, params);
     return rows.map((row) => this.hydrateFact(row));
   }
 
@@ -1010,17 +1048,38 @@ export class SqliteProjectMemoryRepository {
     return this.getFact(fact.id) as ProjectFact;
   }
 
+  /** Add an explicitly user-authored responsibility fact. */
+  addUserResponsibility(profileId: string, projectId: string, content: string, now = Date.now()): ProjectFact {
+    const value = content.trim();
+    if (!value) throw new Error("PROJECT_RESPONSIBILITY_REQUIRED");
+    const project = this.getProject(projectId);
+    if (!project || project.profileId !== profileId) throw new Error("PROJECT_NOT_FOUND");
+    const sourceId = id("user-fact", now);
+    this.sources.assign({ projectId, sourceType: "user_fact", sourceId, relationship: "supporting", sourceRole: "responsibility", assignmentMethod: "manual", confidence: 1, verified: true }, now);
+    const factId = `${projectId}-responsibility-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    const fact = this.addCandidateFact({ id: factId, projectId, profileId, type: "responsibility", factType: "responsibility", title: "个人职责", content: value.slice(0, 1_000), confidence: 1, verified: false, sourceIds: [sourceId], evidence: [{ sourceId, quote: value.slice(0, 800), relation: "support" }], scope: "project", evidenceLevel: "confirmed-user", ownership: "self", status: "pending_review" }, now);
+    return this.setFactReviewStatus(fact.id, "active", now) as ProjectFact;
+  }
+
   setFactVerification(factId: string, verified: boolean, now = Date.now()): ProjectFact | undefined {
-    if (!this.getFact(factId)) return undefined;
+    const before = this.getFact(factId);
+    if (!before) return undefined;
     this.database.run("UPDATE project_facts SET verified = ?, ownership = CASE WHEN ? = 1 AND fact_type = 'responsibility' THEN 'self' ELSE ownership END, status = CASE WHEN ? = 1 AND status = 'pending_review' THEN 'active' ELSE status END, updated_at = ? WHERE id = ?", [verified ? 1 : 0, verified ? 1 : 0, verified ? 1 : 0, now, factId]);
-    this.database.run("UPDATE question_bank_questions SET stale = 1, updated_at = ? WHERE id IN (SELECT question_id FROM question_bank_question_facts WHERE fact_id = ?)", [now, factId]);
-    this.database.run("UPDATE question_bank_answer_cards SET stale = 1, updated_at = ? WHERE question_id IN (SELECT question_id FROM question_bank_question_facts WHERE fact_id = ?)", [now, factId]);
+    const after = this.getFact(factId);
+    // A manual verification toggle only invalidates derived answers when the
+    // fact actually crosses the eligibility boundary.
+    if (after && isFactEligible(before) !== isFactEligible(after)) {
+      this.database.run("UPDATE question_bank_questions SET stale = 1, updated_at = ? WHERE id IN (SELECT question_id FROM question_bank_question_facts WHERE fact_id = ?)", [now, factId]);
+      this.database.run("UPDATE question_bank_answer_cards SET stale = 1, updated_at = ? WHERE question_id IN (SELECT question_id FROM question_bank_question_facts WHERE fact_id = ?)", [now, factId]);
+    }
     this.database.flushNow();
     return this.getFact(factId);
   }
 
-  searchFacts(profileId: string, query: string, options: { projectId?: string; detectedProjectId?: string; queryEmbedding?: number[]; questionType?: string; limit?: number; minScore?: number } = {}): ProjectFactMatch[] {
-    const hits = new ProjectFactMemoryRetriever().search(query, this.listFacts(profileId).filter((fact) => isFactEligible(fact) || fact.status === "pending_review"), {
+  searchFacts(profileId: string, query: string, options: { projectId?: string; detectedProjectId?: string; queryEmbedding?: number[]; questionType?: string; limit?: number; minScore?: number; mode?: "answer" | "review" } = {}): ProjectFactMatch[] {
+    const mode = options.mode ?? "answer";
+    const candidates = this.listFacts(profileId, undefined, { includeStale: mode === "review", includeRejected: false }).filter((fact) => mode === "answer" ? isFactEligible(fact) : isFactReviewRequired(fact));
+    const hits = new ProjectFactMemoryRetriever().search(query, candidates, {
       selectedProjectId: options.projectId,
       detectedProjectId: options.detectedProjectId,
       queryEmbedding: options.queryEmbedding,
@@ -1033,7 +1092,7 @@ export class SqliteProjectMemoryRepository {
 
   setFactReviewStatus(factId: string, status: ProjectFact["status"], now = Date.now()): ProjectFact | undefined {
     if (!this.getFact(factId) || !status) return undefined;
-    this.database.run("UPDATE project_facts SET status = ?, ownership = CASE WHEN ? = 'active' AND fact_type = 'responsibility' THEN 'self' ELSE ownership END, evidence_level = CASE WHEN ? = 'active' AND fact_type = 'responsibility' THEN 'confirmed-user' ELSE evidence_level END, updated_at = ? WHERE id = ?", [status, status, status, now, factId]);
+    this.database.run("UPDATE project_facts SET status = ?, ownership = CASE WHEN ? = 'active' AND fact_type = 'responsibility' THEN 'self' ELSE ownership END, evidence_level = CASE WHEN ? = 'active' AND fact_type = 'responsibility' THEN 'confirmed-user' ELSE evidence_level END, conflict_status = CASE WHEN ? = 'active' AND conflict_status = 'pending_review' THEN 'confirmed' ELSE conflict_status END, updated_at = ? WHERE id = ?", [status, status, status, status, now, factId]);
     this.database.run("UPDATE question_bank_questions SET stale = 1, updated_at = ? WHERE id IN (SELECT question_id FROM question_bank_question_facts WHERE fact_id = ?)", [now, factId]);
     this.database.run("UPDATE question_bank_answer_cards SET stale = 1, updated_at = ? WHERE question_id IN (SELECT question_id FROM question_bank_question_facts WHERE fact_id = ?)", [now, factId]);
     this.database.flushNow();
@@ -1059,7 +1118,14 @@ export class SqliteProjectMemoryRepository {
 
   private syncProjectSkills(profileId: string, projectId: string, facts: ProjectFact[], now: number): void {
     for (const fact of facts.filter((item) => item.projectId === projectId && ["technology", "hardware", "software"].includes(item.type) && item.status === "active")) {
-      const skill = this.database.first<{ id: string }>("SELECT id FROM skills WHERE profile_id = ? AND lower(name) = lower(?) LIMIT 1", [profileId, fact.title]);
+      const canonical = (value: string): string => {
+        const normalized = normalizeTechnicalTerms(value).toLowerCase().replace(/[\s._-]+/g, "");
+        if (/^stm32f?\d/.test(normalized) || normalized === "stm32") return "stm32";
+        if (/^(freertos|rtos)$/.test(normalized)) return "rtos";
+        if (/^(c\+\+|cpp|cxx)$/.test(normalized)) return "cpp";
+        return normalized;
+      };
+      const skill = this.database.all<{ id: string; name: string }>("SELECT id, name FROM skills WHERE profile_id = ?", [profileId]).find((item) => canonical(item.name) === canonical(fact.title));
       if (skill) this.database.run("INSERT INTO project_skills(project_id, skill_id, source_fact_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project_id, skill_id) DO UPDATE SET source_fact_id=excluded.source_fact_id, updated_at=excluded.updated_at", [projectId, skill.id, fact.id, now, now]);
     }
   }
@@ -1117,7 +1183,9 @@ export class SqliteProjectMemoryRepository {
 
   stats(profileId: string): ProjectMemoryStats {
     const snapshot = this.getSnapshot(profileId);
-    return { projects: snapshot.projects.length, modules: snapshot.modules.length, technicalPoints: snapshot.technicalPoints.length, problems: snapshot.problems.length, interviewQuestions: snapshot.interviewQuestions.length };
+    const allFacts = this.listFacts(profileId, undefined, { includeStale: true, includeRejected: true });
+    const currentFacts = allFacts.filter((fact) => !fact.stale && fact.status !== "rejected");
+    return { projects: snapshot.projects.length, modules: snapshot.modules.length, technicalPoints: snapshot.technicalPoints.length, problems: snapshot.problems.length, interviewQuestions: snapshot.interviewQuestions.length, facts: currentFacts.length, eligibleFacts: currentFacts.filter(isFactEligible).length, reviewRequiredFacts: currentFacts.filter(isFactReviewRequired).length, conflictingFacts: currentFacts.filter((fact) => fact.conflictStatus === "conflicting" || fact.status === "conflicting").length, staleFacts: allFacts.filter((fact) => fact.stale).length };
   }
 }
 
