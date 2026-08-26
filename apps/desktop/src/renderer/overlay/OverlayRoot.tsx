@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type JSX } from "react";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { HUDLayout, HUDState, OverlayMode } from "../../main/overlay-manager";
+import { DEFAULT_OVERLAY_PREFERENCES, type OverlayPreferences } from "../../shared/overlay-preferences";
 
 type HudState = "IDLE" | "LISTENING" | "QUESTION_DETECTED" | "GENERATING" | "ANSWER_READY" | "PAUSED" | "ERROR";
 type PanelKey = "toolbar" | "transcript" | "answer" | "shortcuts";
@@ -22,11 +23,11 @@ interface OverlayRootProps {
   question?: { text: string };
   answerText: string;
   answerStreaming: boolean;
+  answerHistory: Array<{ answerId: string; question: string; text: string }>;
   remoteTranscript: TranscriptSnapshot;
   micTranscript: TranscriptSnapshot;
   onToggleMode: () => void;
   onToggleAutomation: () => Promise<void> | void;
-  onAnswerQuestion: (text: string) => Promise<void>;
   onAnswerLatest: () => Promise<void>;
   onAnswerScreenshot: () => Promise<void>;
   onEndInterview: () => Promise<void>;
@@ -133,7 +134,9 @@ function DraggableResizablePanel({ panel, layout, onChange, className, children 
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", end, { once: true });
   };
-  const panelStyle = { left: layout.x, top: layout.y, width: layout.width, height: layout.height, opacity: layout.opacity, display: layout.visible ? undefined : "none", "--hud-panel-width": `${layout.width}px` } as CSSProperties;
+  // Panel transparency belongs to the background surface, never to the
+  // container itself; parent opacity also fades text and harms readability.
+  const panelStyle = { left: layout.x, top: layout.y, width: layout.width, height: layout.height, display: layout.visible ? undefined : "none", "--hud-panel-width": `${layout.width}px` } as CSSProperties;
   return <div className={`floating-panel ${className} ${dragging ? "dragging" : ""}`} style={panelStyle} onPointerDown={beginDrag}>{children}{!layout.locked && <div className="resize-handle" aria-label="调整大小" onPointerDown={beginResize} />}</div>;
 }
 
@@ -169,7 +172,7 @@ const HUD_LABELS: Record<HudState, { label: string; icon: string; tone: string }
   ERROR: { label: "ASR / runtime error", icon: "!", tone: "error" }
 };
 
-function TranscriptTimeline({ remoteSnapshot, micSnapshot, currentQuestion }: { remoteSnapshot: TranscriptSnapshot; micSnapshot: TranscriptSnapshot; currentQuestion?: string }): JSX.Element {
+function TranscriptTimeline({ remoteSnapshot, micSnapshot, currentQuestion, showTimestamps }: { remoteSnapshot: TranscriptSnapshot; micSnapshot: TranscriptSnapshot; currentQuestion?: string; showTimestamps: boolean }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [followLatest, setFollowLatest] = useState(true);
   useEffect(() => { if (followLatest && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [remoteSnapshot, micSnapshot, followLatest]);
@@ -179,7 +182,13 @@ function TranscriptTimeline({ remoteSnapshot, micSnapshot, currentQuestion }: { 
     remoteSnapshot.partial ? { ...remoteSnapshot.partial, speaker: "interviewer" as const } : undefined,
     micSnapshot.partial ? { ...micSnapshot.partial, speaker: "self" as const } : undefined
   ].filter((segment): segment is NonNullable<typeof segment> => Boolean(segment));
-  return <div className="transcript-wrap"><div className="transcript-scroll" ref={scrollRef} onScroll={onScroll}>{segments.map((segment, index) => <article className={`transcript-line ${segment.speaker} ${currentQuestion && segment.text === currentQuestion ? "current-bubble" : index === segments.length - 1 ? "latest-bubble" : ""}`} key={`${segment.id ?? segment.startMs}-${segment.speaker}`}><div className="transcript-line-meta"><span className="transcript-speaker">{segment.speaker === "interviewer" ? "面试官" : "我"}</span><time>{formatTranscriptTimestamp(segment.startMs)}</time></div><p>{segment.text}</p></article>)}{partials.map((partial) => <article className={`transcript-line ${partial.speaker} partial-bubble`} key={`partial-${partial.speaker}`}><div className="transcript-line-meta"><span className="transcript-speaker">{partial.speaker === "interviewer" ? "面试官" : "我"}</span><time>识别中</time></div><p>{partial.text}</p></article>)}</div>{!followLatest && <button className="latest-jump" onClick={() => { setFollowLatest(true); if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }}>↓ 最新</button>}</div>;
+  return <div className="transcript-wrap"><div className="transcript-scroll" ref={scrollRef} onScroll={onScroll}>{segments.map((segment, index) => <article className={`transcript-line ${segment.speaker} ${currentQuestion && segment.text === currentQuestion ? "current-bubble" : index === segments.length - 1 ? "latest-bubble" : ""}`} key={`${segment.id ?? segment.startMs}-${segment.speaker}`}><div className="transcript-line-meta"><span className="transcript-speaker">{segment.speaker === "interviewer" ? "面试官" : "我"}</span>{showTimestamps && <time>{formatTranscriptTimestamp(segment.startMs)}</time>}</div><p>{segment.text}</p></article>)}{partials.map((partial) => <article className={`transcript-line ${partial.speaker} partial-bubble`} key={`partial-${partial.speaker}`}><div className="transcript-line-meta"><span className="transcript-speaker">{partial.speaker === "interviewer" ? "面试官" : "我"}</span>{showTimestamps && <time>识别中</time>}</div><p>{partial.text}</p></article>)}</div>{!followLatest && <button className="latest-jump" onClick={() => { setFollowLatest(true); if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }}>↓ 最新</button>}</div>;
+}
+
+function backgroundWithOpacity(color: string, opacity: number): string {
+  const match = color.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  if (!match) return `rgba(29,48,74,${opacity})`;
+  return `rgba(${parseInt(match[1], 16)},${parseInt(match[2], 16)},${parseInt(match[3], 16)},${opacity})`;
 }
 
 function AnswerCore({ text }: { text: string }): JSX.Element {
@@ -199,10 +208,12 @@ function AnswerCore({ text }: { text: string }): JSX.Element {
   return <>{blocks}</>;
 }
 
-function AnswerSummary({ answerText, answerStreaming }: { answerText: string; answerStreaming: boolean }): JSX.Element {
+function AnswerSummary({ answerText, answerStreaming, answerHistory }: { answerText: string; answerStreaming: boolean; answerHistory: Array<{ answerId: string; question: string; text: string }> }): JSX.Element {
   const keywords = useMemo(() => [...new Set((answerText.match(/[A-Za-z][A-Za-z0-9+#.-]{2,}|[\u4e00-\u9fff]{2,}/g) ?? []).slice(0, 6))], [answerText]);
   const hasAnswer = Boolean(answerText.trim());
-  return <div className="answer-summary">{hasAnswer && <div className="answer-summary-label">CORE ANSWER</div>}<div className="answer-core"><AnswerCore text={answerText} />{answerStreaming && <span className="answer-cursor">▌</span>}</div>{hasAnswer && keywords.length > 0 && <><div className="answer-summary-label">KEYWORDS</div><div className="answer-keywords">{keywords.map((keyword) => <span key={keyword}>{keyword}</span>)}</div></>}</div>;
+  const historyWithoutCurrent = answerHistory.at(-1)?.text === answerText ? answerHistory.slice(0, -1) : answerHistory;
+  const previousAnswers = historyWithoutCurrent.slice(-5).reverse();
+  return <div className="answer-summary">{hasAnswer && <div className="answer-summary-label">CORE ANSWER</div>}<div className="answer-core"><AnswerCore text={answerText} />{answerStreaming && <span className="answer-cursor">▌</span>}</div>{hasAnswer && keywords.length > 0 && <><div className="answer-summary-label">KEYWORDS</div><div className="answer-keywords">{keywords.map((keyword) => <span key={keyword}>{keyword}</span>)}</div></>}{previousAnswers.length > 0 && <details className="answer-history"><summary>本场已回答 {previousAnswers.length} 题</summary>{previousAnswers.map((entry) => <article key={entry.answerId}><strong>{entry.question}</strong><AnswerCore text={entry.text} /></article>)}</details>}</div>;
 }
 
 function ToolbarIcon({ name }: { name: "eye" | "eye-off" | "glasses" | "keyboard" | "share" | "share-off" | "stop" | "menu" | "waveform" | "transcript" | "panel-left" | "panel-right" }): JSX.Element {
@@ -224,15 +235,15 @@ function EndInterviewDialog({ writtenTestMode, onCancel, onConfirm }: { writtenT
 }
 
 function ShortcutPopover({ writtenTestMode, onAnswerLatest, onAnswerScreenshot, onHideAll, onToggleMode, onToggleAutomation, onResetLayout, onEndInterview, onClose }: { writtenTestMode: boolean; onAnswerLatest: () => Promise<void>; onAnswerScreenshot: () => Promise<void>; onHideAll: () => void; onToggleMode: () => void; onToggleAutomation: () => void; onResetLayout: () => void; onEndInterview: () => void; onClose: () => void }): JSX.Element {
-  return <section className="shortcut-card" role="dialog" aria-label="快捷操作"><header><div><span className="panel-kicker">QUICK ACTIONS</span><strong>快捷操作</strong></div><button onClick={onClose} aria-label="关闭快捷操作">×</button></header><div className="shortcut-actions">{!writtenTestMode && <button onClick={() => void onAnswerLatest()}><span>回答最新问题</span><kbd>Ctrl + Alt + A</kbd></button>}<button onClick={() => void onAnswerScreenshot()}><span>截图识别并回答</span><kbd>Ctrl + Alt + S</kbd></button><button onClick={onHideAll}><span>显示 / 隐藏全部悬浮窗</span><kbd>Ctrl + Alt + D</kbd></button><button onClick={onClose}><span>显示 / 隐藏快捷操作</span><kbd>Ctrl + Alt + K</kbd></button><button onClick={onEndInterview}><span>{writtenTestMode ? "结束笔试" : "结束面试"}</span><kbd>Ctrl + Alt + Q</kbd></button>{!writtenTestMode && <button onClick={onToggleAutomation}><span>自动 / 手动回答</span><kbd>Ctrl + Alt + X</kbd></button>}<button onClick={onToggleMode}><span>交互 / 穿透模式</span><kbd>Ctrl + Alt + P</kbd></button>{!writtenTestMode && <><div className="shortcut-static"><span>切换面试官记录</span><kbd>Ctrl + Alt + 1–8</kbd></div><div className="shortcut-static"><span>滚动回答面板</span><kbd>Ctrl + Alt + ↑↓</kbd></div></>}<button onClick={onResetLayout}><span>恢复默认布局</span></button></div></section>;
+  return <section className="shortcut-card" role="dialog" aria-label="快捷操作"><header><div><span className="panel-kicker">QUICK ACTIONS</span><strong>快捷操作</strong></div><button onClick={onClose} aria-label="关闭快捷操作">×</button></header><div className="shortcut-actions">{!writtenTestMode && <button onClick={() => void onAnswerLatest()}><span>回答最新问题</span><kbd>Ctrl + Alt + A</kbd></button>}<button onClick={() => void onAnswerScreenshot()}><span>截图识别并回答</span><kbd>Ctrl + Alt + S</kbd></button>{!writtenTestMode && <div className="shortcut-static"><span>截图识别并回答（仅手动模式）</span><kbd>鼠标中键</kbd></div>}<button onClick={onHideAll}><span>显示 / 隐藏全部悬浮窗</span><kbd>Ctrl + Alt + D</kbd></button><button onClick={onClose}><span>显示 / 隐藏快捷操作</span><kbd>Ctrl + Alt + K</kbd></button><button onClick={onEndInterview}><span>{writtenTestMode ? "结束笔试" : "结束面试"}</span><kbd>Ctrl + Alt + Q</kbd></button>{!writtenTestMode && <button onClick={onToggleAutomation}><span>自动 / 手动回答</span><kbd>Ctrl + Alt + X</kbd></button>}<button onClick={onToggleMode}><span>交互 / 穿透模式</span><kbd>Ctrl + Alt + P</kbd></button>{!writtenTestMode && <><div className="shortcut-static"><span>切换面试官记录</span><kbd>Ctrl + Alt + 1–8</kbd></div><div className="shortcut-static"><span>滚动回答面板</span><kbd>Ctrl + Alt + ↑↓</kbd></div></>}<button onClick={onResetLayout}><span>恢复默认布局</span></button></div></section>;
 }
 
 export function OverlayRoot(props: OverlayRootProps): JSX.Element {
-  const { state, sessionState, realtimeState, operationMode, overlayMode, hudState: sharedHUDState, automationMode, question, answerText, answerStreaming, remoteTranscript, micTranscript, onToggleMode, onToggleAutomation, onAnswerQuestion, onAnswerLatest, onAnswerScreenshot, onEndInterview, onHideAll, onTogglePanels, onToggleTranscript, onToggleAnswer, onToggleShortcuts, captureProtectionEnabled, captureProtectionSupported, captureProtectionOsFlagApplied, captureProtectionDisplayVerified, captureProtectionLastError, captureTest } = props;
+  const { state, sessionState, realtimeState, operationMode, overlayMode, hudState: sharedHUDState, automationMode, question, answerText, answerStreaming, answerHistory, remoteTranscript, micTranscript, onToggleMode, onToggleAutomation, onAnswerLatest, onAnswerScreenshot, onEndInterview, onHideAll, onTogglePanels, onToggleTranscript, onToggleAnswer, onToggleShortcuts, captureProtectionEnabled, captureProtectionSupported, captureProtectionOsFlagApplied, captureProtectionDisplayVerified, captureProtectionLastError, captureTest } = props;
   const writtenTestMode = operationMode === "WRITTEN_TEST";
   const [layout, updateLayout, applyMainLayout] = useOverlayLayout();
-  const [answerDraft, setAnswerDraft] = useState("");
   const [answerSending, setAnswerSending] = useState(false);
+  const [preferences, setPreferences] = useState<OverlayPreferences>(DEFAULT_OVERLAY_PREFERENCES);
   const [endConfirmOpen, setEndConfirmOpen] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [runtimeProtection, setRuntimeProtection] = useState<{ requested: boolean; osFlagApplied: boolean; displayCaptureVerified: boolean | null; lastError?: string }>();
@@ -251,10 +262,12 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
     let disposed = false;
     void window.interviewCopilot.overlay.getCaptureProtection().then((next) => { if (!disposed) setRuntimeProtection(next); }).catch(() => undefined);
     void window.interviewCopilot.overlay.getLayout().then((next) => { if (!disposed && next) applyMainLayout(next); }).catch(() => undefined);
+    void window.interviewCopilot.overlay.getPreferences().then((next) => { if (!disposed && next) setPreferences(next); }).catch(() => undefined);
     const unsubscribeProtection = window.interviewCopilot.events.onOverlayCaptureProtection((next) => { if (!disposed) setRuntimeProtection(next); });
     const unsubscribeLayout = window.interviewCopilot.events.onOverlayLayout((next) => { if (!disposed) applyMainLayout(next); });
+    const unsubscribePreferences = window.interviewCopilot.events.onOverlayPreferences((next) => { if (!disposed) setPreferences(next); });
     const unsubscribeCommands = window.interviewCopilot.events.onOverlayCommand((command: OverlayCommand) => { if (command === "confirm-end") setEndConfirmOpen(true); });
-    return () => { disposed = true; unsubscribeProtection(); unsubscribeLayout(); unsubscribeCommands(); };
+    return () => { disposed = true; unsubscribeProtection(); unsubscribeLayout(); unsubscribePreferences(); unsubscribeCommands(); };
   }, [applyMainLayout]);
   const status = hudState({ state, sessionState, realtimeState, operationMode, question, answerText, answerStreaming });
   const statusMeta = HUD_LABELS[status];
@@ -266,7 +279,6 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   const protectionTone = !effectiveProtectionEnabled ? "off" : effectiveDisplayVerified === true ? "verified" : effectiveOsFlagApplied === false || effectiveLastError ? "failed" : "requested";
   const elapsedLabel = `${String(Math.floor(elapsedSeconds / 60)).padStart(2, "0")}:${String(elapsedSeconds % 60).padStart(2, "0")}`;
   const listeningLabel = !sharedHUDState.running ? "未开始" : writtenTestMode ? status === "ANSWER_READY" ? "回答已就绪" : status === "GENERATING" ? "正在生成" : "按 Ctrl+Alt+S 截图回答" : status === "ANSWER_READY" ? "回答已就绪" : status === "GENERATING" ? "正在生成" : status === "QUESTION_DETECTED" ? "识别问题" : "正在听取";
-  const submitAnswer = async () => { if (answerSending) return; setAnswerSending(true); try { if (answerDraft.trim()) await onAnswerQuestion(answerDraft.trim()); else await onAnswerLatest(); setAnswerDraft(""); } finally { setAnswerSending(false); } };
   const submitScreenshot = async () => { if (answerSending) return; setAnswerSending(true); try { await onAnswerScreenshot(); } finally { setAnswerSending(false); } };
   useEffect(() => {
     if (overlayMode === "interactive" || sharedHUDState.shareMode) return;
@@ -279,14 +291,19 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
     return () => { window.removeEventListener("mousemove", onMouseMove, true); window.removeEventListener("mouseleave", onMouseLeave, true); reportControlRegion(false); };
   }, [overlayMode, sharedHUDState.shareMode]);
   const visualHidden = !sharedHUDState.running || sharedHUDState.shareMode;
-  const transcriptVisible = sharedHUDState.transcriptVisible && !visualHidden;
-  const answerVisible = sharedHUDState.answerVisible && !visualHidden;
+  const transcriptVisible = preferences.showTranscript && sharedHUDState.transcriptVisible && !visualHidden;
+  const answerVisible = preferences.showAnswer && sharedHUDState.answerVisible && !visualHidden;
   const shortcutVisible = sharedHUDState.shortcutVisible && !visualHidden;
-  return <main className="overlay-root" data-hud-state={status} data-hud-mode={sharedHUDState.mode} data-share-mode={sharedHUDState.shareMode ? "on" : "off"} data-overlay-mode={overlayMode} data-operation-mode={operationMode}>
+  const appearanceStyle = {
+    "--overlay-panel-background": backgroundWithOpacity(preferences.backgroundColor, preferences.backgroundOpacity),
+    "--overlay-font-color": preferences.fontColor,
+    "--overlay-font-size": `${preferences.fontSize}px`
+  } as CSSProperties;
+  return <main className="overlay-root" style={appearanceStyle} data-hud-state={status} data-hud-mode={sharedHUDState.mode} data-share-mode={sharedHUDState.shareMode ? "on" : "off"} data-overlay-mode={overlayMode} data-operation-mode={operationMode}>
     {captureTest && !visualHidden && <div className="capture-test-marker">CAPTURE_PROTECTION_TEST_MARKER_7F32</div>}
-     {sharedHUDState.topBarVisible && !visualHidden && <DraggableResizablePanel panel="toolbar" layout={{ ...layout.toolbar, visible: true, locked: true }} onChange={updateLayout} className="toolbar-panel"><div className="floating-toolbar hud-interactive-region" role="toolbar" aria-label={writtenTestMode ? "笔试控制栏" : "面试控制栏"}><span className="toolbar-audio-mark" aria-hidden="true"><ToolbarIcon name="waveform" /></span><div className="toolbar-runtime"><span>{elapsedLabel}</span></div><span className="toolbar-divider" aria-hidden="true" /><div className={`toolbar-status-inline ${statusMeta.tone}`}><i aria-hidden="true" /><span>{listeningLabel}</span></div>{!writtenTestMode && <div className="toolbar-mode-switch" role="group" aria-label="回答模式"><button className={automationMode === "AUTO" ? "selected" : ""} onClick={() => { if (automationMode !== "AUTO") void onToggleAutomation(); }}>自动</button><button className={automationMode === "MANUAL" ? "selected" : ""} onClick={() => { if (automationMode !== "MANUAL") void onToggleAutomation(); }}>手动</button></div>}<button className={`toolbar-inline-action toolbar-panel-toggle ${transcriptVisible ? "active" : "inactive"}`} onClick={onToggleTranscript} title={transcriptVisible ? "隐藏左侧对话" : "显示左侧对话"} aria-label={transcriptVisible ? "隐藏左侧对话" : "显示左侧对话"} aria-pressed={transcriptVisible}><ToolbarIcon name="panel-left" /></button><button className={`toolbar-inline-action toolbar-panel-toggle ${answerVisible ? "active" : "inactive"}`} onClick={onToggleAnswer} title={answerVisible ? "隐藏右侧回答" : "显示右侧回答"} aria-label={answerVisible ? "隐藏右侧回答" : "显示右侧回答"} aria-pressed={answerVisible}><ToolbarIcon name="panel-right" /></button><button className="toolbar-inline-action toolbar-shortcut-toggle" onClick={onToggleShortcuts} title="打开快捷操作" aria-label="打开快捷操作"><ToolbarIcon name="keyboard" /></button><button className="toolbar-end-button" onClick={() => setEndConfirmOpen(true)} title={writtenTestMode ? "结束笔试 Ctrl+Alt+Q" : "结束面试 Ctrl+Alt+Q"} aria-label={writtenTestMode ? "结束笔试" : "结束面试"}>{writtenTestMode ? "结束笔试" : "结束面试"}</button></div></DraggableResizablePanel>}
-     {transcriptVisible && !writtenTestMode && <DraggableResizablePanel panel="transcript" layout={{ ...layout.transcript, visible: true }} onChange={updateLayout} className="transcript-panel"><section className="overlay-panel-card transcript-card" aria-label="对话"><TranscriptTimeline remoteSnapshot={remoteTranscript} micSnapshot={micTranscript} currentQuestion={question?.text} /></section></DraggableResizablePanel>}
-     {answerVisible && <DraggableResizablePanel panel="answer" layout={{ ...layout.answer, visible: true }} onChange={updateLayout} className="answer-panel"><section className="overlay-panel-card answer-card" aria-label="回答"><div className="answer-question-row"><div>{question?.text && <><span className="current-question-label">{writtenTestMode ? "截图题目" : "当前问题"}</span><strong>{question.text}</strong></>}</div>{(answerStreaming || answerText) && <span className={`answer-ready ${answerStreaming ? "generating" : ""}`}>{answerStreaming ? "生成中" : "回答已就绪"}</span>}</div><AnswerSummary answerText={answerText} answerStreaming={answerStreaming} /><div className="overlay-answer-composer hud-interactive-region">{writtenTestMode ? <div className="written-test-hint">按 Ctrl+Alt+S 截取当前题目，自动识别并回答</div> : <textarea value={answerDraft} onChange={(event) => setAnswerDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitAnswer(); } }} placeholder="输入问题，或空发最新面试官问题..." disabled={answerSending} rows={2} />}<div><button onClick={() => void submitScreenshot()} disabled={answerSending}>{writtenTestMode ? "⊕ 截图回答" : "⊕ 附截图"}</button>{!writtenTestMode && <button className="auto-answer" onClick={() => void onToggleAutomation()} disabled={answerSending}>{automationMode === "AUTO" ? "◉ 自动回答" : "Ⅱ 手动回答"}</button>}{!writtenTestMode && <button className="overlay-send" onClick={() => void submitAnswer()} disabled={answerSending}>↑</button>}</div></div></section></DraggableResizablePanel>}
+     {preferences.showToolbar && sharedHUDState.topBarVisible && !visualHidden && <DraggableResizablePanel panel="toolbar" layout={{ ...layout.toolbar, visible: true, locked: true }} onChange={updateLayout} className="toolbar-panel"><div className="floating-toolbar hud-interactive-region" role="toolbar" aria-label={writtenTestMode ? "笔试控制栏" : "面试控制栏"}><span className="toolbar-audio-mark" aria-hidden="true"><ToolbarIcon name="waveform" /></span><div className="toolbar-runtime"><span>{elapsedLabel}</span></div><span className="toolbar-divider" aria-hidden="true" /><div className={`toolbar-status-inline ${statusMeta.tone}`}><i aria-hidden="true" /><span>{listeningLabel}</span></div>{!writtenTestMode && <div className="toolbar-mode-switch" role="group" aria-label="回答模式"><button className={automationMode === "AUTO" ? "selected" : ""} onClick={() => { if (automationMode !== "AUTO") void onToggleAutomation(); }}>自动</button><button className={automationMode === "MANUAL" ? "selected" : ""} onClick={() => { if (automationMode !== "MANUAL") void onToggleAutomation(); }}>手动</button></div>}{preferences.showTranscript && <button className={`toolbar-inline-action toolbar-panel-toggle ${transcriptVisible ? "active" : "inactive"}`} onClick={onToggleTranscript} title={transcriptVisible ? "隐藏左侧对话" : "显示左侧对话"} aria-label={transcriptVisible ? "隐藏左侧对话" : "显示左侧对话"} aria-pressed={transcriptVisible}><ToolbarIcon name="panel-left" /></button>}{preferences.showAnswer && <button className={`toolbar-inline-action toolbar-panel-toggle ${answerVisible ? "active" : "inactive"}`} onClick={onToggleAnswer} title={answerVisible ? "隐藏右侧回答" : "显示右侧回答"} aria-label={answerVisible ? "隐藏右侧回答" : "显示右侧回答"} aria-pressed={answerVisible}><ToolbarIcon name="panel-right" /></button>}<button className="toolbar-inline-action toolbar-shortcut-toggle" onClick={onToggleShortcuts} title="打开快捷操作" aria-label="打开快捷操作"><ToolbarIcon name="keyboard" /></button><button className="toolbar-end-button" onClick={() => setEndConfirmOpen(true)} title={writtenTestMode ? "结束笔试 Ctrl+Alt+Q" : "结束面试 Ctrl+Alt+Q"} aria-label={writtenTestMode ? "结束笔试" : "结束面试"}>{writtenTestMode ? "结束笔试" : "结束面试"}</button></div></DraggableResizablePanel>}
+     {transcriptVisible && !writtenTestMode && <DraggableResizablePanel panel="transcript" layout={{ ...layout.transcript, visible: true }} onChange={updateLayout} className="transcript-panel"><section className="overlay-panel-card transcript-card" aria-label="对话"><TranscriptTimeline remoteSnapshot={remoteTranscript} micSnapshot={micTranscript} currentQuestion={question?.text} showTimestamps={preferences.showTimestamps} /></section></DraggableResizablePanel>}
+     {answerVisible && <DraggableResizablePanel panel="answer" layout={{ ...layout.answer, visible: true }} onChange={updateLayout} className="answer-panel"><section className="overlay-panel-card answer-card" aria-label="回答"><div className="answer-question-row"><div>{question?.text && <><span className="current-question-label">{writtenTestMode ? "截图题目" : "当前问题"}</span><strong>{question.text}</strong></>}</div>{(answerStreaming || answerText) && <span className={`answer-ready ${answerStreaming ? "generating" : ""}`}>{answerStreaming ? "生成中" : "回答已就绪"}</span>}</div><AnswerSummary answerText={answerText} answerStreaming={answerStreaming} answerHistory={answerHistory} />{writtenTestMode ? <div className="written-test-action hud-interactive-region"><span>按 Ctrl+Alt+S 截取当前题目</span><button onClick={() => void submitScreenshot()} disabled={answerSending}>截图回答</button></div> : <div className="overlay-answer-actions hud-interactive-region"><button onClick={() => void submitScreenshot()} disabled={answerSending}>截图回答</button></div>}</section></DraggableResizablePanel>}
     {shortcutVisible && <DraggableResizablePanel panel="shortcuts" layout={{ ...layout.shortcuts, visible: true }} onChange={updateLayout} className="shortcut-panel"><div className="hud-interactive-region"><ShortcutPopover writtenTestMode={writtenTestMode} onAnswerLatest={onAnswerLatest} onAnswerScreenshot={onAnswerScreenshot} onHideAll={onHideAll} onToggleMode={onToggleMode} onToggleAutomation={() => void onToggleAutomation()} onResetLayout={() => void window.interviewCopilot.overlay.resetLayout()} onEndInterview={() => setEndConfirmOpen(true)} onClose={onToggleShortcuts} /></div></DraggableResizablePanel>}
     {endConfirmOpen && !visualHidden && <EndInterviewDialog writtenTestMode={writtenTestMode} onCancel={() => setEndConfirmOpen(false)} onConfirm={() => { setEndConfirmOpen(false); void onEndInterview(); }} />}
     {!visualHidden && <div className={`hud-protection-indicator ${protectionTone}`} title={!effectiveProtectionSupported ? "当前平台不支持 Windows Capture Protection" : effectiveLastError ? "Windows protection flag 失败" : effectiveDisplayVerified === true ? "Display Capture Verified" : effectiveProtectionEnabled ? "Windows protection on" : "Windows protection off"}>{effectiveProtectionSupported ? "◈" : "·"}</div>}

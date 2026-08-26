@@ -16,6 +16,14 @@ describe("interview speech acts", () => {
     expect(classifier.classify("嗯").speechAct).toBe("ACKNOWLEDGEMENT");
   });
 
+  it("promotes an algorithm statement after a code-question anchor", () => {
+    expect(classifier.classify("反转一个单链表", { pendingCodeContext: true })).toMatchObject({
+      speechAct: "CODE_REQUEST",
+      shouldAnswer: true,
+      reason: "code-context-algorithm-request"
+    });
+  });
+
   it("uses an anchor for elliptical requests while preserving a complete standalone question", () => {
     const context = { currentTopic: "TCP", latestAnchor: { text: "TCP 三次握手", topic: "TCP", speechAct: "QUESTION" as const } };
     expect(classifier.classify("讲一下", context).speechAct).toBe("FOLLOW_UP");

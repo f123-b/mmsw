@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider } from "./index";
+import { OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, providerEndpoint, validateLlmModelConfiguration } from "./index";
 
 function streamResponse(chunks: string[]): Response {
   const encoder = new TextEncoder();
@@ -13,6 +13,18 @@ function streamResponse(chunks: string[]): Response {
 }
 
 describe("OpenAICompatibleAnswerProvider", () => {
+  it("normalizes base URLs that already contain v1 or a full chat path", () => {
+    const settings = { providerName: "custom", baseUrl: "https://llm.test/v1", apiKey: "secret", model: "chat", timeoutMs: 5_000, maxRetries: 0 };
+    expect(providerEndpoint(settings, "v1/chat/completions")).toBe("https://llm.test/v1/chat/completions");
+    expect(providerEndpoint({ ...settings, baseUrl: "https://llm.test/v1/chat/completions" }, "v1/chat/completions")).toBe("https://llm.test/v1/chat/completions");
+  });
+
+  it("rejects embedding models assigned to generation tasks", () => {
+    expect(validateLlmModelConfiguration({ baseUrl: "https://llm.test/v1", model: "qwen-plus", projectAnalyzerModel: "text-embedding-v4" })).toEqual([
+      expect.objectContaining({ field: "projectAnalyzerModel", message: expect.stringContaining("不能使用向量模型") })
+    ]);
+  });
+
   it("parses OpenAI-compatible SSE deltas and uses configured model", async () => {
     let request: RequestInit | undefined;
     const provider = new OpenAICompatibleAnswerProvider({ providerName: "test", baseUrl: "https://llm.test/", apiKey: "secret", model: "qwen-max", timeoutMs: 5_000, maxRetries: 0 }, async (_input, init) => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DeepgramStreamingAsrProvider, ProviderError, QwenRealtimeAsrProvider, splitStereoPcm, StereoAsrChannelRouter, type StreamingAsrSocket } from "./asr";
+import { DashScopeTaskStreamingAsrProvider, DeepgramStreamingAsrProvider, ProviderError, QwenRealtimeAsrProvider, qwenAsrWebSocketUrl, splitStereoPcm, StereoAsrChannelRouter, type StreamingAsrSocket } from "./asr";
 
 class FakeSocket implements StreamingAsrSocket {
   sent: Uint8Array[] = [];
@@ -165,5 +165,37 @@ describe("stereo ASR routing", () => {
     socket.emit(JSON.stringify({ type: "error", error: { code: "InvalidApiKey", message: "authentication failed" } }));
     await expect(connecting).rejects.toMatchObject({ code: "AUTH_FAILED", recoverable: false, source: "mic" });
     expect(errors).toHaveLength(1);
+  });
+
+  it("selects the correct Qwen protocol endpoint without changing the model", () => {
+    expect(qwenAsrWebSocketUrl("qwen3-asr-flash-realtime-2026-02-10")).toContain("/realtime");
+    expect(qwenAsrWebSocketUrl("qwen-audio-3.0-asr-flash-streaming")).toContain("/inference");
+    expect(qwenAsrWebSocketUrl("fun-asr-realtime")).toContain("/inference");
+  });
+
+  it("adapts the DashScope task protocol and preserves the selected model", async () => {
+    const socket = new FakeSocket();
+    const requests: Array<{ url: string; apiKey: string }> = [];
+    const provider = new DashScopeTaskStreamingAsrProvider(
+      { model: "fun-asr-realtime", language: "zh-CN", apiKey: "secret" },
+      (options) => { requests.push(options); return socket; }
+    );
+    const segments: Array<{ text: string; final: boolean }> = [];
+    const connecting = provider.connect("remote", (segment) => segments.push({ text: segment.text, final: segment.final }));
+    socket.openSocket();
+    await Promise.resolve();
+    const runTask = JSON.parse(socket.sentText[0] ?? "{}") as { header?: { action?: string }; payload?: { model?: string } };
+    expect(requests[0]?.url).toContain("/inference");
+    expect(runTask).toMatchObject({ header: { action: "run-task" }, payload: { model: "fun-asr-realtime" } });
+    socket.emit(JSON.stringify({ header: { event: "task-started" } }));
+    await connecting;
+    provider.sendAudio(new Uint8Array([1, 2, 3, 4]));
+    expect(socket.sent.at(-1)).toEqual(new Uint8Array([1, 2, 3, 4]));
+    socket.emit(JSON.stringify({ header: { event: "result-generated" }, payload: { output: { sentence: { text: "解释 CAN 仲裁", begin_time: 100, end_time: 500, sentence_end: true } } } }));
+    expect(segments).toEqual([{ text: "解释 CAN 仲裁", final: true }]);
+    const finalizing = provider.finalize(750);
+    expect(JSON.parse(socket.sentText.at(-1) ?? "{}")).toMatchObject({ header: { action: "finish-task" } });
+    socket.emit(JSON.stringify({ header: { event: "task-finished" } }));
+    await finalizing;
   });
 });

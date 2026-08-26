@@ -28,13 +28,15 @@ describe("ProviderConfigStore", () => {
     }
   });
 
-  it("migrates legacy Qwen ASR model and incompatible endpoint to the realtime defaults", async () => {
+  it("preserves the selected Qwen ASR model and derives its protocol endpoint", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
       const config = new ProviderConfigStore(database, new MemorySecretStore());
-      config.update("asr", { providerName: "Qwen Realtime ASR", providerType: "qwen", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-audio-3.0-asr-flash", apiKey: "secret" });
-      expect(config.get("asr")).toMatchObject({ providerType: "qwen", baseUrl: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime", model: "qwen3-asr-flash-realtime" });
-      expect(config.getPublic().asr).toMatchObject({ baseUrl: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime", model: "qwen3-asr-flash-realtime", hasApiKey: true });
+      config.update("asr", { providerName: "Qwen Realtime ASR", providerType: "qwen", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-audio-3.0-asr-flash-streaming", apiKey: "secret" });
+      expect(config.get("asr")).toMatchObject({ providerType: "qwen", baseUrl: "wss://dashscope.aliyuncs.com/api-ws/v1/inference", model: "qwen-audio-3.0-asr-flash-streaming" });
+      expect(config.getPublic().asr).toMatchObject({ baseUrl: "wss://dashscope.aliyuncs.com/api-ws/v1/inference", model: "qwen-audio-3.0-asr-flash-streaming", hasApiKey: true });
+      config.update("asr", { model: "qwen3-asr-flash-realtime-2026-02-10" });
+      expect(config.get("asr")).toMatchObject({ baseUrl: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime", model: "qwen3-asr-flash-realtime-2026-02-10" });
     } finally {
       database.close();
     }
@@ -76,18 +78,32 @@ describe("ProviderConfigStore", () => {
       const first = config.saveLlmProfile({ name: "小米 Mimo", providerName: "Xiaomi", baseUrl: "https://mimo.test/v1", model: "mimo-pro", fastModel: "mimo-fast", questionRecognitionModel: "mimo-classifier", profileBuilderModel: "mimo-profile", questionBankModel: "mimo-bank", chatModel: "mimo-chat", postInterviewModel: "mimo-review", preparationModel: "mimo-prep", timeoutMs: 30_000, maxRetries: 2, apiKey: "mimo-key" });
       const mimoProfile = first.llmProfiles.find((profile) => profile.name === "小米 Mimo");
       expect(mimoProfile).toBeDefined();
-      expect(first.activeLlmProfileId).toBe(mimoProfile?.id);
+      expect(first.activeLlmProfileId).not.toBe(mimoProfile?.id);
       expect(mimoProfile).toMatchObject({ name: "小米 Mimo", model: "mimo-pro", fastModel: "mimo-fast", questionRecognitionModel: "mimo-classifier", profileBuilderModel: "mimo-profile", questionBankModel: "mimo-bank", chatModel: "mimo-chat", postInterviewModel: "mimo-review", preparationModel: "mimo-prep", hasApiKey: true });
+
+      config.activateLlmProfile(mimoProfile?.id ?? "");
 
       const second = config.saveLlmProfile({ name: "DeepSeek", providerName: "DeepSeek", baseUrl: "https://deepseek.test/v1", model: "deepseek-chat", timeoutMs: 30_000, maxRetries: 2, apiKey: "deepseek-key" });
       expect(second.llmProfiles).toHaveLength(3);
-      expect(config.get("llm")).toMatchObject({ model: "deepseek-chat", apiKey: "deepseek-key" });
+      expect(second.activeLlmProfileId).toBe(mimoProfile?.id);
+      expect(config.get("llm")).toMatchObject({ model: "mimo-pro", apiKey: "mimo-key" });
 
       const switched = config.activateLlmProfile(mimoProfile?.id ?? "");
       expect(switched.activeLlmProfileId).toBe(mimoProfile?.id);
       expect(config.get("llm")).toMatchObject({ model: "mimo-pro", apiKey: "mimo-key" });
       expect(JSON.stringify(switched)).not.toContain("mimo-key");
       expect(JSON.stringify(switched)).not.toContain("deepseek-key");
+      expect(config.getLlmProfile(mimoProfile?.id ?? "")).toMatchObject({ model: "mimo-pro", apiKey: "mimo-key" });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects an embedding model in an LLM task route", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const config = new ProviderConfigStore(database, new MemorySecretStore());
+      expect(() => config.saveLlmProfile({ name: "错误配置", providerName: "test", baseUrl: "https://llm.test/v1", model: "chat-model", projectAnalyzerModel: "text-embedding-v4", timeoutMs: 30_000, maxRetries: 2 })).toThrow("LLM_MODEL_CONFIGURATION_INVALID");
     } finally {
       database.close();
     }
@@ -106,6 +122,17 @@ describe("ProviderConfigStore", () => {
 });
 
 describe("OverlaySettingsStore", () => {
+  it("persists and validates overlay appearance and module preferences", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      const saved = settings.setPreferences({ backgroundOpacity: 0.42, backgroundColor: "#102030", fontColor: "#fefefe", fontSize: 19, showTranscript: false, showTimestamps: false });
+      expect(saved).toMatchObject({ backgroundOpacity: 0.42, backgroundColor: "#102030", fontColor: "#fefefe", fontSize: 19, showTranscript: false, showTimestamps: false, showAnswer: true });
+      expect(new OverlaySettingsStore(database).getPreferences()).toEqual(saved);
+      expect(settings.setPreferences({ backgroundOpacity: 3, fontSize: 2, fontColor: "invalid" })).toMatchObject({ backgroundOpacity: 1, fontSize: 12, fontColor: "#f8fbff" });
+    } finally { database.close(); }
+  });
+
   it("defaults to enabled and persists the main-process setting", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {

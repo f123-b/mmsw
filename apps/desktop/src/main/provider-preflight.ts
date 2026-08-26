@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { providerCapabilities, providerEndpoint, QWEN_REALTIME_ASR_MODEL, QWEN_REALTIME_ASR_URL, type ProviderSettings } from "@interview-copilot/shared";
+import { providerCapabilities, providerEndpoint, qwenAsrWebSocketUrl, QWEN_REALTIME_ASR_MODEL, usesQwenRealtimeProtocol, type ProviderSettings } from "@interview-copilot/shared";
 import type { ProviderSection } from "./settings-store";
 
 export type ProviderCheckStatus = "unconfigured" | "testing" | "ready" | "auth_failed" | "model_not_found" | "bad_request" | "rate_limited" | "server_error" | "invalid_response" | "network_failed" | "timeout";
@@ -128,8 +128,9 @@ async function testAsr(settings: ProviderSettings, signal: AbortSignal): Promise
   const isQwen = settings.providerType === "qwen";
   const isLocal = settings.providerType === "funasr-local";
   if (!configured(section, settings)) return { section, configured: false, reachable: false, status: "unconfigured", message: settings.providerType === "custom-gateway" ? "未配置 Custom Gateway" : isLocal ? "未配置本地 ASR 服务地址或模型" : isQwen ? "未配置千问 API Key" : "未配置 Deepgram API Key" };
-  const url = new URL(settings.baseUrl || (isQwen ? QWEN_REALTIME_ASR_URL : "wss://api.deepgram.com/v1/listen"));
-  if (isQwen) {
+  const qwenRealtime = isQwen && usesQwenRealtimeProtocol(settings.model || QWEN_REALTIME_ASR_MODEL);
+  const url = new URL(isQwen ? qwenAsrWebSocketUrl(settings.model || QWEN_REALTIME_ASR_MODEL) : settings.baseUrl || "wss://api.deepgram.com/v1/listen");
+  if (qwenRealtime) {
     url.searchParams.set("model", settings.model || QWEN_REALTIME_ASR_MODEL);
   } else if (settings.providerType !== "custom-gateway" && !isLocal) {
     url.searchParams.set("model", settings.model);
@@ -146,18 +147,25 @@ async function testAsr(settings: ProviderSettings, signal: AbortSignal): Promise
     signal.addEventListener("abort", abort, { once: true });
     try {
       const authorization = isQwen ? `Bearer ${settings.apiKey}` : `Token ${settings.apiKey}`;
-      socket = new WebSocket(url, settings.providerType === "custom-gateway" || isLocal ? undefined : { headers: { Authorization: authorization, ...(isQwen ? { "OpenAI-Beta": "realtime=v1" } : {}) } });
+      socket = new WebSocket(url, settings.providerType === "custom-gateway" || isLocal ? undefined : { headers: { Authorization: authorization, ...(qwenRealtime ? { "OpenAI-Beta": "realtime=v1" } : {}) } });
       socket.once("open", () => {
         if (isLocal) {
           socket?.send(JSON.stringify({ type: "config", model: settings.model, language: settings.language ?? "zh-CN", sampleRate: 16_000, channels: 1, vad: true }));
           finish({ section, configured: true, reachable: true, status: "ready" });
+        } else if (isQwen && !qwenRealtime) {
+          const taskId = `preflight${Date.now().toString(16)}`;
+          socket?.send(JSON.stringify({ header: { action: "run-task", task_id: taskId, streaming: "duplex" }, payload: { task_group: "audio", task: "asr", function: "recognition", model: settings.model, parameters: { format: "pcm", sample_rate: /(?:^|-)8k(?:-|$)/i.test(settings.model) ? 8_000 : 16_000 }, input: {} } }));
         } else if (!isQwen) {
           finish({ section, configured: true, reachable: true, status: "ready" });
         }
       });
       if (isQwen) socket.on("message", (data) => {
         try {
-          const message = JSON.parse(data.toString()) as { type?: string; code?: string; message?: string; error?: string | { code?: string; message?: string } };
+          const message = JSON.parse(data.toString()) as { type?: string; code?: string; message?: string; error?: string | { code?: string; message?: string }; header?: { event?: string; error_code?: string; error_message?: string } };
+          if (!qwenRealtime && message.header?.event === "task-started") {
+            finish({ section, configured: true, reachable: true, status: "ready" });
+            return;
+          }
           if (message.type === "session.created") {
             socket?.send(JSON.stringify({
               event_id: `event_${Date.now()}_preflight`,
@@ -176,9 +184,9 @@ async function testAsr(settings: ProviderSettings, signal: AbortSignal): Promise
             finish({ section, configured: true, reachable: true, status: "ready" });
             return;
           }
-          if (message.type === "error" || message.type === "conversation.item.input_audio_transcription.failed" || message.error) {
+          if (message.type === "error" || message.type === "conversation.item.input_audio_transcription.failed" || message.error || message.header?.event === "task-failed" || message.header?.error_code) {
             const nested = message.error && typeof message.error === "object" ? message.error : undefined;
-            const detail = [message.code, message.message, typeof message.error === "string" ? message.error : undefined, nested?.code, nested?.message].filter(Boolean).join(": ");
+            const detail = [message.code, message.message, typeof message.error === "string" ? message.error : undefined, nested?.code, nested?.message, message.header?.error_code, message.header?.error_message].filter(Boolean).join(": ");
             const status: ProviderCheckStatus = /invalid.*(api.?key|token)|authentication|unauthori[sz]ed|forbidden|\b(401|403)\b/i.test(detail) ? "auth_failed" : /model.*(not.*found|invalid|unsupported)|invalid.*model/i.test(detail) ? "model_not_found" : "bad_request";
             finish({ section, configured: true, reachable: false, status, message: statusMessage(status, settings, detail) });
           }

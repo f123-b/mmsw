@@ -45,6 +45,7 @@ const META_CONVERSATION = /(?:你能看到吗|看得到吗|你能听到吗|听�
 const META_REPAIR = /^(?:你觉得(?:呢)?|怎么(?:回答|答|说)|答案(?:是什么|呢))[。！？?！\s]*$/i;
 const CODE_CONTEXT = /(?:现在|接下来|下面|来)?(?:考你|问你)?(?:一个)?代码题|算法题|编程题/i;
 const CODE_REQUEST = /(?:写.{0,18}(?:代码|函数|程序)|手写|代码实现|实现一下|写一个|写个|给一段代码|(?:^请?|\s请?)用\s*C(?:\+\+|语言)?\s*(?:写|实现)|用\s*C\+\+\s*写|伪代码|补全(?:这段)?代码|(?:^请?|\s请?)输出(?:一个)?[^。！？?]{0,20}(?:代码|示例)|字符串.{0,12}(?:代码|实现)|链表.{0,12}(?:代码|函数|实现)|排序.{0,12}(?:代码|实现))/i;
+const ALGORITHM_TASK = /(?:反转|遍历|查找|排序|合并|去重|判断|检测|求|计算|打印|实现).{0,18}(?:链表|二叉树|数组|字符串|队列|栈|哈希|回文|斐波那契|最大子序列|环|单例|生产者消费者)/i;
 const ANSWER_REQUEST = /^(?:请)?(?:口述|描述|介绍(?:一下)?|详细介绍|讲一下|讲讲|讲一个|详细讲述|讲述|说一下|说说|说明(?:一下)?|解释(?:一下)?|展开讲一下|展开说|列举一下|总结一下|分析一下|完整讲一下|完整讲述|具体说|再说一遍)(?:[：:]|\s|$|(?=[\p{L}\p{N}]))/iu;
 const TRAILING_ANSWER_REQUEST = /(?:^|[，,、\s])(?:好|好的|嗯+|明白了?)?[，,、\s]*(?:说说|讲讲|展开说|展开说说|展开讲讲|具体说|具体讲|再说说|再讲讲)[。！？?！\s]*$/i;
 const QUESTION_FORM = /(?:什么是|什么|为什么|为何|怎么|如何|怎样|哪些|哪种|哪个|哪里|哪|谁|是否|有没有|能不能|可不可以|区别|原理|作用|原因|流程|优缺点|怎么解决|怎么验证|怎么设计|怎么实现|什么地方|用过哪些|最多|最少|最大|最小|上限|容量|数量|多少|几个|几路|几种|多大|多长|多快|频率|设计.*(?:系统|架构|方案|模块))/i;
@@ -52,13 +53,13 @@ const QUESTION_PARTICLE = /(?:吗|呢)[。！？?！\s]*$/i;
 const FOLLOW_UP_PREFIX = /^(?:那|然后|还有|具体|如果|再|这个|它|这里|其中|继续|接着|接下来)/;
 const ELLIPTICAL_FOLLOW_UP = /^(?:为什么|为何|怎么|如何|具体(?:呢)?|还有(?:呢|吗)?|然后呢|用过哪些|用在什么地方|哪几个|哪种|那低速呢|再具体一点|能不能具体一点)[？?。！!\s]*$/i;
 const ELLIPTICAL_ANSWER_REQUEST = /^(?:讲一下|讲讲|说一下|说说|展开讲一下|详细讲述|具体说)[？?。！!\s]*$/i;
-const STRONG_TOPIC = /(?:STL|TCP|UDP|IIC|I2C|SPI|UART|CAN|MQTT|Modbus|FOC|DMA|PWM|ADC|FreeRTOS|RTOS|C\+\+|C语言|虚函数|堆和栈|进程间通信|进程线程|链表|字符串|排序|同步机制|三次握手|四次挥手|容器|上拉电阻|EEPROM|Flash|内存管理|低速抖动|系统架构|完整过程|实现过程)/i;
+const STRONG_TOPIC = /(?:STL|TCP|UDP|HTTP|MQTT|CoAP|LwIP|IIC|I2C|SPI|UART|CAN(?: FD)?|LIN|FlexRay|Modbus|FOC|DMA|PWM|ADC|DAC|GPIO|NVIC|SysTick|MPU|MMU|FreeRTOS|RT-Thread|Zephyr|Linux|RTOS|C\+\+|C语言|RISC-V|Cortex-[MAR]|虚函数|堆和栈|进程间通信|进程线程|链表|字符串|排序|同步机制|三次握手|四次挥手|容器|上拉电阻|EEPROM|Flash|内存管理|低速抖动|系统架构|完整过程|实现过程)/i;
 const ASSERTIVE_STATEMENT = /^(?:我|我们|系统|项目|这个项目|当前项目|当前|这个方案|这次优化|它|该模块).*(?:是|为|通过|使用|采用|完成|下降|提升|增加|减少|切换|实现了|负责了)[^？?]*[。！!]$/;
 const SMALL_TALK = /^(?:你好|您好|谢谢|辛苦了|哈哈|嗨)[。！？?！\s]*$/i;
 const CANDIDATE_SPEECH = /^(?:我|我们|本人|候选人).*(?:负责|做过|参与|实现|采用|使用|认为|觉得|已经|目前|先|会|可以).*[。！!]$/;
 
 const KNOWN_ENTITIES = [
-  "STL", "TCP", "UDP", "IIC", "I2C", "SPI", "UART", "CAN", "MQTT", "Modbus", "FOC", "DMA", "PWM", "ADC", "FreeRTOS", "RTOS", "C++", "虚函数", "堆", "栈", "EEPROM", "Flash", "链表", "字符串", "进程间通信", "三次握手", "四次挥手"
+  "STL", "TCP", "UDP", "HTTP", "MQTT", "CoAP", "LwIP", "IIC", "I2C", "SPI", "UART", "CAN FD", "CAN", "LIN", "FlexRay", "Modbus", "FOC", "DMA", "PWM", "ADC", "DAC", "GPIO", "NVIC", "SysTick", "MPU", "MMU", "FreeRTOS", "RT-Thread", "Zephyr", "Linux", "RTOS", "RISC-V", "Cortex-M", "Cortex-A", "C++", "虚函数", "堆", "栈", "EEPROM", "Flash", "链表", "字符串", "进程间通信", "三次握手", "四次挥手"
 ];
 
 function clamp(value: number): number { return Math.max(0, Math.min(1, value)); }
@@ -124,7 +125,7 @@ export class SpeechActClassifier {
     if (CONTROL.test(normalizedText)) return { speechAct: "CONTROL", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "interview-control", topic, entities };
     if (ACKNOWLEDGEMENT.test(normalizedText) || /^(?:那个)[。！？?！\s]*$/i.test(normalizedText)) return { speechAct: "ACKNOWLEDGEMENT", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "acknowledgement", topic, entities };
     if (CODE_CONTEXT.test(normalizedText) && !CODE_REQUEST.test(normalizedText)) return { speechAct: "TOPIC_ANCHOR", shouldAnswer: false, confidence: 0.98, normalizedText, reason: "code-context", topic: "代码题", entities, codeContext: true };
-    if (CODE_REQUEST.test(normalizedText)) return { speechAct: "CODE_REQUEST", shouldAnswer: true, confidence: 0.98, normalizedText, reason: "code-request", topic, entities };
+    if (CODE_REQUEST.test(normalizedText) || (context.pendingCodeContext && ALGORITHM_TASK.test(normalizedText))) return { speechAct: "CODE_REQUEST", shouldAnswer: true, confidence: 0.98, normalizedText, reason: CODE_REQUEST.test(normalizedText) ? "code-request" : "code-context-algorithm-request", topic, entities };
     if (ANSWER_REQUEST.test(normalizedText) || TRAILING_ANSWER_REQUEST.test(normalizedText)) return { speechAct: isFollowUp(normalizedText, context) ? "FOLLOW_UP" : "ANSWER_REQUEST", shouldAnswer: true, confidence: 0.96, normalizedText, reason: "answer-request", topic, entities };
     if (isFollowUp(normalizedText, context)) return { speechAct: "FOLLOW_UP", shouldAnswer: true, confidence: 0.94, normalizedText, reason: "elliptical-follow-up", topic, entities };
     if (/^(?:我|我们).*(?:说明|介绍|解释|讲一下|说一下).*[。！!]$/.test(normalizedText)) return { speechAct: "STATEMENT", shouldAnswer: false, confidence: 0.94, normalizedText, reason: "declarative-explanation", topic, entities, candidateSpeech: true };

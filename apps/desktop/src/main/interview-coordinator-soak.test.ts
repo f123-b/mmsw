@@ -61,6 +61,7 @@ describe("InterviewCoordinator real pipeline soak", () => {
       answerAgent,
       history,
       questionSilenceMs: 180,
+      answerTimeoutMs: 1_000,
       contextProvider: () => ({}),
       now: () => clock
     });

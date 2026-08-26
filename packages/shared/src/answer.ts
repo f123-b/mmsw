@@ -39,6 +39,8 @@ export interface AnswerContextInput {
   profileSummary?: string;
   jobDescriptionSummary?: string;
   profileInstructions?: string;
+  expressionLevel?: "plain" | "standard" | "expert";
+  explainAdvancedTerms?: boolean;
   skills?: AnswerSkillContext[];
   experienceContext?: string[];
   personalMemoryEvidence?: string[];
@@ -53,6 +55,8 @@ export interface ContextPack {
   profileSummary?: string;
   jobDescriptionSummary?: string;
   profileInstructions?: string;
+  expressionLevel: "plain" | "standard" | "expert";
+  explainAdvancedTerms: boolean;
   skills: AnswerSkillContext[];
   experienceContext: string[];
   personalMemoryEvidence: string[];
@@ -118,6 +122,8 @@ export class ContextRouter {
       profileSummary: input.profileSummary,
       jobDescriptionSummary: input.jobDescriptionSummary,
       profileInstructions: input.profileInstructions,
+      expressionLevel: input.expressionLevel ?? "plain",
+      explainAdvancedTerms: input.explainAdvancedTerms ?? true,
       skills,
       experienceContext: (input.experienceContext ?? []).slice(0, 5),
       personalMemoryEvidence: (input.personalMemoryEvidence ?? []).slice(0, 5),
@@ -144,6 +150,12 @@ export class PromptBuilder {
       { name: "system/base", content: `你是实时面试辅助。先判断题型，再按题型回答。回答必须真实、直接、便于候选人马上口述；第一句必须回应面试官当前问题，不能输出“面试策略”或“面试官一般喜欢”。不要输出“题库参考答案”“Resume”“岗位要求”“结构化项目事实”等资料标签，也不要评价面试官。嵌入式问题要使用标准专业术语，并根据上下文区分 Cortex-M、ARM32、ARM64、RTOS、Embedded Linux 等语境，不能把不同平台的概念混为一谈。只有问题明确要求个人经历时才使用项目经历，严禁虚构用户经历。${personalContextRequested ? "当前是个人经历问题：你现在要以候选人本人第一人称回答，优先使用个人工程经验；资料中没有的内容必须明确说没有证据。" : "当前不是个人经历问题：不要为了个性化而虚构候选人经历。"}` },
       { name: "interview-style", content: `题型：${kind}。回答模式：${mode}。${new InterviewAnswerFormatter().instructions(mode, kind)}` }
     ];
+    const expressionInstruction = context.expressionLevel === "expert"
+      ? "可以使用业内标准专业表达，但避免无意义堆砌术语。"
+      : context.expressionLevel === "standard"
+        ? "使用常见技术词汇；遇到不常见术语，用一句短解释说明它是什么。"
+        : "优先使用简单、口语化的中文。必须使用专业词时，紧接一句通俗解释，不连续堆叠缩写。";
+    sections.push({ name: "interview-style", content: `表达难度：${context.expressionLevel}。${expressionInstruction}${context.explainAdvancedTerms ? " 首次出现较难术语时，用括号或短句解释。" : " 不额外展开术语定义。"}` });
     const experienceRequested = personalContextRequested;
     if (personalContextRequested && (context.profileSummary || context.jobDescriptionSummary || context.profileInstructions)) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary, context.profileInstructions ? `候选人回答偏好：${context.profileInstructions}` : ""].filter(Boolean).join("\n") });
     if (context.skills.length > 0) sections.push({ name: "skill-context", content: context.skills.map((skill) => `${skill.name}: ${skill.content}`).join("\n") });
@@ -174,7 +186,7 @@ export class PromptBuilder {
       ? mode === "FAST" ? "先给最小可运行代码和一句解释" : "完整代码、关键解释、复杂度和边界情况"
       : mode === "FAST" ? "20-60" : mode === "DEEP" ? "120-250" : "60-130";
     const strategy = {
-      code: "先说明思路，再给完整代码块（题目未指定语言时默认 C++17），然后解释关键行、时间/空间复杂度和边界情况；代码不要只写片段，也不要声称来自候选人的项目。",
+      code: "严格按四段输出：①“给面试官的思路”用可直接口述的短句说明数据结构、算法和选择原因；②给完整代码：必须是可编译运行的代码块（题目未指定语言时默认 C++17，包含必要头文件、函数/类定义和可执行入口或清晰调用方式）；③解释关键代码；④时间/空间复杂度、边界情况和可追问点。代码不要只写片段，也不要声称来自候选人的项目。",
       "system-design": "按需求和约束、整体架构、核心链路、数据一致性/稳定性、扩展性和权衡回答；只有明确问到项目时才引用项目。",
       comparison: "先给结论，再按核心差异、适用场景、优缺点和选型依据对比，不要强行加入项目经历。",
       troubleshooting: "按现象、可能原因、定位步骤、修复方案和验证方式回答；不要把排查方案包装成候选人已经做过的经历。",
@@ -186,7 +198,11 @@ export class PromptBuilder {
       concept: "先给定义或结论，再解释原理、关键点和常见误区；不要为了显得个性化而硬塞项目经历。",
       technical: "直接回答技术问题，再补充关键依据、风险或验证方式；只有问题明确要求时才引用项目。"
     }[kind];
-    sections.push({ name: "output-format", content: kind === "code" ? `${strategy} 保证答案完整，不要在代码或解释中途截断。` : `回答长度或结构：${length}。${strategy} 不要写“首先/其次/最后”的模板化标题，不要百科式展开。` });
+    const explicitQuestionCount = question.text.match(/[？?]/g)?.length ?? 0;
+    const multiQuestionInstruction = explicitQuestionCount >= 2 || /(?:以及|并且|同时|另外).{0,24}(?:什么|怎么|如何|哪些|区别|场景)/.test(question.text)
+      ? "检测到同一轮包含多个子问题：必须在一次回答中按原顺序逐项覆盖，每个子问题只回答一次，不能只保留最后一题。"
+      : "";
+    sections.push({ name: "output-format", content: kind === "code" ? `${multiQuestionInstruction}${strategy} 保证答案完整，不要在代码或解释中途截断。` : `${multiQuestionInstruction}回答长度或结构：${length}。${strategy} 不要写“首先/其次/最后”的模板化标题，不要百科式展开。` });
     return sections;
   }
 }
@@ -259,7 +275,20 @@ export interface AnswerGenerationOptions {
   preferFastRoute?: boolean;
   /** Freeze a model routing snapshot for a running interview session. */
   modelOverride?: ModelSnapshot;
+  /** Never expose an unsupported personal/project claim as a final answer. */
+  strictPersonalGrounding?: boolean;
 }
+
+const STRICT_GROUNDING_ISSUES = new Set([
+  "QUALITY_UNGROUNDED_CLAIM",
+  "missing-personal-evidence",
+  "unsupported-technical-claim",
+  "claim-evidence-unsupported",
+  "claim-evidence-conflicting",
+  "possibly-invented-experience"
+]);
+
+const STRICT_GROUNDING_FALLBACK = "这部分在当前已确认的项目资料中没有足够证据，我不能把推测说成实际经历。如果只回答通用方法，我会先复现现象并记录数据，再按信号、时序和任务链路逐层定位，修复后用同一工况回归验证。";
 
 export class AnswerAgent {
   constructor(
@@ -383,6 +412,15 @@ export class AnswerAgent {
         formattedText = repairedText;
         quality = repairedQuality;
       }
+    }
+    if (options.strictPersonalGrounding && personalContextRequested && quality.issues.some((issue) => STRICT_GROUNDING_ISSUES.has(issue))) {
+      formattedText = STRICT_GROUNDING_FALLBACK;
+      quality = {
+        score: 0.75,
+        issues: ["strict-grounding-fallback"],
+        suggestions: ["补充并确认项目事实后，可生成更具体的第一人称回答"],
+        needsRepair: false
+      };
     }
     yield { type: "answer_end", answerId, text: formattedText, quality };
   }

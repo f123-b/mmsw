@@ -18,6 +18,8 @@ export interface Profile {
   resume?: Material;
   jobDescription?: Material;
   instructions?: string;
+  expressionLevel: "plain" | "standard" | "expert";
+  explainAdvancedTerms: boolean;
   skills: Skill[];
   knowledgeBaseIds: string[];
   createdAt: number;
@@ -30,6 +32,8 @@ export interface ProfileInput {
   resume?: Material;
   jobDescription?: Material;
   instructions?: string;
+  expressionLevel?: "plain" | "standard" | "expert";
+  explainAdvancedTerms?: boolean;
   skills?: Skill[];
   knowledgeBaseIds?: string[];
 }
@@ -48,6 +52,8 @@ export function createProfile(input: ProfileInput, now = Date.now()): Profile {
     resume: input.resume,
     jobDescription: input.jobDescription,
     instructions: input.instructions,
+    expressionLevel: input.expressionLevel ?? "plain",
+    explainAdvancedTerms: input.explainAdvancedTerms ?? true,
     skills: [...(input.skills ?? [])],
     knowledgeBaseIds: [...(input.knowledgeBaseIds ?? [])],
     createdAt: now,

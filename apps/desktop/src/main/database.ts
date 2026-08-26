@@ -538,6 +538,10 @@ export class SqliteDatabase {
       [17, `
         ALTER TABLE conversation_messages ADD COLUMN response_json TEXT;
       `],
+      [18, `
+        ALTER TABLE profiles ADD COLUMN expression_level TEXT NOT NULL DEFAULT 'plain';
+        ALTER TABLE profiles ADD COLUMN explain_advanced_terms INTEGER NOT NULL DEFAULT 1;
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -564,18 +568,18 @@ export class SqliteProfileRepository {
   constructor(private readonly database: SqliteDatabase) {}
 
   list(): Profile[] {
-    return this.database.all<{ id: string; name: string; language: string; resume_json: string | null; job_description_json: string | null; instructions: string | null; created_at: number; updated_at: number }>("SELECT * FROM profiles ORDER BY updated_at DESC").map((row) => this.hydrate(row));
+    return this.database.all<{ id: string; name: string; language: string; resume_json: string | null; job_description_json: string | null; instructions: string | null; expression_level: string; explain_advanced_terms: number; created_at: number; updated_at: number }>("SELECT * FROM profiles ORDER BY updated_at DESC").map((row) => this.hydrate(row));
   }
 
   get(profileId: string): Profile | undefined {
-    const row = this.database.first<{ id: string; name: string; language: string; resume_json: string | null; job_description_json: string | null; instructions: string | null; created_at: number; updated_at: number }>("SELECT * FROM profiles WHERE id = ?", [profileId]);
+    const row = this.database.first<{ id: string; name: string; language: string; resume_json: string | null; job_description_json: string | null; instructions: string | null; expression_level: string; explain_advanced_terms: number; created_at: number; updated_at: number }>("SELECT * FROM profiles WHERE id = ?", [profileId]);
     return row ? this.hydrate(row) : undefined;
   }
 
   save(input: Profile | ProfileInput, now = Date.now()): Profile {
     const existing = "id" in input ? input : undefined;
     const profile = existing ? { ...existing, updatedAt: now } : createProfile(input, now);
-    this.database.run("INSERT INTO profiles(id, name, language, resume_json, job_description_json, instructions, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, language=excluded.language, resume_json=excluded.resume_json, job_description_json=excluded.job_description_json, instructions=excluded.instructions, updated_at=excluded.updated_at", [profile.id, profile.name, profile.language, profile.resume ? JSON.stringify(profile.resume) : null, profile.jobDescription ? JSON.stringify(profile.jobDescription) : null, profile.instructions ?? null, profile.createdAt, profile.updatedAt]);
+    this.database.run("INSERT INTO profiles(id, name, language, resume_json, job_description_json, instructions, expression_level, explain_advanced_terms, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, language=excluded.language, resume_json=excluded.resume_json, job_description_json=excluded.job_description_json, instructions=excluded.instructions, expression_level=excluded.expression_level, explain_advanced_terms=excluded.explain_advanced_terms, updated_at=excluded.updated_at", [profile.id, profile.name, profile.language, profile.resume ? JSON.stringify(profile.resume) : null, profile.jobDescription ? JSON.stringify(profile.jobDescription) : null, profile.instructions ?? null, profile.expressionLevel ?? "plain", profile.explainAdvancedTerms === false ? 0 : 1, profile.createdAt, profile.updatedAt]);
     this.database.run("DELETE FROM skills WHERE profile_id = ?", [profile.id]);
     profile.skills.forEach((skill) => this.database.run("INSERT INTO skills(id, profile_id, name, description, content, tags_json) VALUES (?, ?, ?, ?, ?, ?)", [skill.id, profile.id, skill.name, skill.description, skill.content, JSON.stringify(skill.tags)]));
     this.database.run("DELETE FROM profile_knowledge WHERE profile_id = ?", [profile.id]);
@@ -610,10 +614,10 @@ export class SqliteProfileRepository {
     return idRow ? this.get(idRow.value) : this.list()[0];
   }
 
-  private hydrate(row: { id: string; name: string; language: string; resume_json: string | null; job_description_json: string | null; instructions: string | null; created_at: number; updated_at: number }): Profile {
+  private hydrate(row: { id: string; name: string; language: string; resume_json: string | null; job_description_json: string | null; instructions: string | null; expression_level: string; explain_advanced_terms: number; created_at: number; updated_at: number }): Profile {
     const skills = this.database.all<{ id: string; name: string; description: string; content: string; tags_json: string }>("SELECT id, name, description, content, tags_json FROM skills WHERE profile_id = ? ORDER BY name", [row.id]).map((skill) => ({ id: skill.id, name: skill.name, description: skill.description, content: skill.content, tags: JSON.parse(skill.tags_json) as string[] }));
     const knowledgeBaseIds = this.database.all<{ knowledge_base_id: string }>("SELECT knowledge_base_id FROM profile_knowledge WHERE profile_id = ?", [row.id]).map((item) => item.knowledge_base_id);
-    return { id: row.id, name: row.name, language: row.language, resume: row.resume_json ? JSON.parse(row.resume_json) : undefined, jobDescription: row.job_description_json ? JSON.parse(row.job_description_json) : undefined, instructions: value<string>(row.instructions), skills, knowledgeBaseIds, createdAt: row.created_at, updatedAt: row.updated_at };
+    return { id: row.id, name: row.name, language: row.language, resume: row.resume_json ? JSON.parse(row.resume_json) : undefined, jobDescription: row.job_description_json ? JSON.parse(row.job_description_json) : undefined, instructions: value<string>(row.instructions), expressionLevel: ["plain", "standard", "expert"].includes(row.expression_level) ? row.expression_level as Profile["expressionLevel"] : "plain", explainAdvancedTerms: Number(row.explain_advanced_terms) !== 0, skills, knowledgeBaseIds, createdAt: row.created_at, updatedAt: row.updated_at };
   }
 }
 

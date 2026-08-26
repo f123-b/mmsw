@@ -9,8 +9,8 @@ describe("SQLite persistence", () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
       const profiles = new SqliteProfileRepository(database);
-      const profile = profiles.save({ name: "嵌入式面试", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
-      expect(profiles.get(profile.id)?.name).toBe("嵌入式面试");
+      const profile = profiles.save({ name: "嵌入式面试", language: "zh-CN", expressionLevel: "standard", explainAdvancedTerms: false, skills: [], knowledgeBaseIds: [] });
+      expect(profiles.get(profile.id)).toMatchObject({ name: "嵌入式面试", expressionLevel: "standard", explainAdvancedTerms: false });
       const clone = profiles.clone(profile.id, "嵌入式面试副本");
       profiles.setActive(clone.id);
       expect(profiles.active()?.id).toBe(clone.id);

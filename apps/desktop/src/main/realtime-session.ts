@@ -14,6 +14,8 @@ import {
   PcmBackpressureQueue,
   ProviderError,
   QwenRealtimeAsrProvider,
+  DashScopeTaskStreamingAsrProvider,
+  usesQwenRealtimeProtocol,
   QWEN_REALTIME_ASR_MODEL,
   LocalFunASRProvider,
   StereoAsrChannelRouter,
@@ -376,7 +378,9 @@ export class RealtimeSession extends EventEmitter {
     const createProvider = () => providerType === "funasr-local"
       ? new LocalFunASRProvider(this.localSocketFactory, "remote", { url: options.url || settings?.baseUrl, model, language, sampleRate: 16_000, channels: 1, vad: true })
       : providerType === "qwen"
-      ? new QwenRealtimeAsrProvider({ baseUrl: options.url || settings?.baseUrl, model, language, apiKey: settings?.apiKey ?? "" }, this.qwenSocketFactory)
+      ? usesQwenRealtimeProtocol(model)
+        ? new QwenRealtimeAsrProvider({ baseUrl: options.url || settings?.baseUrl, model, language, apiKey: settings?.apiKey ?? "" }, this.qwenSocketFactory)
+        : new DashScopeTaskStreamingAsrProvider({ baseUrl: options.url || settings?.baseUrl, model, language, apiKey: settings?.apiKey ?? "" }, this.qwenSocketFactory)
       : new DeepgramStreamingAsrProvider({ baseUrl: options.url || settings?.baseUrl, model, language, apiKey: settings?.apiKey ?? "" }, this.directSocketFactory);
     const router = new StereoAsrChannelRouter(createProvider(), createProvider());
     this.directRouter = router;

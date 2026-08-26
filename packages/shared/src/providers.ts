@@ -35,6 +35,11 @@ export interface ProviderCapabilities {
   embeddingPath: string;
 }
 
+export interface ModelConfigurationIssue {
+  field: keyof ProviderSettings;
+  message: string;
+}
+
 export type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 function isDeepSeek(settings: ProviderSettings): boolean {
@@ -67,14 +72,44 @@ export function providerCapabilities(settings: ProviderSettings): ProviderCapabi
 
 function cleanBaseUrl(baseUrl: string, settings: ProviderSettings): string {
   let base = baseUrl.trim().replace(/\/+$/, "");
-  if (isDeepSeek(settings)) base = base.replace(/\/chat\/completions$/i, "").replace(/\/v1$/i, "");
+  base = base.replace(/\/(?:v1\/)?(?:chat\/completions|embeddings)$/i, "");
+  if (isDeepSeek(settings)) base = base.replace(/\/v1$/i, "");
   return base;
 }
 
 export function providerEndpoint(settings: ProviderSettings, path: string): string {
-  const normalized = path.replace(/^\/+/, "");
+  let normalized = path.replace(/^\/+/, "");
   const base = cleanBaseUrl(settings.baseUrl, settings);
+  if (/\/v1$/i.test(base) && /^v1\//i.test(normalized)) normalized = normalized.slice(3);
   return `${base}/${normalized}`;
+}
+
+const CHAT_MODEL_FIELDS: Array<keyof ProviderSettings> = [
+  "model", "fastModel", "normalModel", "deepModel", "visionModel", "fallbackModel",
+  "questionRecognitionModel", "profileBuilderModel", "projectAnalyzerModel", "questionBankModel",
+  "chatModel", "postInterviewModel", "preparationModel"
+];
+
+export function validateLlmModelConfiguration(settings: Partial<ProviderSettings>): ModelConfigurationIssue[] {
+  const issues: ModelConfigurationIssue[] = [];
+  if (!settings.baseUrl?.trim()) issues.push({ field: "baseUrl", message: "Base URL 不能为空" });
+  else {
+    try {
+      const url = new URL(settings.baseUrl);
+      if (!/^https?:$/.test(url.protocol)) issues.push({ field: "baseUrl", message: "LLM Base URL 必须使用 http 或 https" });
+    } catch {
+      issues.push({ field: "baseUrl", message: "LLM Base URL 格式无效" });
+    }
+  }
+  if (!settings.model?.trim()) issues.push({ field: "model", message: "默认对话模型不能为空" });
+  for (const field of CHAT_MODEL_FIELDS) {
+    const model = settings[field];
+    if (typeof model !== "string" || !model.trim()) continue;
+    if (/(?:^|[-_/])(embedding|embed)(?:$|[-_/\d])|text-embedding|bge[-_/]|(?:^|[-_/])e5(?:$|[-_/])/i.test(model)) {
+      issues.push({ field, message: `${String(field)} 需要对话/生成模型，不能使用向量模型 ${model}` });
+    }
+  }
+  return issues;
 }
 
 function buildMessages(sections: PromptSection[], attachments: Array<{ mimeType: string; dataUrl: string }> = []): Array<{ role: "system" | "user"; content: string | Array<Record<string, unknown>> }> {

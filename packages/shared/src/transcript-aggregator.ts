@@ -26,8 +26,9 @@ export interface TranscriptAggregatorOptions {
 }
 
 const TERMINAL_PUNCTUATION = /[?？!！。；;]$/;
-const CONTINUATION_START = /^(关键字|关键点|作用|以及|并且|而且|尤其|包括|比如|例如|具体|分别|常见|十五秒|只讲|简单说|先说|你会|你准备|用一句话|急速|抖动|当时|接着|最后|然后|隔离|硬件|软件|故障|可观测|验证|排查|定位|设计|实现|考虑|在|其中|同时|关于|针对)/;
+const CONTINUATION_START = /^(关键字|关键点|作用|影响|导致|决定|以及|并且|而且|尤其|包括|比如|例如|具体|分别|常见|十五秒|只讲|简单说|先说|你会|你准备|用一句话|急速|抖动|当时|接着|最后|然后|隔离|硬件|软件|故障|可观测|验证|排查|定位|设计|实现|考虑|在|其中|同时|关于|针对|有什么)/;
 const INCOMPLETE_TAIL = /(?:比如|例如|包括|以及|并且|而且|尤其|关于|针对|问题是|最后|然后|怎么|如何|哪些|什么|是否|能否)[。！？?！；;，,、\s]*$/;
+const INCOMPLETE_GRAMMAR_TAIL = /(?:的|跟|和|与|以及|或者|还有|包括)[。！？?！；;，,、\s]*$/;
 const STANDALONE_ACKNOWLEDGEMENT = /^(?:好|好的|那|嗯+|呃+|啊+|哦+|对|明白了?|知道了?|行|可以)[。！？?！\s，,、]*$/i;
 const STANDALONE_REPAIR_QUESTION = /^(?:你觉得(?:呢)?|怎么(?:回答|答|说)|答案(?:是什么|呢))[。！？?！\s]*$/i;
 const STANDALONE_TRANSITION = /^(?:还有(?:一个)?问题|下一个(?:问题)?|再问(?:一个)?|接下来(?:问)?)[。！？?！\s，,、]*$/i;
@@ -43,6 +44,13 @@ function mergeText(left: string, right: string): string {
   const b = normalize(right);
   if (!a) return b;
   if (!b) return a;
+  // Mandarin ASR sometimes finalizes the interrogative shell before its
+  // complement: “还有什么因素？” + “影响 MCU 的性能。”  Reorder it into a
+  // self-contained question so the context resolver will not borrow the
+  // previous topic (for example “内存泄漏”).
+  if (/^(?:还有|哪些|什么).*(?:因素|原因)[？?。]$/.test(a) && /^(?:影响|导致|决定)/.test(b)) {
+    return `${a.replace(/[？?。]+$/, "")}${b.replace(/[。！!；;]+$/, "")}？`;
+  }
   return `${a}${/^[，。！？、,.!?；;：:]/.test(b) ? "" : " "}${b}`;
 }
 
@@ -60,7 +68,7 @@ function shouldMergeAfterPunctuation(previous: string, next: string): boolean {
   ) return false;
   // ASR punctuation is frequently inserted at a segment endpoint. A phrase
   // such as “比如。” or “最后。” is not a semantic end of the prompt.
-  if (INCOMPLETE_TAIL.test(previous.trim())) return true;
+  if (INCOMPLETE_TAIL.test(previous.trim()) || INCOMPLETE_GRAMMAR_TAIL.test(previous.trim())) return true;
   // ASR often closes each partial final with a full stop even though the
   // interviewer is continuing the same prompt: “请解释 volatile。” →
   // “关键字的作用。” → “以及常见误区”。 Keep those fragments together.

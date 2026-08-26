@@ -28,8 +28,10 @@ export class FollowUpContextResolver {
     const current = findTurn(turns, question.id);
     const parent = findTurn(turns, question.parentQuestionId)
       ?? (current?.parentQuestionId ? findTurn(turns, current.parentQuestionId) : undefined)
-      ?? turns.at(-2)
-      ?? turns.at(-1);
+      // Only fall back to temporal adjacency when no explicit thread id was
+      // supplied. A missing/stale id must never silently bind the question to
+      // an unrelated latest topic.
+      ?? (!question.parentQuestionId ? turns.at(-2) ?? turns.at(-1) : undefined);
     const root = findTurn(turns, question.rootQuestionId)
       ?? (parent?.rootQuestionId ? findTurn(turns, parent.rootQuestionId) : undefined)
       ?? parent

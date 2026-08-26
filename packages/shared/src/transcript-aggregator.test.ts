@@ -75,6 +75,24 @@ describe("TranscriptAggregator", () => {
     expect(aggregator.flush("remote")[0]?.text).toBe("IIC 通讯偶发读不到数据");
   });
 
+  it("merges a grammatical question stem with its short interrogative tail", () => {
+    const aggregator = new TranscriptAggregator();
+    aggregator.push({ id: "linux-stem", source: "remote", text: "Linux 跟 FreeRTOS 的。", startMs: 0, endMs: 700, final: true });
+    aggregator.push({ id: "linux-tail", source: "remote", text: "有什么区别？", startMs: 820, endMs: 1_150, final: true });
+    expect(aggregator.flush("remote")).toEqual([
+      expect.objectContaining({ text: "Linux 跟 FreeRTOS 的。 有什么区别？", segmentIds: ["linux-stem", "linux-tail"] })
+    ]);
+  });
+
+  it("reconstructs an interrogative shell followed by its subject complement", () => {
+    const aggregator = new TranscriptAggregator();
+    aggregator.push({ id: "factor", source: "remote", text: "还有什么因素？", startMs: 0, endMs: 500, final: true });
+    aggregator.push({ id: "mcu", source: "remote", text: "影响那个 MCU 的性能。", startMs: 560, endMs: 1_000, final: true });
+    expect(aggregator.flush("remote")).toEqual([
+      expect.objectContaining({ text: "还有什么因素影响那个 MCU 的性能？", segmentIds: ["factor", "mcu"] })
+    ]);
+  });
+
   it("keeps runtime receipt and utterance finalization timestamps separate from ASR offsets", () => {
     const aggregator = new TranscriptAggregator();
     aggregator.push({ id: "timed", source: "remote", text: "为什么这样设计？", startMs: 0, endMs: 900, final: true }, 10_000);

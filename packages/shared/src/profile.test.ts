@@ -11,6 +11,7 @@ describe("Profile and Skill domain", () => {
     expect(profile.resume?.summary).toBe("STM32 与 FOC");
     expect(profile.resume?.rawContent).toBe("完整简历");
     expect(profile.skills).toEqual([]);
+    expect(profile).toMatchObject({ expressionLevel: "plain", explainAdvancedTerms: true });
   });
 
   it("routes only relevant top skills", () => {

@@ -2,8 +2,11 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { QWEN_REALTIME_ASR_MODEL, QWEN_REALTIME_ASR_URL, type AsrLanguage, type AsrProviderType, type ProviderSettings } from "@interview-copilot/shared";
+import { qwenAsrWebSocketUrl, QWEN_REALTIME_ASR_MODEL, validateLlmModelConfiguration, type AsrLanguage, type AsrProviderType, type ProviderSettings } from "@interview-copilot/shared";
 import { APP_DATA_DIRECTORY, type SqliteDatabase } from "./database";
+import { DEFAULT_OVERLAY_PREFERENCES, type OverlayPreferences } from "../shared/overlay-preferences";
+
+export type { OverlayPreferences } from "../shared/overlay-preferences";
 
 export type ProviderSection = "llm" | "asr" | "embedding" | "reranker";
 
@@ -85,16 +88,10 @@ const DEFAULTS: Record<ProviderSection, ProviderSettings> = {
 
 function normalizeQwenAsrSettings(settings: ProviderSettings): ProviderSettings {
   if (settings.providerType !== "qwen") return settings;
-  const model = settings.model.trim();
-  const legacyModel = !model || /^qwen-audio-3\.0-asr-flash(?:-streaming)?$/i.test(model) || model === "qwen3-asr-flash-realtime-2026-02-10";
-  let baseUrl = settings.baseUrl.trim();
-  try {
-    const parsed = new URL(baseUrl);
-    if (parsed.protocol !== "wss:" || !parsed.pathname.endsWith("/api-ws/v1/realtime")) baseUrl = QWEN_REALTIME_ASR_URL;
-  } catch {
-    baseUrl = QWEN_REALTIME_ASR_URL;
-  }
-  return { ...settings, baseUrl, model: legacyModel ? QWEN_REALTIME_ASR_MODEL : model };
+  const model = settings.model.trim() || QWEN_REALTIME_ASR_MODEL;
+  // Model choice is user data. Never rewrite it during load/save. The
+  // transport URL is derived from the selected model family instead.
+  return { ...settings, baseUrl: qwenAsrWebSocketUrl(model), model };
 }
 
 export class ProviderConfigStore {
@@ -154,6 +151,13 @@ export class ProviderConfigStore {
     return { ...profile, apiKey: this.secrets.get(this.profileSecretKey(profile.id)) ?? "" };
   }
 
+  getLlmProfile(id: string): ProviderSettings {
+    const { profiles } = this.ensureLlmProfiles();
+    const profile = profiles.find((item) => item.id === id);
+    if (!profile) throw new Error("LLM_PROFILE_NOT_FOUND: 模型配置不存在");
+    return this.profileSettings(profile);
+  }
+
   private publicLlmProfile(profile: Omit<ProviderSettings, "apiKey"> & { id: string; name: string }): PublicLlmModelProfile {
     const { apiKey: _apiKey, ...safe } = this.profileSettings(profile);
     return { id: profile.id, name: profile.name, ...safe, hasApiKey: Boolean(this.secrets.get(this.profileSecretKey(profile.id)) ?? "") };
@@ -205,6 +209,8 @@ export class ProviderConfigStore {
     const current = this.get(section);
     const next = section === "asr" ? normalizeQwenAsrSettings({ ...current, ...input }) : { ...current, ...input };
     if (section === "llm") {
+      const issues = validateLlmModelConfiguration(next);
+      if (issues.length) throw new Error(`LLM_MODEL_CONFIGURATION_INVALID: ${issues.map((issue) => issue.message).join("；")}`);
       const { profiles, activeId } = this.ensureLlmProfiles();
       const activeProfile = profiles.find((profile) => profile.id === activeId) ?? profiles[0];
       const { apiKey: _apiKey, ...safe } = next;
@@ -233,6 +239,8 @@ export class ProviderConfigStore {
     const seed = existing ? this.profileSettings(existing) : { ...DEFAULTS.llm, ...this.defaults.llm, apiKey: "" };
     const { id: _id, name: rawName, apiKey, ...settings } = input;
     const nextSettings = { ...seed, ...settings };
+    const issues = validateLlmModelConfiguration(nextSettings);
+    if (issues.length) throw new Error(`LLM_MODEL_CONFIGURATION_INVALID: ${issues.map((issue) => issue.message).join("；")}`);
     const { apiKey: _apiKey, ...safe } = nextSettings;
     const nextProfile = { id, name: rawName.trim() || "未命名模型配置", ...safe };
     this.writeLlmProfiles(existing ? profiles.map((profile) => profile.id === id ? nextProfile : profile) : [...profiles, nextProfile]);
@@ -240,8 +248,8 @@ export class ProviderConfigStore {
       if (apiKey) this.secrets.set(this.profileSecretKey(id), apiKey);
       else this.secrets.delete(this.profileSecretKey(id));
     }
-    this.writeActiveLlmProfileId(id);
-    this.writeStoredProvider("llm", { ...nextSettings, apiKey: apiKey ?? (existing ? this.secrets.get(this.profileSecretKey(id)) ?? "" : "") });
+    const { activeId } = this.ensureLlmProfiles();
+    if (id === activeId) this.writeStoredProvider("llm", { ...nextSettings, apiKey: apiKey ?? (existing ? this.secrets.get(this.profileSecretKey(id)) ?? "" : "") });
     return this.getPublic();
   }
 
@@ -274,6 +282,22 @@ export interface OverlayCaptureProtectionSettings {
   captureProtection: boolean;
 }
 
+function normalizeOverlayPreferences(input: Partial<OverlayPreferences>): OverlayPreferences {
+  const color = (value: unknown, fallback: string) => typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : fallback;
+  const number = (value: unknown, fallback: number, minimum: number, maximum: number) => typeof value === "number" && Number.isFinite(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback;
+  const flag = (value: unknown, fallback: boolean) => typeof value === "boolean" ? value : fallback;
+  return {
+    backgroundOpacity: number(input.backgroundOpacity, DEFAULT_OVERLAY_PREFERENCES.backgroundOpacity, 0.2, 1),
+    backgroundColor: color(input.backgroundColor, DEFAULT_OVERLAY_PREFERENCES.backgroundColor),
+    fontColor: color(input.fontColor, DEFAULT_OVERLAY_PREFERENCES.fontColor),
+    fontSize: number(input.fontSize, DEFAULT_OVERLAY_PREFERENCES.fontSize, 12, 28),
+    showToolbar: flag(input.showToolbar, DEFAULT_OVERLAY_PREFERENCES.showToolbar),
+    showTranscript: flag(input.showTranscript, DEFAULT_OVERLAY_PREFERENCES.showTranscript),
+    showAnswer: flag(input.showAnswer, DEFAULT_OVERLAY_PREFERENCES.showAnswer),
+    showTimestamps: flag(input.showTimestamps, DEFAULT_OVERLAY_PREFERENCES.showTimestamps)
+  };
+}
+
 export type TencentValidationStatus = "unverified" | "verified" | "failed";
 export type AutomationMode = "AUTO" | "MANUAL";
 
@@ -284,6 +308,7 @@ export interface TencentValidationState {
 
 export class OverlaySettingsStore {
   private static readonly key = "overlay.captureProtection";
+  private static readonly preferencesKey = "overlay.preferences";
   private static readonly tencentValidationKey = "overlay.tencentValidation";
   private static readonly automationModeKey = "interview.automationMode";
 
@@ -304,6 +329,20 @@ export class OverlaySettingsStore {
     this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.key, JSON.stringify(value)]);
     this.database.flushNow();
     return { captureProtection: value };
+  }
+
+  getPreferences(): OverlayPreferences {
+    const stored = this.database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", [OverlaySettingsStore.preferencesKey]);
+    if (!stored) return { ...DEFAULT_OVERLAY_PREFERENCES };
+    try { return normalizeOverlayPreferences(JSON.parse(stored.value) as Partial<OverlayPreferences>); }
+    catch { return { ...DEFAULT_OVERLAY_PREFERENCES }; }
+  }
+
+  setPreferences(input: Partial<OverlayPreferences>): OverlayPreferences {
+    const next = normalizeOverlayPreferences({ ...this.getPreferences(), ...input });
+    this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.preferencesKey, JSON.stringify(next)]);
+    this.database.flushNow();
+    return next;
   }
 
   getAutomationMode(): AutomationMode {

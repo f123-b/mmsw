@@ -50,9 +50,9 @@ describe("InterviewCoordinator software E2E", () => {
     for (let index = 0; index < 12; index += 1) await Promise.resolve();
     expect(messages).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "answer_start" }),
-      expect.objectContaining({ type: "answer_end", text: "核心回答。" })
+      expect.objectContaining({ type: "answer_end", text: expect.stringContaining("没有足够证据") })
     ]));
-    expect(messages.some((message) => (message as { type?: string }).type === "answer_delta")).toBe(true);
+    expect(messages.some((message) => (message as { type?: string }).type === "answer_delta")).toBe(false);
     await coordinator.stop();
     expect(coordinator.running).toBe(false);
     expect(interviewId).toMatch(/^interview-/);
@@ -305,14 +305,16 @@ describe("InterviewCoordinator software E2E", () => {
     vi.useRealTimers();
   });
 
-  it("cancels an in-flight answer when a new question supersedes it", async () => {
+  it("queues rapid follow-up questions without cancelling the in-flight answer", async () => {
     vi.useFakeTimers();
     const audio = new FakeAudio();
     const realtime = new FakeRealtime();
     const history = new InterviewHistoryStore();
     let clock = 1_000;
     let calls = 0;
-    const provider: AnswerProvider = { stream: (_request, signal) => (async function* () { if (calls++ === 0) { yield "旧答案"; await new Promise<never>((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true })); } else yield "新答案"; })() };
+    let releaseFirst!: () => void;
+    const firstAnswerGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const provider: AnswerProvider = { stream: () => (async function* () { if (calls++ === 0) { yield "第一题答案"; await firstAnswerGate; yield "完成"; } else yield "第二题答案"; })() };
     const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
     const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, history, now: () => clock });
     const messages: Array<{ type: string; reason?: string }> = [];
@@ -326,9 +328,13 @@ describe("InterviewCoordinator software E2E", () => {
     clock = 3_600;
     vi.advanceTimersByTime(500);
     for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
-    expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({ type: "answer_cancelled", reason: "superseded" }), expect.objectContaining({ type: "answer_end" })]));
+    expect(messages.some((message) => message.type === "answer_cancelled")).toBe(false);
+    releaseFirst();
+    for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
+    expect(messages.filter((message) => message.type === "answer_end")).toHaveLength(2);
     const snapshot = history.snapshot(coordinator.interviewId!);
-    expect(snapshot.answers.find((answer) => answer.cancelReason === "superseded")?.text).toBe("旧答案");
+    expect(snapshot.answers.map((answer) => answer.text)).toEqual(["第一题答案完成", "第二题答案"]);
+    expect(snapshot.questions.every((question) => question.status === "answered")).toBe(true);
     await coordinator.stop();
     vi.useRealTimers();
   });

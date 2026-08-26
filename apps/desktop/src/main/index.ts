@@ -13,12 +13,14 @@ import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkil
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
-import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type ProviderSection } from "./settings-store";
+import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type OverlayPreferences, type ProviderSection } from "./settings-store";
 import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnection } from "./provider-preflight";
+import { discoverProviderModels } from "./model-catalog";
 import { parseDocument } from "./document-parsers";
 import { SafeLogger } from "./logger";
 import { buildConversationHistory } from "./chat-context";
 import { ShutdownController } from "./shutdown-controller";
+import { MiddleMouseShortcutManager, middleMouseHelperCandidates, shouldHandleMiddleMouseShortcut } from "./middle-mouse-shortcut";
 import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-service-manager";
 import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
 import { createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
@@ -212,6 +214,7 @@ const questionDetector2 = new QuestionDetector2({
 });
 let interviewCoordinator: InterviewCoordinator | undefined;
 let writtenTestController: WrittenTestController | undefined;
+let middleMouseShortcutManager: MiddleMouseShortcutManager | undefined;
 let profileRepository: SqliteProfileRepository | undefined;
 let knowledgeRepository: SqliteKnowledgeRepository | undefined;
 let questionBankRepository: SqliteQuestionBankRepository | undefined;
@@ -253,6 +256,7 @@ const rendererAppReadyWaiters = new Map<number, Set<() => void>>();
 
 const shutdownController = new ShutdownController([
   { name: "unregister-shortcuts", run: () => globalShortcut.unregisterAll() },
+  { name: "stop-middle-mouse-shortcut", run: () => middleMouseShortcutManager?.stop() },
   { name: "abort-preparation", run: () => preparationAbortController?.abort() },
   { name: "abort-chat", run: () => chatAbortControllers.forEach((entry) => { entry.reason = "shutdown"; entry.controller.abort(); }) },
   { name: "wait-chat", run: async () => { await Promise.allSettled([...chatStreamPromises]); } },
@@ -288,7 +292,7 @@ function userFacingError(error: unknown): string {
     ["AUDIO_PROBE_MIC_FAILED", "麦克风输入不可用"],
     ["AUDIO_PROBE_SYSTEM_FAILED", "系统音频回采不可用"],
     ["AUDIO_PROBE_REQUIRED", "请先完成一次音频检测"],
-    ["ASR_AUTH_FAILED", "未配置或未授权 Deepgram API Key，请前往设置"],
+    ["ASR_AUTH_FAILED", "当前语音供应商的 API Key 未配置或未授权，请前往模型与服务设置"],
     ["ASR_CONNECT_FAILED", "ASR 连接失败，请检查 ASR 设置或本地服务"],
     ["LLM_NOT_CONFIGURED", "未配置 LLM API Key，请前往设置"],
     ["LLM_CONNECT_FAILED", "LLM 连接失败，请检查测试结果和网络"],
@@ -842,7 +846,7 @@ function chatContext(profileId?: string, userMessage = "", projectId?: string): 
   if (profile.instructions) sections.push(`Instructions：${profile.instructions.slice(0, 2_000)}`);
   if (profile.skills.length && plan.intent !== "general_technical") sections.push(`Skills：${profile.skills.map((skill) => `${skill.name}: ${skill.description}\n${skill.content}`).join("\n\n").slice(0, 5_000)}`);
 
-  const snapshot = plan.includeProjectMemory && profileId ? projectMemoryRepository?.getSnapshot(profileId) : undefined;
+  const snapshot = (plan.includeProjectMemory || Boolean(projectId)) && profileId ? projectMemoryRepository?.getSnapshot(profileId) : undefined;
   const project = snapshot?.projects.find((item) => item.id === projectId) ?? (snapshot?.projects.length === 1 ? snapshot.projects[0] : undefined);
   if (project) {
     const projectFacts = snapshot?.facts ?? [];
@@ -852,7 +856,7 @@ function chatContext(profileId?: string, userMessage = "", projectId?: string): 
     sections.push(`当前项目：${project.name}\n背景：${project.description || "未补充"}\n职责：${project.role || "未确认"}\n技术栈：${project.technologyStack.join("、") || "未确认"}\n${facts.length ? `已确认事实：\n${facts.map((fact) => `- [${fact.type}] ${fact.title}：${fact.content}`).join("\n")}` : "已确认事实：无"}\n待确认事实：${pending} 条${completeness ? `\n项目资料完整度：${completeness.completeness}%` : ""}`);
     sources.push(...(project.sourceIds ?? []).slice(0, 8));
     const details = projectMemoryRepository?.listSourceDetails(project.id).slice(0, 5) ?? [];
-    if (details.length) sections.push(`项目来源：${details.map((source) => source.title).join("、")}`);
+    if (details.length) sections.push(`项目来源（写入建议必须引用这里的 sourceId）：\n${details.map((source) => `- ${source.sourceId}：${source.title}`).join("\n")}`);
   } else if (plan.includeProjectMemory && snapshot?.projects.length) {
     const projectSummary = snapshot.projects.slice(0, 8).map((item) => {
       const result = profileId ? projectMemoryRepository?.getProjectCompleteness(profileId, item.id) : undefined;
@@ -869,7 +873,7 @@ function chatContext(profileId?: string, userMessage = "", projectId?: string): 
       sources.push(match.question.id);
     }
   }
-  if (plan.includeKnowledge) {
+  if (plan.includeKnowledge || Boolean(projectId)) {
     const chunks = knowledgeRepository?.listChunks(profile.knowledgeBaseIds) ?? [];
     const retrieved = new HybridRetriever().search(userMessage, chunks, { topK: 8 }).slice(0, 5);
     if (retrieved.length) {
@@ -919,8 +923,11 @@ async function streamChat(conversationId: string, content: string, resumeMessage
     const prompt = existing
       ? `${contextForQuestion.text}\n\n原始用户问题：${userMessage.content}\n已有回答：${existing.content}\n请从中断位置继续回答。不要重复已有回答，保持原答案的语言、结构和语气，只输出新增内容。`
       : `${contextForQuestion.text}\n\n用户问题：${content}`;
+    const systemInstruction = conversation.conversation.projectId
+      ? "你是项目资料整理 Agent。你的目标是把用户上传的源码/文档和用户补充说明整理成真实、自洽、能经受面试追问的项目库。必须区分：已确认事实、资料支持但待确认、相互冲突、完全缺失。绝不补写没有证据的职责、指标、硬件型号或实现细节；不确定时直接提出一个短问题，并给 2~4 个互斥选项。回答必须是 JSON 对象 {text,sources,cards,actions,context}。可建议的 actions 只有 add_project_fact、review_fact、create_question，全部 requiresConfirmation=true。add_project_fact.payload 必须包含 projectId,type,title,content,sourceIds,evidence；evidence 每项必须包含真实 sourceId 和原文 quote。任何写入都只能说‘建议’，不能声称已经执行。代码题和面试题必须给口述思路、完整可运行代码、复杂度和边界。"
+      : "你是 Interview Copilot 面试助手。只根据提供的 Profile、Resume、JD 和知识回答；如果资料不足，请明确说明，不要编造经历。普通问题输出简洁 Markdown。对于项目缺口、题库覆盖或明确要求执行动作的问题，可以输出一个 JSON 对象：{text, sources, cards, actions, context}；actions 只能是建议，必须 requiresConfirmation=true，绝不能声称已经写入数据库。";
     for await (const delta of provider.stream({ model: selectedModel, sections: [
-      { name: "system/base", content: "你是 Interview Copilot 面试助手。只根据提供的 Profile、Resume、JD 和知识回答；如果资料不足，请明确说明，不要编造经历。普通问题输出简洁 Markdown。对于项目缺口、题库覆盖或明确要求执行动作的问题，可以输出一个 JSON 对象：{text, sources, cards, actions, context}；actions 只能是建议，必须 requiresConfirmation=true，绝不能声称已经写入数据库。" },
+      { name: "system/base", content: systemInstruction },
       ...(history ? [{ name: "conversation-history" as const, content: history }] : []),
       { name: "question", content: prompt }
     ] }, entry.controller.signal)) {
@@ -1103,6 +1110,12 @@ function registerIpc(): void {
    ipcMain.handle("overlay:toggle-shortcuts", () => { overlayManager?.toggleShortcuts(); return true; });
    ipcMain.handle("overlay:get-state", () => overlayManager?.hudState);
    ipcMain.handle("overlay:get-layout", () => overlayManager?.hudLayout);
+   ipcMain.handle("overlay:get-preferences", () => overlaySettingsStore?.getPreferences());
+   ipcMain.handle("overlay:set-preferences", (_event, input: Partial<OverlayPreferences>) => {
+     const next = overlaySettingsStore?.setPreferences(input);
+     if (next) broadcast("overlay:preferences", next);
+     return next;
+   });
    ipcMain.handle("overlay:set-share-mode", (_event, enabled: boolean) => { overlayManager?.setShareMode(Boolean(enabled)); return overlayManager?.hudState; });
    ipcMain.handle("overlay:toggle-share-mode", () => { overlayManager?.toggleShareMode(); return overlayManager?.hudState; });
   ipcMain.handle("overlay:set-control-region", (_event, interactive: boolean) => {
@@ -1466,13 +1479,18 @@ function registerIpc(): void {
     applyLlmRouting(result.llm);
     return result;
   });
-  ipcMain.handle("settings:test-connection", async (_event, section: ProviderSection) => {
+  ipcMain.handle("settings:test-connection", async (_event, section: ProviderSection, profileId?: string) => {
     if (!providerConfigStore) throw new Error("Settings are still initializing");
-    const settings = providerConfigStore.get(section);
+    const settings = section === "llm" && profileId ? providerConfigStore.getLlmProfile(profileId) : providerConfigStore.get(section);
     if (section === "asr" && settings.providerType === "funasr-local") {
       await localAsrServiceManager.ensureRunning({ webSocketUrl: settings.baseUrl, model: settings.model });
     }
     return testCachedProviderConnection(section, settings, providerPreflightCache);
+  });
+  ipcMain.handle("settings:list-models", async (_event, section: ProviderSection, profileId?: string) => {
+    if (!providerConfigStore) throw new Error("Settings are still initializing");
+    const settings = section === "llm" && profileId ? providerConfigStore.getLlmProfile(profileId) : providerConfigStore.get(section);
+    return discoverProviderModels(section, settings);
   });
   ipcMain.handle("local-asr:health", (_event, options?: LocalAsrStartOptions) => localAsrServiceManager.getHealthCheck(options));
   ipcMain.handle("settings:preflight", (_event, checkReachability = false) => {
@@ -1787,6 +1805,8 @@ if (hasSingleInstanceLock) {
       profileSummary: profile?.resume?.summary,
       jobDescriptionSummary: profile?.jobDescription?.summary,
       profileInstructions: profile?.instructions,
+      expressionLevel: profile?.expressionLevel ?? "plain",
+      explainAdvancedTerms: profile?.explainAdvancedTerms ?? true,
       skills: (profile?.skills ?? []).map((skill) => ({ id: skill.id, name: skill.name, content: `${skill.description}\n${skill.content}` })),
       experienceContext: experience,
       personalMemoryEvidence: personalEvidence,
@@ -1827,6 +1847,20 @@ if (hasSingleInstanceLock) {
     initialAnswerMode: "NORMAL",
     contextProvider: (question, profileId) => answerContextProvider(question, profileId, [])
   });
+  const middleMouseHelper = firstExistingLocalPath(middleMouseHelperCandidates(process.resourcesPath, app.getAppPath()));
+  if (middleMouseHelper) {
+    middleMouseShortcutManager = new MiddleMouseShortcutManager(middleMouseHelper, () => {
+      if (!shouldHandleMiddleMouseShortcut({ interviewRunning: Boolean(interviewCoordinator?.running), automationMode: interviewCoordinator?.automationMode ?? "AUTO", writtenTestRunning: Boolean(writtenTestController?.running) })) return;
+      broadcast("shortcut", "middle-mouse-screenshot");
+      void answerCapturedScreenshot("interview").catch((error) => {
+        realtimeLogger?.warn("MIDDLE_MOUSE_SCREENSHOT_FAILED", { error: String(error) });
+        broadcast("runtime:error", { code: "SCREENSHOT_FAILED", message: "鼠标中键截图识别失败，请重试", recoverable: true });
+      });
+    }, (message) => realtimeLogger?.warn(message));
+    middleMouseShortcutManager.start();
+  } else {
+    appLogger?.warn("MIDDLE_MOUSE_HELPER_NOT_FOUND");
+  }
   const createdMainWindow = createMainWindow();
   overlayManager = new OverlayManager({
     preloadPath,

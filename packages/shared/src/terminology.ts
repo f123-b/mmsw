@@ -114,8 +114,23 @@ export const EMBEDDED_TERMINOLOGY_RULES: readonly TerminologyRule[] = [
   { canonical: "GPIO", pattern: /g\s*p\s*i\s*o/gi },
   { canonical: "PWM", pattern: /p\s*w\s*m/gi },
   { canonical: "CAN", pattern: /\bc\s*a\s*n\b/gi, priority: 100 },
+  { canonical: "CAN", pattern: /(?:看|砍|坎|康)(?=\s*(?:总线|FD|协议|报文|仲裁|节点|收发器|控制器))/g, priority: 120 },
+  { canonical: "CAN FD", pattern: /(?:看|砍|坎|康)\s*f\s*d/gi, priority: 120 },
+  { canonical: "LIN", pattern: /\bl\s*i\s*n\b/gi },
+  { canonical: "FlexRay", pattern: /flex\s*ray/gi },
+  { canonical: "Profibus", pattern: /profi\s*bus/gi },
+  { canonical: "LoRaWAN", pattern: /lora\s*wan/gi },
+  { canonical: "LoRa", pattern: /\blora\b/gi },
+  { canonical: "NB-IoT", pattern: /n\s*b\s*[- ]?\s*i\s*o\s*t/gi },
+  { canonical: "Zigbee", pattern: /zig\s*bee/gi },
+  { canonical: "NFC", pattern: /\bn\s*f\s*c\b/gi },
   { canonical: "MQTT", pattern: /m\s*q\s*t\s*t/gi },
   { canonical: "Modbus", pattern: /m\s*o\s*d\s*b\s*u\s*s/gi },
+  { canonical: "LwIP", pattern: /l\s*w\s*i\s*p/gi },
+  { canonical: "CoAP", pattern: /c\s*o\s*a\s*p/gi },
+  { canonical: "DHCP", pattern: /d\s*h\s*c\s*p/gi },
+  { canonical: "DNS", pattern: /\bd\s*n\s*s\b/gi },
+  { canonical: "SNTP", pattern: /s\s*n\s*t\s*p/gi },
   { canonical: "TCP/IP", pattern: /t\s*c\s*p\s*(?:\/|每)?\s*i\s*p/gi },
   { canonical: "Socket", pattern: /s\s*o\s*c\s*k\s*e\s*t/gi },
   { canonical: "I/O", pattern: /i\s*[\/或]\s*o/gi },
@@ -126,6 +141,26 @@ export const EMBEDDED_TERMINOLOGY_RULES: readonly TerminologyRule[] = [
   { canonical: "Buildroot", pattern: /b\s*u\s*i\s*l\s*d\s*r\s*o\s*o\s*t/gi },
   { canonical: "Yocto", pattern: /y\s*o\s*c\s*t\s*o/gi },
   { canonical: "Device Tree", pattern: /device\s*tree|设备\s*树/gi }
+  ,{ canonical: "DTS", pattern: /\bd\s*t\s*s\b/gi }
+  ,{ canonical: "DTB", pattern: /\bd\s*t\s*b\b/gi }
+  ,{ canonical: "Rootfs", pattern: /root\s*f\s*s/gi }
+  ,{ canonical: "Cgroups", pattern: /c\s*groups/gi }
+  ,{ canonical: "Namespaces", pattern: /name\s*spaces/gi }
+  ,{ canonical: "LittleFS", pattern: /little\s*f\s*s/gi }
+  ,{ canonical: "SPIFFS", pattern: /s\s*p\s*i\s*f\s*f\s*s/gi }
+  ,{ canonical: "eMMC", pattern: /e\s*m\s*m\s*c/gi }
+  ,{ canonical: "LVGL", pattern: /l\s*v\s*g\s*l/gi }
+  ,{ canonical: "V4L2", pattern: /v\s*4\s*l\s*2/gi }
+  ,{ canonical: "ALSA", pattern: /a\s*l\s*s\s*a/gi }
+  ,{ canonical: "TrustZone", pattern: /trust\s*zone/gi }
+  ,{ canonical: "OP-TEE", pattern: /op\s*[- ]?\s*tee/gi }
+  ,{ canonical: "mbedTLS", pattern: /m\s*bed\s*tls/gi }
+  ,{ canonical: "AUTOSAR", pattern: /auto\s*sar/gi }
+  ,{ canonical: "ISO 26262", pattern: /iso\s*26262/gi }
+  ,{ canonical: "MISRA C", pattern: /misra\s*c/gi }
+  ,{ canonical: "SOME/IP", pattern: /some\s*[\/]?\s*i\s*p/gi }
+  ,{ canonical: "State Machine", pattern: /state\s*machine/gi }
+  ,{ canonical: "Callback", pattern: /call\s*back/gi }
 ];
 
 export const INTERVIEW_TERMINOLOGY_RULES: readonly TerminologyRule[] = [

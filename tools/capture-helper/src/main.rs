@@ -14,6 +14,7 @@ mod windows_capture {
     use std::mem::size_of;
     use std::path::Path;
     use std::ptr::null_mut;
+    use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -33,6 +34,7 @@ mod windows_capture {
     type Hwnd = isize;
     type Hbitmap = *mut c_void;
     type Hgdiobj = *mut c_void;
+    type Hhook = isize;
 
     const BI_RGB: u32 = 0;
     const DIB_RGB_COLORS: u32 = 0;
@@ -43,6 +45,24 @@ mod windows_capture {
     const SM_YVIRTUALSCREEN: i32 = 77;
     const SM_CXVIRTUALSCREEN: i32 = 78;
     const SM_CYVIRTUALSCREEN: i32 = 79;
+    const WH_MOUSE_LL: i32 = 14;
+    const WM_MBUTTONDOWN: usize = 0x0207;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Point { x: i32, y: i32 }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Msg {
+        hwnd: Hwnd,
+        message: u32,
+        wParam: usize,
+        lParam: isize,
+        time: u32,
+        pt: Point,
+        lPrivate: u32,
+    }
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -94,6 +114,10 @@ mod windows_capture {
         fn PrintWindow(hwnd: Hwnd, hdc: Hdc, flags: u32) -> Bool;
         fn GetSystemMetrics(index: i32) -> i32;
         fn IsWindow(hwnd: Hwnd) -> Bool;
+        fn SetWindowsHookExW(idHook: i32, callback: Option<unsafe extern "system" fn(i32, usize, isize) -> isize>, instance: isize, threadId: u32) -> Hhook;
+        fn CallNextHookEx(hook: Hhook, code: i32, wParam: usize, lParam: isize) -> isize;
+        fn UnhookWindowsHookEx(hook: Hhook) -> Bool;
+        fn GetMessageW(message: *mut Msg, hwnd: Hwnd, min: u32, max: u32) -> i32;
     }
 
     #[link(name = "gdi32")]
@@ -227,9 +251,11 @@ mod windows_capture {
                 _ => return Err(format!("unknown argument: {arg}")),
             }
         }
+        let mode = mode.ok_or_else(|| "missing --mode".to_string())?;
+        let output = if mode == "mouse-watch" { output.unwrap_or_default() } else { output.ok_or_else(|| "missing --output".to_string())? };
         Ok(Args {
-            mode: mode.ok_or_else(|| "missing --mode".to_string())?,
-            output: output.ok_or_else(|| "missing --output".to_string())?,
+            mode,
+            output,
             target,
             roi,
         })
@@ -625,6 +651,27 @@ mod windows_capture {
             .replace('\n', "\\n")
     }
 
+    unsafe extern "system" fn mouse_hook(code: i32, wparam: usize, lparam: isize) -> isize {
+        if code >= 0 && wparam == WM_MBUTTONDOWN {
+            println!(r#"{{"event":"middle-click"}}"#);
+            let _ = io::stdout().flush();
+        }
+        CallNextHookEx(0, code, wparam, lparam)
+    }
+
+    fn watch_mouse() -> Result<(), String> {
+        unsafe {
+            let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), 0, 0);
+            if hook == 0 { return Err(format!("SetWindowsHookExW failed: {}", GetLastError())); }
+            println!(r#"{{"event":"ready"}}"#);
+            let _ = io::stdout().flush();
+            let mut message = std::mem::zeroed::<Msg>();
+            while GetMessageW(&mut message, 0, 0, 0) > 0 {}
+            UnhookWindowsHookEx(hook);
+        }
+        Ok(())
+    }
+
     pub fn run() -> i32 {
         let args = match parse_args() {
             Ok(value) => value,
@@ -636,6 +683,12 @@ mod windows_capture {
                 return 2;
             }
         };
+        if args.mode == "mouse-watch" {
+            return match watch_mouse() {
+                Ok(()) => 0,
+                Err(error) => { println!(r#"{{"event":"error","error":"{}"}}"#, json_string(&error)); 2 }
+            };
+        }
         let capture = match args.mode.as_str() {
             "display" => capture_display(&args.output, args.roi),
             "window" => match args.target.as_deref().map(parse_hwnd).transpose() {

@@ -445,13 +445,15 @@ export class QuestionDetector {
       return [{ type: "question_ignored", question: { ...candidate, status: "ignored" }, reason: "duplicate" }, { type: "question_diagnostic", text: candidate.text, questionScore: candidate.score, confidence: candidate.score, candidate: true, confirmed: false, reason: "duplicate", category: candidate.category, detectionType: candidate.detectionType, speechAct: candidate.speechAct, fingerprint: candidate.fingerprint, ignoredReason: "duplicate", dedupeScore }];
     }
     const confirmed = { ...candidate, status: "confirmed" as const };
-    const previous = this.confirmed.at(-1);
     this.confirmed.push(confirmed);
     this.currentCandidate = confirmed;
     this.stateValue = "CONFIRMED";
-    const event: QuestionEvent = previous && previous.id !== confirmed.id && (previous.status === "confirmed" || previous.id === this.answeringQuestionId)
-      ? { type: "question_superseded", previousQuestionId: previous.id, question: confirmed }
-      : { type: "question_confirmed", question: confirmed };
+    // A distinct utterance is another interview question, not a replacement
+    // for the previous one. ASR revisions have already been removed by the
+    // similarity check above. Treating every rapid follow-up as superseding
+    // caused the coordinator to cancel valid answers and lose multi-part
+    // questions such as “怎么定位？最后怎么解决？”.
+    const event: QuestionEvent = { type: "question_confirmed", question: confirmed };
     this.resetBuffer(false);
     return [event, { type: "question_diagnostic", text: confirmed.text, questionScore: confirmed.score, confidence: confirmed.score, candidate: true, confirmed: true, reason: confirmed.triggerReason ?? "confirmed", category: confirmed.category, detectionType: confirmed.detectionType, speechAct: confirmed.speechAct, fingerprint: confirmed.fingerprint, dedupeScore }];
   }

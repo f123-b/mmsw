@@ -255,13 +255,22 @@ try {
   await clickText("快捷帮助");
   await waitFor(() => Boolean(document.querySelector(".settings-page")));
   await screenshot("01-settings.png");
+  await waitFor(() => document.body.innerText.includes("面试悬浮窗"));
+  const overlayPreferencesRoundTrip = await main.evaluate("window.interviewCopilot.overlay.setPreferences({ backgroundOpacity: 0.64, backgroundColor: '#20344f', fontColor: '#f4f8ff', fontSize: 16, showToolbar: true, showTranscript: true, showAnswer: true, showTimestamps: false }).then(() => window.interviewCopilot.overlay.getPreferences())");
+  if (overlayPreferencesRoundTrip?.backgroundOpacity !== 0.64 || overlayPreferencesRoundTrip?.fontSize !== 16 || overlayPreferencesRoundTrip?.showTimestamps !== false) throw new Error(`OVERLAY_PREFERENCES_PERSIST failed: ${JSON.stringify(overlayPreferencesRoundTrip)}`);
+  await main.evaluate("document.querySelector('.overlay-preferences-card')?.scrollIntoView({ block: 'center' }); true");
+  await sleep(250);
+  await screenshot("01b-overlay-settings.png");
+  evidence.push("Overlay Preferences UI: PASS; OVERLAY_PREFERENCES_PERSIST: PASS");
+  await clickText("OpenAI 兼容");
+  await clickSelector(".primary-service-card .settings-advanced summary");
   await fillLabel("Base URL", `http://127.0.0.1:${mockPort}`);
   await fillLabel("API Key", "mock-key");
-  await fillLabel("默认 Model", "mock-model");
-  await clickText("测试连接");
+  await fillLabel("默认模型 ID", "mock-model");
+  await clickText("测试所选配置");
   await waitFor(() => document.body.innerText.includes("正常"));
   await screenshot("02-provider-success.png");
-  await clickText("保存设置");
+  await clickText("保存全部设置");
 
   await clickText("档案 / 简历");
   await clickText("新建档案");
@@ -364,9 +373,11 @@ try {
   evidence.push("AUTOMATION_RUNTIME_SWITCH: PASS; Overlay AUTO/MANUAL Sync: PASS");
 
   const beforeManualSend = answerRequests.length;
-  await overlay.evaluate(`(() => { const input = document.querySelector('.overlay-answer-composer textarea, .overlay-answer-composer input'); const setter = Object.getOwnPropertyDescriptor(input.constructor.prototype, 'value')?.set; setter.call(input, 'Mock manual question'); input.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('.overlay-send').click(); return true; })()`);
+  const overlayComposerPresent = await overlay.evaluate("Boolean(document.querySelector('.overlay-answer-composer textarea, .overlay-answer-composer input'))");
+  if (overlayComposerPresent) throw new Error("OVERLAY_COMPOSER_REMOVED failed");
+  await main.evaluate("window.interviewCopilot.interview.answerQuestion('Mock manual question')");
   await waitForNode(() => answerRequests.length > beforeManualSend, 15_000);
-  evidence.push("OVERLAY_MANUAL_SEND: PASS");
+  evidence.push("OVERLAY_COMPOSER_REMOVED: PASS; MAIN_MANUAL_SEND: PASS");
 
   const beforeScreenshot = answerRequests.length;
   const beforeCaptured = await main.evaluate("window.__e2eMainScreenshotCaptured ?? 0");
@@ -412,9 +423,15 @@ try {
   if (!(snapshot.detail?.questions ?? []).some((item) => item.text === "请分析截图中的题目、代码或内容，并给出适合面试场景的回答。")) throw new Error("Screenshot-only synthetic question was not persisted");
   evidence.push(`History: PASS; interview count=${snapshot.count}; first interview remote transcripts=${firstSnapshot.detail.transcripts.filter((item) => item.source === "remote").length}; first interview questions=${firstSnapshot.detail.questions.length}; first interview answers=${firstSnapshot.detail.answers.length}; latest status=${snapshot.record.status}`);
   await clickText("面试历史");
-  await clickSelector(".history-layout .clean-list-row");
+  await clickSelector(".history-layout .history-record-row .row-main-button");
   await waitFor(() => document.body.innerText.includes("面试详情"));
   await screenshot("history-after-interview.png");
+  const historyBeforeDelete = await main.evaluate("window.interviewCopilot.history.list().then((records) => records.length)");
+  const deletedHistoryId = snapshot.record.id;
+  await main.evaluate(`window.interviewCopilot.history.delete(${JSON.stringify(deletedHistoryId)})`);
+  const historyAfterDelete = await main.evaluate("window.interviewCopilot.history.list().then((records) => records.length)");
+  if (historyAfterDelete !== historyBeforeDelete - 1) throw new Error(`History delete failed: ${historyBeforeDelete} -> ${historyAfterDelete}`);
+  evidence.push("History deletion cascade: PASS");
   if (main.rendererErrors.length || (overlay?.rendererErrors.length ?? 0)) throw new Error(`Critical renderer errors: ${[...main.rendererErrors, ...(overlay?.rendererErrors ?? [])].join(" | ")}`);
   evidence.push("Critical Renderer Errors: 0");
 } catch (error) {

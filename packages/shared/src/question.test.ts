@@ -18,7 +18,7 @@ describe("QuestionDetector", () => {
     detector.observe({ text: "为什么需要同步采样？", final: true, startMs: 2_000, endMs: 2_600 }, 2_600);
     expect(detector.flush(3_200)[0]).toMatchObject({ type: "question_ignored", reason: "duplicate" });
     detector.observe({ text: "为什么需要同步采样？", final: true, startMs: 12_000, endMs: 12_600 }, 12_600);
-    expect(detector.flush(13_200)[0]?.type).toBe("question_superseded");
+    expect(detector.flush(13_200)[0]?.type).toBe("question_confirmed");
   });
 
   it("confirms a complete pending question before a new aggregated utterance replaces it", () => {
@@ -28,12 +28,12 @@ describe("QuestionDetector", () => {
     expect(events[0]).toMatchObject({ type: "question_confirmed", question: { text: "如果 IIC 通讯偶发读不到数据，你会怎么排查？" } });
   });
 
-  it("emits supersede for a distinct follow-up question", () => {
+  it("keeps a distinct follow-up as another confirmed question", () => {
     const detector = new QuestionDetector();
     detector.observe({ text: "什么是 volatile？", final: true, startMs: 0, endMs: 500 }, 500);
     detector.flush(1_100);
     detector.observe({ text: "它和 const 有什么区别？", final: true, startMs: 2_000, endMs: 2_600 }, 2_600);
-    expect(detector.flush(3_200)[0]?.type).toBe("question_superseded");
+    expect(detector.flush(3_200)[0]?.type).toBe("question_confirmed");
   });
 });
 
@@ -55,7 +55,7 @@ describe("question scoring", () => {
     expect(detector.flush(10_400)[0]?.type).toBe("question_ignored");
     expect(detector.flush(10_600)[0]?.type).toBe("question_confirmed");
     detector.observe({ text: "如果换成 FreeRTOS 呢？", final: true, startMs: 2_000, endMs: 2_900 }, 10_700);
-    expect(detector.flush(11_300)[0]?.type).toBe("question_superseded");
+    expect(detector.flush(11_300)[0]?.type).toBe("question_confirmed");
   });
 
   it.each([

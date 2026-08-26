@@ -2,6 +2,15 @@ import type { TranscriptSegment } from "@interview-copilot/protocol";
 
 export const QWEN_REALTIME_ASR_MODEL = "qwen3-asr-flash-realtime";
 export const QWEN_REALTIME_ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
+export const QWEN_TASK_ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
+
+export function usesQwenRealtimeProtocol(model: string): boolean {
+  return /^qwen3-asr-flash-realtime(?:-|$)/i.test(model.trim());
+}
+
+export function qwenAsrWebSocketUrl(model: string): string {
+  return usesQwenRealtimeProtocol(model) ? QWEN_REALTIME_ASR_URL : QWEN_TASK_ASR_URL;
+}
 
 export interface SplitStereoPcmResult {
   mic: Uint8Array;
@@ -85,6 +94,11 @@ interface QwenRealtimeMessage {
   code?: string;
   message?: string;
   error?: string | { code?: string; message?: string };
+}
+
+interface DashScopeTaskMessage {
+  header?: { event?: string; task_id?: string; error_code?: string; error_message?: string };
+  payload?: { output?: { sentence?: { text?: string; begin_time?: number; end_time?: number; sentence_end?: boolean } } };
 }
 
 function providerError(error: unknown, source: "mic" | "remote", fallbackCode: AsrProviderErrorCode, fallbackMessage: string): ProviderError {
@@ -287,6 +301,162 @@ function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (let index = 0; index < bytes.byteLength; index += 1) binary += String.fromCharCode(bytes[index] ?? 0);
   return btoa(binary);
+}
+
+function taskId(): string {
+  return `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`.slice(0, 32);
+}
+
+function resample16kTo8k(pcm: Uint8Array): Uint8Array {
+  const samples = Math.floor(pcm.byteLength / 2);
+  const outputSamples = Math.ceil(samples / 2);
+  const output = new Uint8Array(outputSamples * 2);
+  for (let source = 0, target = 0; source + 1 < pcm.byteLength; source += 4, target += 2) {
+    output[target] = pcm[source] ?? 0;
+    output[target + 1] = pcm[source + 1] ?? 0;
+  }
+  return output;
+}
+
+/** DashScope task-protocol adapter used by Qwen Audio, Fun-ASR and Paraformer. */
+export class DashScopeTaskStreamingAsrProvider implements StreamingAsrProvider {
+  private socket: StreamingAsrSocket | undefined;
+  private source: "mic" | "remote" = "remote";
+  private taskId = "";
+  private ready = false;
+  private expectedClose = false;
+  private segmentListener?: (segment: Omit<TranscriptSegment, "id">) => void;
+  private errorListener?: StreamingAsrErrorListener;
+  private readyWaiter?: { resolve: () => void; reject: (error: ProviderError) => void; timer: ReturnType<typeof setTimeout> };
+  private finalizeWaiters: Array<{ resolve: () => void; timer: ReturnType<typeof setTimeout> }> = [];
+
+  constructor(
+    private readonly settings: { baseUrl?: string; model?: string; language?: string; apiKey: string },
+    private readonly socketFactory: StreamingAsrSocketFactory
+  ) {}
+
+  async connect(source: "mic" | "remote", onSegment: (segment: Omit<TranscriptSegment, "id">) => void, onError?: StreamingAsrErrorListener): Promise<void> {
+    this.close();
+    this.source = source;
+    this.segmentListener = onSegment;
+    this.errorListener = onError;
+    this.expectedClose = false;
+    this.ready = false;
+    this.taskId = taskId();
+    if (!this.settings.apiKey.trim()) throw new ProviderError("AUTH_FAILED", "千问 API Key 未配置", false, source);
+    const model = this.settings.model?.trim() || "qwen-audio-3.0-asr-flash-streaming";
+    const socket = this.socketFactory({ url: qwenAsrWebSocketUrl(model), apiKey: this.settings.apiKey });
+    this.socket = socket;
+    socket.onError((error) => this.handleError(error));
+    socket.onClose((error) => this.handleClose(error));
+    socket.onMessage((data) => this.handleMessage(data));
+    const initialized = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new ProviderError("CONNECTION_FAILED", "千问流式 ASR 会话初始化超时", true, source)), 10_000);
+      this.readyWaiter = { resolve, reject, timer };
+    });
+    try {
+      await socket.waitForOpen();
+      const sampleRate = /(?:^|-)8k(?:-|$)/i.test(model) ? 8_000 : 16_000;
+      socket.send(JSON.stringify({
+        header: { action: "run-task", task_id: this.taskId, streaming: "duplex" },
+        payload: {
+          task_group: "audio",
+          task: "asr",
+          function: "recognition",
+          model,
+          parameters: { format: "pcm", sample_rate: sampleRate },
+          input: {}
+        }
+      }));
+      await initialized;
+    } catch (error) {
+      const failure = qwenProviderError(error, source, "CONNECTION_FAILED", "千问流式 ASR WebSocket 连接失败");
+      this.clearReadyWaiter();
+      this.expectedClose = true;
+      socket.close();
+      this.socket = undefined;
+      throw failure;
+    }
+  }
+
+  sendAudio(pcm: Uint8Array): void {
+    if (!this.socket || !this.ready) throw new ProviderError("CONNECTION_FAILED", "千问流式 ASR 会话尚未 READY", true, this.source);
+    const model = this.settings.model ?? "";
+    this.socket.send(/(?:^|-)8k(?:-|$)/i.test(model) ? resample16kTo8k(pcm) : pcm);
+  }
+
+  finalize(timeoutMs = 1_500): Promise<void> {
+    if (!this.socket || !this.ready) return Promise.resolve();
+    const promise = new Promise<void>((resolve) => {
+      const timer = setTimeout(() => { this.finishFinalize(); resolve(); }, Math.max(750, Math.min(3_000, timeoutMs)));
+      this.finalizeWaiters.push({ resolve, timer });
+    });
+    try { this.socket.send(JSON.stringify({ header: { action: "finish-task", task_id: this.taskId, streaming: "duplex" }, payload: { input: {} } })); }
+    catch (error) { this.handleError(error); this.finishFinalize(); }
+    return promise;
+  }
+
+  close(): void {
+    this.expectedClose = true;
+    this.clearReadyWaiter();
+    this.finishFinalize();
+    const socket = this.socket;
+    this.socket = undefined;
+    if (socket) socket.close();
+    this.ready = false;
+    this.segmentListener = undefined;
+    this.errorListener = undefined;
+  }
+
+  private handleMessage(data: string): void {
+    let message: DashScopeTaskMessage;
+    try { message = JSON.parse(data) as DashScopeTaskMessage; }
+    catch (error) { this.notifyError(new ProviderError("INVALID_RESPONSE", `千问流式 ASR 返回了无效消息：${String(error)}`, true, this.source)); return; }
+    const event = message.header?.event;
+    if (event === "task-failed" || message.header?.error_code) {
+      const failure = qwenProviderError(new Error(`${message.header?.error_code ?? "task-failed"}: ${message.header?.error_message ?? "千问 ASR 任务失败"}`), this.source, "PROVIDER_ERROR", "千问 ASR 任务失败");
+      this.readyWaiter?.reject(failure);
+      this.notifyError(failure);
+      return;
+    }
+    if (event === "task-started") {
+      this.ready = true;
+      const waiter = this.readyWaiter;
+      this.readyWaiter = undefined;
+      if (waiter) { clearTimeout(waiter.timer); waiter.resolve(); }
+      return;
+    }
+    if (event === "result-generated") {
+      const sentence = message.payload?.output?.sentence;
+      const text = sentence?.text?.trim() ?? "";
+      if (text && this.segmentListener) {
+        const startMs = Math.max(0, Math.round(sentence?.begin_time ?? 0));
+        const endMs = Math.max(startMs, Math.round(sentence?.end_time ?? startMs));
+        this.segmentListener({ source: this.source, text, startMs, endMs, final: Boolean(sentence?.sentence_end) });
+      }
+      return;
+    }
+    if (event === "task-finished") {
+      this.ready = false;
+      this.expectedClose = true;
+      this.finishFinalize();
+    }
+  }
+
+  private handleError(error: unknown): void {
+    const failure = qwenProviderError(error, this.source, "PROVIDER_ERROR", "千问流式 ASR Provider 错误");
+    this.readyWaiter?.reject(failure);
+    this.notifyError(failure);
+  }
+  private handleClose(error?: Error): void {
+    if (this.expectedClose) return;
+    const failure = new ProviderError("PROVIDER_CLOSED", error?.message || "千问流式 ASR WebSocket 已断开", true, this.source);
+    this.readyWaiter?.reject(failure);
+    this.notifyError(failure);
+  }
+  private notifyError(error: ProviderError): void { this.errorListener?.(error); }
+  private clearReadyWaiter(): void { if (this.readyWaiter) clearTimeout(this.readyWaiter.timer); this.readyWaiter = undefined; }
+  private finishFinalize(): void { const waiters = this.finalizeWaiters.splice(0); for (const waiter of waiters) { clearTimeout(waiter.timer); waiter.resolve(); } }
 }
 
 /** Alibaba Cloud Qwen realtime ASR adapter using the official JSON WebSocket event protocol. */

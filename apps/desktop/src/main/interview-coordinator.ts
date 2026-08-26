@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import type { ClientControlMessage, RealtimeServerMessage, TranscriptSegment } from "@interview-copilot/protocol";
 import {
   AnswerAgent,
+  classifyAnswerQuestion,
   FollowUpContextResolver,
   InterviewBrain,
   InterviewMemory,
@@ -100,6 +101,8 @@ export interface InterviewCoordinatorOptions {
   initialAutomationMode?: "MANUAL" | "AUTO";
   /** Live interview confirmation debounce. Kept configurable for ASR providers with slower finalization. */
   questionSilenceMs?: number;
+  /** Upper bound for one answer so a stalled provider cannot block queued questions. */
+  answerTimeoutMs?: number;
 }
 
 export type InterviewCoordinatorEvent =
@@ -151,10 +154,18 @@ export class InterviewCoordinator extends EventEmitter {
   private answerGeneration = 0;
   private answerTriggerTimer: NodeJS.Timeout | undefined;
   private pendingAnswerQuestion: QuestionCandidate | undefined;
+  private readonly answerQueue: QuestionCandidate[] = [];
+  private readonly answerContextSnapshots = new Map<string, {
+    recentTranscript: string[];
+    memory: ReturnType<InterviewMemory["snapshot"]>;
+    trace?: QuestionTrace;
+  }>();
+  private activeAnswerQuestion: QuestionCandidate | undefined;
   private activeModelSnapshot: ModelSnapshot | undefined;
   private sessionGeneration = 0;
   private pendingQuestionTrace: QuestionTrace | undefined;
   private currentQuestionTrace: QuestionTrace | undefined;
+  private activeQuestionTrace: QuestionTrace | undefined;
 
   constructor(private readonly options: InterviewCoordinatorOptions) {
     super();
@@ -221,16 +232,17 @@ export class InterviewCoordinator extends EventEmitter {
     this.anchorStore.reset();
     this.memory.reset();
     this.clearAnswerTrigger();
+    this.answerQueue.length = 0;
+    this.answerContextSnapshots.clear();
+    this.activeAnswerQuestion = undefined;
     this.activeModelSnapshot = this.options.answerAgent.getModelSnapshot();
     this.pendingQuestionTrace = undefined;
     this.currentQuestionTrace = undefined;
+    this.activeQuestionTrace = undefined;
     this.currentQuestion = undefined;
-      this.historyQuestionIds.clear();
-      this.pendingQuestionTrace = undefined;
-      this.currentQuestionTrace = undefined;
+    this.historyQuestionIds.clear();
     this.questionConfirmedAt.clear();
     this.recentTranscript.length = 0;
-    this.memory.reset();
     this.clearRemoteAssemblyTimer();
     this.aggregator.clear();
     this.transition("CONNECTING");
@@ -252,6 +264,8 @@ export class InterviewCoordinator extends EventEmitter {
     if (!interviewId) return;
     this.clearQuestionFlushTimer();
     this.clearRemoteAssemblyTimer();
+    this.answerQueue.length = 0;
+    this.answerContextSnapshots.clear();
     this.cancelAnswer(reason === "error" ? "timeout" : "user");
     try { await Promise.resolve(this.options.audio.stop()); } catch (error) { this.emitDiagnostic(`Audio stop failed: ${String(error)}`); }
     try { await this.asr.finalize?.(1_000); } catch (error) { this.emitDiagnostic(`ASR finalize failed: ${String(error)}`); }
@@ -275,6 +289,9 @@ export class InterviewCoordinator extends EventEmitter {
     this.memory.reset();
     this.historyQuestionIds.clear();
     this.activeModelSnapshot = undefined;
+    this.pendingQuestionTrace = undefined;
+    this.currentQuestionTrace = undefined;
+    this.activeQuestionTrace = undefined;
   }
 
   async answerLatest(): Promise<void> {
@@ -333,18 +350,38 @@ export class InterviewCoordinator extends EventEmitter {
       this.emitDiagnostic("Interview is not running");
       return;
     }
-    this.cancelAnswer("superseded");
+    const frozenContext = this.answerContextSnapshots.get(question.id) ?? {
+      recentTranscript: [...this.recentTranscript],
+      memory: this.memory.snapshot(),
+      ...(this.currentQuestion?.id === question.id && this.currentQuestionTrace ? { trace: this.currentQuestionTrace } : {})
+    };
+    this.answerContextSnapshots.set(question.id, frozenContext);
+    if (this.answerController) {
+      const alreadyQueued = this.answerQueue.some((queued) => queued.id === question.id);
+      if (!alreadyQueued && this.activeAnswerQuestion?.id !== question.id) {
+        this.answerQueue.push(question);
+        this.emitDiagnostic(`ANSWER_QUEUED: ${question.id} (${this.answerQueue.length})`);
+      }
+      return;
+    }
     const generation = this.answerGeneration;
-    this.currentQuestion = question;
+    this.activeAnswerQuestion = question;
+    const answerTrace = frozenContext.trace;
+    this.activeQuestionTrace = answerTrace;
     this.detector.markAnswering(question.id);
     this.options.history?.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "answering");
     const controller = new AbortController();
     this.answerController = controller;
+    const answerTimeout = setTimeout(() => {
+      if (this.answerController !== controller || controller.signal.aborted) return;
+      this.emitDiagnostic(`ANSWER_TIMEOUT: ${question.id}`);
+      this.cancelAnswer("timeout");
+    }, Math.max(1_000, this.options.answerTimeoutMs ?? 20_000));
     const startedAt = this.now();
-    this.currentQuestionTrace?.mark("retrievalStarted", startedAt);
+    answerTrace?.mark("retrievalStarted", startedAt);
     this.accumulatedAnswerText = "";
     try {
-      const providerContextResult = this.contextProvider(question, this.activeProfileId ?? "", [...this.recentTranscript], { projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId });
+      const providerContextResult = this.contextProvider(question, this.activeProfileId ?? "", [...frozenContext.recentTranscript], { projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId });
       // Keep the default synchronous context path truly synchronous. This
       // removes an avoidable microtask from consecutive-question handling;
       // async profile/knowledge retrieval still remains cancellable below.
@@ -352,10 +389,13 @@ export class InterviewCoordinator extends EventEmitter {
       const providerContext: AnswerContextInput = isPromiseLike(providerContextResult)
         ? await providerContextResult
         : providerContextResult;
-      this.currentQuestionTrace?.mark("retrievalEnded", this.now());
+      answerTrace?.mark("retrievalEnded", this.now());
       if (controller.signal.aborted || generation !== this.answerGeneration) return;
       const isFollowUp = question.speechAct === "FOLLOW_UP" || question.detectionType === "follow_up" || question.category === "followup";
-      const memorySnapshot = this.memory.snapshot();
+      // A queued question must retain the topic and transcript that existed
+      // when it was confirmed. Looking at global "latest" memory here caused
+      // an older memory-leak question to inherit a later RS-485/RS-232 topic.
+      const memorySnapshot = frozenContext.memory;
       const followUpContext = isFollowUp
         ? this.followUpContextResolver.resolve(
           { id: question.id, parentQuestionId: question.parentQuestionId, rootQuestionId: question.rootQuestionId, text: question.text },
@@ -367,7 +407,10 @@ export class InterviewCoordinator extends EventEmitter {
         )
         : undefined;
       const preparedAnswer = providerContext.preparedAnswer;
-      const isProjectQuestion = /项目|简历|经历|负责|做过|成果|业绩/.test(question.text);
+      const answerKind = classifyAnswerQuestion(question.text, question.detectionType);
+      const personalThreadText = `${followUpContext?.rootQuestion ?? ""}\n${followUpContext?.parentQuestion ?? ""}`;
+      const isProjectQuestion = ["project", "behavioral"].includes(answerKind) || /项目|简历|经历|负责|做过|成果|业绩|你做的|你的实现|你的方案|在这个结构下/.test(question.text);
+      const requiresPersonalGrounding = isProjectQuestion || (isFollowUp && (/项目|简历|经历|负责|做过|成果|业绩/.test(personalThreadText) || (providerContext.personalMemoryEvidence?.length ?? 0) > 0));
       if (preparedAnswer && preparedAnswer.verified && preparedAnswer.score >= 0.88 && !streamOptions.hasScreenshot && !isProjectQuestion) {
         this.emitDiagnostic("QUESTION_BANK_DIRECT_HIT");
         const answerId = `question-bank-answer-${question.id}-${startedAt}`;
@@ -383,8 +426,8 @@ export class InterviewCoordinator extends EventEmitter {
         this.emit("event", { type: "realtime_message", message: { type: "answer_end", answerId, text: preparedText } });
         const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
         this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: preparedText, model: "question-bank", mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
-        this.currentQuestionTrace?.update({ answerSource: "question-bank" }).mark("answerLookupStarted", startedAt).mark("answerVisible", finishedAt).mark("answerEnded", finishedAt);
-        this.emitQuestionTrace();
+        answerTrace?.update({ answerSource: "question-bank" }).mark("answerLookupStarted", startedAt).mark("answerVisible", finishedAt).mark("answerEnded", finishedAt);
+        this.emitQuestionTrace(answerTrace);
         this.memory.recordAnswer(preparedText, { question: question.text, createdAt: finishedAt });
         this.detector.markAnswered(question.id);
         this.options.history?.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "answered");
@@ -396,15 +439,16 @@ export class InterviewCoordinator extends EventEmitter {
         this.answerFirstTokenAt = undefined;
         return;
       }
-      const context = { ...providerContext, recentTranscript: providerContext.recentTranscript ?? [...this.recentTranscript], interviewMemory: memorySnapshot, ...(followUpContext ? { followUpContext } : {}) };
-      this.currentQuestionTrace?.update({ answerSource: "llm" }).mark("llmRequestStarted", this.now());
+      const context = { ...providerContext, recentTranscript: providerContext.recentTranscript ?? [...frozenContext.recentTranscript], interviewMemory: memorySnapshot, ...(followUpContext ? { followUpContext } : {}) };
+      answerTrace?.update({ answerSource: "llm" }).mark("llmRequestStarted", this.now());
       for await (const event of this.options.answerAgent.stream({ id: question.id, text: question.text, ...(isFollowUp ? { kind: "follow-up" as const } : {}) }, mode, context, controller.signal, {
         ...streamOptions,
-        // Expose provider deltas so the overlay can show the first useful
-        // sentence immediately instead of waiting for the whole answer.
-        directDisplay: false,
-        emitDeltas: true,
-        allowQualityRepair: false,
+        // Project answers are buffered until claim/evidence validation has
+        // passed. Generic technical answers can still stream immediately.
+        directDisplay: requiresPersonalGrounding,
+        emitDeltas: !requiresPersonalGrounding,
+        allowQualityRepair: requiresPersonalGrounding,
+        strictPersonalGrounding: requiresPersonalGrounding,
         formatAnswer: true,
         maxRetries: 1,
         preferFastRoute: this.activeOptions?.automationMode === "AUTO" && !streamOptions.hasScreenshot,
@@ -422,7 +466,7 @@ export class InterviewCoordinator extends EventEmitter {
         } else if (event.type === "answer_delta") {
           this.accumulatedAnswerText += event.delta;
           this.answerFirstTokenAt ??= this.now();
-          this.currentQuestionTrace?.mark("firstToken", this.answerFirstTokenAt);
+          answerTrace?.mark("firstToken", this.answerFirstTokenAt);
           this.emit("event", { type: "realtime_message", message: { type: "answer_delta", answerId: event.answerId, delta: event.delta } });
         } else {
           const finishedAt = this.now();
@@ -431,10 +475,11 @@ export class InterviewCoordinator extends EventEmitter {
           // visible response. Normal live providers stream through the branch
           // above and set answerFirstTokenAt when the first delta arrives.
           this.answerFirstTokenAt ??= finishedAt;
-          this.currentQuestionTrace?.mark("answerEnded", finishedAt);
+          answerTrace?.mark("answerEnded", finishedAt);
           if (event.quality?.issues.includes("QUALITY_UNGROUNDED_CLAIM")) this.emitDiagnostic("QUALITY_UNGROUNDED_CLAIM");
+          if (event.quality?.issues.includes("strict-grounding-fallback")) this.emitDiagnostic("STRICT_GROUNDING_FALLBACK");
           this.emit("event", { type: "realtime_message", message: { type: "answer_end", answerId: event.answerId, text: answerText, quality: event.quality } });
-          this.emitQuestionTrace();
+          this.emitQuestionTrace(answerTrace);
           const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
           this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: answerText, model: this.answerModel ?? "configured", mode: this.answerMode ?? mode, startedAt: this.answerStartedAt ?? startedAt, firstTokenAt: this.answerFirstTokenAt, finishedAt, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
           this.memory.recordAnswer(answerText, { question: question.text, createdAt: finishedAt });
@@ -458,7 +503,13 @@ export class InterviewCoordinator extends EventEmitter {
       this.emitDiagnostic(`LLM_FAILED: ${String(error)}`);
       this.emit("event", { type: "realtime_message", message: { type: "runtime_error", code: "LLM_FAILED", message: "答案生成失败，请检查模型配置后重试", recoverable: true } });
     } finally {
+      clearTimeout(answerTimeout);
       if (this.answerController === controller) this.answerController = undefined;
+      if (this.activeAnswerQuestion?.id === question.id) this.activeAnswerQuestion = undefined;
+      if (this.activeQuestionTrace === answerTrace) this.activeQuestionTrace = undefined;
+      this.answerContextSnapshots.delete(question.id);
+      const next = this.answerQueue.shift();
+      if (next && this.running) void this.answer(next);
     }
   }
 
@@ -823,7 +874,6 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private scheduleAnswer(question: QuestionCandidate): void {
-    this.clearAnswerTrigger();
     const sessionGeneration = this.sessionGeneration;
     // Completeness has already been established by the temporal detector.
     // Do not add another post-confirmation delay, especially for short but
@@ -853,18 +903,19 @@ export class InterviewCoordinator extends EventEmitter {
     const answerId = this.answerId;
     const questionId = this.answerQuestionId;
     const inFlight = Boolean(answerId || this.answerController || this.answerStartedAt !== undefined || this.accumulatedAnswerText);
-    const persistedQuestionId = questionId ?? (inFlight ? this.currentQuestion?.id : undefined);
+    const persistedQuestionId = questionId ?? (inFlight ? this.activeAnswerQuestion?.id : undefined);
     const now = this.now();
     this.answerController?.abort();
     this.answerController = undefined;
+    this.activeAnswerQuestion = undefined;
     this.answerId = undefined;
     if (answerId) this.emitAnswerCancelled(answerId, reason);
     // Persist cancellation even if the provider was aborted between request
     // creation and the first answer_start event. The old answerId-only guard
     // dropped exactly that in-flight record during window-close shutdown.
     if (persistedQuestionId && inFlight) {
-      this.currentQuestionTrace?.mark("answerEnded", now);
-      this.emitQuestionTrace();
+      this.activeQuestionTrace?.mark("answerEnded", now);
+      this.emitQuestionTrace(this.activeQuestionTrace);
       this.history.addAnswer({ questionId: this.historyQuestionIds.get(persistedQuestionId) ?? persistedQuestionId, text: this.accumulatedAnswerText, model: this.answerModel ?? "unknown", mode: this.answerMode, startedAt: this.answerStartedAt ?? now, firstTokenAt: this.answerFirstTokenAt, finishedAt: now, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - (this.questionConfirmedAt.get(persistedQuestionId) ?? now), latencyTotal: now - (this.questionConfirmedAt.get(persistedQuestionId) ?? now), cancelReason: reason, createdAt: now });
     }
     this.answerQuestionId = undefined;
@@ -879,11 +930,12 @@ export class InterviewCoordinator extends EventEmitter {
     this.emit("event", { type: "realtime_message", message: { type: "answer_cancelled", answerId, reason } });
   }
 
-  private emitQuestionTrace(): void {
-    const trace = this.currentQuestionTrace;
+  private emitQuestionTrace(selectedTrace?: QuestionTrace): void {
+    const trace = selectedTrace ?? this.currentQuestionTrace;
     if (!trace) return;
     this.emitTelemetry("QUESTION_TRACE", { ...trace.snapshot() });
-    this.currentQuestionTrace = undefined;
+    if (this.currentQuestionTrace === trace) this.currentQuestionTrace = undefined;
+    if (this.activeQuestionTrace === trace) this.activeQuestionTrace = undefined;
   }
 
   private failInterview(message: string): void {

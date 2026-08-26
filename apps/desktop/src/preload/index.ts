@@ -10,13 +10,14 @@ import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
-import type { TencentValidationState, TencentValidationStatus } from "../main/settings-store";
+import type { OverlayPreferences, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
 import type { ChatAction, Profile, ProfileInput, ProjectFact, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
 import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
+import type { ModelCatalogResult } from "../main/model-catalog";
 
 const api = {
   diagnostics: {
@@ -40,6 +41,8 @@ const api = {
     toggleShortcuts: () => ipcRenderer.invoke("overlay:toggle-shortcuts"),
     getState: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:get-state"),
     getLayout: (): Promise<HUDLayout | undefined> => ipcRenderer.invoke("overlay:get-layout"),
+    getPreferences: (): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:get-preferences"),
+    setPreferences: (input: Partial<OverlayPreferences>): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:set-preferences", input),
     setShareMode: (enabled: boolean): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:set-share-mode", enabled),
     toggleShareMode: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:toggle-share-mode"),
     setMode: (mode: OverlayMode) => ipcRenderer.invoke("overlay:set-mode", mode),
@@ -129,7 +132,8 @@ const api = {
     saveLlmProfile: (input: LlmModelProfileInput): Promise<ProviderCenterPublicConfig | undefined> => ipcRenderer.invoke("settings:save-llm-profile", input),
     activateLlmProfile: (profileId: string): Promise<ProviderCenterPublicConfig | undefined> => ipcRenderer.invoke("settings:activate-llm-profile", profileId),
     deleteLlmProfile: (profileId: string): Promise<ProviderCenterPublicConfig | undefined> => ipcRenderer.invoke("settings:delete-llm-profile", profileId),
-    testConnection: (section: ProviderSection): Promise<ProviderCheckResult> => ipcRenderer.invoke("settings:test-connection", section),
+    testConnection: (section: ProviderSection, profileId?: string): Promise<ProviderCheckResult> => ipcRenderer.invoke("settings:test-connection", section, profileId),
+    listModels: (section: ProviderSection, profileId?: string): Promise<ModelCatalogResult> => ipcRenderer.invoke("settings:list-models", section, profileId),
     preflight: (checkReachability?: boolean): Promise<ProviderPreflightResult> => ipcRenderer.invoke("settings:preflight", checkReachability)
   },
   projects: {
@@ -324,6 +328,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
       ipcRenderer.on("chat:error", handler);
       return () => ipcRenderer.removeListener("chat:error", handler);
+    },
+    onOverlayPreferences: (listener: (preferences: OverlayPreferences) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, preferences: OverlayPreferences) => listener(preferences);
+      ipcRenderer.on("overlay:preferences", handler);
+      return () => ipcRenderer.removeListener("overlay:preferences", handler);
     },
     onChatCancelled: (listener: (event: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);

@@ -11,10 +11,11 @@ import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
 import type { ChatAction, KnowledgeDocumentType, Profile, ProfileInput, ProjectFact, ProjectMemorySnapshot, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
-import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
+import type { LlmModelProfileInput, OverlayPreferences, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectAnalysisState, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
+import type { ModelCatalogResult } from "../main/model-catalog";
 
 declare global {
   interface Window {
@@ -40,6 +41,8 @@ declare global {
         toggleShortcuts(): Promise<boolean>;
         getState(): Promise<HUDState | undefined>;
         getLayout(): Promise<HUDLayout | undefined>;
+        getPreferences(): Promise<OverlayPreferences>;
+        setPreferences(input: Partial<OverlayPreferences>): Promise<OverlayPreferences>;
         setShareMode(enabled: boolean): Promise<HUDState | undefined>;
         toggleShareMode(): Promise<HUDState | undefined>;
         setMode(mode: OverlayMode): Promise<void>;
@@ -134,7 +137,8 @@ declare global {
         saveLlmProfile(input: LlmModelProfileInput): Promise<ProviderCenterPublicConfig | undefined>;
         activateLlmProfile(profileId: string): Promise<ProviderCenterPublicConfig | undefined>;
         deleteLlmProfile(profileId: string): Promise<ProviderCenterPublicConfig | undefined>;
-        testConnection(section: ProviderSection): Promise<ProviderCheckResult>;
+        testConnection(section: ProviderSection, profileId?: string): Promise<ProviderCheckResult>;
+        listModels(section: ProviderSection, profileId?: string): Promise<ModelCatalogResult>;
         preflight(checkReachability?: boolean): Promise<ProviderPreflightResult>;
       };
       projects: {
@@ -196,6 +200,7 @@ declare global {
         onOverlayMode(listener: (mode: OverlayMode) => void): () => void;
         onOverlayState(listener: (state: HUDState) => void): () => void;
         onOverlayLayout(listener: (layout: HUDLayout) => void): () => void;
+        onOverlayPreferences(listener: (preferences: OverlayPreferences) => void): () => void;
         onOverlayCommand(listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end") => void): () => void;
         onOverlayCaptureProtection(listener: (state: CaptureProtectionState) => void): () => void;
         onShortcut(listener: (shortcut: string) => void): () => void;

@@ -15,14 +15,29 @@ export interface ResolvedQuestionContext {
 
 function trimPunctuation(text: string): string { return text.trim().replace(/[。！？?！\s]+$/g, ""); }
 
+const GENERIC_FOLLOW_UP_SUBJECT = /^(?:场景|情况|时候|原因|区别|作用|问题|地方|方式|方法|结果|影响|风险|优缺点|好处|坏处|注意事项)/;
+
+function hasExplicitStandaloneSubject(text: string): boolean {
+  const compact = text.replace(/[？?。！!，,、\s]/g, "");
+  const whatMatch = compact.match(/^什么(?:是)?(.+)$/);
+  if (whatMatch) {
+    const subject = whatMatch[1];
+    return subject.length >= 2 && !GENERIC_FOLLOW_UP_SUBJECT.test(subject);
+  }
+  return /^(?:请)?(?:简述|说明|解释|介绍)(?!一下$).{2,}/.test(compact);
+}
+
 function isElliptical(text: string): boolean {
   const compact = text.replace(/[？?。！!，,、\s]/g, "");
-  return compact.length <= 14 || /^(?:讲一下|讲讲|说一下|说说|具体|为什么|怎么|如何|用过哪些|用在什么地方|还有呢?)[？?。！!]?$/i.test(text);
+  if (hasExplicitStandaloneSubject(text)) return false;
+  return /^(?:讲一下|讲讲|说一下|说说|具体|为什么|怎么|如何|用过哪些|用在什么地方|还有呢?|什么(?:场景|情况|时候|原因|区别|作用|问题|地方|方式|方法|结果|影响|风险|优缺点).*)[？?。！!]?$/i.test(text)
+    || /^(?:那|然后|还有|这个|它|这里|其中|接下来|再).{0,12}$/.test(compact);
 }
 
 function isCompleteStandaloneQuestion(text: string): boolean {
   const compact = text.replace(/[？?。！!，,、\s]/g, "");
-  return compact.length >= 8 && /第\s*\d+\s*题|(?:什么是|为什么|为何|怎么|如何|哪些|哪种|哪个|哪里|在哪|多少|几个|几路|上限|容量|吗|呢)/.test(text);
+  return hasExplicitStandaloneSubject(text)
+    || compact.length >= 8 && /第\s*\d+\s*题|(?:什么是|为什么|为何|怎么|如何|哪些|哪种|哪个|哪里|在哪|多少|几个|几路|上限|容量|吗|呢)/.test(text);
 }
 
 function withAnchor(text: string, anchor: ContextAnchor): string {

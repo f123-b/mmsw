@@ -31,11 +31,24 @@ describe("Answer routing and generation", () => {
     expect(sections.map((section) => section.content).join("\n")).not.toContain("个人项目证据");
   });
 
+  it("adds the selected plain-language policy to every answer prompt", () => {
+    const context = new ContextRouter().route("解释一下DMA", { expressionLevel: "plain", explainAdvancedTerms: true });
+    const prompt = new PromptBuilder().build({ id: "plain", text: "解释一下DMA" }, "NORMAL", context).map((section) => section.content).join("\n");
+    expect(prompt).toContain("优先使用简单、口语化的中文");
+    expect(prompt).toContain("首次出现较难术语");
+  });
+
   it("keeps code answers complete instead of slicing the tail", () => {
     const code = "思路：双指针。\n```cpp\nint main() { return 0; }\n```\n复杂度 O(1)。";
     expect(new InterviewAnswerFormatter().format(code, "NORMAL", "code")).toBe(code);
     const output = new PromptBuilder().build({ id: "code", text: "请写代码实现二分查找" }, "NORMAL", new ContextRouter().route("请写代码实现二分查找"));
     expect(output.find((section) => section.name === "output-format")?.content).toContain("完整代码");
+    expect(output.find((section) => section.name === "output-format")?.content).toContain("给面试官的思路");
+  });
+
+  it("keeps all sub-questions in one ordered answer", () => {
+    const output = new PromptBuilder().build({ id: "multi", text: "TCP 和 UDP 有什么区别？分别用在什么场景？" }, "NORMAL", new ContextRouter().route("TCP 和 UDP 有什么区别？分别用在什么场景？"));
+    expect(output.find((section) => section.name === "output-format")?.content).toContain("一次回答中按原顺序逐项覆盖");
   });
 
   it("selects only the top three skills and separates prompt sections", async () => {
@@ -119,6 +132,30 @@ describe("Answer routing and generation", () => {
     expect(calls).toBe(1);
     expect(events.map((event) => event.type)).toEqual(["answer_start", "answer_end"]);
     expect(events.at(-1)).toMatchObject({ type: "answer_end", text: "首先，直接返回这一版。" });
+  });
+
+  it("blocks unsupported project details even when a repair still invents facts", async () => {
+    let calls = 0;
+    const unsafeProvider: AnswerProvider = {
+      stream: async function* () { calls += 1; yield "我主导了STM32项目，把延迟降低了50%。"; },
+      complete: async () => { calls += 1; return "我主导了STM32项目，把延迟降低了50%。"; }
+    };
+    const events = [];
+    for await (const event of new AnswerAgent({ normal: unsafeProvider }, new ModelRouter({ normal: "test-model" })).stream(
+      { id: "q-strict", text: "说说你在这个项目里最棘手的问题" },
+      "NORMAL",
+      {},
+      undefined,
+      { directDisplay: true, emitDeltas: false, allowQualityRepair: true, strictPersonalGrounding: true }
+    )) events.push(event);
+    expect(calls).toBe(2);
+    expect(events.map((event) => event.type)).toEqual(["answer_start", "answer_end"]);
+    expect(events.at(-1)).toMatchObject({
+      type: "answer_end",
+      text: expect.stringContaining("没有足够证据"),
+      quality: { issues: ["strict-grounding-fallback"], needsRepair: false }
+    });
+    expect((events.at(-1) as { text: string }).text).not.toContain("STM32");
   });
 
   it("sanitizes safe presentation noise without rewriting technical content", () => {

@@ -26,6 +26,12 @@ describe("technical terminology normalization", () => {
     expect(result.corrections.length).toBeGreaterThan(3);
   });
 
+  it("recovers CAN homophones only in CAN-specific contexts", () => {
+    expect(normalizeTechnicalTerms("看总线的仲裁机制是什么？")).toContain("CAN总线");
+    expect(normalizeTechnicalTerms("砍 FD 报文长度是多少？")).toContain("CAN FD");
+    expect(normalizeTechnicalTerms("看一下这个函数")).toBe("看一下这个函数");
+  });
+
   it("does not rewrite ordinary words that contain acronym spellings", () => {
     expect(normalizeTechnicalTerms("candidate focus DMA 项目")) .toBe("candidate focus DMA 项目");
   });
