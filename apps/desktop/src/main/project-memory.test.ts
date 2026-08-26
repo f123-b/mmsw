@@ -199,4 +199,42 @@ describe("ProjectMemoryService project isolation", () => {
       database.close();
     }
   });
+
+  it("counts conflict groups and user actions instead of candidate facts", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const memories = new SqliteProjectMemoryRepository(database);
+      const profile = profiles.save({ name: "V3 统计", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const project = memories.createProject(profile.id, "FOC");
+      memories.assignSource({ projectId: project.id, sourceType: "document", sourceId: "doc", relationship: "primary", sourceRole: "overview", confidence: 1, verified: true });
+      for (const [id, content] of [["f405", "STM32F405"], ["g431", "STM32G431"]] as const) memories.addCandidateFact({ id, projectId: project.id, profileId: profile.id, type: "hardware", title: "MCU", content, confidence: 1, verified: false, sourceIds: ["doc"], evidence: [{ sourceId: "doc", quote: content }], evidenceLevel: "confirmed-document", status: "conflicting", conflictStatus: "conflicting", conflictGroupId: `conflict:${project.id}:mcu.main` });
+      const stats = memories.stats(profile.id, project.id);
+      expect(stats.conflictingFacts).toBe(2);
+      expect(stats.conflictGroups).toBe(1);
+      expect(stats.userActions).toBe(1);
+      expect(stats.userActionRequiredFacts).toBe(1);
+    } finally { database.close(); }
+  });
+
+  it("requires variant context when keeping both conflict candidates", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const memories = new SqliteProjectMemoryRepository(database);
+      const profile = profiles.save({ name: "V3 版本", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const project = memories.createProject(profile.id, "版本项目");
+      memories.assignSource({ projectId: project.id, sourceType: "document", sourceId: "doc", relationship: "primary", sourceRole: "overview", confidence: 1, verified: true });
+      for (const [id, content] of [["f405", "STM32F405"], ["g431", "STM32G431"]] as const) memories.addCandidateFact({ id, projectId: project.id, profileId: profile.id, type: "hardware", title: "MCU", content, confidence: 1, verified: false, sourceIds: ["doc"], evidence: [{ sourceId: "doc", quote: content }], evidenceLevel: "confirmed-document", status: "conflicting", conflictStatus: "conflicting", conflictGroupId: `conflict:${project.id}:mcu.main` });
+      await expect(Promise.resolve().then(() => memories.resolveConflict(`conflict:${project.id}:mcu.main`, "f405", true))).rejects.toThrow("PROJECT_CONFLICT_VARIANT_CONTEXT_REQUIRED");
+      memories.resolveConflict(`conflict:${project.id}:mcu.main`, "f405", true, { f405: "early-version", g431: "later-version" });
+      expect(memories.stats(profile.id, project.id)).toMatchObject({ conflictGroups: 0, userActions: 0 });
+      expect(memories.getFact("f405")).toMatchObject({ status: "active", conflictStatus: "confirmed", variantContext: "early-version" });
+      expect(memories.getFact("g431")).toMatchObject({ status: "active", conflictStatus: "confirmed", variantContext: "later-version" });
+      memories.repairProjectFactSemantics(project.id);
+      expect(memories.stats(profile.id, project.id)).toMatchObject({ conflictGroups: 0, userActions: 0 });
+      expect(memories.getFact("f405")).toMatchObject({ status: "active", conflictStatus: "confirmed", variantContext: "early-version" });
+      expect(memories.getFact("g431")).toMatchObject({ status: "active", conflictStatus: "confirmed", variantContext: "later-version" });
+    } finally { database.close(); }
+  });
 });

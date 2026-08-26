@@ -43,6 +43,8 @@ export interface ProjectMemoryProject {
   hardware: string[];
   software: string[];
   technologyStack: string[];
+  /** Derived display taxonomy. It is intentionally not copied to Profile.skills. */
+  technologyTaxonomy?: ProjectTechnologyGroup[];
   time?: string;
   sourceIds: string[];
   confidence: number;
@@ -81,6 +83,15 @@ export interface ProjectFactEvidence {
 export type ProjectFactScope = "project" | "module" | "problem" | "architecture";
 export type ProjectFactEvidenceLevel = "confirmed-user" | "confirmed-code" | "confirmed-document" | "inferred" | "pending" | "risk" | "not-measured";
 export type ProjectFactOwnership = "project" | "self" | "team" | "unknown";
+export type ProjectFactCardinality = "single" | "set" | "narrative";
+
+export type ProjectTechnologyCategory = "platform" | "mcu" | "rtos" | "language" | "control" | "communication" | "sampling" | "sensor" | "driver" | "middleware" | "build" | "linux" | "other";
+
+export interface ProjectTechnologyGroup {
+  category: ProjectTechnologyCategory;
+  label: string;
+  items: string[];
+}
 
 export interface ProjectFact {
   id: string;
@@ -97,6 +108,9 @@ export interface ProjectFact {
   sectionPath?: string[];
   evidenceLevel?: ProjectFactEvidenceLevel;
   subtype?: string;
+  canonicalKey?: string;
+  cardinality?: ProjectFactCardinality;
+  variantContext?: string;
   factType?: ProjectFactType;
   status?: "active" | "pending_review" | "rejected" | "conflicting";
   conflictStatus?: "confirmed" | "conflicting" | "pending_review";
@@ -110,6 +124,35 @@ export interface ProjectFact {
   embeddingUpdatedAt?: number;
   createdAt?: number;
   updatedAt?: number;
+}
+
+export type ProjectConflictGroupType = "single-value" | "contradiction";
+export type ProjectConflictGroupStatus = "unresolved" | "resolved";
+
+export interface ProjectConflictGroup {
+  id: string;
+  projectId: string;
+  canonicalKey: string;
+  factIds: string[];
+  facts: ProjectFact[];
+  type: ProjectConflictGroupType;
+  label: string;
+  status: ProjectConflictGroupStatus;
+  resolved: boolean;
+  preferredFactId?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export type ProjectUserActionType = "conflict_group" | "responsibility_confirmation" | "metric_confirmation" | "result_confirmation" | "other_high_risk";
+
+export interface ProjectUserAction {
+  id: string;
+  projectId: string;
+  type: ProjectUserActionType;
+  factIds: string[];
+  label: string;
+  status: "pending" | "resolved";
 }
 
 export interface ProjectMemoryModule {

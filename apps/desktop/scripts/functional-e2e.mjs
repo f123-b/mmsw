@@ -240,6 +240,15 @@ async function waitFor(predicate, timeout = 12_000, client = main) {
   throw new Error(`Timed out waiting for renderer condition\n${String(await client.evaluate("document.body.innerText").catch((error) => error)).slice(0, 3_000)}`);
 }
 
+async function waitForText(text, timeout = 12_000, client = main) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    if (await client.evaluate(`document.body.innerText.includes(${JSON.stringify(text)})`)) return;
+    await sleep(150);
+  }
+  throw new Error(`Timed out waiting for renderer text: ${text}\n${String(await client.evaluate("document.body.innerText").catch((error) => error)).slice(0, 3_000)}`);
+}
+
 async function waitForNode(predicate, timeout = 12_000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { if (predicate()) return; await sleep(100); }
@@ -324,8 +333,28 @@ try {
   await screenshot("05-knowledge.png");
   evidence.push("Knowledge: PASS");
 
-  const projectSeed = await main.evaluate(`(async () => { const profile = await window.interviewCopilot.profiles.active(); const bases = await window.interviewCopilot.knowledge.listBases(); const base = bases.find((item) => item.name === 'Mock E2E Knowledge') ?? bases[0]; if (!profile?.id || !base?.id) throw new Error('project seed prerequisites missing'); if (!profile.knowledgeBaseIds.includes(base.id)) await window.interviewCopilot.profiles.save({ ...profile, knowledgeBaseIds: [...profile.knowledgeBaseIds, base.id] }); const project = await window.interviewCopilot.projects.create({ profileId: profile.id, name: 'E2E FOC 电机控制项目' }); const text = ['# E2E FOC 电机控制项目', '项目名称：E2E FOC 电机控制项目', '项目背景：在 STM32F405 上实现单轴 FOC 电机控制。', '个人职责：负责电流环、ADC 与 PWM 同步实现。', '技术栈：STM32F405、FreeRTOS、FOC、CAN、DMA。', '问题：采样时序抖动。', '原因：ADC 触发点与 PWM 更新不同步。', '解决：统一定时器触发并记录时间戳。'].join('\\n'); const document = await window.interviewCopilot.knowledge.ingest({ knowledgeBaseId: base.id, profileId: profile.id, projectId: project.id, sourceRole: 'overview', filename: 'e2e-foc-project.md', mimeType: 'text/markdown', bytes: new TextEncoder().encode(text), documentType: 'project' }); const memory = await window.interviewCopilot.projectMemory.rebuildProject(project.id); return { document, project: memory.projects.find((item) => item.id === project.id), factCount: memory.facts?.filter((fact) => fact.projectId === project.id).length ?? 0 }; })()`);
-  if (projectSeed?.document?.documentType !== "project" || projectSeed?.document?.projectAssignment?.status !== "assigned" || !projectSeed?.project?.id || projectSeed.factCount < 1) throw new Error(`Project Agent seed failed: ${JSON.stringify(projectSeed)}`);
+  const projectSeed = await main.evaluate(`(async () => {
+    const profile = await window.interviewCopilot.profiles.active();
+    const bases = await window.interviewCopilot.knowledge.listBases();
+    const base = bases.find((item) => item.name === 'Mock E2E Knowledge') ?? bases[0];
+    if (!profile?.id || !base?.id) throw new Error('project seed prerequisites missing');
+    if (!profile.knowledgeBaseIds.includes(base.id)) await window.interviewCopilot.profiles.save({ ...profile, knowledgeBaseIds: [...profile.knowledgeBaseIds, base.id] });
+    const project = await window.interviewCopilot.projects.create({ profileId: profile.id, name: 'E2E FOC 电机控制项目' });
+    const text = ['# E2E FOC 电机控制项目', '项目名称：E2E FOC 电机控制项目', '项目背景：在 STM32F405 上实现单轴 FOC 电机控制。', '个人职责：负责电流环、ADC 与 PWM 同步实现。', '技术栈：STM32F405、FreeRTOS、FOC、CAN、DMA。', '问题：采样时序抖动。', '原因：ADC 触发点与 PWM 更新不同步。', '解决：统一定时器触发并记录时间戳。'].join('\\n');
+    const document = await window.interviewCopilot.knowledge.ingest({ knowledgeBaseId: base.id, profileId: profile.id, projectId: project.id, sourceRole: 'overview', filename: 'e2e-foc-project.md', mimeType: 'text/markdown', bytes: new TextEncoder().encode(text), documentType: 'project' });
+    const memory = await window.interviewCopilot.projectMemory.rebuildProject(project.id);
+    const conflictCandidates = [
+      { id: 'e2e-mcu-f405', content: 'STM32F405' },
+      { id: 'e2e-mcu-g431', content: 'STM32G431' }
+    ];
+    for (const candidate of conflictCandidates) await window.interviewCopilot.projectMemory.addCandidateFact({ id: candidate.id, projectId: project.id, profileId: profile.id, type: 'hardware', title: 'MCU', content: candidate.content, confidence: 1, verified: false, sourceIds: [document.id], evidence: [{ sourceId: document.id, quote: candidate.content }], evidenceLevel: 'confirmed-document', ownership: 'project', status: 'pending_review' });
+    await window.interviewCopilot.projectMemory.repairSemantics(project.id);
+    const currentMemory = await window.interviewCopilot.projectMemory.get(profile.id);
+    const stats = await window.interviewCopilot.projectMemory.stats(profile.id, project.id);
+    const conflictGroups = await window.interviewCopilot.projectMemory.conflictGroups(project.id);
+    return { document, project: currentMemory.projects.find((item) => item.id === project.id), factCount: currentMemory.facts?.filter((fact) => fact.projectId === project.id).length ?? memory.facts?.filter((fact) => fact.projectId === project.id).length ?? 0, stats, conflictGroups: conflictGroups.map((group) => ({ id: group.id, canonicalKey: group.canonicalKey, factIds: group.factIds })) };
+  })()`);
+  if (projectSeed?.document?.documentType !== "project" || projectSeed?.document?.projectAssignment?.status !== "assigned" || !projectSeed?.project?.id || projectSeed.factCount < 1 || projectSeed.stats?.conflictGroups !== 1 || projectSeed.conflictGroups?.length !== 1 || projectSeed.conflictGroups[0]?.canonicalKey !== "mcu.main") throw new Error(`Project Library semantic seed failed: ${JSON.stringify(projectSeed)}`);
   await main.evaluate("location.reload()");
   await waitFor(() => document.documentElement?.dataset.appReady === "true");
   await clickText("项目库");
@@ -340,6 +369,13 @@ try {
   await sleep(250);
   await screenshot("05b-project-agent.png");
   evidence.push("Project Agent: PASS; PROJECT_AGENT_GROUNDED_CONTEXT: PASS; PROJECT_AGENT_STRUCTURED_RESPONSE: PASS");
+  await clickText("项目事实");
+  await waitFor(() => document.body.innerText.includes("冲突组 · mcu.main") && document.body.innerText.includes("采用此版本"), 15_000);
+  await screenshot("05d-project-conflict-group.png");
+  evidence.push("Project Library Conflict Group UI: PASS; PROJECT_LIBRARY_ACTION_COUNT: PASS; PROJECT_LIBRARY_SINGLE_CONFLICT_CARD: PASS");
+  await clickText("采用此版本");
+  await waitFor(() => document.body.innerText.includes("冲突组 0"), 15_000);
+  evidence.push("Project Library Conflict Resolution: PASS; PROJECT_LIBRARY_CONFLICT_GROUP_REDUCED: PASS");
   await fillSelector(".project-agent-composer textarea", "触发项目 Agent 错误 E2E");
   await clickSelector(".project-agent-composer button");
   await waitFor(() => document.body.innerText.includes("模型密钥未配置、已失效或没有访问权限") && document.body.innerText.includes("重新生成") && document.body.innerText.includes("检查模型设置"), 15_000);
@@ -409,9 +445,9 @@ try {
   await screenshot("10-interview-running.png", overlay);
   evidence.push(`Formal Start: PASS; meterOnly:false: PASS; MIC Channel: PASS; SYSTEM Channel: PASS; PCM packets: ${pcmPackets}`);
 
-  await waitFor(() => document.body.innerText.includes(interviewQuestions.auto[2]), 15_000, overlay);
+  await waitForText(interviewQuestions.auto[2], 15_000, overlay);
   evidence.push("Supersede: PASS");
-  await waitFor(() => document.body.innerText.includes(interviewQuestions.auto[0]), 15_000, overlay);
+  await waitForText(interviewQuestions.auto[0], 15_000, overlay);
   await screenshot("11-overlay-question.png", overlay);
   await waitFor(() => document.body.innerText.includes("Mock LLM answer"), 15_000, overlay);
   await screenshot("12-overlay-answer-streaming.png", overlay);

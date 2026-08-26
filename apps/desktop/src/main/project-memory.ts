@@ -134,7 +134,11 @@ export class ProjectMemoryService {
     try {
       const snapshot = await new ProjectAnalyzerAgentClass(this.model).analyze(input);
       this.onTrace?.("PROJECT_PARSE_TRACE", { projectId, sourceCount: sources.length, factCount: snapshot.facts?.length ?? 0, moduleCount: snapshot.modules.length, problemCount: snapshot.problems.length, questionCount: snapshot.interviewQuestions.length, sourceIds: sources.map((source) => source.id) });
-      const saved = this.memories.replaceSnapshot(project.profileId, snapshot, Date.now(), project.id);
+       this.memories.replaceSnapshot(project.profileId, snapshot, Date.now(), project.id);
+       // Reclassify legacy rows after each rebuild so old title-based false
+       // conflicts are repaired without requiring manual cleanup.
+       this.memories.repairProjectFactSemantics(project.id);
+       const saved = this.memories.getSnapshot(project.profileId);
       await this.embedFacts?.(project.profileId, project.id);
       this.analysisRuns?.record({ id: runId, profileId: project.profileId, projectId: project.id, runType: "project-memory", inputHash, status: "completed", inputSnapshot, output: saved, snapshotVersion });
       this.analysisRuns?.setProjectState({ projectId: project.id, latestAnalysisId: runId, lastSuccessfulAnalysisId: runId, status: "completed", snapshotVersion });

@@ -4,6 +4,7 @@ import { parseMarkdownProjectDocument } from "./project-document-parser";
 import { isUsableProjectTimeline } from "./project-timeline";
 import { resolveProjectIdentity } from "./project-identity";
 import { isFactEligible } from "./project-fact-eligibility";
+import { deriveProjectView } from "./project-view";
 import { PROJECT_FACT_TYPES, type ProjectFact, type ProjectFactEvidence, type ProjectFactType, type ProjectMemoryAnalysisInput, type ProjectInterviewQuestion, type ProjectMemoryModel, type ProjectMemoryModule, type ProjectMemoryProject, type ProjectMemorySnapshot, type ProjectProblem, type ProjectTechnicalPoint } from "./types";
 
 function unique(values: string[]): string[] { return [...new Set(values.map((value) => value.trim()).filter(Boolean))]; }
@@ -22,7 +23,7 @@ function buildProject(source: ProjectMemoryAnalysisInput["sources"][number], pro
   const hardware = unique(facts.filter((item) => item.type === "hardware").map((item) => item.title));
   const software = unique(facts.filter((item) => item.type === "software").map((item) => item.title));
   const technologyStack = unique(facts.filter((item) => item.type === "technology" || item.type === "technical_decision" || item.type === "architecture").map((item) => item.title));
-  const roles = facts.filter((item) => item.type === "responsibility" && (item.scope ?? "project") === "project").map((item) => item.content).filter((value) => ProjectFactValidator.validateRole(value).status === "accepted");
+  const roles = facts.filter((item) => item.type === "responsibility" && (item.scope ?? "project") === "project").flatMap((item) => item.content.split(/[；;]/).filter((part) => !/(?:由其他成员|其他成员|他人|团队负责|非本人|不是我|不负责)/i.test(part))).map((value) => value.trim()).filter((value) => ProjectFactValidator.validateRole(value).status === "accepted");
   const role = unique(roles).join("；") || "资料未明确记录";
   const timeline = facts.find((item) => item.type === "timeline" && item.title === "项目时间" && isUsableProjectTimeline(item.content))?.content;
   const description = facts.map((item) => item.type === "background" || item.type === "goal" ? item.content : "").find((value) => value.trim().length >= 15) ?? "资料未明确记录";
@@ -51,7 +52,7 @@ function buildTechnicalPoints(project: ProjectMemoryProject, source: ProjectMemo
 function buildProblems(project: ProjectMemoryProject, source: ProjectMemoryAnalysisInput["sources"][number]): ProjectProblem[] {
   const facts = factsForSource(source, project.id, project.name).filter((fact) => isFactEligible(fact));
   const challenges = facts.filter((item) => item.type === "challenge");
-  return challenges.slice(0, 20).map((challenge, index) => {
+  return challenges.sort((left, right) => Number(Boolean(facts.find((fact) => fact.type === "result" && fact.sectionPath?.join("/") === left.sectionPath?.join("/"))) && Boolean(facts.find((fact) => fact.type === "solution" && fact.sectionPath?.join("/") === left.sectionPath?.join("/")))) - Number(Boolean(facts.find((fact) => fact.type === "result" && fact.sectionPath?.join("/") === right.sectionPath?.join("/"))) && Boolean(facts.find((fact) => fact.type === "solution" && fact.sectionPath?.join("/") === right.sectionPath?.join("/")))) || right.confidence - left.confidence).slice(0, 3).map((challenge, index) => {
     const sameSection = (fact: ProjectFact): boolean => Boolean(challenge.sectionPath?.join("/") && fact.sectionPath?.join("/") === challenge.sectionPath?.join("/"));
     const pick = (type: ProjectFactType): string => facts.find((item) => item.type === type && sameSection(item))?.content ?? facts.find((item) => item.type === type)?.content ?? "资料未明确记录";
     return { id: `${project.id}-problem-${slug(source.id)}-${index + 1}`, projectId: project.id, problem: challenge.content.slice(0, 500), cause: pick("cause").slice(0, 500), solution: pick("solution").slice(0, 600), result: pick("result").slice(0, 500), sourceIds: challenge.sourceIds };
@@ -101,11 +102,14 @@ export function buildDeterministicProjectMemory(input: ProjectMemoryAnalysisInpu
     if (!first) continue;
     const groupInput = { ...input, projectId: input.projectId ?? first.projectId, projectName: input.projectName ?? first.projectName, sources: group };
     const project = buildProject({ ...first, projectId: groupInput.projectId, projectName: groupInput.projectName }, input.profileId);
-    project.sourceIds = group.map((source) => source.id);
     const groupFacts = new ProjectFactConflictResolver().resolve(extractProjectFacts({ ...groupInput, projectId: project.id, projectName: project.name }), group);
-    projects.push(project);
+    const projectView = deriveProjectView({ ...project, sourceIds: group.map((source) => source.id) }, groupFacts);
+    // The persisted/UI view re-derives responsibility from eligible facts.
+    // Keep the historical in-memory fallback for callers that consume the
+    // deterministic analyzer before persistence has applied that boundary.
+    projects.push({ ...projectView, role: projectView.role || project.role, sourceIds: group.map((source) => source.id) });
     facts = [...facts, ...groupFacts];
-    modules.push(...group.flatMap((source) => buildModules(project, source)));
+    modules.push(...group.flatMap((source) => buildModules(project, source)).filter((item, index, all) => all.findIndex((other) => other.moduleName === item.moduleName && other.description === item.description) === index).slice(0, 6));
     technicalPoints.push(...group.flatMap((source) => buildTechnicalPoints(project, source)));
     problems.push(...group.flatMap((source) => buildProblems(project, source)));
   }

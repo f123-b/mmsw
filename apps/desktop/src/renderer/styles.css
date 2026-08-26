@@ -1111,3 +1111,15 @@ body { background: #f1f1ee; color: var(--text-primary); }
 .history-detail-actions > button { flex: 0 0 auto; margin-left: 14px; }
 .history-empty-detail { display: grid; min-height: 280px; place-content: center; gap: 8px; text-align: center; color: #8a94a3; }
 @media (max-width: 900px) { .project-agent-panel > header,.project-agent-composer { grid-template-columns: 1fr; display: grid; }.history-record-list { min-width: 0; }.history-summary { flex-wrap: wrap; } }
+.project-overview-v2 { display: grid; grid-template-columns: 1.1fr 1fr 1fr; gap: 15px; }
+.project-summary-text { margin: 8px 0 20px; color: #253044; font-size: 17px; line-height: 1.75; }
+.project-bullet-list { display: grid; gap: 8px; margin: 8px 0 18px; padding-left: 20px; color: #536174; line-height: 1.55; }
+.technology-taxonomy { display: grid; gap: 12px; }
+.technology-taxonomy section > strong { display: block; margin-bottom: 6px; color: #536174; font-size: 12px; }
+.conflict-group-card { border-color: #e8b3a9; background: #fffaf8; }
+.conflict-candidates { display: grid; gap: 10px; }
+.conflict-candidate { display: grid; gap: 5px; border: 1px solid #f0d7d1; border-radius: 10px; padding: 11px; background: #fff; }
+.conflict-candidate > span { color: #75839a; font-size: 12px; }
+.conflict-candidate > button.outline-pill { justify-self: start; }
+@media (max-width: 1100px) { .project-overview-v2 { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 700px) { .project-overview-v2 { grid-template-columns: 1fr; } }

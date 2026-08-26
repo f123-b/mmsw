@@ -26,7 +26,7 @@ import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-s
 import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
 import { createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
-import { isFactEligible, isFactReviewRequired, isFactUserActionRequired } from "@interview-copilot/shared";
+import { isFactEligible, isFactReviewRequired } from "@interview-copilot/shared";
 import type { ChatAction, ChatCancelReason, ChatResponse } from "@interview-copilot/shared";
 import type { QuestionBankBulkPatch, QuestionBankListOptions } from "./database";
 
@@ -887,15 +887,16 @@ function chatContext(profileId?: string, userMessage = "", projectId?: string): 
     const projectFacts = snapshot?.facts ?? [];
     const facts = projectFacts.filter((fact) => fact.projectId === project.id && isFactEligible(fact)).slice(0, 24);
     const currentProjectFacts = projectFacts.filter((fact) => fact.projectId === project.id && fact.status !== "rejected" && !fact.stale);
-    const pendingFacts = currentProjectFacts.filter((fact) => isFactReviewRequired(fact)).slice(0, 30);
-    const userActionFacts = currentProjectFacts.filter((fact) => isFactUserActionRequired(fact)).slice(0, 20);
-    const conflictingFacts = currentProjectFacts.filter((fact) => fact.status === "conflicting" || fact.conflictStatus === "conflicting");
+    const conflictGroups = projectMemoryRepository?.listConflictGroups(project.id) ?? [];
+    const userActions = projectMemoryRepository?.listUserActions(project.id) ?? [];
+    const pendingFacts = currentProjectFacts.filter((fact) => isFactReviewRequired(fact) && !(fact.status === "conflicting" || fact.conflictStatus === "conflicting")).slice(0, 30);
     const completeness = profileId ? projectMemoryRepository?.getProjectCompleteness(profileId, project.id) : undefined;
     sections.push([
       facts.length ? `AUTHORITATIVE（可用于第一人称回答，必须以这些事实为准）：\n${facts.map((fact) => `- [${fact.id}] [${fact.type}] [证据 ${fact.evidenceLevel ?? "pending"}] [归属 ${fact.ownership ?? "unknown"}] ${fact.title}：${fact.content}`).join("\n")}` : "AUTHORITATIVE：无",
       pendingFacts.length ? `REVIEW_REQUIRED（禁止直接当作事实）：\n${pendingFacts.map((fact) => `- [${fact.id}] [${fact.status === "conflicting" ? "冲突" : "待确认"}] [${fact.type}] ${fact.title}：${fact.content}${fact.evidence?.[0]?.quote ? `；证据：“${fact.evidence[0].quote.slice(0, 240)}”` : "；无引用证据"}`).join("\n")}` : "REVIEW_REQUIRED：无",
-      userActionFacts.length ? `USER_ACTION_REQUIRED（需要本人决定，当前 ${userActionFacts.length} 项）：\n${userActionFacts.map((fact) => `- [${fact.type}] ${fact.title}：${fact.content}`).join("\n")}` : "USER_ACTION_REQUIRED：无",
-      completeness ? `DERIVED_VIEW（由 active facts 推导，仅供展示）：项目 ${project.name}（${project.id}）；项目 ID：${project.id}；准备度 ${completeness.interviewReadinessScore}%；缺失类型 ${completeness.missingFactTypes.join("、") || "无"}；弱证据 ${completeness.weakEvidence.length} 项；冲突 ${conflictingFacts.length} 项。` : `DERIVED_VIEW：项目 ${project.name}（${project.id}）；项目 ID：${project.id}，尚未计算完整度`
+      userActions.length ? `USER_ACTION_REQUIRED（按用户决策计数，当前 ${userActions.length} 项）：\n${userActions.map((action) => `- [${action.type}] ${action.label}：${action.factIds.join("、")}`).join("\n")}` : "USER_ACTION_REQUIRED：无",
+      conflictGroups.length ? `CONFLICT_GROUPS（只有真实语义冲突才进入此处，当前 ${conflictGroups.length} 组）：\n${conflictGroups.map((group) => `- [${group.canonicalKey}] ${group.label}：${group.facts.map((fact) => `${fact.id}=${fact.content}`).join(" / ")}`).join("\n")}` : "CONFLICT_GROUPS：无",
+      completeness ? `DERIVED_VIEW（由 active facts 推导，仅供展示）：项目 ${project.name}（${project.id}）；项目 ID：${project.id}；准备度 ${completeness.interviewReadinessScore}%；缺失类型 ${completeness.missingFactTypes.join("、") || "无"}；弱证据 ${completeness.weakEvidence.length} 项；冲突组 ${conflictGroups.length} 组。` : `DERIVED_VIEW：项目 ${project.name}（${project.id}）；项目 ID：${project.id}，尚未计算完整度`
     ].join("\n"));
     sources.push(...(project.sourceIds ?? []).slice(0, 8));
     const scopedChunks = profileId ? projectKnowledgeChunks(profileId, project.id) : [];
@@ -1430,14 +1431,17 @@ function registerIpc(): void {
     return profileBuilderService.rebuild(profileId);
   });
   ipcMain.handle("project-memory:get", (_event, profileId: string) => projectMemoryService?.get(profileId));
-  ipcMain.handle("project-memory:stats", (_event, profileId: string, projectId?: string) => projectMemoryRepository?.stats(profileId, projectId) ?? { projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0, questions: 0, facts: 0, eligibleFacts: 0, reviewRequiredFacts: 0, userActionRequiredFacts: 0, conflictingFacts: 0, staleFacts: 0 });
+  ipcMain.handle("project-memory:stats", (_event, profileId: string, projectId?: string) => projectMemoryRepository?.stats(profileId, projectId) ?? { projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0, questions: 0, facts: 0, eligibleFacts: 0, reviewRequiredFacts: 0, userActionRequiredFacts: 0, conflictingFacts: 0, conflictGroups: 0, userActions: 0, staleFacts: 0 });
   ipcMain.handle("project-memory:list-facts", (_event, profileId: string, projectId?: string, options?: { includeStale?: boolean; includeRejected?: boolean }) => projectMemoryRepository?.listFacts(profileId, projectId, options) ?? []);
   ipcMain.handle("project-memory:add-candidate-fact", (_event, fact: import("@interview-copilot/shared").ProjectFact) => projectMemoryRepository?.addCandidateFact(fact));
   ipcMain.handle("project-memory:add-responsibility", (_event, profileId: string, projectId: string, content: string) => projectMemoryRepository?.addUserResponsibility(profileId, projectId, content));
   ipcMain.handle("project-memory:confirm-fact", (_event, factId: string) => projectMemoryRepository?.confirmFactAsUser(factId));
   ipcMain.handle("project-memory:verify-fact", (_event, factId: string, verified: boolean) => projectMemoryRepository?.setFactVerification(factId, verified));
   ipcMain.handle("project-memory:review-fact", (_event, factId: string, status: import("@interview-copilot/shared").ProjectFact["status"]) => projectMemoryRepository?.setFactReviewStatus(factId, status));
-  ipcMain.handle("project-memory:resolve-conflict", (_event, conflictGroupId: string, selectedFactId: string, keepBoth?: boolean) => projectMemoryRepository?.resolveConflict(conflictGroupId, selectedFactId, Boolean(keepBoth)) ?? []);
+  ipcMain.handle("project-memory:resolve-conflict", (_event, conflictGroupId: string, selectedFactId: string, keepBoth?: boolean, variantContexts?: Record<string, string>) => projectMemoryRepository?.resolveConflict(conflictGroupId, selectedFactId, Boolean(keepBoth), variantContexts) ?? []);
+  ipcMain.handle("project-memory:conflict-groups", (_event, projectId: string, includeResolved?: boolean) => projectMemoryRepository?.listConflictGroups(projectId, Boolean(includeResolved)) ?? []);
+  ipcMain.handle("project-memory:user-actions", (_event, projectId: string) => projectMemoryRepository?.listUserActions(projectId) ?? []);
+  ipcMain.handle("project-memory:repair-semantics", (_event, projectId: string) => projectMemoryRepository?.repairProjectFactSemantics(projectId) ?? []);
   ipcMain.handle("project-memory:sources", (_event, projectId: string) => projectMemoryRepository?.listSourceDetails(projectId) ?? []);
   ipcMain.handle("project-memory:completeness", (_event, profileId: string, projectId: string) => projectMemoryRepository?.getProjectCompleteness(profileId, projectId));
   ipcMain.handle("project-memory:analysis-runs", (_event, profileId: string) => knowledgeAnalysisRepository?.list(profileId) ?? []);

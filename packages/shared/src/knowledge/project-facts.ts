@@ -1,6 +1,7 @@
 import { normalizeTechnicalTerms } from "../terminology";
 import { markdownSectionText, normalizedFieldName, parseMarkdownProjectDocument, type ProjectMarkdownSection } from "./project-document-parser";
 import { validateProjectTimeline } from "./project-timeline";
+import { areCanonicalFactValuesEquivalent, canonicalProjectFactKey, inferFactCardinality, isDeterministicContradiction, withFactSemantics } from "./project-semantics";
 import type { ProjectFact, ProjectFactEvidence, ProjectFactEvidenceLevel, ProjectFactScope, ProjectFactType, ProjectMemoryAnalysisInput, ProjectMemorySource } from "./types";
 
 export interface ProjectFactValidationIssue { code: string; message: string; }
@@ -126,7 +127,9 @@ function inferScope(section: ProjectMarkdownSection | undefined): ProjectFactSco
 function fact(projectId: string, source: ProjectMemorySource, type: ProjectFactType, title: string, content: string, lineIndex: number, options: { quote?: string; scope?: ProjectFactScope; sectionPath?: string[]; evidenceLevel?: ProjectFactEvidenceLevel; subtype?: string; confidence?: number } = {}): ProjectFact {
   const itemEvidence = evidence(source, options.quote ?? content, lineIndex);
   const evidenceLevel = inferredEvidenceLevel(source, options.evidenceLevel);
-  const ownership = type === "responsibility" ? (source.sourceRole === "responsibility" || source.sourceRole === "resume" || source.kind === "resume-section" || source.kind === "user-fact" || source.kind === "manual" ? "self" : "unknown") : "project";
+  const ownership = type === "responsibility"
+    ? (/(?:由其他成员|其他成员|他人|团队负责|非本人|不是我|不负责)/i.test(content) ? "team" : source.sourceRole === "responsibility" || source.sourceRole === "resume" || source.kind === "resume-section" || source.kind === "user-fact" || source.kind === "manual" ? "self" : "unknown")
+    : "project";
   return {
     id: `${projectId}-fact-${type}-${slug(title)}-${slug(content).slice(0, 18)}`,
     projectId,
@@ -162,10 +165,7 @@ function factForField(projectId: string, source: ProjectMemorySource, field: key
   const scope = inferScope(section);
   const common = { quote, scope, sectionPath: section?.path, evidenceLevel };
   switch (field) {
-    case "responsibility": {
-      const role = content.split(/[；;]/).filter((part) => !/(?:由其他成员|其他成员|他人|团队负责|不负责|未负责)/i.test(part)).join("；").trim();
-      return role ? [fact(projectId, source, "responsibility", "个人职责", role, lineIndex, { ...common, confidence: 0.9 })] : [];
-    }
+    case "responsibility": return [fact(projectId, source, "responsibility", "个人职责", content, lineIndex, { ...common, confidence: 0.9 })];
     case "background": return [fact(projectId, source, "background", "项目背景", content, lineIndex, { ...common, confidence: 0.84 })];
     case "goal": return [fact(projectId, source, "goal", "项目目标", content, lineIndex, common)];
     case "timeline": return [fact(projectId, source, "timeline", "项目时间", content, lineIndex, common)];
@@ -349,48 +349,55 @@ export class ProjectFactValidator {
     const result = this.validate(fact);
     if (result.status === "rejected") return undefined;
     const pending = result.status === "pending_review" || fact.evidenceLevel === "pending" || (fact.type === "timeline" && validateProjectTimeline(fact.content).status === "unknown");
-    return { ...fact, status: pending ? "pending_review" : "active" };
+    return withFactSemantics({ ...fact, status: pending ? "pending_review" : "active" });
   }
 }
 
 export type ProjectFactConflictStatus = "confirmed" | "conflicting" | "pending_review";
 
-function trust(source: ProjectMemorySource): number {
-  if (source.kind === "user-fact" || source.sourceType === "user_fact") return 4;
-  if (source.kind === "project-document" || source.kind === "repository" || source.kind === "readme") return 3;
-  if (source.kind === "resume-section" || source.sourceType === "resume_section") return 2;
-  return 1;
-}
-
 export class ProjectFactConflictResolver {
   resolve(facts: ProjectFact[], sources: ProjectMemorySource[] = []): ProjectFact[] {
-    const sourceById = new Map(sources.map((source) => [source.id, source]));
+    void sources;
+    const normalizedFacts = facts.map(withFactSemantics);
     const groups = new Map<string, ProjectFact[]>();
-    for (const item of facts) {
-      const normalizedTitle = normalizeTechnicalTerms(item.title).toLowerCase();
-      const normalizedContent = normalizeTechnicalTerms(item.content).toLowerCase();
-      const narrative = ["responsibility", "challenge", "cause", "solution", "result", "application"].includes(item.type);
-      const semanticSlot = item.type === "hardware" && /stm32|esp32|rk\d+|mcu|芯片/.test(normalizedTitle) ? "mcu" : narrative ? `${normalizedTitle}|${slug(normalizedContent).slice(0, 36)}` : normalizedTitle;
-      const key = `${item.projectId}|${item.type}|${semanticSlot}`;
+    for (const item of normalizedFacts) {
+      const semanticKey = item.canonicalKey ?? canonicalProjectFactKey(item);
+      const cardinality = item.cardinality ?? inferFactCardinality(item);
+      // No stable semantic slot means that two descriptions are allowed to
+      // coexist. Set members only share a bucket when their value is the same,
+      // so CAN, UART and SPI can never become one conflict.
+      const key = semanticKey ? `${item.projectId}|${semanticKey}|${cardinality === "set" ? normalizeTechnicalTerms(item.content).toLowerCase() : ""}` : `${item.projectId}|unkeyed|${item.id}`;
       groups.set(key, [...(groups.get(key) ?? []), item]);
     }
     return [...groups.values()].flatMap((group) => {
       if (group.length <= 1) return group;
-      const conflictGroupId = `conflict-${slug(group[0]?.projectId ?? "project")}-${slug(group[0]?.type ?? "fact")}-${slug(group[0]?.title ?? "fact")}`;
-      const contents = new Set(group.map((item) => normalizeTechnicalTerms(item.content).toLowerCase()));
-      if (contents.size <= 1) return [this.merge(group, "confirmed")];
-      const scores = group.map((item) => item.sourceIds.reduce((total, sourceId) => total + trust(sourceById.get(sourceId) ?? { id: sourceId, kind: "manual", title: "", text: "" }), 0));
-      const best = Math.max(...scores);
-      const leaders = group.filter((_item, index) => scores[index] === best);
-      // Keep every candidate when values disagree. A higher quality source is
-      // a useful ranking signal, but it is not permission to silently discard
-      // a contradictory claim before the user resolves it.
+      const key = group[0]?.canonicalKey;
+      const cardinality = group[0]?.cardinality ?? inferFactCardinality(group[0] as ProjectFact);
+      if (cardinality === "set") return [this.merge(group, "confirmed")];
+      const equivalent = group.every((item, index) => index === 0 || areCanonicalFactValuesEquivalent(group[0] as ProjectFact, item));
+      if (equivalent) return [this.merge(group, "confirmed")];
+      const contradiction = group.some((item, index) => group.slice(index + 1).some((other) => isDeterministicContradiction(item, other)));
+      if (!contradiction || !key) return group.map((item) => this.clearConflict(item));
+      const conflictGroupId = `conflict:${group[0]?.projectId ?? "project"}:${key}`;
+      const userConfirmed = group.find((item) => item.verified && item.evidenceLevel === "confirmed-user" && item.status !== "rejected");
+      if (userConfirmed && !group.some((item) => (item.evidence ?? []).some((evidence) => evidence.relation === "refute"))) {
+        return group.map((item) => item.id === userConfirmed.id
+          ? { ...item, conflictStatus: "confirmed" as const, conflictGroupId: undefined, status: "active" as const }
+          : { ...item, conflictStatus: "confirmed" as const, conflictGroupId: undefined, status: "rejected" as const });
+      }
       return group.map((item) => ({ ...item, conflictStatus: "conflicting" as const, conflictGroupId, status: "conflicting" as const }));
     });
   }
 
+  private clearConflict(fact: ProjectFact): ProjectFact {
+    const status = fact.status === "rejected" ? "rejected" : ["pending", "inferred", "risk"].includes(fact.evidenceLevel ?? "pending") ? "pending_review" : "active";
+    return { ...fact, conflictStatus: "confirmed", conflictGroupId: undefined, status: status as ProjectFact["status"] };
+  }
+
   private merge(facts: ProjectFact[], status: ProjectFactConflictStatus): ProjectFact {
-    const first = facts[0] as ProjectFact;
-    return { ...first, sourceIds: [...new Set(facts.flatMap((item) => item.sourceIds))], evidence: facts.flatMap((item) => item.evidence ?? []), conflictStatus: status, status: status === "confirmed" ? "active" : "pending_review" };
+    const rank: Record<string, number> = { pending: 0, inferred: 0, risk: 0, "not-measured": 0, "confirmed-document": 1, "confirmed-code": 2, "confirmed-user": 3 };
+    const first = [...facts].sort((left, right) => Number(right.verified) - Number(left.verified) || (rank[right.evidenceLevel ?? "pending"] ?? 0) - (rank[left.evidenceLevel ?? "pending"] ?? 0) || right.confidence - left.confidence)[0] as ProjectFact;
+    const evidence = [...new Map(facts.flatMap((item) => item.evidence ?? []).map((item) => [`${item.sourceId}|${item.quote}|${item.relation ?? "support"}`, item])).values()];
+    return { ...first, sourceIds: [...new Set(facts.flatMap((item) => item.sourceIds))], evidence, conflictStatus: status, conflictGroupId: undefined, status: status === "confirmed" ? (first.status === "rejected" ? "rejected" : "active") : "pending_review" };
   }
 }

@@ -44,6 +44,12 @@ import {
   type ProjectSourceRole,
   type ProjectSourceAssignmentMethod,
   type ProjectFactEvidence,
+  type ProjectConflictGroup,
+  type ProjectUserAction,
+  ProjectFactConflictResolver,
+  listConflictGroups,
+  listUserActions,
+  withFactSemantics,
   normalizeProfileBuilderArtifact,
   calculateProjectCompleteness,
   calculateQuestionBankCoverage,
@@ -614,11 +620,20 @@ export class SqliteDatabase {
         WHERE status <> 'rejected' AND verified = 0 AND evidence_level = 'pending'
           AND EXISTS (SELECT 1 FROM project_fact_sources pfs WHERE pfs.fact_id = project_facts.id AND COALESCE(pfs.quote, '') <> '');
       `],
+      [22, `
+        CREATE INDEX IF NOT EXISTS project_facts_semantics_idx ON project_facts(project_id, canonical_key, cardinality, conflict_status);
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
       this.database.run("BEGIN");
       try {
+        if (version === 22) {
+          const columns = new Set(this.all<{ name: string }>("PRAGMA table_info(project_facts)").map((row) => row.name));
+          for (const column of ["canonical_key", "cardinality", "variant_context"]) {
+            if (!columns.has(column)) this.database.run(`ALTER TABLE project_facts ADD COLUMN ${column} TEXT`);
+          }
+        }
         this.database.run(sql);
         this.database.run("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", [version, Date.now()]);
         this.database.run("COMMIT");
@@ -830,6 +845,10 @@ export interface ProjectMemoryStats {
   reviewRequiredFacts: number;
   userActionRequiredFacts: number;
   conflictingFacts: number;
+  /** Number of unresolved decision groups, not candidate facts. */
+  conflictGroups: number;
+  /** Number of user decisions, with one action per conflict group. */
+  userActions: number;
   staleFacts: number;
   /** Current-project alias used by detail views. */
   questions: number;
@@ -1044,12 +1063,13 @@ export class SqliteProjectMemoryRepository {
     for (const question of snapshot.interviewQuestions) this.database.run("INSERT INTO interview_questions(id, project_id, question, answer_points_json, keywords_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?)", [question.id, question.projectId, question.question, JSON.stringify(question.answerPoints), JSON.stringify(question.keywords), JSON.stringify(question.sourceIds)]);
     const projectById = new Map(snapshot.projects.map((project) => [project.id, project]));
     const saveFact = (fact: ProjectFact): void => {
+      fact = withFactSemantics(fact);
       const verified = previousFactVerification.get(fact.id) ?? fact.verified;
       const contentHash = projectFactEmbeddingHash(fact.title, fact.content);
       const previous = previousFactEmbeddings.get(fact.id);
       const keepEmbedding = previous?.embeddingHash === contentHash && Boolean(previous.embeddingJson);
       const persistedStatus = fact.evidence?.some((item) => item.quote.trim()) ? fact.status ?? "active" : "pending_review";
-      this.database.run("INSERT INTO project_facts(id, project_id, fact_type, title, content, confidence, verified, status, evidence_level, scope, section_path_json, subtype, conflict_status, conflict_group_id, ownership, stale, embedding_json, embedding_hash, embedding_model, embedding_version, embedding_updated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, fact_type=excluded.fact_type, title=excluded.title, content=excluded.content, confidence=excluded.confidence, verified=CASE WHEN project_facts.verified=1 THEN 1 ELSE excluded.verified END, status=CASE WHEN project_facts.verified=1 AND project_facts.evidence_level='confirmed-user' THEN project_facts.status ELSE excluded.status END, evidence_level=CASE WHEN project_facts.verified=1 AND project_facts.evidence_level='confirmed-user' THEN project_facts.evidence_level ELSE excluded.evidence_level END, scope=excluded.scope, section_path_json=excluded.section_path_json, subtype=excluded.subtype, conflict_status=excluded.conflict_status, conflict_group_id=excluded.conflict_group_id, ownership=CASE WHEN project_facts.ownership='self' THEN project_facts.ownership ELSE excluded.ownership END, stale=0, embedding_json=excluded.embedding_json, embedding_hash=excluded.embedding_hash, embedding_model=excluded.embedding_model, embedding_version=excluded.embedding_version, embedding_updated_at=excluded.embedding_updated_at, updated_at=excluded.updated_at", [fact.id, fact.projectId, fact.type, fact.title, fact.content, Math.max(0, Math.min(1, fact.confidence)), verified ? 1 : 0, persistedStatus, fact.evidenceLevel ?? "confirmed-document", fact.scope ?? "project", JSON.stringify(fact.sectionPath ?? []), fact.subtype ?? null, fact.conflictStatus ?? "confirmed", fact.conflictGroupId ?? null, fact.ownership ?? "project", fact.stale ? 1 : 0, keepEmbedding ? previous?.embeddingJson : null, keepEmbedding ? contentHash : null, keepEmbedding ? previous?.embeddingModel ?? null : null, keepEmbedding ? previous?.embeddingVersion ?? null : null, keepEmbedding ? previous?.embeddingUpdatedAt ?? null : null, fact.createdAt ?? now, fact.updatedAt ?? now]);
+      this.database.run("INSERT INTO project_facts(id, project_id, fact_type, title, content, confidence, verified, status, evidence_level, scope, section_path_json, subtype, canonical_key, cardinality, variant_context, conflict_status, conflict_group_id, ownership, stale, embedding_json, embedding_hash, embedding_model, embedding_version, embedding_updated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, fact_type=excluded.fact_type, title=excluded.title, content=excluded.content, confidence=excluded.confidence, verified=CASE WHEN project_facts.verified=1 THEN 1 ELSE excluded.verified END, status=CASE WHEN project_facts.verified=1 AND project_facts.evidence_level='confirmed-user' THEN project_facts.status ELSE excluded.status END, evidence_level=CASE WHEN project_facts.verified=1 AND project_facts.evidence_level='confirmed-user' THEN project_facts.evidence_level ELSE excluded.evidence_level END, scope=excluded.scope, section_path_json=excluded.section_path_json, subtype=excluded.subtype, canonical_key=excluded.canonical_key, cardinality=excluded.cardinality, variant_context=excluded.variant_context, conflict_status=excluded.conflict_status, conflict_group_id=excluded.conflict_group_id, ownership=CASE WHEN project_facts.ownership='self' THEN project_facts.ownership ELSE excluded.ownership END, stale=0, embedding_json=excluded.embedding_json, embedding_hash=excluded.embedding_hash, embedding_model=excluded.embedding_model, embedding_version=excluded.embedding_version, embedding_updated_at=excluded.embedding_updated_at, updated_at=excluded.updated_at", [fact.id, fact.projectId, fact.type, fact.title, fact.content, Math.max(0, Math.min(1, fact.confidence)), verified ? 1 : 0, persistedStatus, fact.evidenceLevel ?? "confirmed-document", fact.scope ?? "project", JSON.stringify(fact.sectionPath ?? []), fact.subtype ?? null, fact.canonicalKey ?? null, fact.cardinality ?? null, fact.variantContext ?? null, fact.conflictStatus ?? "confirmed", fact.conflictGroupId ?? null, fact.ownership ?? "project", fact.stale ? 1 : 0, keepEmbedding ? previous?.embeddingJson : null, keepEmbedding ? contentHash : null, keepEmbedding ? previous?.embeddingModel ?? null : null, keepEmbedding ? previous?.embeddingVersion ?? null : null, keepEmbedding ? previous?.embeddingUpdatedAt ?? null : null, fact.createdAt ?? now, fact.updatedAt ?? now]);
       this.database.run("DELETE FROM project_fact_sources WHERE fact_id = ?", [fact.id]);
       const evidence: ProjectFactEvidence[] = fact.evidence?.length ? fact.evidence : fact.sourceIds.map((sourceId) => ({ sourceId, quote: "" }));
       for (const item of evidence) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)", [fact.id, item.sourceId, item.quote || null, item.locator ?? null, item.relation ?? "support", now]);
@@ -1084,20 +1104,21 @@ export class SqliteProjectMemoryRepository {
     if (!options.includeStale) conditions.push("COALESCE(f.stale, 0) = 0");
     if (!options.includeRejected) conditions.push("f.status <> 'rejected'");
     else conditions.push("f.status IN ('active', 'pending_review', 'conflicting', 'rejected')");
-    const rows = this.database.all<Record<string, unknown>>(`SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.evidence_level AS evidenceLevel, f.scope, f.section_path_json AS sectionPathJson, f.subtype, f.conflict_status AS conflictStatus, f.conflict_group_id AS conflictGroupId, f.ownership, f.stale, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE ${conditions.join(" AND ")} ORDER BY CASE WHEN f.conflict_status IN ('conflicting','pending_review') THEN 0 ELSE 1 END, f.verified DESC, f.confidence DESC, f.updated_at DESC`, params);
+    const rows = this.database.all<Record<string, unknown>>(`SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.evidence_level AS evidenceLevel, f.scope, f.section_path_json AS sectionPathJson, f.subtype, f.canonical_key AS canonicalKey, f.cardinality, f.variant_context AS variantContext, f.conflict_status AS conflictStatus, f.conflict_group_id AS conflictGroupId, f.ownership, f.stale, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE ${conditions.join(" AND ")} ORDER BY CASE WHEN f.conflict_status IN ('conflicting','pending_review') THEN 0 ELSE 1 END, f.verified DESC, f.confidence DESC, f.updated_at DESC`, params);
     return rows.map((row) => this.hydrateFact(row));
   }
 
   getFact(factId: string): ProjectFact | undefined {
-    const row = this.database.first<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.evidence_level AS evidenceLevel, f.scope, f.section_path_json AS sectionPathJson, f.subtype, f.conflict_status AS conflictStatus, f.conflict_group_id AS conflictGroupId, f.ownership, f.stale, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE f.id = ?", [factId]);
+    const row = this.database.first<Record<string, unknown>>("SELECT f.id, f.project_id AS projectId, p.profile_id AS profileId, f.fact_type AS type, f.title, f.content, f.confidence, f.verified, f.status, f.evidence_level AS evidenceLevel, f.scope, f.section_path_json AS sectionPathJson, f.subtype, f.canonical_key AS canonicalKey, f.cardinality, f.variant_context AS variantContext, f.conflict_status AS conflictStatus, f.conflict_group_id AS conflictGroupId, f.ownership, f.stale, f.embedding_json AS embeddingJson, f.embedding_hash AS embeddingHash, f.embedding_model AS embeddingModel, f.embedding_version AS embeddingVersion, f.embedding_updated_at AS embeddingUpdatedAt, f.created_at AS createdAt, f.updated_at AS updatedAt FROM project_facts f JOIN projects p ON p.id = f.project_id WHERE f.id = ?", [factId]);
     return row ? this.hydrateFact(row) : undefined;
   }
 
   addCandidateFact(fact: ProjectFact, now = Date.now()): ProjectFact {
     if (!fact.projectId || !fact.sourceIds.length || !fact.evidence?.length) throw new Error("PROJECT_FACT_EVIDENCE_REQUIRED");
-    this.database.run("INSERT INTO project_facts(id, project_id, fact_type, title, content, confidence, verified, status, evidence_level, scope, section_path_json, subtype, conflict_status, conflict_group_id, ownership, stale, embedding_json, embedding_hash, embedding_model, embedding_version, embedding_updated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, 'pending_review', ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, NULL, NULL, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, content=excluded.content, confidence=excluded.confidence, status='pending_review', evidence_level=excluded.evidence_level, scope=excluded.scope, section_path_json=excluded.section_path_json, subtype=excluded.subtype, ownership=excluded.ownership, stale=0, updated_at=excluded.updated_at", [fact.id, fact.projectId, fact.type, fact.title, fact.content, Math.max(0, Math.min(1, fact.confidence)), fact.evidenceLevel ?? "pending", fact.scope ?? "project", JSON.stringify(fact.sectionPath ?? []), fact.subtype ?? null, fact.conflictStatus ?? "pending_review", fact.conflictGroupId ?? null, fact.ownership ?? "project", fact.createdAt ?? now, now]);
+    fact = withFactSemantics(fact);
+    this.database.run("INSERT INTO project_facts(id, project_id, fact_type, title, content, confidence, verified, status, evidence_level, scope, section_path_json, subtype, canonical_key, cardinality, variant_context, conflict_status, conflict_group_id, ownership, stale, embedding_json, embedding_hash, embedding_model, embedding_version, embedding_updated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, 'pending_review', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, NULL, NULL, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, content=excluded.content, confidence=excluded.confidence, status='pending_review', evidence_level=excluded.evidence_level, scope=excluded.scope, section_path_json=excluded.section_path_json, subtype=excluded.subtype, canonical_key=excluded.canonical_key, cardinality=excluded.cardinality, variant_context=excluded.variant_context, ownership=excluded.ownership, stale=0, updated_at=excluded.updated_at", [fact.id, fact.projectId, fact.type, fact.title, fact.content, Math.max(0, Math.min(1, fact.confidence)), fact.evidenceLevel ?? "pending", fact.scope ?? "project", JSON.stringify(fact.sectionPath ?? []), fact.subtype ?? null, fact.canonicalKey ?? null, fact.cardinality ?? null, fact.variantContext ?? null, fact.conflictStatus ?? "pending_review", fact.conflictGroupId ?? null, fact.ownership ?? "project", fact.createdAt ?? now, now]);
     this.database.run("DELETE FROM project_fact_sources WHERE fact_id = ?", [fact.id]);
-    for (const item of fact.evidence) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)", [fact.id, item.sourceId, item.quote, item.locator ?? null, item.relation ?? "support", now]);
+    for (const item of fact.evidence ?? []) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)", [fact.id, item.sourceId, item.quote, item.locator ?? null, item.relation ?? "support", now]);
     this.database.flushNow();
     return this.getFact(fact.id) as ProjectFact;
   }
@@ -1176,14 +1197,15 @@ export class SqliteProjectMemoryRepository {
     return this.getFact(factId);
   }
 
-  resolveConflict(conflictGroupId: string, selectedFactId: string, keepBoth = false, now = Date.now()): ProjectFact[] {
+  resolveConflict(conflictGroupId: string, selectedFactId: string, keepBoth = false, variantContexts?: Record<string, string>, now = Date.now()): ProjectFact[] {
     const selected = this.getFact(selectedFactId);
     if (!selected || selected.conflictGroupId !== conflictGroupId) throw new Error("PROJECT_CONFLICT_SELECTION_INVALID");
     const siblings = this.listFacts(String(selected.profileId ?? ""), selected.projectId, { includeStale: true, includeRejected: true }).filter((fact) => fact.conflictGroupId === conflictGroupId);
     if (keepBoth) {
-      const distinguishable = siblings.every((left, index) => siblings.slice(index + 1).every((right) => `${left.scope ?? "project"}|${left.subtype ?? ""}|${(left.sectionPath ?? []).join("/")}` !== `${right.scope ?? "project"}|${right.subtype ?? ""}|${(right.sectionPath ?? []).join("/")}`));
-      if (!distinguishable) this.database.run("UPDATE project_facts SET status='conflicting', conflict_status='conflicting', updated_at=? WHERE conflict_group_id=?", [now, conflictGroupId]);
-      else for (const fact of siblings) this.confirmFactAsUser(fact.id, { now, allowConflict: true });
+      if (!variantContexts || siblings.some((fact) => !variantContexts[fact.id]?.trim())) throw new Error("PROJECT_CONFLICT_VARIANT_CONTEXT_REQUIRED");
+      for (const fact of siblings) {
+        this.database.run("UPDATE project_facts SET status='active', conflict_status='confirmed', variant_context=?, updated_at=? WHERE id=?", [variantContexts[fact.id].trim().slice(0, 120), now, fact.id]);
+      }
     } else {
       this.database.run("UPDATE project_facts SET status='rejected', conflict_status='confirmed', updated_at=? WHERE conflict_group_id=? AND id <> ?", [now, conflictGroupId, selectedFactId]);
       this.confirmFactAsUser(selectedFactId, { now, allowConflict: true });
@@ -1234,6 +1256,49 @@ export class SqliteProjectMemoryRepository {
     return calculateProjectCompleteness({ project, facts: this.listFacts(profileId, projectId), modules: snapshot.modules, problems: snapshot.problems, questions: snapshot.interviewQuestions });
   }
 
+  listConflictGroups(projectId: string, includeResolved = false): ProjectConflictGroup[] {
+    const profileId = this.database.first<{ profileId: string }>("SELECT profile_id AS profileId FROM projects WHERE id = ?", [projectId])?.profileId;
+    if (!profileId) return [];
+    return listConflictGroups(this.listFacts(profileId, projectId, { includeStale: includeResolved, includeRejected: includeResolved }), { projectId, includeResolved });
+  }
+
+  listUserActions(projectId: string): ProjectUserAction[] {
+    const profileId = this.database.first<{ profileId: string }>("SELECT profile_id AS profileId FROM projects WHERE id = ?", [projectId])?.profileId;
+    if (!profileId) return [];
+    return listUserActions(this.listFacts(profileId, projectId), projectId);
+  }
+
+  /** Reclassifies legacy fact rows in place without deleting facts or evidence. */
+  repairProjectFactSemantics(projectId: string, now = Date.now()): ProjectFact[] {
+    const project = this.getProject(projectId);
+    if (!project) return [];
+    const existing = this.listFacts(project.profileId, projectId, { includeStale: true, includeRejected: true });
+    const repaired = new ProjectFactConflictResolver().resolve(existing);
+    const repairedIds = new Set(repaired.map((fact) => fact.id));
+    this.database.run("BEGIN");
+    try {
+      for (const fact of existing) {
+        const next = repaired.find((candidate) => candidate.id === fact.id);
+        if (!next) {
+          this.database.run("UPDATE project_facts SET status='rejected', conflict_status='confirmed', conflict_group_id=NULL, updated_at=? WHERE id=?", [now, fact.id]);
+          continue;
+        }
+        this.database.run("UPDATE project_facts SET canonical_key=?, cardinality=?, variant_context=?, status=?, conflict_status=?, conflict_group_id=?, updated_at=? WHERE id=?", [next.canonicalKey ?? null, next.cardinality ?? null, next.variantContext ?? null, next.status ?? "active", next.conflictStatus ?? "confirmed", next.conflictGroupId ?? null, now, fact.id]);
+        if (next.evidence) {
+          this.database.run("DELETE FROM project_fact_sources WHERE fact_id=?", [fact.id]);
+          for (const item of next.evidence) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)", [fact.id, item.sourceId, item.quote || null, item.locator ?? null, item.relation ?? "support", now]);
+        }
+      }
+      this.database.run("COMMIT");
+    } catch (error) {
+      this.database.run("ROLLBACK");
+      throw error;
+    }
+    this.syncProjectSkillsForProject(projectId, now);
+    this.database.flushNow();
+    return this.listFacts(project.profileId, projectId, { includeStale: true, includeRejected: true }).filter((fact) => repairedIds.has(fact.id));
+  }
+
   setFactEmbedding(factId: string, embedding: number[], options: { model?: string; version?: string; now?: number } = {}): ProjectFact | undefined {
     const fact = this.getFact(factId);
     const vector = embedding.filter((value) => Number.isFinite(value));
@@ -1275,7 +1340,7 @@ export class SqliteProjectMemoryRepository {
     const evidence = this.database.all<{ sourceId: string; quote: string | null; locator: string | null; relation: string | null }>("SELECT source_id AS sourceId, quote, locator, relation FROM project_fact_sources WHERE fact_id = ? ORDER BY created_at", [String(row.id)]).map((item) => ({ sourceId: item.sourceId, quote: item.quote ?? "", ...(item.locator ? { locator: item.locator } : {}), relation: item.relation === "refute" ? "refute" : "support" } satisfies ProjectFactEvidence));
     const sourceIds = evidence.map((item) => item.sourceId);
     const embedding = jsonArray<number>(row.embeddingJson);
-    return { id: String(row.id), projectId: String(row.projectId), profileId: String(row.profileId), type: String(row.type) as ProjectFactType, factType: String(row.type) as ProjectFactType, title: String(row.title), content: String(row.content), confidence: Number(row.confidence ?? 1), verified: Number(row.verified) === 1, sourceIds, evidence, scope: String(row.scope ?? "project") as ProjectFact["scope"], sectionPath: jsonArray<string>(row.sectionPathJson), evidenceLevel: String(row.evidenceLevel ?? "pending") as ProjectFact["evidenceLevel"], ...(row.subtype ? { subtype: String(row.subtype) } : {}), status: String(row.status ?? "active") as ProjectFact["status"], conflictStatus: String(row.conflictStatus ?? "pending_review") as ProjectFact["conflictStatus"], ...(row.conflictGroupId ? { conflictGroupId: String(row.conflictGroupId) } : {}), ownership: String(row.ownership ?? "project") as ProjectFact["ownership"], stale: Number(row.stale) === 1, ...(embedding.length ? { embedding } : {}), ...(row.embeddingHash ? { embeddingHash: String(row.embeddingHash) } : {}), ...(row.embeddingModel ? { embeddingModel: String(row.embeddingModel) } : {}), ...(row.embeddingVersion ? { embeddingVersion: String(row.embeddingVersion) } : {}), ...(row.embeddingUpdatedAt ? { embeddingUpdatedAt: Number(row.embeddingUpdatedAt) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
+    return { id: String(row.id), projectId: String(row.projectId), profileId: String(row.profileId), type: String(row.type) as ProjectFactType, factType: String(row.type) as ProjectFactType, title: String(row.title), content: String(row.content), confidence: Number(row.confidence ?? 1), verified: Number(row.verified) === 1, sourceIds, evidence, scope: String(row.scope ?? "project") as ProjectFact["scope"], sectionPath: jsonArray<string>(row.sectionPathJson), evidenceLevel: String(row.evidenceLevel ?? "pending") as ProjectFact["evidenceLevel"], ...(row.subtype ? { subtype: String(row.subtype) } : {}), ...(row.canonicalKey ? { canonicalKey: String(row.canonicalKey) } : {}), ...(row.cardinality ? { cardinality: String(row.cardinality) as ProjectFact["cardinality"] } : {}), ...(row.variantContext ? { variantContext: String(row.variantContext) } : {}), status: String(row.status ?? "active") as ProjectFact["status"], conflictStatus: String(row.conflictStatus ?? "pending_review") as ProjectFact["conflictStatus"], ...(row.conflictGroupId ? { conflictGroupId: String(row.conflictGroupId) } : {}), ownership: String(row.ownership ?? "project") as ProjectFact["ownership"], stale: Number(row.stale) === 1, ...(embedding.length ? { embedding } : {}), ...(row.embeddingHash ? { embeddingHash: String(row.embeddingHash) } : {}), ...(row.embeddingModel ? { embeddingModel: String(row.embeddingModel) } : {}), ...(row.embeddingVersion ? { embeddingVersion: String(row.embeddingVersion) } : {}), ...(row.embeddingUpdatedAt ? { embeddingUpdatedAt: Number(row.embeddingUpdatedAt) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
   }
 
   stats(profileId: string, projectId?: string): ProjectMemoryStats {
@@ -1284,7 +1349,9 @@ export class SqliteProjectMemoryRepository {
     const allFacts = this.listFacts(profileId, projectId, { includeStale: true, includeRejected: true });
     const currentFacts = allFacts.filter((fact) => !fact.stale && fact.status !== "rejected");
     const questions = snapshot.interviewQuestions.filter((question) => !projectId || question.projectId === projectId).length;
-    return { projects: scopedProjects.length, modules: snapshot.modules.filter((item) => !projectId || item.projectId === projectId).length, technicalPoints: snapshot.technicalPoints.filter((item) => !projectId || item.projectId === projectId).length, problems: snapshot.problems.filter((item) => !projectId || item.projectId === projectId).length, interviewQuestions: questions, questions, facts: currentFacts.length, eligibleFacts: currentFacts.filter(isFactEligible).length, reviewRequiredFacts: currentFacts.filter(isFactReviewRequired).length, userActionRequiredFacts: currentFacts.filter(isFactUserActionRequired).length, conflictingFacts: currentFacts.filter((fact) => fact.conflictStatus === "conflicting" || fact.status === "conflicting").length, staleFacts: allFacts.filter((fact) => fact.stale).length };
+    const conflictGroups = listConflictGroups(currentFacts, { projectId }).filter((group) => !group.resolved);
+    const userActions = listUserActions(currentFacts, projectId);
+    return { projects: scopedProjects.length, modules: snapshot.modules.filter((item) => !projectId || item.projectId === projectId).length, technicalPoints: snapshot.technicalPoints.filter((item) => !projectId || item.projectId === projectId).length, problems: snapshot.problems.filter((item) => !projectId || item.projectId === projectId).length, interviewQuestions: questions, questions, facts: currentFacts.length, eligibleFacts: currentFacts.filter(isFactEligible).length, reviewRequiredFacts: currentFacts.filter(isFactReviewRequired).length, userActionRequiredFacts: userActions.length, conflictingFacts: currentFacts.filter((fact) => fact.conflictStatus === "conflicting" || fact.status === "conflicting").length, conflictGroups: conflictGroups.length, userActions: userActions.length, staleFacts: allFacts.filter((fact) => fact.stale).length };
   }
 }
 

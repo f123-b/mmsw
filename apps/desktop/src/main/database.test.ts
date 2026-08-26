@@ -240,17 +240,30 @@ describe("SQLite persistence", () => {
         { id: "legacy-role", projectId: "project-migration", type: "responsibility", title: "个人职责", content: "负责驱动", confidence: 1, verified: true, sourceIds: ["legacy-doc"], evidence: [{ sourceId: "legacy-doc", quote: "负责驱动" }] }
       ] });
       memory.assignSource({ projectId: "project-migration", sourceType: "repository", sourceId: "legacy-doc", relationship: "primary", sourceRole: "code", confidence: 1, verified: true });
+      const questionBank = new SqliteQuestionBankRepository(first);
+      questionBank.saveQuestion({ id: "legacy-project-question", canonicalText: "Legacy 项目如何实现？", type: "project", scope: "project", profileId: profile.id, projectId: "project-migration", source: "generated", factIds: ["legacy-code"] });
+      questionBank.saveAnswerCard({ id: "legacy-answer-card", questionId: "legacy-project-question", content: "保留旧答案卡", verified: true, factIds: ["legacy-code"] });
+      const history = new SqliteInterviewHistoryRepository(first);
+      const interview = history.createInterview({ profileId: profile.id, projectId: "project-migration", startedAt: 1, status: "running", language: "zh-CN", automationMode: "AUTO" }, 2);
+      const historyQuestion = history.addQuestion({ interviewId: interview.id, text: "Legacy 面试题", confidence: "high", source: "rules", detectedAt: 3, status: "confirmed" });
+      history.addTranscript({ interviewId: interview.id, source: "remote", text: "Legacy 转写", startMs: 0, endMs: 100, final: true, confidence: 1 }, 4);
+      history.addAnswer({ questionId: historyQuestion.id, text: "Legacy 回答", model: "legacy-model", createdAt: 5 });
       first.run("UPDATE project_facts SET evidence_level='pending', conflict_status='pending_review', ownership='project' WHERE project_id='project-migration'");
       first.run("UPDATE project_facts SET verified=1 WHERE id='legacy-role'");
-      first.run("DELETE FROM schema_migrations WHERE version=21");
+      first.run("DELETE FROM schema_migrations WHERE version IN (21, 22)");
       first.flushNow();
       first.close();
       const second = await SqliteDatabase.open(filePath);
       try {
-        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(21);
+        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(22);
         const repaired = new SqliteProjectMemoryRepository(second);
+        expect(repaired.listFacts(profile.id, "project-migration", { includeStale: true, includeRejected: true })).toHaveLength(2);
         expect(repaired.getFact("legacy-code")).toMatchObject({ evidenceLevel: "confirmed-code", conflictStatus: "confirmed" });
-        expect(repaired.getFact("legacy-role")).toMatchObject({ evidenceLevel: "confirmed-user", ownership: "self" });
+        expect(repaired.getFact("legacy-code")?.evidence).toEqual([expect.objectContaining({ sourceId: "legacy-doc", quote: "CAN" })]);
+        expect(repaired.getFact("legacy-role")).toMatchObject({ evidenceLevel: "confirmed-user", ownership: "self", verified: true });
+        expect(repaired.listProjectSources("project-migration")).toHaveLength(1);
+        expect(new SqliteQuestionBankRepository(second).getQuestion("legacy-project-question")?.answerCards[0]).toMatchObject({ content: "保留旧答案卡", verified: true });
+        expect(new SqliteInterviewHistoryRepository(second).snapshot(interview.id)).toMatchObject({ transcripts: [expect.objectContaining({ text: "Legacy 转写" })], questions: [expect.objectContaining({ text: "Legacy 面试题" })], answers: [expect.objectContaining({ text: "Legacy 回答" })] });
       } finally { second.close(); }
     } finally { await rm(directory, { recursive: true, force: true }); }
   });

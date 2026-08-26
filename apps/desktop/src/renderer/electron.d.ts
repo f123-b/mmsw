@@ -118,7 +118,10 @@ declare global {
         confirmFact(factId: string): Promise<ProjectFact | undefined>;
         verifyFact(factId: string, verified: boolean): Promise<ProjectFact | undefined>;
         reviewFact(factId: string, status: "active" | "pending_review" | "rejected" | "conflicting"): Promise<ProjectFact | undefined>;
-        resolveConflict(conflictGroupId: string, selectedFactId: string, keepBoth?: boolean): Promise<ProjectFact[]>;
+        resolveConflict(conflictGroupId: string, selectedFactId: string, keepBoth?: boolean, variantContexts?: Record<string, string>): Promise<ProjectFact[]>;
+        conflictGroups(projectId: string, includeResolved?: boolean): Promise<unknown[]>;
+        userActions(projectId: string): Promise<unknown[]>;
+        repairSemantics(projectId: string): Promise<ProjectFact[]>;
         sources(projectId: string): Promise<unknown[]>;
         completeness(profileId: string, projectId: string): Promise<unknown>;
         analysisRuns(profileId: string): Promise<KnowledgeAnalysisRunRecord[]>;

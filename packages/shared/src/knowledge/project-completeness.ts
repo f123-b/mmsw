@@ -1,5 +1,6 @@
 import { calculateProjectDataHealth, type ProjectDataHealthResult } from "./project-data-health";
 import { isFactEligible, isFactUserActionRequired } from "./project-fact-eligibility";
+import { listConflictGroups, listUserActions } from "./project-actions";
 import type { ProjectFact, ProjectFactType, ProjectMemoryModule, ProjectMemoryProject, ProjectProblem, ProjectInterviewQuestion } from "./types";
 
 export type ProjectSourceCoverageStatus = "covered" | "weak" | "missing" | "conflicting";
@@ -27,6 +28,8 @@ export interface ProjectCompletenessResult {
   trustScore: number;
   /** Percentage of critical review items resolved; compatibility verificationScore is retained separately. */
   criticalReviewScore: number;
+  conflictGroups: number;
+  userActions: number;
   questionCoverage: number;
   verificationScore: number;
   interviewReadinessScore: number;
@@ -90,17 +93,18 @@ export function calculateProjectCompleteness(input: { project: ProjectMemoryProj
     const fact = input.facts.find((item) => item.id === factId);
     return !fact || fact.stale || fact.status === "rejected" || !isFactEligible(fact);
   }))).map((question) => question.id);
-  const criticalKeys = new Set<string>();
-  const unresolvedCritical = new Set<string>();
-  for (const fact of facts) {
-    // not-measured is an explicit, resolved absence of a benchmark. It
-    // affects measurement coverage, but must not be counted as unresolved
-    // critical review work.
-    const critical = isFactUserActionRequired(fact) || fact.status === "conflicting" || fact.conflictStatus === "conflicting";
-    if (!critical) continue;
+  const conflictGroups = listConflictGroups(facts);
+  const userActions = listUserActions(facts, input.project.id);
+  const criticalKeys = new Set(userActions.map((action) => action.id));
+  const unresolvedCritical = new Set(userActions.filter((action) => action.status === "pending").map((action) => action.id));
+  const userActionFactIds = new Set(userActions.flatMap((action) => action.factIds));
+  // not-measured is an explicit, resolved absence of a benchmark. It affects
+  // measurement coverage, but must not be counted as unresolved work.
+  for (const fact of facts.filter(isFactUserActionRequired)) {
+    if (fact.evidenceLevel === "not-measured") continue;
+    if (userActionFactIds.has(fact.id)) continue;
     const key = fact.conflictGroupId && (fact.status === "conflicting" || fact.conflictStatus === "conflicting") ? `conflict:${fact.conflictGroupId}` : `fact:${fact.id}`;
-    criticalKeys.add(key);
-    if (!isFactEligible(fact)) unresolvedCritical.add(key);
+    if (!criticalKeys.has(key) && !fact.conflictGroupId) { criticalKeys.add(key); unresolvedCritical.add(key); }
   }
   if (!facts.some((fact) => fact.type === "responsibility")) { criticalKeys.add("responsibility:missing"); unresolvedCritical.add("responsibility:missing"); }
   const criticalReviewScore = criticalKeys.size ? Math.round(((criticalKeys.size - unresolvedCritical.size) / criticalKeys.size) * 100) : 100;
@@ -113,6 +117,8 @@ export function calculateProjectCompleteness(input: { project: ProjectMemoryProj
     sourceCoverageScore,
     trustScore,
     criticalReviewScore,
+    conflictGroups: conflictGroups.filter((group) => !group.resolved).length,
+    userActions: userActions.length,
     questionCoverage,
     verificationScore,
     interviewReadinessScore,
