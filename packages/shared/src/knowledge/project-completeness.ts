@@ -1,5 +1,5 @@
 import { calculateProjectDataHealth, type ProjectDataHealthResult } from "./project-data-health";
-import { isFactEligible } from "./project-fact-eligibility";
+import { isFactEligible, isFactUserActionRequired } from "./project-fact-eligibility";
 import type { ProjectFact, ProjectFactType, ProjectMemoryModule, ProjectMemoryProject, ProjectProblem, ProjectInterviewQuestion } from "./types";
 
 export type ProjectSourceCoverageStatus = "covered" | "weak" | "missing" | "conflicting";
@@ -93,7 +93,10 @@ export function calculateProjectCompleteness(input: { project: ProjectMemoryProj
   const criticalKeys = new Set<string>();
   const unresolvedCritical = new Set<string>();
   for (const fact of facts) {
-    const critical = fact.type === "responsibility" || fact.type === "result" || fact.type === "metric" || fact.evidenceLevel === "risk" || (fact.evidenceLevel === "inferred" && ["responsibility", "result", "metric"].includes(fact.type)) || fact.status === "conflicting" || fact.conflictStatus === "conflicting";
+    // not-measured is an explicit, resolved absence of a benchmark. It
+    // affects measurement coverage, but must not be counted as unresolved
+    // critical review work.
+    const critical = isFactUserActionRequired(fact) || fact.status === "conflicting" || fact.conflictStatus === "conflicting";
     if (!critical) continue;
     const key = fact.conflictGroupId && (fact.status === "conflicting" || fact.conflictStatus === "conflicting") ? `conflict:${fact.conflictGroupId}` : `fact:${fact.id}`;
     criticalKeys.add(key);

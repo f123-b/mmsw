@@ -34,6 +34,12 @@ export interface DocumentMetadata {
   documentType?: KnowledgeDocumentType;
   section?: string;
   page?: number;
+  /** Optional provenance fields added by project-scoped retrieval. */
+  scope?: "project" | "global-reference" | "profile";
+  projectId?: string;
+  sourceRole?: string;
+  relationship?: string;
+  sourceId?: string;
 }
 
 export interface ParsedDocument {

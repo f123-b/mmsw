@@ -31,6 +31,30 @@ let activeAsrSocket;
 let scheduledQuestions = false;
 let preparationRequests = 0;
 
+// Keep the regression flow deterministic when requested while rotating the
+// interview topics between normal runs. Set INTERVIEW_E2E_VARIANT to pin a
+// variant in CI or when reproducing a failure.
+const interviewQuestionSets = [
+  {
+    auto: ["为什么中断服务程序要快进快出？", "为什么使用 DMA？", "如果换成 FreeRTOS 呢？"],
+    manual: ["手动模式问题：不要自动回答", "为什么自动切换后应该立即回答？"]
+  },
+  {
+    auto: ["CAN 总线仲裁失败时你如何定位？", "ADC 采样与 PWM 更新怎样保证同步？", "Linux 与 FreeRTOS 如何划分实时任务？"],
+    manual: ["手动模式问题：请说明 CAN 报文如何验证", "为什么自动切换后不能漏掉当前问题？"]
+  },
+  {
+    auto: ["RS-485 和 RS-232 如何选型？", "内存泄漏通常怎么排查？", "多核 ARM 出现单核过载如何处理？"],
+    manual: ["手动模式问题：请说明串口故障如何复现", "为什么自动切换后应该继续回答？"]
+  }
+];
+const configuredVariant = Number.parseInt(process.env.INTERVIEW_E2E_VARIANT ?? "", 10);
+const interviewVariant = Number.isFinite(configuredVariant)
+  ? Math.abs(configuredVariant) % interviewQuestionSets.length
+  : Date.now() % interviewQuestionSets.length;
+const interviewQuestions = interviewQuestionSets[interviewVariant];
+console.log(`FUNCTIONAL_E2E_QUESTION_VARIANT ${interviewVariant + 1}/${interviewQuestionSets.length}`);
+
 function questionSegment(id, text, startMs) {
   return JSON.stringify({ type: "asr_final", segment: { id, source: "remote", text, startMs, endMs: startMs + 900, final: true, confidence: 0.96 } });
 }
@@ -55,9 +79,9 @@ asrServer.on("connection", (socket) => {
     scheduledQuestions = true;
     socket.send(JSON.stringify({ type: "asr_status", source: "mic", state: "listening" }));
     socket.send(JSON.stringify({ type: "asr_status", source: "remote", state: "listening" }));
-    setTimeout(() => sendQuestion("为什么中断服务程序要快进快出？", "q1", 0), 200);
-    setTimeout(() => sendQuestion("为什么使用 DMA？", "q2", 2_000), 900);
-    setTimeout(() => sendQuestion("如果换成 FreeRTOS 呢？", "q3", 4_000), 2_200);
+    setTimeout(() => sendQuestion(interviewQuestions.auto[0], "q1", 0), 200);
+    setTimeout(() => sendQuestion(interviewQuestions.auto[1], "q2", 2_000), 900);
+    setTimeout(() => sendQuestion(interviewQuestions.auto[2], "q3", 4_000), 2_200);
   });
   socket.on("close", () => { if (activeAsrSocket === socket) activeAsrSocket = undefined; });
 });
@@ -120,7 +144,7 @@ const mockServer = createServer(async (request, response) => {
     return;
   }
   if (!isQuestionClassifier && !isChatFirstTurn && !isChatSecondTurn && !isChatStructured) answerRequests.push(payload);
-  const slow = messageContents.includes("中断服务程序");
+  const slow = messageContents.includes(interviewQuestions.auto[0]);
   const structuredAnswer = JSON.stringify({ text: "结构化缺口已识别", sources: [{ id: "e2e-source", label: "E2E 题库资料", kind: "question-bank" }], cards: [{ id: "e2e-coverage-card", kind: "coverage", title: "题库覆盖", body: "建议补充一张可核验答案卡。", data: { coverage: 50 } }], actions: [{ id: "e2e-create-question", type: "create_question", label: "加入题库", rationale: "保留为下一轮复习题。", payload: { canonicalText: "结构化覆盖 E2E 题" }, requiresConfirmation: true }] });
   const projectAgentAnswer = JSON.stringify({ text: "项目 Agent E2E 正常：已读取当前项目、待确认事实与证据。", sources: [], cards: [{ id: "project-gap-e2e", kind: "gap", title: "待确认职责", body: "请确认你是否负责电流环实现。" }], actions: [], context: { intent: "project-gap-analysis" } });
   const answer = isProjectAgent
@@ -385,9 +409,9 @@ try {
   await screenshot("10-interview-running.png", overlay);
   evidence.push(`Formal Start: PASS; meterOnly:false: PASS; MIC Channel: PASS; SYSTEM Channel: PASS; PCM packets: ${pcmPackets}`);
 
-  await waitFor(() => document.body.innerText.includes("如果换成 FreeRTOS"), 15_000, overlay);
+  await waitFor(() => document.body.innerText.includes(interviewQuestions.auto[2]), 15_000, overlay);
   evidence.push("Supersede: PASS");
-  await waitFor(() => document.body.innerText.includes("为什么中断服务程序要快进快出"), 15_000, overlay);
+  await waitFor(() => document.body.innerText.includes(interviewQuestions.auto[0]), 15_000, overlay);
   await screenshot("11-overlay-question.png", overlay);
   await waitFor(() => document.body.innerText.includes("Mock LLM answer"), 15_000, overlay);
   await screenshot("12-overlay-answer-streaming.png", overlay);
@@ -396,7 +420,7 @@ try {
 
   const beforeManualMode = answerRequests.length;
   await main.evaluate("void window.interviewCopilot.interview.setAutomationMode('MANUAL'); true");
-  requireQuestion("手动模式问题：不要自动回答", "q4", 6_000);
+  requireQuestion(interviewQuestions.manual[0], "q4", 6_000);
   await waitFor(() => document.body.innerText.includes("手动模式问题"), 10_000, overlay);
   await sleep(1_000);
   if (answerRequests.length !== beforeManualMode) throw new Error("MANUAL_NO_AUTO_ANSWER failed");
@@ -404,7 +428,7 @@ try {
   await main.evaluate("void window.interviewCopilot.interview.setAutomationMode('AUTO'); true");
   await waitFor(() => window.interviewCopilot.interview.getState().then((state) => state.automationMode === "AUTO"), 5_000);
   await sleep(300);
-  requireQuestion("为什么自动切换后应该立即回答？", "q5", 8_000);
+  requireQuestion(interviewQuestions.manual[1], "q5", 8_000);
   await waitForNode(() => answerRequests.length > beforeManualMode, 15_000);
   evidence.push("AUTOMATION_RUNTIME_SWITCH: PASS; Overlay AUTO/MANUAL Sync: PASS");
 

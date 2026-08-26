@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTerminologyDictionary, normalizeTechnicalTerms, normalizeTechnicalTermsWithCorrections } from "./terminology";
+import { createTerminologyDictionary, normalizeSkillKey, normalizeTechnicalTerms, normalizeTechnicalTermsWithCorrections } from "./terminology";
 import { QuestionDetector2 } from "./question-detector-2";
 
 describe("technical terminology normalization", () => {
@@ -42,5 +42,16 @@ describe("technical terminology normalization", () => {
     expect(result.text).toContain("STM32G431");
     expect(result.corrections.at(-1)).toMatchObject({ canonical: "STM32G431", source: "project" });
     expect(result.corrections.every((correction) => correction.raw.length < 32)).toBe(true);
+  });
+
+  it("normalizes only true Profile skill aliases", () => {
+    expect(normalizeSkillKey("STM32F405")).toBe("stm32");
+    expect(normalizeSkillKey("STM32G431")).toBe("stm32");
+    expect(normalizeSkillKey("FreeRTOS")).toBe("rtos");
+    expect(normalizeSkillKey("CXX")).toBe("cpp");
+    expect(normalizeSkillKey("FDCAN")).toBe("can");
+    expect(normalizeSkillKey("IIC")).toBe("i2c");
+    expect(normalizeSkillKey("FOC")).toBe("foc");
+    expect(normalizeSkillKey("PID")).toBe("pid");
   });
 });

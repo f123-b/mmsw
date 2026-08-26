@@ -9,7 +9,7 @@ import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planChatContext, PreparationAgentRuntime, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planChatContext, PreparationAgentRuntime, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
@@ -26,7 +26,7 @@ import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-s
 import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
 import { createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
-import { isFactEligible } from "@interview-copilot/shared";
+import { isFactEligible, isFactReviewRequired, isFactUserActionRequired } from "@interview-copilot/shared";
 import type { ChatAction, ChatCancelReason, ChatResponse } from "@interview-copilot/shared";
 import type { QuestionBankBulkPatch, QuestionBankListOptions } from "./database";
 
@@ -837,6 +837,38 @@ async function stopInterview(): Promise<void> {
   }
 }
 
+type ScopedKnowledgeChunk = KnowledgeChunk & {
+  metadata: KnowledgeChunk["metadata"] & {
+    scope?: "project" | "global-reference" | "profile";
+    projectId?: string;
+    sourceRole?: string;
+    relationship?: string;
+    sourceId?: string;
+  };
+};
+
+/** Build the explicit allow-list used by both Project Agent and interviews. */
+function projectKnowledgeChunks(profileId: string, projectId: string): ScopedKnowledgeChunk[] {
+  const project = projectMemoryRepository?.getProject(projectId);
+  if (!project || project.profileId !== profileId || !knowledgeRepository || !projectMemoryRepository) return [];
+  const assignments = projectMemoryRepository.listProjectSources(projectId);
+  const projectDocumentIds = new Set(projectMemoryRepository.listProjectDocumentIds(projectId));
+  const projectAssignments = assignments.filter((item) => projectDocumentIds.has(item.sourceId));
+  const projectByDocument = new Map(projectAssignments.map((item) => [item.sourceId, item]));
+  const projectChunks = knowledgeRepository.listChunksByDocumentIds([...projectByDocument.keys()]).map((chunk) => {
+    const assignment = projectByDocument.get(chunk.metadata.documentId);
+    return { ...chunk, metadata: { ...chunk.metadata, scope: "project" as const, projectId, sourceRole: assignment?.sourceRole ?? "other", relationship: assignment?.relationship ?? "supporting", sourceId: assignment?.sourceId ?? chunk.metadata.documentId } };
+  });
+  const referenceDocumentIds = new Set(projectMemoryRepository.listReferenceDocumentIds(profileId));
+  const referenceAssignments = projectMemoryRepository.listReferenceSources(profileId).filter((item) => referenceDocumentIds.has(item.sourceId));
+  const referenceByDocument = new Map(referenceAssignments.map((item) => [item.sourceId, item]));
+  const referenceChunks = knowledgeRepository.listChunksByDocumentIds([...referenceByDocument.keys()]).map((chunk) => {
+    const assignment = referenceByDocument.get(chunk.metadata.documentId);
+    return { ...chunk, metadata: { ...chunk.metadata, scope: "global-reference" as const, sourceRole: "reference", relationship: "reference", sourceId: assignment?.sourceId ?? chunk.metadata.documentId } };
+  });
+  return [...projectChunks, ...referenceChunks];
+}
+
 function chatContext(profileId?: string, userMessage = "", projectId?: string): { text: string; intent: string; sources: string[] } {
   const profile = profileId ? profileRepository?.get(profileId) : profileRepository?.active();
   if (!profile) return { text: "当前没有可用 Profile。请明确告诉用户先创建 Profile。", intent: "general_technical", sources: [] };
@@ -851,17 +883,26 @@ function chatContext(profileId?: string, userMessage = "", projectId?: string): 
   const snapshot = (plan.includeProjectMemory || Boolean(projectId)) && profileId ? projectMemoryRepository?.getSnapshot(profileId) : undefined;
   const project = snapshot?.projects.find((item) => item.id === projectId) ?? (snapshot?.projects.length === 1 ? snapshot.projects[0] : undefined);
   if (project) {
+    sections.push(`当前项目：${project.name}\n项目 ID：${project.id}`);
     const projectFacts = snapshot?.facts ?? [];
     const facts = projectFacts.filter((fact) => fact.projectId === project.id && isFactEligible(fact)).slice(0, 24);
-    const pendingFacts = projectFacts.filter((fact) => fact.projectId === project.id && !isFactEligible(fact) && fact.status !== "rejected" && !fact.stale).slice(0, 30);
-    const conflictingFacts = pendingFacts.filter((fact) => fact.status === "conflicting" || fact.conflictStatus === "conflicting");
+    const currentProjectFacts = projectFacts.filter((fact) => fact.projectId === project.id && fact.status !== "rejected" && !fact.stale);
+    const pendingFacts = currentProjectFacts.filter((fact) => isFactReviewRequired(fact)).slice(0, 30);
+    const userActionFacts = currentProjectFacts.filter((fact) => isFactUserActionRequired(fact)).slice(0, 20);
+    const conflictingFacts = currentProjectFacts.filter((fact) => fact.status === "conflicting" || fact.conflictStatus === "conflicting");
     const completeness = profileId ? projectMemoryRepository?.getProjectCompleteness(profileId, project.id) : undefined;
     sections.push([
       facts.length ? `AUTHORITATIVE（可用于第一人称回答，必须以这些事实为准）：\n${facts.map((fact) => `- [${fact.id}] [${fact.type}] [证据 ${fact.evidenceLevel ?? "pending"}] [归属 ${fact.ownership ?? "unknown"}] ${fact.title}：${fact.content}`).join("\n")}` : "AUTHORITATIVE：无",
       pendingFacts.length ? `REVIEW_REQUIRED（禁止直接当作事实）：\n${pendingFacts.map((fact) => `- [${fact.id}] [${fact.status === "conflicting" ? "冲突" : "待确认"}] [${fact.type}] ${fact.title}：${fact.content}${fact.evidence?.[0]?.quote ? `；证据：“${fact.evidence[0].quote.slice(0, 240)}”` : "；无引用证据"}`).join("\n")}` : "REVIEW_REQUIRED：无",
-      completeness ? `DERIVED_VIEW（由 active facts 推导，仅供展示）：项目 ${project.name}（${project.id}）；准备度 ${completeness.interviewReadinessScore}%；缺失类型 ${completeness.missingFactTypes.join("、") || "无"}；弱证据 ${completeness.weakEvidence.length} 项；冲突 ${conflictingFacts.length} 项。` : `DERIVED_VIEW：项目 ${project.name}（${project.id}），尚未计算完整度`
+      userActionFacts.length ? `USER_ACTION_REQUIRED（需要本人决定，当前 ${userActionFacts.length} 项）：\n${userActionFacts.map((fact) => `- [${fact.type}] ${fact.title}：${fact.content}`).join("\n")}` : "USER_ACTION_REQUIRED：无",
+      completeness ? `DERIVED_VIEW（由 active facts 推导，仅供展示）：项目 ${project.name}（${project.id}）；项目 ID：${project.id}；准备度 ${completeness.interviewReadinessScore}%；缺失类型 ${completeness.missingFactTypes.join("、") || "无"}；弱证据 ${completeness.weakEvidence.length} 项；冲突 ${conflictingFacts.length} 项。` : `DERIVED_VIEW：项目 ${project.name}（${project.id}）；项目 ID：${project.id}，尚未计算完整度`
     ].join("\n"));
     sources.push(...(project.sourceIds ?? []).slice(0, 8));
+    const scopedChunks = profileId ? projectKnowledgeChunks(profileId, project.id) : [];
+    const projectChunks = scopedChunks.filter((chunk) => chunk.metadata.scope === "project").slice(0, 6);
+    const referenceChunks = scopedChunks.filter((chunk) => chunk.metadata.scope === "global-reference").slice(0, 4);
+    if (projectChunks.length) sections.push(`PROJECT_SOURCE（当前项目绑定资料，仅辅助解释实现，不证明个人职责）：\n${projectChunks.map((chunk) => `- [${chunk.metadata.sourceRole ?? "other"}] ${chunk.metadata.filename}：${chunk.text}`).join("\n\n")}`);
+    if (referenceChunks.length) sections.push(`GLOBAL_REFERENCE（通用参考，只能解释概念，不能证明项目经历）：\n${referenceChunks.map((chunk) => `- ${chunk.metadata.filename}：${chunk.text}`).join("\n\n")}`);
     const details = projectMemoryRepository?.listSourceDetails(project.id).slice(0, 5) ?? [];
     if (details.length) sections.push(`DERIVED_VIEW（来源索引，仅用于引用，不代表事实）：\n${details.map((source) => `- ${source.sourceId}：${source.title}`).join("\n")}`);
   } else if (plan.includeProjectMemory && snapshot?.projects.length) {
@@ -881,11 +922,15 @@ function chatContext(profileId?: string, userMessage = "", projectId?: string): 
     }
   }
   if (plan.includeKnowledge || Boolean(projectId)) {
-    const chunks = knowledgeRepository?.listChunks(profile.knowledgeBaseIds) ?? [];
+    const chunks = project && profileId
+      ? projectKnowledgeChunks(profileId, project.id)
+      : projectId
+        ? []
+        : (knowledgeRepository?.listChunks(profile.knowledgeBaseIds) ?? []).map((chunk) => ({ ...chunk, metadata: { ...chunk.metadata, scope: "profile" as const } }));
     const retrieved = new HybridRetriever().search(userMessage, chunks, { topK: 8 }).slice(0, 5);
     if (retrieved.length) {
-      sections.push(`相关知识（${providerConfigStore?.get("embedding")?.apiKey ? "Hybrid Retrieval" : "Keyword Retrieval"}）：\n${retrieved.map((chunk) => `${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`).join("\n\n")}`);
-      sources.push(...retrieved.map((chunk) => chunk.metadata.filename));
+      sections.push(`相关知识（${providerConfigStore?.get("embedding")?.apiKey ? "Hybrid Retrieval" : "Keyword Retrieval"}）：\n${retrieved.map((chunk) => `[${chunk.metadata.scope === "global-reference" ? "GLOBAL_REFERENCE" : chunk.metadata.scope === "project" ? "PROJECT_SOURCE" : "PROFILE_SOURCE"}] ${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`).join("\n\n")}`);
+      sources.push(...retrieved.map((chunk) => chunk.metadata.sourceId ?? chunk.metadata.filename));
     } else sections.push("相关知识：无");
   }
   return { text: sections.filter(Boolean).join("\n\n"), intent: plan.intent, sources: [...new Set(sources)] };
@@ -936,7 +981,7 @@ async function streamChat(conversationId: string, content: string, resumeMessage
       ? `${contextForQuestion.text}\n\n原始用户问题：${userMessage.content}\n已有回答：${existing.content}\n请从中断位置继续回答。不要重复已有回答，保持原答案的语言、结构和语气，只输出新增内容。`
       : `${contextForQuestion.text}\n\n用户问题：${content}`;
     const systemInstruction = conversation.conversation.projectId
-      ? "你是项目资料整理 Agent。你的目标是把用户上传的源码/文档和用户补充说明整理成真实、自洽、能经受面试追问的项目库。必须区分：已确认事实、资料支持但待确认、相互冲突、完全缺失。绝不补写没有证据的职责、指标、硬件型号或实现细节；不确定时直接提出一个短问题，并给 2~4 个互斥选项。回答必须是 JSON 对象 {text,sources,cards,actions,context}。可建议的 actions 只有 add_project_fact、review_fact、create_question，全部 requiresConfirmation=true。add_project_fact.payload 必须包含 projectId,type,title,content,sourceIds,evidence；evidence 每项必须包含真实 sourceId 和原文 quote。任何写入都只能说‘建议’，不能声称已经执行。代码题和面试题必须给口述思路、完整可运行代码、复杂度和边界。"
+      ? "你是项目资料整理 Agent。你的目标是把用户上传的源码/文档和用户补充说明整理成真实、自洽、能经受面试追问的项目库。必须区分 AUTHORITATIVE（eligible ProjectFact）、REVIEW_REQUIRED（系统待复核）、USER_ACTION_REQUIRED（确实需要用户决定）、PROJECT_SOURCE（当前项目原始资料）和 GLOBAL_REFERENCE（通用参考）。第一人称项目经历只能来自 AUTHORITATIVE；PROJECT_SOURCE 只能辅助解释实现，GLOBAL_REFERENCE 只能解释通用概念，二者都不能证明用户职责或项目指标。绝不补写没有证据的职责、指标、硬件型号或实现细节；不确定时直接提出一个短问题，并给 2~4 个互斥选项。回答必须是 JSON 对象 {text,sources,cards,actions,context}。可建议的 actions 只有 add_project_fact、review_fact、create_question，全部 requiresConfirmation=true。add_project_fact.payload 必须包含 projectId,type,title,content,sourceIds,evidence；evidence 每项必须包含真实 sourceId 和原文 quote。任何写入都只能说‘建议’，不能声称已经执行。代码题和面试题必须给口述思路、完整可运行代码、复杂度和边界。"
       : "你是 Interview Copilot 面试助手。只根据提供的 Profile、Resume、JD 和知识回答；如果资料不足，请明确说明，不要编造经历。普通问题输出简洁 Markdown。对于项目缺口、题库覆盖或明确要求执行动作的问题，可以输出一个 JSON 对象：{text, sources, cards, actions, context}；actions 只能是建议，必须 requiresConfirmation=true，绝不能声称已经写入数据库。";
     for await (const delta of provider.stream({ model: selectedModel, sections: [
       { name: "system/base", content: systemInstruction },
@@ -1385,10 +1430,11 @@ function registerIpc(): void {
     return profileBuilderService.rebuild(profileId);
   });
   ipcMain.handle("project-memory:get", (_event, profileId: string) => projectMemoryService?.get(profileId));
-  ipcMain.handle("project-memory:stats", (_event, profileId: string) => projectMemoryRepository?.stats(profileId) ?? { projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0, facts: 0, eligibleFacts: 0, reviewRequiredFacts: 0, conflictingFacts: 0, staleFacts: 0 });
+  ipcMain.handle("project-memory:stats", (_event, profileId: string, projectId?: string) => projectMemoryRepository?.stats(profileId, projectId) ?? { projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0, questions: 0, facts: 0, eligibleFacts: 0, reviewRequiredFacts: 0, userActionRequiredFacts: 0, conflictingFacts: 0, staleFacts: 0 });
   ipcMain.handle("project-memory:list-facts", (_event, profileId: string, projectId?: string, options?: { includeStale?: boolean; includeRejected?: boolean }) => projectMemoryRepository?.listFacts(profileId, projectId, options) ?? []);
   ipcMain.handle("project-memory:add-candidate-fact", (_event, fact: import("@interview-copilot/shared").ProjectFact) => projectMemoryRepository?.addCandidateFact(fact));
   ipcMain.handle("project-memory:add-responsibility", (_event, profileId: string, projectId: string, content: string) => projectMemoryRepository?.addUserResponsibility(profileId, projectId, content));
+  ipcMain.handle("project-memory:confirm-fact", (_event, factId: string) => projectMemoryRepository?.confirmFactAsUser(factId));
   ipcMain.handle("project-memory:verify-fact", (_event, factId: string, verified: boolean) => projectMemoryRepository?.setFactVerification(factId, verified));
   ipcMain.handle("project-memory:review-fact", (_event, factId: string, status: import("@interview-copilot/shared").ProjectFact["status"]) => projectMemoryRepository?.setFactReviewStatus(factId, status));
   ipcMain.handle("project-memory:resolve-conflict", (_event, conflictGroupId: string, selectedFactId: string, keepBoth?: boolean) => projectMemoryRepository?.resolveConflict(conflictGroupId, selectedFactId, Boolean(keepBoth)) ?? []);
@@ -1735,7 +1781,9 @@ if (hasSingleInstanceLock) {
           return vector;
         }).catch(() => undefined)
         : Promise.resolve<number[] | undefined>(undefined);
-    const chunks = knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? [];
+    const chunks = targetProjectId && useProjectContext
+      ? projectKnowledgeChunks(profileId, targetProjectId)
+      : (knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? []).map((chunk) => ({ ...chunk, metadata: { ...chunk.metadata, scope: "profile" as const } }));
     const retrievalOptions = { chunks, topK: 3, candidateK: 12, reranker: new KeywordReranker() };
     const keywordTiming: RetrievalTiming = {};
     // Start the lexical path before waiting for the shared query embedding so
@@ -1818,7 +1866,7 @@ if (hasSingleInstanceLock) {
         ...(questionBankMatch ? [{ resultType: "question" as const, resultId: questionBankMatch.question.id, score: questionBankMatch.score, verified: questionBankMatch.question.verified, preview: questionBankMatch.question.canonicalText, metadata: { scope: questionBankMatch.question.scope, type: questionBankMatch.question.type } }] : []),
         ...factMatches.map((hit) => ({ resultType: "project-fact" as const, resultId: hit.fact.id, score: hit.finalScore, verified: hit.fact.verified, preview: `${hit.fact.title}: ${hit.fact.content}`, metadata: { projectId: hit.fact.projectId, type: hit.fact.type, evidenceLevel: hit.fact.evidenceLevel ?? "pending", ownership: hit.fact.ownership ?? "unknown", eligible: isFactEligible(hit.fact), stale: Boolean(hit.fact.stale), conflictStatus: hit.fact.conflictStatus ?? "confirmed", lexicalScore: hit.lexicalScore, vectorScore: hit.vectorScore, typeScore: hit.typeScore, projectScore: hit.projectScore, verifiedBoost: hit.verifiedBoost, reason: hit.reason } })),
         ...jobMatches.map((hit) => ({ resultType: "job-requirement" as const, resultId: hit.requirement.id, score: hit.score, verified: hit.requirement.verified, preview: hit.requirement.requirement, metadata: { category: hit.requirement.category, importance: hit.requirement.importance } })),
-        ...retrieved.slice(0, 3).map((hit) => ({ resultType: "document-chunk" as const, resultId: hit.id, score: hit.score, preview: hit.text, metadata: hit.metadata as unknown as Record<string, unknown> }))
+        ...retrieved.slice(0, 3).map((hit) => ({ resultType: "document-chunk" as const, resultId: hit.id, score: hit.score, preview: hit.text, metadata: { ...(hit.metadata as unknown as Record<string, unknown>), scope: hit.metadata.scope ?? (targetProjectId ? "project" : "profile"), projectId: hit.metadata.projectId ?? targetProjectId ?? null, sourceRole: hit.metadata.sourceRole ?? null, relationship: hit.metadata.relationship ?? null, sourceId: hit.metadata.sourceId ?? hit.metadata.documentId, documentId: hit.metadata.documentId } }))
       ]
     });
     return {
@@ -1834,7 +1882,7 @@ if (hasSingleInstanceLock) {
       retrievedKnowledge: [
         ...(preparedAnswer ? [preparedAnswer] : []),
         ...jobContext,
-        ...retrieved.slice(0, preparedAnswer ? 2 : 3).map((chunk) => `${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`)
+        ...retrieved.slice(0, preparedAnswer ? 2 : 3).map((chunk) => `[${chunk.metadata.scope === "global-reference" ? "GLOBAL_REFERENCE" : chunk.metadata.scope === "project" ? "PROJECT_SOURCE" : "PROFILE_SOURCE"}] ${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`)
       ],
       recentTranscript: recentTranscript.slice(-8)
     };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { factPriority, isFactEligible } from "./project-fact-eligibility";
+import { factPriority, isFactEligible, isFactReviewRequired, isFactUserActionRequired } from "./project-fact-eligibility";
 import type { ProjectFact } from "./types";
 
 const base: ProjectFact = { id: "f", projectId: "p", type: "technology", title: "CAN", content: "CAN", confidence: 1, verified: false, sourceIds: ["s"], evidence: [{ sourceId: "s", quote: "CAN" }], status: "active", evidenceLevel: "confirmed-document" };
@@ -21,5 +21,13 @@ describe("project fact eligibility", () => {
     expect(isFactEligible({ ...base, type: "responsibility", evidenceLevel: "confirmed-user", ownership: "unknown" })).toBe(false);
     expect(isFactEligible({ ...base, type: "result", evidenceLevel: "pending" })).toBe(false);
     expect(factPriority({ ...base, type: "responsibility" })).toBe(100);
+  });
+  it("only asks the user to act on personal-risk items", () => {
+    expect(isFactUserActionRequired({ ...base, evidenceLevel: "pending", status: "pending_review" })).toBe(false);
+    expect(isFactUserActionRequired({ ...base, type: "responsibility", evidenceLevel: "pending", status: "pending_review" })).toBe(true);
+    expect(isFactUserActionRequired({ ...base, type: "metric", evidenceLevel: "risk", status: "pending_review" })).toBe(true);
+    expect(isFactUserActionRequired({ ...base, type: "metric", evidenceLevel: "not-measured", status: "active" })).toBe(false);
+    expect(isFactReviewRequired({ ...base, type: "metric", evidenceLevel: "not-measured", status: "active" })).toBe(false);
+    expect(isFactUserActionRequired({ ...base, status: "conflicting", conflictStatus: "conflicting" })).toBe(true);
   });
 });

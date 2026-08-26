@@ -10,7 +10,26 @@ export function isFactEligible(fact: ProjectFact): boolean {
 }
 
 export function isFactReviewRequired(fact: ProjectFact): boolean {
-  return !isFactEligible(fact) && !fact.stale && fact.status !== "rejected";
+  return !isFactEligible(fact) && fact.evidenceLevel !== "not-measured" && !fact.stale && fact.status !== "rejected";
+}
+
+/**
+ * Narrower than governance review: this is the set of facts for which the
+ * candidate must make a personal decision. Ordinary inferred technology or
+ * architecture candidates can remain in system review without interrupting
+ * the user.
+ */
+export function isFactUserActionRequired(fact: ProjectFact): boolean {
+  if (fact.stale || fact.status === "rejected" || isFactEligible(fact)) return false;
+  if (fact.status === "conflicting" || fact.conflictStatus === "conflicting") return true;
+  if (fact.type === "responsibility") return true;
+  if (fact.type === "result" || fact.type === "metric") {
+    return fact.evidenceLevel !== "not-measured" && ["pending", "inferred", "risk"].includes(fact.evidenceLevel ?? "pending");
+  }
+  // A first-person, high-risk claim needs the candidate's explicit approval;
+  // a normal technical candidate does not.
+  if (fact.ownership === "self" && ["pending", "inferred", "risk"].includes(fact.evidenceLevel ?? "pending")) return true;
+  return false;
 }
 
 export function factPriority(fact: ProjectFact): number {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SqliteDatabase, SqliteInterviewHistoryRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectMemoryRepository } from "./database";
+import { SqliteDatabase, SqliteInterviewHistoryRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteQuestionBankRepository } from "./database";
 import { ProjectMemoryService } from "./project-memory";
 
 describe("ProjectMemoryService project isolation", () => {
@@ -43,6 +43,90 @@ describe("ProjectMemoryService project isolation", () => {
       const project = memories.createProject(profile.id, "项目");
       const fact = memories.addUserResponsibility(profile.id, project.id, "我负责 CAN 驱动和故障恢复");
       expect(fact).toMatchObject({ type: "responsibility", ownership: "self", evidenceLevel: "confirmed-user", status: "active", conflictStatus: "confirmed" });
+    } finally { database.close(); }
+  });
+
+  it("confirms pending facts through one human-confirmation path", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const memories = new SqliteProjectMemoryRepository(database);
+      const profile = profiles.save({ name: "统一确认", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const project = memories.createProject(profile.id, "项目");
+      memories.assignSource({ projectId: project.id, sourceType: "document", sourceId: "doc", relationship: "primary", sourceRole: "overview", confidence: 1, verified: true });
+      const pending = memories.addCandidateFact({ id: "pending-tech", projectId: project.id, profileId: profile.id, type: "technology", title: "ADC", content: "ADC DMA", confidence: .8, verified: false, sourceIds: ["doc"], evidence: [{ sourceId: "doc", quote: "ADC DMA" }], evidenceLevel: "pending", ownership: "project", status: "pending_review" });
+      const confirmed = memories.confirmFactAsUser(pending.id);
+      expect(confirmed).toMatchObject({ verified: true, status: "active", conflictStatus: "confirmed", evidenceLevel: "confirmed-user" });
+      const responsibility = memories.addCandidateFact({ id: "pending-role", projectId: project.id, profileId: profile.id, type: "responsibility", title: "个人职责", content: "负责 ADC", confidence: .8, verified: false, sourceIds: ["doc"], evidence: [{ sourceId: "doc", quote: "负责 ADC" }], evidenceLevel: "pending", ownership: "unknown", status: "pending_review" });
+      expect(memories.confirmFactAsUser(responsibility.id)).toMatchObject({ ownership: "self", evidenceLevel: "confirmed-user", verified: true, status: "active" });
+    } finally { database.close(); }
+  });
+
+  it("keeps a fact and its questions valid when one of multiple supports is unbound", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const memories = new SqliteProjectMemoryRepository(database);
+      const questions = new SqliteQuestionBankRepository(database);
+      const profile = profiles.save({ name: "多证据", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const project = memories.createProject(profile.id, "项目");
+      memories.assignSource({ projectId: project.id, sourceType: "document", sourceId: "readme", relationship: "primary", sourceRole: "overview", confidence: 1, verified: true });
+      memories.assignSource({ projectId: project.id, sourceType: "repository", sourceId: "repo", relationship: "supporting", sourceRole: "code", confidence: 1, verified: true });
+      const fact = memories.addCandidateFact({ id: "multi-support", projectId: project.id, profileId: profile.id, type: "technology", title: "CAN", content: "CAN 总线", confidence: .9, verified: false, sourceIds: ["readme", "repo"], evidence: [{ sourceId: "readme", quote: "CAN 总线" }, { sourceId: "repo", quote: "CAN 总线" }], evidenceLevel: "pending", status: "pending_review" });
+      memories.confirmFactAsUser(fact.id);
+      const question = questions.saveQuestion({ id: "multi-question", canonicalText: "项目 CAN 如何实现？", type: "project", scope: "project", profileId: profile.id, projectId: project.id, factIds: [fact.id] });
+      questions.saveAnswerCard({ id: "multi-card", questionId: question.id, content: "CAN 总线", factIds: [fact.id] });
+      memories.unassignSource(project.id, "document", "readme");
+      expect(memories.getFact(fact.id)).toMatchObject({ stale: false, evidenceLevel: "confirmed-user" });
+      expect(questions.getQuestion(question.id)?.stale).toBe(false);
+      expect(questions.getQuestion(question.id)?.answerCards[0]?.stale).toBe(false);
+    } finally { database.close(); }
+  });
+
+  it("isolates project document allow-lists and exposes explicit references", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const knowledge = new SqliteKnowledgeRepository(database);
+      const memories = new SqliteProjectMemoryRepository(database);
+      const base = knowledge.createKnowledgeBase("资料");
+      const profile = profiles.save({ name: "RAG 隔离", language: "zh-CN", skills: [], knowledgeBaseIds: [base.id] });
+      const a = knowledge.saveDocument({ id: "doc-a", knowledgeBaseId: base.id, filename: "A.md", mimeType: "text/markdown", sha256: "a", text: "STM32F405 ADC DMA", sections: [], documentType: "project", status: "ready" });
+      const b = knowledge.saveDocument({ id: "doc-b", knowledgeBaseId: base.id, filename: "B.md", mimeType: "text/markdown", sha256: "b", text: "STM32G431 ADC injected", sections: [], documentType: "project", status: "ready" });
+      const reference = knowledge.saveDocument({ id: "doc-ref", knowledgeBaseId: base.id, filename: "ADC 手册.md", mimeType: "text/markdown", sha256: "r", text: "ADC 通用参考", sections: [], documentType: "technical-doc", status: "ready" });
+      knowledge.replaceChunks(a.id, [{ id: "chunk-a", text: "STM32F405 ADC DMA", metadata: { documentId: a.id, filename: a.filename, documentType: "project" } }]);
+      knowledge.replaceChunks(b.id, [{ id: "chunk-b", text: "STM32G431 ADC injected", metadata: { documentId: b.id, filename: b.filename, documentType: "project" } }]);
+      knowledge.replaceChunks(reference.id, [{ id: "chunk-ref", text: "ADC 通用参考", metadata: { documentId: reference.id, filename: reference.filename, documentType: "technical-doc" } }]);
+      const projectA = memories.createProject(profile.id, "A");
+      const projectB = memories.createProject(profile.id, "B");
+      memories.assignSource({ projectId: projectA.id, sourceType: "document", sourceId: a.id, relationship: "primary", sourceRole: "overview", confidence: 1, verified: true });
+      memories.assignSource({ projectId: projectB.id, sourceType: "document", sourceId: b.id, relationship: "primary", sourceRole: "overview", confidence: 1, verified: true });
+      memories.assignSource({ projectId: projectA.id, sourceType: "document", sourceId: reference.id, relationship: "reference", sourceRole: "reference", confidence: 1, verified: true });
+      expect(memories.listProjectDocumentIds(projectA.id)).toEqual([a.id]);
+      expect(memories.listProjectDocumentIds(projectA.id)).not.toContain(b.id);
+      expect(memories.listReferenceDocumentIds(profile.id)).toContain(reference.id);
+      expect(knowledge.listChunksByDocumentIds(memories.listProjectDocumentIds(projectA.id)).map((chunk) => chunk.id)).toEqual(["chunk-a"]);
+      expect(memories.stats(profile.id, projectA.id)).toMatchObject({ projects: 1, facts: 0, questions: 0, userActionRequiredFacts: 0 });
+    } finally { database.close(); }
+  });
+
+  it("reconciles ProjectSkill relationships and preserves them across Profile edits", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const memories = new SqliteProjectMemoryRepository(database);
+      const profile = profiles.save({ name: "技能生命周期", language: "zh-CN", instructions: "原始", skills: [{ id: "skill-rtos", name: "FreeRTOS", description: "", content: "任务调度", tags: [] }, { id: "skill-stm", name: "STM32", description: "", content: "MCU", tags: [] }], knowledgeBaseIds: [] });
+      const project = memories.createProject(profile.id, "项目");
+      memories.assignSource({ projectId: project.id, sourceType: "document", sourceId: "code", relationship: "primary", sourceRole: "code", confidence: 1, verified: true });
+      const fact = memories.addCandidateFact({ id: "rtos-fact", projectId: project.id, profileId: profile.id, type: "technology", title: "RTOS", content: "FreeRTOS", confidence: .9, verified: false, sourceIds: ["code"], evidence: [{ sourceId: "code", quote: "FreeRTOS" }], evidenceLevel: "confirmed-code", status: "pending_review" });
+      memories.confirmFactAsUser(fact.id);
+      expect(memories.listProjectSkills(project.id)).toEqual([expect.objectContaining({ skillId: "skill-rtos", sourceFactId: fact.id })]);
+      profiles.save({ ...profile, name: "技能生命周期更新", instructions: "新的说明" });
+      expect(memories.listProjectSkills(project.id)).toEqual([expect.objectContaining({ skillId: "skill-rtos" })]);
+      memories.setFactReviewStatus(fact.id, "rejected");
+      expect(memories.listProjectSkills(project.id)).toHaveLength(0);
+      profiles.save({ ...profile, name: "删除技能", skills: [{ id: "skill-stm", name: "STM32", description: "", content: "MCU", tags: [] }] });
+      expect(memories.listProjectSkills(project.id)).toHaveLength(0);
     } finally { database.close(); }
   });
 

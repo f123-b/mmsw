@@ -242,6 +242,23 @@ export function normalizeTechnicalTerms(text: string): string {
   return normalizeTechnicalTermsWithCorrections(text).text;
 }
 
+/**
+ * Canonical key for matching a project fact to an existing Profile skill.
+ * This intentionally only collapses true aliases; related concepts such as
+ * FOC and PID remain different skills.
+ */
+export function normalizeSkillKey(value: string): string {
+  const normalized = normalizeTechnicalTerms(value).trim().toLowerCase().replace(/[\s._-]+/g, "");
+  if (/^stm32(?:f|g)?\d/.test(normalized) || normalized === "stm32") return "stm32";
+  if (/^(?:freertos|rtos)$/.test(normalized)) return "rtos";
+  if (/^(?:c\+\+|cpp|cxx)$/.test(normalized)) return "cpp";
+  if (/^(?:can|fdcan|socketcan)$/.test(normalized)) return "can";
+  if (/^(?:uart|usart)$/.test(normalized)) return "uart";
+  if (/^(?:i2c|iic)$/.test(normalized)) return "i2c";
+  if (/^modbus(?:rtu)?$/.test(normalized)) return "modbus";
+  return normalized;
+}
+
 export function createTerminologyDictionary(initialRules: readonly TerminologyRule[] = []): TerminologyDictionary {
   const rules = [...initialRules];
   return {

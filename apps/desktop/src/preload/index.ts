@@ -111,9 +111,10 @@ const api = {
   },
   projectMemory: {
     get: (profileId: string) => ipcRenderer.invoke("project-memory:get", profileId),
-    stats: (profileId: string) => ipcRenderer.invoke("project-memory:stats", profileId),
+    stats: (profileId: string, projectId?: string) => ipcRenderer.invoke("project-memory:stats", profileId, projectId),
     listFacts: (profileId: string, projectId?: string, options?: { includeStale?: boolean; includeRejected?: boolean }): Promise<ProjectFact[]> => ipcRenderer.invoke("project-memory:list-facts", profileId, projectId, options),
     addResponsibility: (profileId: string, projectId: string, content: string): Promise<ProjectFact | undefined> => ipcRenderer.invoke("project-memory:add-responsibility", profileId, projectId, content),
+    confirmFact: (factId: string): Promise<ProjectFact | undefined> => ipcRenderer.invoke("project-memory:confirm-fact", factId),
     verifyFact: (factId: string, verified: boolean): Promise<ProjectFact | undefined> => ipcRenderer.invoke("project-memory:verify-fact", factId, verified),
     reviewFact: (factId: string, status: "active" | "pending_review" | "rejected" | "conflicting"): Promise<ProjectFact | undefined> => ipcRenderer.invoke("project-memory:review-fact", factId, status),
     resolveConflict: (conflictGroupId: string, selectedFactId: string, keepBoth?: boolean) => ipcRenderer.invoke("project-memory:resolve-conflict", conflictGroupId, selectedFactId, keepBoth),
