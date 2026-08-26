@@ -5,6 +5,7 @@ import { isUsableProjectTimeline } from "./project-timeline";
 import { resolveProjectIdentity } from "./project-identity";
 import { isFactEligible } from "./project-fact-eligibility";
 import { deriveProjectView } from "./project-view";
+import { normalizeProjectFactValue } from "./project-technical-memory";
 import { PROJECT_FACT_TYPES, type ProjectFact, type ProjectFactEvidence, type ProjectFactType, type ProjectMemoryAnalysisInput, type ProjectInterviewQuestion, type ProjectMemoryModel, type ProjectMemoryModule, type ProjectMemoryProject, type ProjectMemorySnapshot, type ProjectProblem, type ProjectTechnicalPoint } from "./types";
 
 function unique(values: string[]): string[] { return [...new Set(values.map((value) => value.trim()).filter(Boolean))]; }
@@ -27,7 +28,7 @@ function buildProject(source: ProjectMemoryAnalysisInput["sources"][number], pro
   const role = unique(roles).join("；") || "资料未明确记录";
   const timeline = facts.find((item) => item.type === "timeline" && item.title === "项目时间" && isUsableProjectTimeline(item.content))?.content;
   const description = facts.map((item) => item.type === "background" || item.type === "goal" ? item.content : "").find((value) => value.trim().length >= 15) ?? "资料未明确记录";
-  return { id: projectId, profileId, name, description: description.slice(0, 800), role: role.slice(0, 700), hardware, software, technologyStack, ...(timeline ? { time: timeline } : {}), sourceIds: [source.id], confidence: source.kind === "repository" ? 0.68 : 0.76 };
+  return { id: projectId, profileId, name, description: description.slice(0, 800), role: role.slice(0, 700), hardware, software, technologyStack, ...(timeline ? { time: timeline } : {}), sourceIds: [source.id], confidence: source.kind === "repository" ? 0.68 : 0.76, ownershipMode: "personal" };
 }
 
 function buildModules(project: ProjectMemoryProject, source: ProjectMemoryAnalysisInput["sources"][number]): ProjectMemoryModule[] {
@@ -77,6 +78,12 @@ function buildInterviewQuestions(project: ProjectMemoryProject, points: ProjectT
   const problemFactIds = factIds(["challenge", "cause", "solution", "result"]);
   const problemPoints = factText(["challenge", "cause", "solution", "result"], 6);
   if (problemFactIds.length && problemPoints.length) result.push({ id: `${project.id}-question-problem`, projectId: project.id, question: `你在${project.name}中遇到什么问题，怎么解决？`, answerPoints: problemPoints, keywords: unique([project.name, "问题", "原因", "解决", "结果"]), sourceIds: unique(facts.filter((item) => problemFactIds.includes(item.id)).flatMap((item) => item.sourceIds)), factIds: problemFactIds });
+  const parameterFactIds = factIds(["parameter"]);
+  const parameterPoints = factText(["parameter"], 8);
+  if (parameterFactIds.length) result.push({ id: `${project.id}-question-parameters`, projectId: project.id, question: `你在${project.name}中关键参数是怎么确定的？`, answerPoints: parameterPoints, keywords: unique([project.name, "参数", "频率", "波特率", "限流"]), sourceIds: unique(facts.filter((item) => parameterFactIds.includes(item.id)).flatMap((item) => item.sourceIds)), factIds: parameterFactIds });
+  const decisionFactIds = factIds(["technical_decision", "decision"]);
+  const decisionPoints = factText(["technical_decision", "decision"], 6);
+  if (decisionFactIds.length) result.push({ id: `${project.id}-question-decision`, projectId: project.id, question: `你在${project.name}中的关键技术决策是什么？`, answerPoints: decisionPoints, keywords: unique([project.name, "技术决策", "为什么", "方案"]), sourceIds: unique(facts.filter((item) => decisionFactIds.includes(item.id)).flatMap((item) => item.sourceIds)), factIds: decisionFactIds });
   const uniquePoints = points.filter((point, index, all) => all.findIndex((item) => item.topic.toLowerCase() === point.topic.toLowerCase()) === index);
   for (const point of uniquePoints.slice(0, 8)) {
     const pointFactIds = factIdsForTopic(point.topic);
@@ -118,7 +125,7 @@ export function buildDeterministicProjectMemory(input: ProjectMemoryAnalysisInpu
 }
 
 interface CandidateEvidence { sourceId?: string; quote?: string; locator?: string; }
-interface CandidateFact { id?: string; projectId?: string; factType?: string; type?: string; title?: string; content?: string; confidence?: number; scope?: string; evidenceLevel?: string; sources?: CandidateEvidence[]; evidence?: CandidateEvidence[]; }
+interface CandidateFact { id?: string; projectId?: string; factType?: string; type?: string; title?: string; content?: string; confidence?: number; scope?: string; evidenceLevel?: string; experienceRelation?: string; value?: unknown; sources?: CandidateEvidence[]; evidence?: CandidateEvidence[]; }
 
 function parseJsonOutput(raw: string): Record<string, unknown> | undefined {
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] ?? raw;
@@ -170,6 +177,8 @@ function parseCandidateFacts(raw: string, input: ProjectMemoryAnalysisInput): Pr
       evidence: evidenceItems,
       scope: candidate.scope === "module" || candidate.scope === "problem" || candidate.scope === "architecture" ? candidate.scope : "project",
       evidenceLevel,
+      ...(candidate.experienceRelation ? { experienceRelation: candidate.experienceRelation as ProjectFact["experienceRelation"] } : {}),
+      ...(type === "parameter" ? { value: normalizeProjectFactValue(candidate.value, candidate.content) } : {}),
       ownership: type === "responsibility" ? "unknown" : "project",
       status: "pending_review"
     };

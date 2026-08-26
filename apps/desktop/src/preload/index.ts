@@ -150,8 +150,9 @@ const api = {
   },
   projects: {
     list: (): Promise<ProjectRecord[]> => ipcRenderer.invoke("projects:list"),
-    create: (input: { name: string; profileId?: string }): Promise<ProjectRecord | undefined> => ipcRenderer.invoke("projects:create", input),
+    create: (input: { name: string; profileId?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }): Promise<ProjectRecord | undefined> => ipcRenderer.invoke("projects:create", input),
     rename: (projectId: string, name: string): Promise<ProjectRecord | undefined> => ipcRenderer.invoke("projects:rename", projectId, name),
+    update: (projectId: string, input: { name?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }): Promise<ProjectRecord | undefined> => ipcRenderer.invoke("projects:update", projectId, input),
     delete: (projectId: string): Promise<boolean> => ipcRenderer.invoke("projects:delete", projectId)
   },
   knowledge: {

@@ -1,4 +1,4 @@
-import type { ProjectFact } from "./types";
+import type { ProjectFact, ProjectOwnershipMode } from "./types";
 
 /** Central policy used by retrieval, project views and question generation. */
 export function isFactEligible(fact: ProjectFact): boolean {
@@ -19,16 +19,16 @@ export function isFactReviewRequired(fact: ProjectFact): boolean {
  * architecture candidates can remain in system review without interrupting
  * the user.
  */
-export function isFactUserActionRequired(fact: ProjectFact): boolean {
+export function isFactUserActionRequired(fact: ProjectFact, projectOwnershipMode: ProjectOwnershipMode = "personal"): boolean {
   if (fact.stale || fact.status === "rejected" || isFactEligible(fact)) return false;
   if (fact.status === "conflicting" || fact.conflictStatus === "conflicting") return true;
-  if (fact.type === "responsibility") return true;
+  if (fact.type === "responsibility") return projectOwnershipMode === "team" || projectOwnershipMode === "partial";
   if (fact.type === "result" || fact.type === "metric") {
     return fact.evidenceLevel !== "not-measured" && ["pending", "inferred", "risk"].includes(fact.evidenceLevel ?? "pending");
   }
-  // A first-person, high-risk claim needs the candidate's explicit approval;
-  // a normal technical candidate does not.
-  if (fact.ownership === "self" && ["pending", "inferred", "risk"].includes(fact.evidenceLevel ?? "pending")) return true;
+  // Ordinary technical facts remain system-managed. Only conflicts, high-risk
+  // outcomes/metrics, and team/partial responsibility boundaries interrupt the
+  // user for a decision.
   return false;
 }
 

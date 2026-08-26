@@ -150,8 +150,9 @@ declare global {
       };
       projects: {
         list(): Promise<ProjectRecord[]>;
-        create(input: { name: string; profileId?: string }): Promise<ProjectRecord | undefined>;
+        create(input: { name: string; profileId?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }): Promise<ProjectRecord | undefined>;
         rename(projectId: string, name: string): Promise<ProjectRecord | undefined>;
+        update(projectId: string, input: { name?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }): Promise<ProjectRecord | undefined>;
         delete(projectId: string): Promise<boolean>;
       };
       knowledge: {

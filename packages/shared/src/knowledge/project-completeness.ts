@@ -1,7 +1,8 @@
 import { calculateProjectDataHealth, type ProjectDataHealthResult } from "./project-data-health";
 import { isFactEligible, isFactUserActionRequired } from "./project-fact-eligibility";
 import { listConflictGroups, listUserActions } from "./project-actions";
-import type { ProjectFact, ProjectFactType, ProjectMemoryModule, ProjectMemoryProject, ProjectProblem, ProjectInterviewQuestion } from "./types";
+import { normalizeProjectOwnershipMode } from "./project-technical-memory";
+import type { ProjectFact, ProjectFactType, ProjectMemoryModule, ProjectMemoryProject, ProjectProblem, ProjectInterviewQuestion, ProjectOwnershipMode } from "./types";
 
 export type ProjectSourceCoverageStatus = "covered" | "weak" | "missing" | "conflicting";
 export type ProjectVerificationStatus = "confirmed" | "pending" | "missing" | "conflicting";
@@ -33,6 +34,12 @@ export interface ProjectCompletenessResult {
   questionCoverage: number;
   verificationScore: number;
   interviewReadinessScore: number;
+  projectFamiliarityScore: number;
+  technicalCoverageScore: number;
+  parameterCoverageScore: number;
+  decisionCoverageScore: number;
+  problemCoverageScore: number;
+  familiarityDimensions: ProjectFamiliarityDimension[];
   dimensions: ProjectCompletenessDimension[];
   missingFactTypes: ProjectFactType[];
   weakEvidence: string[];
@@ -40,6 +47,15 @@ export interface ProjectCompletenessResult {
   staleQuestions: string[];
   sourceCoverage: number;
   dataHealth: ProjectDataHealthResult;
+}
+
+export interface ProjectFamiliarityDimension {
+  key: string;
+  label: string;
+  weight: number;
+  score: number;
+  factCount: number;
+  eligibleFactCount: number;
 }
 
 const DIMENSIONS: Array<{ key: string; label: string; weight: number; factTypes: ProjectFactType[] }> = [
@@ -54,6 +70,18 @@ const DIMENSIONS: Array<{ key: string; label: string; weight: number; factTypes:
   { key: "application", label: "应用场景", weight: 10, factTypes: ["application"] }
 ];
 
+const FAMILIARITY_DIMENSIONS: Array<{ key: string; label: string; weight: number; factTypes: ProjectFactType[] }> = [
+  { key: "background", label: "背景", weight: 8, factTypes: ["background", "goal"] },
+  { key: "architecture", label: "架构", weight: 12, factTypes: ["architecture"] },
+  { key: "hardware", label: "硬件", weight: 10, factTypes: ["hardware"] },
+  { key: "technology", label: "技术", weight: 18, factTypes: ["technology", "software"] },
+  { key: "modules", label: "模块", weight: 12, factTypes: ["module"] },
+  { key: "parameters", label: "关键参数", weight: 12, factTypes: ["parameter"] },
+  { key: "decisions", label: "技术决策", weight: 10, factTypes: ["technical_decision", "decision"] },
+  { key: "problems", label: "问题", weight: 12, factTypes: ["challenge", "cause", "solution"] },
+  { key: "results", label: "结果", weight: 6, factTypes: ["result", "metric"] }
+];
+
 function relevantFacts(facts: ProjectFact[], types: ProjectFactType[]): ProjectFact[] { return facts.filter((fact) => types.includes(fact.type) && !fact.stale && fact.status !== "rejected"); }
 function hasEvidence(fact: ProjectFact): boolean { return Boolean(fact.evidence?.some((item) => item.quote.trim() && item.sourceId)); }
 function isNotMeasured(fact: ProjectFact): boolean { return fact.evidenceLevel === "not-measured" || /未测量|未测试|没有正式 benchmark|无正式 benchmark/i.test(fact.content); }
@@ -61,6 +89,19 @@ function isNotMeasured(fact: ProjectFact): boolean { return fact.evidenceLevel =
 function coverageValue(status: ProjectSourceCoverageStatus, missingKind?: ProjectMissingKind): number {
   if (missingKind === "not_measured") return 0;
   return status === "covered" ? 1 : status === "weak" || status === "conflicting" ? 0.5 : 0;
+}
+
+function familiarityValue(facts: ProjectFact[]): number {
+  if (facts.some((fact) => fact.status === "conflicting" || fact.conflictStatus === "conflicting")) return 25;
+  if (!facts.length) return 0;
+  const eligible = facts.filter(isFactEligible).length;
+  return eligible ? Math.round(eligible / facts.length * 100) : 50;
+}
+
+function weightedFamiliarityScore(dimensions: ProjectFamiliarityDimension[], keys: string[]): number {
+  const selected = dimensions.filter((dimension) => keys.includes(dimension.key));
+  const total = selected.reduce((sum, dimension) => sum + dimension.weight, 0);
+  return total ? Math.round(selected.reduce((sum, dimension) => sum + dimension.score * dimension.weight, 0) / total) : 0;
 }
 
 export function calculateProjectCompleteness(input: { project: ProjectMemoryProject; facts: ProjectFact[]; modules?: ProjectMemoryModule[]; problems?: ProjectProblem[]; questions?: ProjectInterviewQuestion[] }): ProjectCompletenessResult {
@@ -81,7 +122,6 @@ export function calculateProjectCompleteness(input: { project: ProjectMemoryProj
   });
   const totalWeight = DIMENSIONS.reduce((sum, dimension) => sum + dimension.weight, 0);
   const sourceCoverageScore = Math.round((dimensions.reduce((sum, dimension) => sum + coverageValue(dimension.sourceStatus, dimension.missingKind) * dimension.weight, 0) / totalWeight) * 100);
-  const trustScore = Math.round((dimensions.reduce((sum, dimension) => sum + (relevantFacts(facts, dimension.factTypes).some(isFactEligible) ? dimension.weight : 0), 0) / totalWeight) * 100);
   const reviewableFacts = facts.filter(hasEvidence);
   // Compatibility only: callers that still display this field can see the
   // old manual-click ratio, but the readiness score no longer uses it.
@@ -94,22 +134,39 @@ export function calculateProjectCompleteness(input: { project: ProjectMemoryProj
     return !fact || fact.stale || fact.status === "rejected" || !isFactEligible(fact);
   }))).map((question) => question.id);
   const conflictGroups = listConflictGroups(facts);
-  const userActions = listUserActions(facts, input.project.id);
+  const ownershipMode: ProjectOwnershipMode = normalizeProjectOwnershipMode(input.project.ownershipMode);
+  // Responsibility remains a compatibility dimension, but it is not part of
+  // personal/reference technical familiarity or trust. Team/partial projects
+  // keep the boundary signal in their critical review score.
+  const trustDimensions = dimensions.filter((dimension) => dimension.key !== "responsibility" || ownershipMode === "team" || ownershipMode === "partial");
+  const trustWeight = trustDimensions.reduce((sum, dimension) => sum + dimension.weight, 0);
+  const trustScore = Math.round((trustDimensions.reduce((sum, dimension) => sum + (relevantFacts(facts, dimension.factTypes).some(isFactEligible) ? dimension.weight : 0), 0) / trustWeight) * 100);
+  const userActions = listUserActions(facts, input.project.id, ownershipMode);
   const criticalKeys = new Set(userActions.map((action) => action.id));
   const unresolvedCritical = new Set(userActions.filter((action) => action.status === "pending").map((action) => action.id));
   const userActionFactIds = new Set(userActions.flatMap((action) => action.factIds));
   // not-measured is an explicit, resolved absence of a benchmark. It affects
   // measurement coverage, but must not be counted as unresolved work.
-  for (const fact of facts.filter(isFactUserActionRequired)) {
+  for (const fact of facts.filter((item) => isFactUserActionRequired(item, ownershipMode))) {
     if (fact.evidenceLevel === "not-measured") continue;
     if (userActionFactIds.has(fact.id)) continue;
     const key = fact.conflictGroupId && (fact.status === "conflicting" || fact.conflictStatus === "conflicting") ? `conflict:${fact.conflictGroupId}` : `fact:${fact.id}`;
     if (!criticalKeys.has(key) && !fact.conflictGroupId) { criticalKeys.add(key); unresolvedCritical.add(key); }
   }
-  if (!facts.some((fact) => fact.type === "responsibility")) { criticalKeys.add("responsibility:missing"); unresolvedCritical.add("responsibility:missing"); }
+  if ((ownershipMode === "team" || ownershipMode === "partial") && !facts.some((fact) => fact.type === "responsibility")) { criticalKeys.add("responsibility:missing"); unresolvedCritical.add("responsibility:missing"); }
   const criticalReviewScore = criticalKeys.size ? Math.round(((criticalKeys.size - unresolvedCritical.size) / criticalKeys.size) * 100) : 100;
-  const interviewReadinessScore = Math.round(sourceCoverageScore * 0.35 + trustScore * 0.35 + criticalReviewScore * 0.20 + questionCoverage * 0.10);
-  const missingFactTypes = [...new Set(dimensions.filter((dimension) => dimension.missing || dimension.missingKind === "not_measured").flatMap((dimension) => dimension.factTypes))];
+  const familiarityDimensions = FAMILIARITY_DIMENSIONS.map((dimension) => {
+    const matches = relevantFacts(facts, dimension.factTypes);
+    return { ...dimension, score: familiarityValue(matches), factCount: matches.length, eligibleFactCount: matches.filter(isFactEligible).length };
+  });
+  const technicalCoverageScore = weightedFamiliarityScore(familiarityDimensions, ["background", "architecture", "hardware", "technology", "modules"]);
+  const parameterCoverageScore = weightedFamiliarityScore(familiarityDimensions, ["parameters"]);
+  const decisionCoverageScore = weightedFamiliarityScore(familiarityDimensions, ["decisions"]);
+  const problemCoverageScore = weightedFamiliarityScore(familiarityDimensions, ["problems"]);
+  const projectFamiliarityScore = Math.round(technicalCoverageScore * 0.30 + parameterCoverageScore * 0.20 + decisionCoverageScore * 0.15 + problemCoverageScore * 0.20 + trustScore * 0.15);
+  const interviewReadinessScore = Math.round(projectFamiliarityScore * 0.75 + questionCoverage * 0.15 + criticalReviewScore * 0.10);
+  const missingFactTypes = [...new Set(dimensions.filter((dimension) => dimension.missing || dimension.missingKind === "not_measured").flatMap((dimension) => dimension.factTypes))]
+    .filter((type) => type !== "responsibility" || ownershipMode === "team" || ownershipMode === "partial");
   const legacySourceCoverage = facts.length ? Math.round((facts.filter(hasEvidence).length / facts.length) * 100) : 0;
   return {
     projectId: input.project.id,
@@ -122,6 +179,12 @@ export function calculateProjectCompleteness(input: { project: ProjectMemoryProj
     questionCoverage,
     verificationScore,
     interviewReadinessScore,
+    projectFamiliarityScore,
+    technicalCoverageScore,
+    parameterCoverageScore,
+    decisionCoverageScore,
+    problemCoverageScore,
+    familiarityDimensions,
     dimensions,
     missingFactTypes,
     weakEvidence: facts.filter((fact) => !hasEvidence(fact) || fact.confidence < 0.65 || fact.evidenceLevel === "inferred" || fact.evidenceLevel === "risk").map((fact) => fact.id),

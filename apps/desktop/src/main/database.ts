@@ -59,7 +59,12 @@ import {
   isFactEligible,
   isFactReviewRequired,
   isFactUserActionRequired,
-  normalizeSkillKey
+  normalizeSkillKey,
+  canonicalProjectParameterKey,
+  inferExperienceRelation,
+  normalizeProjectFactValue,
+  normalizeProjectOwnershipMode,
+  type ProjectOwnershipMode
 } from "@interview-copilot/shared";
 import type { ChatCancelReason, ChatMessageStatus, ChatResponse, ChatStreamTelemetry } from "@interview-copilot/shared";
 
@@ -623,6 +628,21 @@ export class SqliteDatabase {
       [22, `
         CREATE INDEX IF NOT EXISTS project_facts_semantics_idx ON project_facts(project_id, canonical_key, cardinality, conflict_status);
       `],
+      [23, `
+        ALTER TABLE projects ADD COLUMN ownership_mode TEXT NOT NULL DEFAULT 'personal';
+        ALTER TABLE projects ADD COLUMN ownership_note TEXT;
+        ALTER TABLE project_facts ADD COLUMN experience_relation TEXT NOT NULL DEFAULT 'project';
+        ALTER TABLE project_facts ADD COLUMN value_json TEXT;
+        UPDATE project_facts SET experience_relation = CASE
+          WHEN fact_type = 'metric' THEN 'measured'
+          WHEN fact_type IN ('architecture', 'technical_decision', 'decision') THEN 'designed'
+          WHEN fact_type IN ('challenge', 'cause') THEN 'observed'
+          WHEN fact_type IN ('technology', 'software', 'hardware') THEN 'used'
+          ELSE 'project'
+        END
+        WHERE experience_relation = 'project';
+        CREATE INDEX IF NOT EXISTS project_facts_runtime_v4_idx ON project_facts(project_id, status, stale, fact_type, canonical_key);
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -771,6 +791,8 @@ export interface ProjectRecord {
   profileId?: string;
   createdAt: number;
   updatedAt: number;
+  ownershipMode?: ProjectOwnershipMode;
+  ownershipNote?: string;
 }
 
 export interface ConversationRecord {
@@ -806,20 +828,33 @@ export class SqliteProjectRepository {
   constructor(private readonly database: SqliteDatabase) {}
 
   list(): ProjectRecord[] {
-    return this.database.all<ProjectRecord>("SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt FROM projects ORDER BY updated_at DESC");
+    return this.database.all<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects ORDER BY updated_at DESC").map((row) => this.hydrate(row));
   }
 
   get(projectId: string): ProjectRecord | undefined {
-    return this.database.first<ProjectRecord>("SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt FROM projects WHERE id = ?", [projectId]);
+    const row = this.database.first<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects WHERE id = ?", [projectId]);
+    return row ? this.hydrate(row) : undefined;
   }
 
-  create(name: string, profileId?: string, now = Date.now()): ProjectRecord {
-    const existing = profileId ? this.database.first<ProjectRecord>("SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt FROM projects WHERE profile_id = ? AND lower(trim(name)) = lower(trim(?)) ORDER BY updated_at DESC LIMIT 1", [profileId, name.trim() || "新面试项目"]) : undefined;
-    if (existing) return existing;
+  create(name: string, profileId?: string, now = Date.now(), ownershipMode: ProjectOwnershipMode = "personal", ownershipNote?: string): ProjectRecord {
+    const existing = profileId ? this.database.first<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects WHERE profile_id = ? AND lower(trim(name)) = lower(trim(?)) ORDER BY updated_at DESC LIMIT 1", [profileId, name.trim() || "新面试项目"]) : undefined;
+    if (existing) return this.hydrate(existing);
     const project = { id: id("project", now), name: name.trim() || "新面试项目", ...(profileId ? { profileId } : {}), createdAt: now, updatedAt: now };
-    this.database.run("INSERT INTO projects(id, name, profile_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", [project.id, project.name, project.profileId ?? null, now, now]);
+    this.database.run("INSERT INTO projects(id, name, profile_id, ownership_mode, ownership_note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [project.id, project.name, project.profileId ?? null, normalizeProjectOwnershipMode(ownershipMode), ownershipNote?.trim() || null, now, now]);
     this.database.flushNow();
-    return project;
+    return this.get(project.id) as ProjectRecord;
+  }
+
+  update(projectId: string, input: { name?: string; ownershipMode?: ProjectOwnershipMode; ownershipNote?: string }, now = Date.now()): ProjectRecord | undefined {
+    const current = this.get(projectId);
+    if (!current) return undefined;
+    this.database.run("UPDATE projects SET name = ?, ownership_mode = ?, ownership_note = ?, updated_at = ? WHERE id = ?", [input.name?.trim() || current.name, normalizeProjectOwnershipMode(input.ownershipMode ?? current.ownershipMode), input.ownershipNote === undefined ? current.ownershipNote ?? null : input.ownershipNote.trim() || null, now, projectId]);
+    this.database.flushNow();
+    return this.get(projectId);
+  }
+
+  private hydrate(row: Record<string, unknown>): ProjectRecord {
+    return { id: String(row.id), name: String(row.name), ...(row.profileId ? { profileId: String(row.profileId) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt), ownershipMode: normalizeProjectOwnershipMode(row.ownershipMode), ...(row.ownershipNote ? { ownershipNote: String(row.ownershipNote) } : {}) };
   }
 
   rename(projectId: string, name: string, now = Date.now()): ProjectRecord | undefined {
@@ -852,6 +887,7 @@ export interface ProjectMemoryStats {
   staleFacts: number;
   /** Current-project alias used by detail views. */
   questions: number;
+  projectFamiliarityScore?: number;
 }
 
 function jsonArray<T = string>(value: unknown): T[] {
@@ -920,13 +956,13 @@ export class SqliteProjectMemoryRepository {
 
   constructor(private readonly database: SqliteDatabase) { this.sources = new SqliteProjectSourceRepository(database); this.projects = new SqliteProjectRepository(database); }
 
-  listProjects(profileId: string): Array<{ id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[] }> {
-    return this.database.all<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, aliases_json AS aliasesJson, source_ids_json AS sourceIdsJson FROM projects WHERE profile_id = ? ORDER BY updated_at DESC", [profileId]).map((row) => ({ id: String(row.id), name: String(row.name), profileId: String(row.profileId), aliases: jsonArray(row.aliasesJson), sourceIds: jsonArray(row.sourceIdsJson) }));
+  listProjects(profileId: string): Array<{ id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[]; ownershipMode: ProjectOwnershipMode; ownershipNote?: string }> {
+    return this.database.all<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, aliases_json AS aliasesJson, source_ids_json AS sourceIdsJson, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects WHERE profile_id = ? ORDER BY updated_at DESC", [profileId]).map((row) => ({ id: String(row.id), name: String(row.name), profileId: String(row.profileId), aliases: jsonArray(row.aliasesJson), sourceIds: jsonArray(row.sourceIdsJson), ownershipMode: normalizeProjectOwnershipMode(row.ownershipMode), ...(row.ownershipNote ? { ownershipNote: String(row.ownershipNote) } : {}) }));
   }
 
-  getProject(projectId: string): { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[] } | undefined {
-    const row = this.database.first<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, aliases_json AS aliasesJson, source_ids_json AS sourceIdsJson FROM projects WHERE id = ?", [projectId]);
-    return row ? { id: String(row.id), name: String(row.name), profileId: String(row.profileId), aliases: jsonArray(row.aliasesJson), sourceIds: jsonArray(row.sourceIdsJson) } : undefined;
+  getProject(projectId: string): { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[]; ownershipMode: ProjectOwnershipMode; ownershipNote?: string } | undefined {
+    const row = this.database.first<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, aliases_json AS aliasesJson, source_ids_json AS sourceIdsJson, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects WHERE id = ?", [projectId]);
+    return row ? { id: String(row.id), name: String(row.name), profileId: String(row.profileId), aliases: jsonArray(row.aliasesJson), sourceIds: jsonArray(row.sourceIdsJson), ownershipMode: normalizeProjectOwnershipMode(row.ownershipMode), ...(row.ownershipNote ? { ownershipNote: String(row.ownershipNote) } : {}) } : undefined;
   }
 
   listProjectSources(projectId: string): ProjectSourceRecord[] { return this.sources.listProjectSources(projectId); }
@@ -948,8 +984,8 @@ export class SqliteProjectMemoryRepository {
       return { ...assignment, title: String(document?.filename ?? assignment.sourceId), ...(document?.documentType ? { documentType: String(document.documentType) } : {}), ...(document?.status ? { status: String(document.status) } : {}), ...(document?.text ? { text: String(document.text).slice(0, 20_000) } : {}), updatedAt: Number(document?.updatedAt ?? assignment.updatedAt) };
     });
   }
-  createProject(profileId: string, name: string, now = Date.now()): { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[] } {
-    return this.ensureProject({ profileId, name }, now);
+  createProject(profileId: string, name: string, now = Date.now(), ownershipMode: ProjectOwnershipMode = "personal", ownershipNote?: string): { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[]; ownershipMode: ProjectOwnershipMode; ownershipNote?: string } {
+    return this.ensureProject({ profileId, name, ownershipMode, ownershipNote }, now);
   }
   renameProject(projectId: string, name: string, now = Date.now()): { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[] } | undefined {
     this.projects.rename(projectId, name, now);
@@ -1006,20 +1042,22 @@ export class SqliteProjectMemoryRepository {
   }
   sourcesFor(sourceType: ProjectSourceType, sourceId: string): ProjectSourceRecord[] { return this.sources.getBySource(sourceType, sourceId); }
 
-  ensureProject(input: { id?: string; profileId: string; name: string; aliases?: string[]; sourceIds?: string[] }, now = Date.now()): { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[] } {
-    const existing = this.database.first<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, aliases_json AS aliasesJson, source_ids_json AS sourceIdsJson FROM projects WHERE profile_id = ? AND lower(trim(name)) = lower(trim(?)) ORDER BY updated_at DESC LIMIT 1", [input.profileId, input.name.trim() || "待确认项目"]);
+  ensureProject(input: { id?: string; profileId: string; name: string; aliases?: string[]; sourceIds?: string[]; ownershipMode?: ProjectOwnershipMode; ownershipNote?: string }, now = Date.now()): { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[]; ownershipMode: ProjectOwnershipMode; ownershipNote?: string } {
+    const existing = this.database.first<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, aliases_json AS aliasesJson, source_ids_json AS sourceIdsJson, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects WHERE profile_id = ? AND lower(trim(name)) = lower(trim(?)) ORDER BY updated_at DESC LIMIT 1", [input.profileId, input.name.trim() || "待确认项目"]);
     const projectId = input.id ?? (existing ? String(existing.id) : this.projects.create(input.name, input.profileId, now).id);
-    this.database.run("INSERT INTO projects(id, name, profile_id, aliases_json, source_ids_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, profile_id=excluded.profile_id, aliases_json=excluded.aliases_json, source_ids_json=excluded.source_ids_json, updated_at=excluded.updated_at", [projectId, input.name.trim() || "待确认项目", input.profileId, JSON.stringify(input.aliases ?? []), JSON.stringify(input.sourceIds ?? []), now, now]);
+    const preservedOwnershipMode = input.ownershipMode ?? existing?.ownershipMode;
+    const preservedOwnershipNote = input.ownershipNote === undefined ? existing?.ownershipNote : input.ownershipNote;
+    this.database.run("INSERT INTO projects(id, name, profile_id, aliases_json, source_ids_json, ownership_mode, ownership_note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, profile_id=excluded.profile_id, aliases_json=excluded.aliases_json, source_ids_json=excluded.source_ids_json, ownership_mode=excluded.ownership_mode, ownership_note=excluded.ownership_note, updated_at=excluded.updated_at", [projectId, input.name.trim() || "待确认项目", input.profileId, JSON.stringify(input.aliases ?? []), JSON.stringify(input.sourceIds ?? []), normalizeProjectOwnershipMode(preservedOwnershipMode), typeof preservedOwnershipNote === "string" ? preservedOwnershipNote.trim() || null : null, now, now]);
     this.database.flushNow();
-    return this.getProject(projectId) as { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[] };
+    return this.getProject(projectId) as { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[]; ownershipMode: ProjectOwnershipMode; ownershipNote?: string };
   }
 
   getSnapshot(profileId: string): ProjectMemorySnapshot {
-    const projects = this.database.all<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, description, role, hardware_json AS hardwareJson, software_json AS softwareJson, technology_stack_json AS technologyStackJson, time, source_ids_json AS sourceIdsJson, confidence FROM projects WHERE profile_id = ? ORDER BY updated_at DESC", [profileId]).filter((row) => {
+    const projects = this.database.all<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, description, role, hardware_json AS hardwareJson, software_json AS softwareJson, technology_stack_json AS technologyStackJson, time, source_ids_json AS sourceIdsJson, confidence, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects WHERE profile_id = ? ORDER BY updated_at DESC", [profileId]).filter((row) => {
       const state = this.database.first<{ status: string; lastSuccessfulAnalysisId: string | null }>("SELECT status, last_successful_analysis_id AS lastSuccessfulAnalysisId FROM project_analysis_state WHERE project_id = ?", [String(row.id)]);
       return !(state?.status === "failed" && !state.lastSuccessfulAnalysisId);
     }).map((row) => ({
-      id: String(row.id), profileId: String(row.profileId), name: String(row.name), description: String(row.description ?? ""), role: String(row.role ?? ""), hardware: jsonArray(row.hardwareJson), software: jsonArray(row.softwareJson), technologyStack: jsonArray(row.technologyStackJson), ...(row.time ? { time: String(row.time) } : {}), sourceIds: jsonArray(row.sourceIdsJson), confidence: Number(row.confidence ?? 1)
+      id: String(row.id), profileId: String(row.profileId), name: String(row.name), description: String(row.description ?? ""), role: String(row.role ?? ""), hardware: jsonArray(row.hardwareJson), software: jsonArray(row.softwareJson), technologyStack: jsonArray(row.technologyStackJson), ...(row.time ? { time: String(row.time) } : {}), sourceIds: jsonArray(row.sourceIdsJson), confidence: Number(row.confidence ?? 1), ownershipMode: normalizeProjectOwnershipMode(row.ownershipMode), ...(row.ownershipNote ? { ownershipNote: String(row.ownershipNote) } : {})
     }));
     const projectIds = projects.map((project) => project.id);
     if (projectIds.length === 0) return { projects, modules: [], technicalPoints: [], problems: [], interviewQuestions: [], facts: [] };
@@ -1036,6 +1074,8 @@ export class SqliteProjectMemoryRepository {
     const factScope = onlyProjectId ? "project_id = ?" : "project_id IN (SELECT id FROM projects WHERE profile_id = ?)";
     const projectFilterParams: Array<string | number> = onlyProjectId ? [onlyProjectId] : [profileId];
     const previousAssignments = onlyProjectId ? this.sources.listProjectSources(onlyProjectId) : [];
+    const persistedOwnership = new Map(this.database.all<{ id: string; ownershipMode: string | null; ownershipNote: string | null }>("SELECT id, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects WHERE profile_id = ?", [profileId]).map((row) => [row.id, row] as const));
+    snapshot = { ...snapshot, projects: snapshot.projects.map((project) => { const existing = persistedOwnership.get(project.id); return { ...project, ownershipMode: normalizeProjectOwnershipMode(existing?.ownershipMode ?? project.ownershipMode), ...(existing?.ownershipNote ? { ownershipNote: existing.ownershipNote } : project.ownershipNote ? { ownershipNote: project.ownershipNote } : {}) }; }) };
     const previousFactVerification = new Map(this.database.all<{ id: string; verified: number }>(`SELECT id, verified FROM project_facts WHERE ${factScope}`, projectFilterParams).map((row) => [row.id, Number(row.verified) === 1] as const));
     const previousFactEmbeddings = new Map(this.database.all<{ id: string; embeddingJson: string | null; embeddingHash: string | null; embeddingModel: string | null; embeddingVersion: string | null; embeddingUpdatedAt: number | null }>(`SELECT id, embedding_json AS embeddingJson, embedding_hash AS embeddingHash, embedding_model AS embeddingModel, embedding_version AS embeddingVersion, embedding_updated_at AS embeddingUpdatedAt FROM project_facts WHERE ${factScope}`, projectFilterParams).map((row) => [row.id, row] as const));
     const questionDelete = onlyProjectId ? "DELETE FROM question_bank_questions WHERE scope = 'project' AND profile_id = ? AND source = 'generated' AND project_id = ?" : "DELETE FROM question_bank_questions WHERE scope = 'project' AND profile_id = ? AND source = 'generated'";
@@ -1055,7 +1095,7 @@ export class SqliteProjectMemoryRepository {
       this.database.run("UPDATE project_facts SET stale = 1, updated_at = ? WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ?) AND verified = 0 AND evidence_level NOT IN ('confirmed-user')", [now, profileId]);
     }
     for (const project of snapshot.projects) {
-      this.database.run("INSERT INTO projects(id, name, profile_id, description, role, hardware_json, software_json, technology_stack_json, time, source_ids_json, confidence, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, profile_id=excluded.profile_id, description=excluded.description, role=excluded.role, hardware_json=excluded.hardware_json, software_json=excluded.software_json, technology_stack_json=excluded.technology_stack_json, time=excluded.time, source_ids_json=excluded.source_ids_json, confidence=excluded.confidence, updated_at=excluded.updated_at", [project.id, project.name, profileId, project.description, project.role, JSON.stringify(project.hardware), JSON.stringify(project.software), JSON.stringify(project.technologyStack), project.time ?? null, JSON.stringify(project.sourceIds), project.confidence, now, now]);
+      this.database.run("INSERT INTO projects(id, name, profile_id, description, role, hardware_json, software_json, technology_stack_json, time, source_ids_json, confidence, ownership_mode, ownership_note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, profile_id=excluded.profile_id, description=excluded.description, role=excluded.role, hardware_json=excluded.hardware_json, software_json=excluded.software_json, technology_stack_json=excluded.technology_stack_json, time=excluded.time, source_ids_json=excluded.source_ids_json, confidence=excluded.confidence, ownership_mode=excluded.ownership_mode, ownership_note=excluded.ownership_note, updated_at=excluded.updated_at", [project.id, project.name, profileId, project.description, project.role, JSON.stringify(project.hardware), JSON.stringify(project.software), JSON.stringify(project.technologyStack), project.time ?? null, JSON.stringify(project.sourceIds), project.confidence, normalizeProjectOwnershipMode(project.ownershipMode), project.ownershipNote ?? null, now, now]);
     }
     for (const module of snapshot.modules) this.database.run("INSERT INTO project_modules(id, project_id, module_name, description, file_path, source_ids_json) VALUES (?, ?, ?, ?, ?, ?)", [module.id, module.projectId, module.moduleName, module.description, module.filePath ?? null, JSON.stringify(module.sourceIds)]);
     for (const point of snapshot.technicalPoints) this.database.run("INSERT INTO technical_points(id, project_id, topic, content, importance, source_ids_json) VALUES (?, ?, ?, ?, ?, ?)", [point.id, point.projectId, point.topic, point.content, point.importance, JSON.stringify(point.sourceIds)]);
@@ -1073,6 +1113,7 @@ export class SqliteProjectMemoryRepository {
       this.database.run("DELETE FROM project_fact_sources WHERE fact_id = ?", [fact.id]);
       const evidence: ProjectFactEvidence[] = fact.evidence?.length ? fact.evidence : fact.sourceIds.map((sourceId) => ({ sourceId, quote: "" }));
       for (const item of evidence) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)", [fact.id, item.sourceId, item.quote || null, item.locator ?? null, item.relation ?? "support", now]);
+      this.database.run("UPDATE project_facts SET experience_relation = ?, value_json = ? WHERE id = ?", [fact.experienceRelation ?? inferExperienceRelation(fact), fact.value ? JSON.stringify(fact.value) : null, fact.id]);
     };
     if (snapshot.facts?.length) for (const item of snapshot.facts) saveFact({ ...item, profileId, status: item.status ?? "active", createdAt: item.createdAt ?? now, updatedAt: now });
     else {
@@ -1119,6 +1160,7 @@ export class SqliteProjectMemoryRepository {
     this.database.run("INSERT INTO project_facts(id, project_id, fact_type, title, content, confidence, verified, status, evidence_level, scope, section_path_json, subtype, canonical_key, cardinality, variant_context, conflict_status, conflict_group_id, ownership, stale, embedding_json, embedding_hash, embedding_model, embedding_version, embedding_updated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, 'pending_review', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, NULL, NULL, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, content=excluded.content, confidence=excluded.confidence, status='pending_review', evidence_level=excluded.evidence_level, scope=excluded.scope, section_path_json=excluded.section_path_json, subtype=excluded.subtype, canonical_key=excluded.canonical_key, cardinality=excluded.cardinality, variant_context=excluded.variant_context, ownership=excluded.ownership, stale=0, updated_at=excluded.updated_at", [fact.id, fact.projectId, fact.type, fact.title, fact.content, Math.max(0, Math.min(1, fact.confidence)), fact.evidenceLevel ?? "pending", fact.scope ?? "project", JSON.stringify(fact.sectionPath ?? []), fact.subtype ?? null, fact.canonicalKey ?? null, fact.cardinality ?? null, fact.variantContext ?? null, fact.conflictStatus ?? "pending_review", fact.conflictGroupId ?? null, fact.ownership ?? "project", fact.createdAt ?? now, now]);
     this.database.run("DELETE FROM project_fact_sources WHERE fact_id = ?", [fact.id]);
     for (const item of fact.evidence ?? []) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)", [fact.id, item.sourceId, item.quote, item.locator ?? null, item.relation ?? "support", now]);
+    this.database.run("UPDATE project_facts SET experience_relation = ?, value_json = ? WHERE id = ?", [fact.experienceRelation ?? inferExperienceRelation(fact), fact.value ? JSON.stringify(fact.value) : null, fact.id]);
     this.database.flushNow();
     return this.getFact(fact.id) as ProjectFact;
   }
@@ -1171,9 +1213,10 @@ export class SqliteProjectMemoryRepository {
     return this.getFact(factId);
   }
 
-  searchFacts(profileId: string, query: string, options: { projectId?: string; detectedProjectId?: string; queryEmbedding?: number[]; questionType?: string; limit?: number; minScore?: number; mode?: "answer" | "review" } = {}): ProjectFactMatch[] {
+  searchFacts(profileId: string, query: string, options: { projectId?: string; detectedProjectId?: string; queryEmbedding?: number[]; questionType?: string; limit?: number; minScore?: number; mode?: "answer" | "review"; includeReferenceProject?: boolean } = {}): ProjectFactMatch[] {
     const mode = options.mode ?? "answer";
-    const candidates = this.listFacts(profileId, undefined, { includeStale: mode === "review", includeRejected: false }).filter((fact) => mode === "answer" ? isFactEligible(fact) : isFactReviewRequired(fact));
+    const referenceProjectIds = new Set(this.projects.list().filter((project) => project.profileId === profileId && normalizeProjectOwnershipMode(project.ownershipMode) === "reference").map((project) => project.id));
+    const candidates = this.listFacts(profileId, undefined, { includeStale: mode === "review", includeRejected: false }).filter((fact) => !referenceProjectIds.has(fact.projectId) || options.includeReferenceProject).filter((fact) => mode === "answer" ? isFactEligible(fact) : isFactReviewRequired(fact));
     const hits = new ProjectFactMemoryRetriever().search(query, candidates, {
       selectedProjectId: options.projectId,
       detectedProjectId: options.detectedProjectId,
@@ -1263,17 +1306,37 @@ export class SqliteProjectMemoryRepository {
   }
 
   listUserActions(projectId: string): ProjectUserAction[] {
-    const profileId = this.database.first<{ profileId: string }>("SELECT profile_id AS profileId FROM projects WHERE id = ?", [projectId])?.profileId;
+    const project = this.getProject(projectId);
+    const profileId = project?.profileId;
     if (!profileId) return [];
-    return listUserActions(this.listFacts(profileId, projectId), projectId);
+    return listUserActions(this.listFacts(profileId, projectId), projectId, project);
   }
 
-  /** Reclassifies legacy fact rows in place without deleting facts or evidence. */
-  repairProjectFactSemantics(projectId: string, now = Date.now()): ProjectFact[] {
+  /** Reclassifies legacy technical rows in place without deleting facts or evidence. */
+  repairProjectTechnicalSemantics(projectId: string, now = Date.now()): ProjectFact[] {
     const project = this.getProject(projectId);
     if (!project) return [];
     const existing = this.listFacts(project.profileId, projectId, { includeStale: true, includeRejected: true });
-    const repaired = new ProjectFactConflictResolver().resolve(existing);
+    const assignments = this.sources.listProjectSources(projectId);
+    const normalizedExisting = existing.map((fact) => {
+      // Migration 21 established these trust defaults. Re-run the same
+      // deterministic derivation for legacy databases whose migration marker
+      // was already past 23; never lower an existing user confirmation.
+      const trustBackfill = fact.status !== "rejected"
+        ? fact.type === "responsibility" && fact.verified
+          ? { ownership: "self" as const, evidenceLevel: "confirmed-user" as const }
+          : fact.verified && fact.evidenceLevel === "pending"
+            ? { evidenceLevel: "confirmed-user" as const }
+            : !fact.verified && fact.evidenceLevel === "pending" && fact.evidence?.some((item) => item.quote.trim())
+              ? { evidenceLevel: this.evidenceLevelForAssignments(fact, assignments) }
+              : {}
+        : {};
+      const enriched = { ...fact, ...trustBackfill };
+      return enriched.type !== "parameter" && ["metric", "technology"].includes(enriched.type) && canonicalProjectParameterKey(enriched)
+        ? { ...enriched, type: "parameter" as const, factType: "parameter" as const, value: normalizeProjectFactValue(enriched.value, enriched.content) }
+        : withFactSemantics(enriched);
+    });
+    const repaired = new ProjectFactConflictResolver().resolve(normalizedExisting);
     const repairedIds = new Set(repaired.map((fact) => fact.id));
     this.database.run("BEGIN");
     try {
@@ -1283,10 +1346,17 @@ export class SqliteProjectMemoryRepository {
           this.database.run("UPDATE project_facts SET status='rejected', conflict_status='confirmed', conflict_group_id=NULL, updated_at=? WHERE id=?", [now, fact.id]);
           continue;
         }
-        this.database.run("UPDATE project_facts SET canonical_key=?, cardinality=?, variant_context=?, status=?, conflict_status=?, conflict_group_id=?, updated_at=? WHERE id=?", [next.canonicalKey ?? null, next.cardinality ?? null, next.variantContext ?? null, next.status ?? "active", next.conflictStatus ?? "confirmed", next.conflictGroupId ?? null, now, fact.id]);
-        if (next.evidence) {
+        const persistence = next.conflictGroupId ? next : {
+          ...next,
+          status: next.status === "rejected" ? "rejected" as const : ["pending", "inferred", "risk"].includes(next.evidenceLevel ?? "pending") ? "pending_review" as const : "active" as const,
+          conflictStatus: next.status === "conflicting" ? "conflicting" as const : "confirmed" as const,
+          conflictGroupId: undefined
+        };
+        this.database.run("UPDATE project_facts SET canonical_key=?, cardinality=?, variant_context=?, status=?, conflict_status=?, conflict_group_id=?, evidence_level=?, ownership=?, updated_at=? WHERE id=?", [persistence.canonicalKey ?? null, persistence.cardinality ?? null, persistence.variantContext ?? null, persistence.status ?? "active", persistence.conflictStatus ?? "confirmed", persistence.conflictGroupId ?? null, persistence.evidenceLevel ?? fact.evidenceLevel ?? "pending", persistence.ownership ?? fact.ownership ?? "project", now, fact.id]);
+        this.database.run("UPDATE project_facts SET fact_type=?, experience_relation=?, value_json=? WHERE id=?", [persistence.type, persistence.experienceRelation ?? inferExperienceRelation(persistence), persistence.value ? JSON.stringify(persistence.value) : null, fact.id]);
+        if (persistence.evidence) {
           this.database.run("DELETE FROM project_fact_sources WHERE fact_id=?", [fact.id]);
-          for (const item of next.evidence) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)", [fact.id, item.sourceId, item.quote || null, item.locator ?? null, item.relation ?? "support", now]);
+          for (const item of persistence.evidence) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)", [fact.id, item.sourceId, item.quote || null, item.locator ?? null, item.relation ?? "support", now]);
         }
       }
       this.database.run("COMMIT");
@@ -1297,6 +1367,11 @@ export class SqliteProjectMemoryRepository {
     this.syncProjectSkillsForProject(projectId, now);
     this.database.flushNow();
     return this.listFacts(project.profileId, projectId, { includeStale: true, includeRejected: true }).filter((fact) => repairedIds.has(fact.id));
+  }
+
+  /** Compatibility alias retained for the existing IPC and callers. */
+  repairProjectFactSemantics(projectId: string, now = Date.now()): ProjectFact[] {
+    return this.repairProjectTechnicalSemantics(projectId, now);
   }
 
   setFactEmbedding(factId: string, embedding: number[], options: { model?: string; version?: string; now?: number } = {}): ProjectFact | undefined {
@@ -1338,9 +1413,10 @@ export class SqliteProjectMemoryRepository {
 
   private hydrateFact(row: Record<string, unknown>): ProjectFact {
     const evidence = this.database.all<{ sourceId: string; quote: string | null; locator: string | null; relation: string | null }>("SELECT source_id AS sourceId, quote, locator, relation FROM project_fact_sources WHERE fact_id = ? ORDER BY created_at", [String(row.id)]).map((item) => ({ sourceId: item.sourceId, quote: item.quote ?? "", ...(item.locator ? { locator: item.locator } : {}), relation: item.relation === "refute" ? "refute" : "support" } satisfies ProjectFactEvidence));
+    const technical = this.database.first<{ experienceRelation: string | null; valueJson: string | null }>("SELECT experience_relation AS experienceRelation, value_json AS valueJson FROM project_facts WHERE id = ?", [String(row.id)]);
     const sourceIds = evidence.map((item) => item.sourceId);
     const embedding = jsonArray<number>(row.embeddingJson);
-    return { id: String(row.id), projectId: String(row.projectId), profileId: String(row.profileId), type: String(row.type) as ProjectFactType, factType: String(row.type) as ProjectFactType, title: String(row.title), content: String(row.content), confidence: Number(row.confidence ?? 1), verified: Number(row.verified) === 1, sourceIds, evidence, scope: String(row.scope ?? "project") as ProjectFact["scope"], sectionPath: jsonArray<string>(row.sectionPathJson), evidenceLevel: String(row.evidenceLevel ?? "pending") as ProjectFact["evidenceLevel"], ...(row.subtype ? { subtype: String(row.subtype) } : {}), ...(row.canonicalKey ? { canonicalKey: String(row.canonicalKey) } : {}), ...(row.cardinality ? { cardinality: String(row.cardinality) as ProjectFact["cardinality"] } : {}), ...(row.variantContext ? { variantContext: String(row.variantContext) } : {}), status: String(row.status ?? "active") as ProjectFact["status"], conflictStatus: String(row.conflictStatus ?? "pending_review") as ProjectFact["conflictStatus"], ...(row.conflictGroupId ? { conflictGroupId: String(row.conflictGroupId) } : {}), ownership: String(row.ownership ?? "project") as ProjectFact["ownership"], stale: Number(row.stale) === 1, ...(embedding.length ? { embedding } : {}), ...(row.embeddingHash ? { embeddingHash: String(row.embeddingHash) } : {}), ...(row.embeddingModel ? { embeddingModel: String(row.embeddingModel) } : {}), ...(row.embeddingVersion ? { embeddingVersion: String(row.embeddingVersion) } : {}), ...(row.embeddingUpdatedAt ? { embeddingUpdatedAt: Number(row.embeddingUpdatedAt) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
+    return { id: String(row.id), projectId: String(row.projectId), profileId: String(row.profileId), type: String(row.type) as ProjectFactType, factType: String(row.type) as ProjectFactType, title: String(row.title), content: String(row.content), confidence: Number(row.confidence ?? 1), verified: Number(row.verified) === 1, sourceIds, evidence, scope: String(row.scope ?? "project") as ProjectFact["scope"], sectionPath: jsonArray<string>(row.sectionPathJson), evidenceLevel: String(row.evidenceLevel ?? "pending") as ProjectFact["evidenceLevel"], ...(row.subtype ? { subtype: String(row.subtype) } : {}), ...(row.canonicalKey ? { canonicalKey: String(row.canonicalKey) } : {}), ...(row.cardinality ? { cardinality: String(row.cardinality) as ProjectFact["cardinality"] } : {}), ...(row.variantContext ? { variantContext: String(row.variantContext) } : {}), status: String(row.status ?? "active") as ProjectFact["status"], conflictStatus: String(row.conflictStatus ?? "pending_review") as ProjectFact["conflictStatus"], ...(row.conflictGroupId ? { conflictGroupId: String(row.conflictGroupId) } : {}), ownership: String(row.ownership ?? "project") as ProjectFact["ownership"], experienceRelation: technical?.experienceRelation ? technical.experienceRelation as ProjectFact["experienceRelation"] : inferExperienceRelation({ type: String(row.type) as ProjectFactType, title: String(row.title), content: String(row.content) }), ...(technical?.valueJson ? { value: safeJson<ProjectFact["value"]>(technical.valueJson) } : {}), stale: Number(row.stale) === 1, ...(embedding.length ? { embedding } : {}), ...(row.embeddingHash ? { embeddingHash: String(row.embeddingHash) } : {}), ...(row.embeddingModel ? { embeddingModel: String(row.embeddingModel) } : {}), ...(row.embeddingVersion ? { embeddingVersion: String(row.embeddingVersion) } : {}), ...(row.embeddingUpdatedAt ? { embeddingUpdatedAt: Number(row.embeddingUpdatedAt) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
   }
 
   stats(profileId: string, projectId?: string): ProjectMemoryStats {
@@ -1350,8 +1426,11 @@ export class SqliteProjectMemoryRepository {
     const currentFacts = allFacts.filter((fact) => !fact.stale && fact.status !== "rejected");
     const questions = snapshot.interviewQuestions.filter((question) => !projectId || question.projectId === projectId).length;
     const conflictGroups = listConflictGroups(currentFacts, { projectId }).filter((group) => !group.resolved);
-    const userActions = listUserActions(currentFacts, projectId);
-    return { projects: scopedProjects.length, modules: snapshot.modules.filter((item) => !projectId || item.projectId === projectId).length, technicalPoints: snapshot.technicalPoints.filter((item) => !projectId || item.projectId === projectId).length, problems: snapshot.problems.filter((item) => !projectId || item.projectId === projectId).length, interviewQuestions: questions, questions, facts: currentFacts.length, eligibleFacts: currentFacts.filter(isFactEligible).length, reviewRequiredFacts: currentFacts.filter(isFactReviewRequired).length, userActionRequiredFacts: userActions.length, conflictingFacts: currentFacts.filter((fact) => fact.conflictStatus === "conflicting" || fact.status === "conflicting").length, conflictGroups: conflictGroups.length, userActions: userActions.length, staleFacts: allFacts.filter((fact) => fact.stale).length };
+    const userActions = projectId
+      ? listUserActions(currentFacts, projectId, scopedProjects[0])
+      : scopedProjects.flatMap((project) => listUserActions(currentFacts, project.id, project));
+    const familiarity = projectId && scopedProjects[0] ? calculateProjectCompleteness({ project: scopedProjects[0], facts: currentFacts, modules: snapshot.modules, problems: snapshot.problems, questions: snapshot.interviewQuestions }).projectFamiliarityScore : undefined;
+    return { projects: scopedProjects.length, modules: snapshot.modules.filter((item) => !projectId || item.projectId === projectId).length, technicalPoints: snapshot.technicalPoints.filter((item) => !projectId || item.projectId === projectId).length, problems: snapshot.problems.filter((item) => !projectId || item.projectId === projectId).length, interviewQuestions: questions, questions, facts: currentFacts.length, eligibleFacts: currentFacts.filter(isFactEligible).length, reviewRequiredFacts: currentFacts.filter(isFactReviewRequired).length, userActionRequiredFacts: userActions.length, conflictingFacts: currentFacts.filter((fact) => fact.conflictStatus === "conflicting" || fact.status === "conflicting").length, conflictGroups: conflictGroups.length, userActions: userActions.length, staleFacts: allFacts.filter((fact) => fact.stale).length, ...(familiarity === undefined ? {} : { projectFamiliarityScore: familiarity }) };
   }
 }
 

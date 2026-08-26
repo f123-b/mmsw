@@ -1,6 +1,6 @@
 import { isFactUserActionRequired } from "./project-fact-eligibility";
 import { semanticLabel } from "./project-semantics";
-import type { ProjectConflictGroup, ProjectFact, ProjectUserAction } from "./types";
+import type { ProjectConflictGroup, ProjectFact, ProjectMemoryProject, ProjectOwnershipMode, ProjectUserAction } from "./types";
 
 export function listConflictGroups(facts: ProjectFact[], options: { projectId?: string; includeResolved?: boolean } = {}): ProjectConflictGroup[] {
   const groups = new Map<string, ProjectFact[]>();
@@ -21,11 +21,12 @@ export function listConflictGroups(facts: ProjectFact[], options: { projectId?: 
   });
 }
 
-export function listUserActions(facts: ProjectFact[], projectId?: string): ProjectUserAction[] {
+export function listUserActions(facts: ProjectFact[], projectId?: string, project?: Pick<ProjectMemoryProject, "ownershipMode"> | ProjectOwnershipMode): ProjectUserAction[] {
   const scoped = facts.filter((fact) => (!projectId || fact.projectId === projectId) && !fact.stale && fact.status !== "rejected");
+  const ownershipMode: ProjectOwnershipMode = typeof project === "string" ? project : project?.ownershipMode ?? "personal";
   const actions: ProjectUserAction[] = [];
   for (const group of listConflictGroups(scoped)) actions.push({ id: `conflict:${group.id}`, projectId: group.projectId, type: "conflict_group", factIds: group.factIds, label: group.label, status: "pending" });
-  const actionable = scoped.filter(isFactUserActionRequired).filter((fact) => !fact.conflictGroupId || !(fact.status === "conflicting" || fact.conflictStatus === "conflicting"));
+  const actionable = scoped.filter((fact) => isFactUserActionRequired(fact, ownershipMode)).filter((fact) => !fact.conflictGroupId || !(fact.status === "conflicting" || fact.conflictStatus === "conflicting"));
   const responsibility = actionable.filter((fact) => fact.type === "responsibility");
   if (responsibility.length) actions.push({ id: `responsibility:${responsibility[0]?.projectId ?? projectId ?? "project"}`, projectId: responsibility[0]?.projectId ?? projectId ?? "", type: "responsibility_confirmation", factIds: responsibility.map((fact) => fact.id), label: "确认本人职责", status: "pending" });
   const grouped = new Map<string, ProjectFact[]>();

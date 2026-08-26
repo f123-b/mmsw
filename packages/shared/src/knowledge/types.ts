@@ -5,6 +5,16 @@ export type ProjectSourceRelationship = "primary" | "supporting" | "reference";
 export type ProjectSourceRole = "overview" | "code" | "resume" | "responsibility" | "debug" | "test" | "architecture" | "reference" | "other";
 export type ProjectSourceAssignmentMethod = "explicit" | "matched" | "manual" | "imported";
 
+export type ProjectOwnershipMode = "personal" | "team" | "partial" | "reference";
+
+export type ProjectExperienceRelation = "project" | "designed" | "implemented" | "integrated" | "configured" | "used" | "debugged" | "measured" | "observed";
+
+export type ProjectFactValue =
+  | { kind: "scalar"; value: number; unit?: string; display?: string }
+  | { kind: "enum"; value: string; display?: string }
+  | { kind: "range"; min: number; max: number; unit?: string; display?: string }
+  | { kind: "boolean"; value: boolean; display?: string };
+
 export interface ProjectSourceAssignment {
   id?: string;
   projectId: string;
@@ -48,6 +58,9 @@ export interface ProjectMemoryProject {
   time?: string;
   sourceIds: string[];
   confidence: number;
+  /** Defaults to personal for projects created before migration 23. */
+  ownershipMode?: ProjectOwnershipMode;
+  ownershipNote?: string;
 }
 
 export const PROJECT_FACT_TYPES = [
@@ -66,6 +79,7 @@ export const PROJECT_FACT_TYPES = [
   "solution",
   "result",
   "metric",
+  "parameter",
   "application",
   "timeline",
   "limitation"
@@ -116,6 +130,8 @@ export interface ProjectFact {
   conflictStatus?: "confirmed" | "conflicting" | "pending_review";
   conflictGroupId?: string;
   ownership?: ProjectFactOwnership;
+  experienceRelation?: ProjectExperienceRelation;
+  value?: ProjectFactValue;
   stale?: boolean;
   embedding?: number[];
   embeddingHash?: string;

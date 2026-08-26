@@ -22,9 +22,10 @@ describe("project fact eligibility", () => {
     expect(isFactEligible({ ...base, type: "result", evidenceLevel: "pending" })).toBe(false);
     expect(factPriority({ ...base, type: "responsibility" })).toBe(100);
   });
-  it("only asks the user to act on personal-risk items", () => {
+  it("keeps personal responsibility optional but requires team boundaries", () => {
     expect(isFactUserActionRequired({ ...base, evidenceLevel: "pending", status: "pending_review" })).toBe(false);
-    expect(isFactUserActionRequired({ ...base, type: "responsibility", evidenceLevel: "pending", status: "pending_review" })).toBe(true);
+    expect(isFactUserActionRequired({ ...base, type: "responsibility", evidenceLevel: "pending", status: "pending_review" })).toBe(false);
+    expect(isFactUserActionRequired({ ...base, type: "responsibility", evidenceLevel: "pending", status: "pending_review" }, "team")).toBe(true);
     expect(isFactUserActionRequired({ ...base, type: "metric", evidenceLevel: "risk", status: "pending_review" })).toBe(true);
     expect(isFactUserActionRequired({ ...base, type: "metric", evidenceLevel: "not-measured", status: "active" })).toBe(false);
     expect(isFactReviewRequired({ ...base, type: "metric", evidenceLevel: "not-measured", status: "active" })).toBe(false);

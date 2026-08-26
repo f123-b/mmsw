@@ -20,6 +20,7 @@ await mkdir(artifactDirectory, { recursive: true });
 await rm(userDataDirectory, { recursive: true, force: true });
 
 const answerRequests = [];
+const projectAnswerRequests = [];
 const chatRequests = [];
 const projectAgentRequests = [];
 let chatSecondTurnContextObserved = false;
@@ -105,6 +106,7 @@ const mockServer = createServer(async (request, response) => {
   const isChatStructured = messageContents.includes("用户问题：结构化卡片与动作审批 E2E");
   const isProjectAgent = messageContents.includes("你是项目资料整理 Agent");
   const isProjectAgentFailure = isProjectAgent && messageContents.includes("触发项目 Agent 错误 E2E");
+  if (!isQuestionClassifier && /你的电流环频率多少|为什么要 PWM 中心对齐|低速抖动怎么查/.test(messageContents)) projectAnswerRequests.push(payload);
   if (isChatFirstTurn || isChatSecondTurn || isChatStructured) {
     chatRequests.push(payload);
     if (isChatSecondTurn && serializedMessages.includes("帮我分析 FOC 项目") && serializedMessages.includes("第一点 xxx；第二点是电流环与采样同步。")) chatSecondTurnContextObserved = true;
@@ -146,7 +148,7 @@ const mockServer = createServer(async (request, response) => {
   if (!isQuestionClassifier && !isChatFirstTurn && !isChatSecondTurn && !isChatStructured) answerRequests.push(payload);
   const slow = messageContents.includes(interviewQuestions.auto[0]);
   const structuredAnswer = JSON.stringify({ text: "结构化缺口已识别", sources: [{ id: "e2e-source", label: "E2E 题库资料", kind: "question-bank" }], cards: [{ id: "e2e-coverage-card", kind: "coverage", title: "题库覆盖", body: "建议补充一张可核验答案卡。", data: { coverage: 50 } }], actions: [{ id: "e2e-create-question", type: "create_question", label: "加入题库", rationale: "保留为下一轮复习题。", payload: { canonicalText: "结构化覆盖 E2E 题" }, requiresConfirmation: true }] });
-  const projectAgentAnswer = JSON.stringify({ text: "项目 Agent E2E 正常：已读取当前项目、待确认事实与证据。", sources: [], cards: [{ id: "project-gap-e2e", kind: "gap", title: "待确认职责", body: "请确认你是否负责电流环实现。" }], actions: [], context: { intent: "project-gap-analysis" } });
+  const projectAgentAnswer = JSON.stringify({ text: "项目 Agent E2E 正常：已读取当前项目、参数、决策、问题链与证据。", sources: [], cards: [{ id: "project-gap-e2e", kind: "gap", title: "待补充 Why / 问题链", body: "请补充关键技术决策的原因，或补齐问题链中的因果关系。" }], actions: [], context: { intent: "project-gap-analysis" } });
   const answer = isProjectAgent
     ? projectAgentAnswer
     : isChatStructured
@@ -340,7 +342,7 @@ try {
     if (!profile?.id || !base?.id) throw new Error('project seed prerequisites missing');
     if (!profile.knowledgeBaseIds.includes(base.id)) await window.interviewCopilot.profiles.save({ ...profile, knowledgeBaseIds: [...profile.knowledgeBaseIds, base.id] });
     const project = await window.interviewCopilot.projects.create({ profileId: profile.id, name: 'E2E FOC 电机控制项目' });
-    const text = ['# E2E FOC 电机控制项目', '项目名称：E2E FOC 电机控制项目', '项目背景：在 STM32F405 上实现单轴 FOC 电机控制。', '个人职责：负责电流环、ADC 与 PWM 同步实现。', '技术栈：STM32F405、FreeRTOS、FOC、CAN、DMA。', '问题：采样时序抖动。', '原因：ADC 触发点与 PWM 更新不同步。', '解决：统一定时器触发并记录时间戳。'].join('\\n');
+    const text = ['# E2E FOC 电机控制项目', '项目名称：E2E FOC 电机控制项目', '项目背景：在 STM32F405 上实现单轴 FOC 电机控制。', '个人职责：负责电流环、ADC 与 PWM 同步实现。', '技术栈：STM32F405、FreeRTOS、FOC、CAN、DMA。', '电流环频率：20 kHz', '速度环频率：1 kHz', 'PWM 频率：20 kHz', 'CAN 波特率：1 Mbps', '技术决策：选择：PWM 中心对齐；原因：方便在稳定采样窗口采 ADC。', '问题：低速抖动。', '原因：采样窗口和参数问题。', '解决：调整采样窗口及 PI。', '结果：低速运行稳定。'].join('\\n');
     const document = await window.interviewCopilot.knowledge.ingest({ knowledgeBaseId: base.id, profileId: profile.id, projectId: project.id, sourceRole: 'overview', filename: 'e2e-foc-project.md', mimeType: 'text/markdown', bytes: new TextEncoder().encode(text), documentType: 'project' });
     const memory = await window.interviewCopilot.projectMemory.rebuildProject(project.id);
     const conflictCandidates = [
@@ -352,9 +354,10 @@ try {
     const currentMemory = await window.interviewCopilot.projectMemory.get(profile.id);
     const stats = await window.interviewCopilot.projectMemory.stats(profile.id, project.id);
     const conflictGroups = await window.interviewCopilot.projectMemory.conflictGroups(project.id);
-    return { document, project: currentMemory.projects.find((item) => item.id === project.id), factCount: currentMemory.facts?.filter((fact) => fact.projectId === project.id).length ?? memory.facts?.filter((fact) => fact.projectId === project.id).length ?? 0, stats, conflictGroups: conflictGroups.map((group) => ({ id: group.id, canonicalKey: group.canonicalKey, factIds: group.factIds })) };
+    const projectFacts = currentMemory.facts?.filter((fact) => fact.projectId === project.id) ?? memory.facts?.filter((fact) => fact.projectId === project.id) ?? [];
+    return { document, project: currentMemory.projects.find((item) => item.id === project.id), factCount: projectFacts.length, parameterFacts: projectFacts.filter((fact) => fact.type === 'parameter').map((fact) => ({ canonicalKey: fact.canonicalKey, value: fact.value, relation: fact.experienceRelation })), decisionFacts: projectFacts.filter((fact) => fact.type === 'technical_decision' || fact.type === 'decision').length, problemFacts: projectFacts.filter((fact) => ['challenge', 'cause', 'solution'].includes(fact.type)).length, stats, conflictGroups: conflictGroups.map((group) => ({ id: group.id, canonicalKey: group.canonicalKey, factIds: group.factIds })) };
   })()`);
-  if (projectSeed?.document?.documentType !== "project" || projectSeed?.document?.projectAssignment?.status !== "assigned" || !projectSeed?.project?.id || projectSeed.factCount < 1 || projectSeed.stats?.conflictGroups !== 1 || projectSeed.conflictGroups?.length !== 1 || projectSeed.conflictGroups[0]?.canonicalKey !== "mcu.main") throw new Error(`Project Library semantic seed failed: ${JSON.stringify(projectSeed)}`);
+  if (projectSeed?.document?.documentType !== "project" || projectSeed?.document?.projectAssignment?.status !== "assigned" || !projectSeed?.project?.id || projectSeed.project.ownershipMode !== "personal" || projectSeed.factCount < 1 || !projectSeed.parameterFacts?.some((fact) => fact.canonicalKey === "control.current_loop.frequency" && fact.value?.value === 20_000 && fact.value?.unit === "Hz" && fact.relation === "configured") || projectSeed.parameterFacts?.filter((fact) => fact.canonicalKey === "control.current_loop.frequency" || fact.canonicalKey === "control.speed_loop.frequency" || fact.canonicalKey === "sampling.pwm.frequency").length !== 3 || projectSeed.decisionFacts < 1 || projectSeed.problemFacts < 3 || projectSeed.stats?.projectFamiliarityScore <= 0 || projectSeed.stats?.conflictGroups !== 1 || projectSeed.conflictGroups?.length !== 1 || projectSeed.conflictGroups[0]?.canonicalKey !== "mcu.main") throw new Error(`Project Library V4 semantic seed failed: ${JSON.stringify(projectSeed)}`);
   await main.evaluate("location.reload()");
   await waitFor(() => document.documentElement?.dataset.appReady === "true");
   await clickText("项目库");
@@ -364,7 +367,7 @@ try {
   await waitFor(() => document.body.innerText.includes("项目 Agent E2E 正常"), 15_000);
   await waitForNode(() => projectAgentRequests.length === 1, 15_000);
   const projectAgentPrompt = JSON.stringify(projectAgentRequests[0]?.messages ?? []);
-  if (!projectAgentPrompt.toLowerCase().includes("当前项目：e2e foc") || !projectAgentPrompt.includes("REVIEW_REQUIRED") || !projectAgentPrompt.includes("项目 ID：")) throw new Error("PROJECT_AGENT_GROUNDED_CONTEXT failed");
+  if (!projectAgentPrompt.toLowerCase().includes("当前项目：e2e foc") || !projectAgentPrompt.includes("KEY_PARAMETERS") || !projectAgentPrompt.includes("TECHNICAL_DECISIONS") || !projectAgentPrompt.includes("PROBLEM_CHAINS") || !projectAgentPrompt.includes("control.current_loop.frequency") || !projectAgentPrompt.includes("REVIEW_REQUIRED") || !projectAgentPrompt.includes("项目 ID：")) throw new Error("PROJECT_AGENT_GROUNDED_CONTEXT failed");
   await main.evaluate("document.querySelector('.project-agent-panel')?.scrollIntoView({ block: 'center' }); true");
   await sleep(250);
   await screenshot("05b-project-agent.png");
@@ -424,6 +427,10 @@ try {
   await main.evaluate(`(async () => { await window.interviewCopilot.settings.update("llm", { providerName: "Mock LLM", baseUrl: "http://127.0.0.1:${mockPort}", model: "mock-model", apiKey: "mock-key", timeoutMs: 10_000, maxRetries: 0 }); await window.interviewCopilot.settings.update("asr", { providerName: "Custom WebSocket ASR Gateway", providerType: "custom-gateway", baseUrl: "ws://127.0.0.1:${asrPort}/realtime", model: "mock-asr", language: "zh-CN", apiKey: "", timeoutMs: 3_000, maxRetries: 0 }); return true; })()`);
   await main.evaluate("location.reload()");
   await waitFor(() => document.documentElement?.dataset.appReady === "true");
+  await clickText("开始一场面试");
+  await waitFor(() => document.body.innerText.includes("LIVE INTERVIEW"));
+  await waitFor(() => [...document.querySelectorAll('label')].some((item) => (item.innerText || '').includes('重点项目') && item.querySelector('select')));
+  await fillLabel("重点项目", projectSeed.project.id);
   await waitFor(() => Boolean(document.querySelector("button.start-interview")));
   answerRequests.length = 0;
   await clickSelector("button.start-interview");
@@ -453,6 +460,29 @@ try {
   await screenshot("12-overlay-answer-streaming.png", overlay);
   await waitForNode(() => answerRequests.length >= 3, 15_000);
   evidence.push("Remote Transcript: PASS; Question Confirmed: PASS; AUTO_3_QUESTIONS: PASS; AUTO Answer: PASS; Overlay: PASS");
+
+  const projectQuestionAssertions = [
+    { question: "你的电流环频率多少？", markers: ["control.current_loop.frequency", "20 kHz"], label: "EXACT_PARAMETER_RETRIEVAL" },
+    { question: "为什么要 PWM 中心对齐？", markers: ["TECHNICAL_DECISIONS", "PWM 中心对齐"], label: "TECHNICAL_DECISION_RETRIEVAL" },
+    { question: "低速抖动怎么查？", markers: ["PROBLEM_CHAINS", "低速抖动", "采样窗口和参数问题"], label: "PROBLEM_CHAIN_RETRIEVAL" }
+  ];
+  // Let the three scheduled interview answers drain before injecting the
+  // explicit project questions. This keeps the assertion about project
+  // retrieval, rather than about queue ordering between unrelated questions.
+  await sleep(6_000);
+  for (const assertion of projectQuestionAssertions) {
+    const beforeProjectQuestion = projectAnswerRequests.length;
+    const beforeAnswerRequest = answerRequests.length;
+    console.log(`FUNCTIONAL_E2E_PROJECT_QUERY ${assertion.label}`);
+    void main.command("Runtime.evaluate", { expression: `setTimeout(() => void window.interviewCopilot.interview.answerQuestion(${JSON.stringify(assertion.question)}), 0);`, awaitPromise: false, returnByValue: false });
+    await sleep(4_000);
+    const capturedProjectRequests = projectAnswerRequests.slice(beforeProjectQuestion);
+    const capturedAnswerRequests = answerRequests.slice(beforeAnswerRequest);
+    const answerPrompt = JSON.stringify([...capturedProjectRequests, ...capturedAnswerRequests]);
+    if (capturedProjectRequests.length === 0 && capturedAnswerRequests.length === 0) throw new Error(`${assertion.label} produced no provider request`);
+    if (!assertion.markers.every((marker) => answerPrompt.includes(marker))) throw new Error(`${assertion.label} failed: ${answerPrompt.slice(0, 8_000)}`);
+  }
+  evidence.push("Interview Project Context: PASS; EXACT_PARAMETER_RETRIEVAL: PASS; TECHNICAL_DECISION_RETRIEVAL: PASS; PROBLEM_CHAIN_RETRIEVAL: PASS");
 
   const beforeManualMode = answerRequests.length;
   await main.evaluate("void window.interviewCopilot.interview.setAutomationMode('MANUAL'); true");

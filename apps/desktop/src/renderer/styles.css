@@ -972,6 +972,19 @@ body { background: #f1f1ee; color: var(--text-primary); }
 .project-memory-metrics > div { border: 1px solid #e5e9f0; border-radius: 12px; padding: 12px 14px; background: #fff; color: #75839a; }
 .project-memory-metrics > div strong { display: block; margin-top: 4px; color: #253044; font-size: 20px; }
 .project-memory-metrics > p { grid-column: 1 / -1; margin: 0; color: #a45c2b; }
+.project-v4-overview { margin: 0 0 18px; padding: 18px; border: 1px solid #dfe6f1; border-radius: 16px; background: linear-gradient(135deg, #fbfdff, #f5f8fc); }
+.project-v4-overview > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.project-v4-overview h2 { margin: 5px 0; color: #253044; font-size: 21px; }
+.project-v4-overview h3 { margin: 0 0 9px; color: #253044; font-size: 15px; }
+.project-v4-overview .project-memory-metrics { margin-bottom: 12px; }
+.project-v4-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.project-v4-columns article { min-width: 0; padding: 14px; border: 1px solid #e1e7f0; border-radius: 12px; background: #fff; }
+.project-v4-columns p { margin: 8px 0; color: #536174; line-height: 1.5; white-space: pre-wrap; }
+.project-v4-columns p strong { color: #2d3d55; }
+.project-v4-columns .evidence-link { display: inline-block; margin: 0 0 0 6px; font-size: 11px; }
+.fact-conflict-marker { margin-left: 6px; color: #b24a42; font-size: 11px; font-weight: 600; }
+.project-scope-note { margin: 12px 0; }
+@media (max-width: 900px) { .project-v4-overview > header, .project-v4-columns { grid-template-columns: 1fr; display: grid; } }
 .fact-review-toolbar { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: -4px; }.fact-review-toolbar button { border: 1px solid #dce3ec; border-radius: 999px; padding: 8px 13px; background: #fff; color: #536174; white-space: nowrap; }.fact-review-toolbar button.active { border-color: #385b8e; background: #edf3fb; color: #294c7d; }.inline-responsibility-form { display: grid; gap: 8px; margin: 10px 0 16px; }.inline-responsibility-form label { color: #75839a; font-size: 12px; }.inline-responsibility-form textarea { resize: vertical; border: 1px solid #d9e0e8; border-radius: 10px; padding: 10px 12px; color: #2f3c4e; font: inherit; }
 
 /* Guided model and provider settings */

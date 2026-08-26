@@ -1,5 +1,6 @@
 import { normalizeTechnicalTerms } from "../terminology";
-import type { ProjectFact, ProjectFactCardinality } from "./types";
+import { canonicalProjectParameterKey, inferExperienceRelation, normalizeProjectFactValue } from "./project-technical-memory";
+import type { ProjectFact, ProjectFactCardinality, ProjectFactValue } from "./types";
 
 const SET_TYPES = new Set(["technology", "module"]);
 const NARRATIVE_TYPES = new Set(["background", "goal", "architecture", "challenge", "cause", "solution", "result", "application", "technical_decision", "decision", "limitation"]);
@@ -23,6 +24,8 @@ function isNoRtos(text: string): boolean { return /(?:\b(?:no\s+rtos|without\s+r
 export function canonicalProjectFactKey(fact: ProjectFact): string | undefined {
   const text = factText(fact);
   const normalized = normalizeTechnicalTerms(text).toLowerCase();
+  const parameterKey = canonicalProjectParameterKey(fact);
+  if (fact.type === "parameter" || parameterKey) return parameterKey;
   if (fact.type === "timeline" && fact.subtype !== "supporting-development-window") return "project.timeline";
   if (fact.type === "metric") {
     if (/电流环|current[\s._-]*loop/i.test(text)) return "control.current_loop.frequency";
@@ -72,18 +75,28 @@ export function inferFactCardinality(fact: ProjectFact): ProjectFactCardinality 
   if (fact.cardinality === "single" || fact.cardinality === "set" || fact.cardinality === "narrative") return fact.cardinality;
   const key = canonicalProjectFactKey(fact);
   if (key?.startsWith("responsibility.")) return "narrative";
-  if (key && (key.startsWith("mcu.") || key.startsWith("rtos.") || key.startsWith("motor.driver") || key.endsWith(".frequency") || key === "project.timeline")) return "single";
+  if (key && (key.startsWith("mcu.") || key.startsWith("rtos.") || key.startsWith("motor.driver") || key.endsWith(".frequency") || key.includes(".bitrate") || key.includes(".baudrate") || key.includes(".limit") || key.includes("_limit") || key.includes(".pole_pairs") || key.includes(".resolution") || key.includes(".period") || key.startsWith("control.") || key.startsWith("runtime.") || key === "sampling.window" || key === "project.timeline")) return "single";
   if (SET_TYPES.has(fact.type) || ["hardware", "software"].includes(fact.type)) return "set";
   if (fact.type === "responsibility" || NARRATIVE_TYPES.has(fact.type)) return "narrative";
   return "narrative";
 }
 
 function valueForComparison(fact: ProjectFact, key: string | undefined): string {
+  const structured = normalizeProjectFactValue(fact.value, fact.content);
+  if (structured && key && (key.includes("frequency") || key.includes("bitrate") || key.includes("baudrate") || key.includes(".limit") || key.includes("_limit") || key.includes("pole_pairs") || key.includes("resolution") || key.includes("period") || key.startsWith("control.") || key.startsWith("runtime.") || key === "sampling.window")) return comparableStructuredValue(structured);
   const text = normalizeTechnicalTerms(factText(fact));
   if (key === "mcu.main") return text.match(/(?:stm32[a-z]?\d+|esp32|rk\d+[a-z]?)/i)?.[0]?.toLowerCase() ?? (/(?:mcu|芯片)/i.test(text) ? "mcu" : compact(text));
   if (key === "rtos.primary") return isNoRtos(text) ? "none" : /free\s*rtos/i.test(text) ? "freertos" : "rtos";
   if (key?.startsWith("control.") || key === "project.timeline" || key?.startsWith("communication.") || key?.startsWith("responsibility.")) return compact(text);
   return compact(text);
+}
+
+/** Display strings are evidence-friendly labels, not semantic values. */
+function comparableStructuredValue(value: ProjectFactValue): string {
+  if (value.kind === "scalar") return `scalar:${value.value}:${value.unit ?? ""}`;
+  if (value.kind === "range") return `range:${value.min}:${value.max}:${value.unit ?? ""}`;
+  if (value.kind === "boolean") return `boolean:${value.value}`;
+  return `enum:${value.value}`;
 }
 
 export function canonicalProjectFactValue(fact: ProjectFact): string {
@@ -158,7 +171,11 @@ export function semanticFactKey(fact: ProjectFact): string | undefined {
 export function withFactSemantics(fact: ProjectFact): ProjectFact {
   const canonicalKey = fact.canonicalKey ?? canonicalProjectFactKey(fact);
   const cardinality = inferFactCardinality({ ...fact, canonicalKey });
-  return { ...fact, ...(canonicalKey ? { canonicalKey } : {}), cardinality };
+  const parameter = fact.type === "parameter" || Boolean(canonicalProjectParameterKey(fact));
+  // The relation is a local semantic projection, not an LLM-controlled claim.
+  // Recompute it on every normalization so a third-party library can never be
+  // upgraded to “implemented” by model output or stale persisted metadata.
+  return { ...fact, ...(canonicalKey ? { canonicalKey } : {}), cardinality, experienceRelation: inferExperienceRelation(fact), ...(parameter ? { value: normalizeProjectFactValue(fact.value, fact.content) } : {}) };
 }
 
 export function semanticLabel(canonicalKey: string | undefined, facts: ProjectFact[] = []): string {
@@ -170,6 +187,17 @@ export function semanticLabel(canonicalKey: string | undefined, facts: ProjectFa
     "control.current_loop.frequency": "电流环频率冲突",
     "control.speed_loop.frequency": "速度环频率冲突",
     "control.frequency": "控制频率冲突",
+    "sampling.pwm.frequency": "PWM 频率冲突",
+    "sampling.adc.frequency": "ADC 采样频率冲突",
+    "communication.can.bitrate": "CAN 波特率冲突",
+    "communication.uart.baudrate": "UART 波特率冲突",
+    "motor.current_limit": "电流限制冲突",
+    "motor.voltage_limit": "电压限制冲突",
+    "motor.pole_pairs": "电机极对数冲突",
+    "sensor.encoder.resolution": "编码器分辨率冲突",
+    "rtos.control_task.period": "控制任务周期冲突",
+    "rtos.communication_task.period": "通信任务周期冲突",
+    "rtos.task.period": "RTOS 任务周期冲突",
     "project.timeline": "项目时间冲突"
   };
   if (canonicalKey?.startsWith("responsibility.")) return `职责归属冲突 · ${facts[0]?.title ?? "职责"}`;

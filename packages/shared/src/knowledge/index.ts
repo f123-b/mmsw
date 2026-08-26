@@ -7,6 +7,7 @@ export * from "./project-memory";
 export * from "./project-identity";
 export * from "./project-facts";
 export * from "./project-semantics";
+export * from "./project-technical-memory";
 export * from "./project-taxonomy";
 export * from "./project-actions";
 export * from "./project-fact-eligibility";

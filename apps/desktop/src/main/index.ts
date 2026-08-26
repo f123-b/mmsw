@@ -26,7 +26,7 @@ import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-s
 import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
 import { createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
-import { isFactEligible, isFactReviewRequired } from "@interview-copilot/shared";
+import { deriveProjectProblemChains, deriveProjectTechnicalDecisions, formatProjectFactValue, isFactEligible, isFactReviewRequired, normalizeProjectOwnershipMode, resolveProjectAnswerPerspective } from "@interview-copilot/shared";
 import type { ChatAction, ChatCancelReason, ChatResponse } from "@interview-copilot/shared";
 import type { QuestionBankBulkPatch, QuestionBankListOptions } from "./database";
 
@@ -883,20 +883,27 @@ function chatContext(profileId?: string, userMessage = "", projectId?: string): 
   const snapshot = (plan.includeProjectMemory || Boolean(projectId)) && profileId ? projectMemoryRepository?.getSnapshot(profileId) : undefined;
   const project = snapshot?.projects.find((item) => item.id === projectId) ?? (snapshot?.projects.length === 1 ? snapshot.projects[0] : undefined);
   if (project) {
-    sections.push(`当前项目：${project.name}\n项目 ID：${project.id}`);
+    const ownershipMode = normalizeProjectOwnershipMode(project.ownershipMode);
+    sections.push(`当前项目：${project.name}\n项目 ID：${project.id}\n项目归属模式：${ownershipMode}${project.ownershipNote ? `\n归属说明：${project.ownershipNote}` : ""}`);
     const projectFacts = snapshot?.facts ?? [];
     const facts = projectFacts.filter((fact) => fact.projectId === project.id && isFactEligible(fact)).slice(0, 24);
     const currentProjectFacts = projectFacts.filter((fact) => fact.projectId === project.id && fact.status !== "rejected" && !fact.stale);
+    const parameterFacts = facts.filter((fact) => fact.type === "parameter").slice(0, 16);
+    const decisionFacts = facts.filter((fact) => fact.type === "technical_decision" || fact.type === "decision").slice(0, 12);
+    const problemChains = deriveProjectProblemChains(currentProjectFacts).slice(0, 8);
     const conflictGroups = projectMemoryRepository?.listConflictGroups(project.id) ?? [];
     const userActions = projectMemoryRepository?.listUserActions(project.id) ?? [];
     const pendingFacts = currentProjectFacts.filter((fact) => isFactReviewRequired(fact) && !(fact.status === "conflicting" || fact.conflictStatus === "conflicting")).slice(0, 30);
     const completeness = profileId ? projectMemoryRepository?.getProjectCompleteness(profileId, project.id) : undefined;
     sections.push([
-      facts.length ? `AUTHORITATIVE（可用于第一人称回答，必须以这些事实为准）：\n${facts.map((fact) => `- [${fact.id}] [${fact.type}] [证据 ${fact.evidenceLevel ?? "pending"}] [归属 ${fact.ownership ?? "unknown"}] ${fact.title}：${fact.content}`).join("\n")}` : "AUTHORITATIVE：无",
+      facts.length ? `AUTHORITATIVE（只能使用这些事实；第一人称必须遵守项目归属与经验关系政策）：\n${facts.map((fact) => { const perspective = resolveProjectAnswerPerspective(project, fact); return `- [${fact.id}] [${fact.type}] [证据 ${fact.evidenceLevel ?? "pending"}] [归属 ${fact.ownership ?? "unknown"}] [经验 ${perspective.relation}] [${perspective.voice}] ${fact.title}：${fact.content}`; }).join("\n")}` : "AUTHORITATIVE：无",
+      parameterFacts.length ? `KEY_PARAMETERS（配置/设计参数，优先于普通项目资料）：\n${parameterFacts.map((fact) => `- [${fact.id}] ${fact.title}：${formatProjectFactValue(fact.value) || fact.content}${fact.canonicalKey ? ` [${fact.canonicalKey}]` : ""}`).join("\n")}` : "KEY_PARAMETERS：无",
+      decisionFacts.length ? `TECHNICAL_DECISIONS（只使用已有 choose/reason/tradeoff 证据，不补写未出现的取舍）：\n${decisionFacts.map((fact) => `- [${fact.id}] ${fact.title}：${fact.content}`).join("\n")}` : "TECHNICAL_DECISIONS：无",
+      problemChains.length ? `PROBLEM_CHAINS（由现有 challenge/cause/solution/result 派生，不是新事实源）：\n${problemChains.map((chain) => `- ${chain.challenge?.content ?? "问题待补充"}；原因：${chain.cause?.content ?? "待补充"}；解决：${chain.solution?.content ?? "待补充"}；结果：${chain.result?.content ?? "待补充"}`).join("\n")}` : "PROBLEM_CHAINS：无",
       pendingFacts.length ? `REVIEW_REQUIRED（禁止直接当作事实）：\n${pendingFacts.map((fact) => `- [${fact.id}] [${fact.status === "conflicting" ? "冲突" : "待确认"}] [${fact.type}] ${fact.title}：${fact.content}${fact.evidence?.[0]?.quote ? `；证据：“${fact.evidence[0].quote.slice(0, 240)}”` : "；无引用证据"}`).join("\n")}` : "REVIEW_REQUIRED：无",
       userActions.length ? `USER_ACTION_REQUIRED（按用户决策计数，当前 ${userActions.length} 项）：\n${userActions.map((action) => `- [${action.type}] ${action.label}：${action.factIds.join("、")}`).join("\n")}` : "USER_ACTION_REQUIRED：无",
       conflictGroups.length ? `CONFLICT_GROUPS（只有真实语义冲突才进入此处，当前 ${conflictGroups.length} 组）：\n${conflictGroups.map((group) => `- [${group.canonicalKey}] ${group.label}：${group.facts.map((fact) => `${fact.id}=${fact.content}`).join(" / ")}`).join("\n")}` : "CONFLICT_GROUPS：无",
-      completeness ? `DERIVED_VIEW（由 active facts 推导，仅供展示）：项目 ${project.name}（${project.id}）；项目 ID：${project.id}；准备度 ${completeness.interviewReadinessScore}%；缺失类型 ${completeness.missingFactTypes.join("、") || "无"}；弱证据 ${completeness.weakEvidence.length} 项；冲突组 ${conflictGroups.length} 组。` : `DERIVED_VIEW：项目 ${project.name}（${project.id}）；项目 ID：${project.id}，尚未计算完整度`
+      completeness ? `DERIVED_VIEW（由 active facts 推导，仅供展示）：项目 ${project.name}（${project.id}）；归属 ${ownershipMode}；熟悉度 ${completeness.projectFamiliarityScore}%（技术 ${completeness.technicalCoverageScore}% / 参数 ${completeness.parameterCoverageScore}% / 决策 ${completeness.decisionCoverageScore}% / 问题 ${completeness.problemCoverageScore}%）；准备度 ${completeness.interviewReadinessScore}%；缺失类型 ${completeness.missingFactTypes.join("、") || "无"}；弱证据 ${completeness.weakEvidence.length} 项；冲突组 ${conflictGroups.length} 组。` : `DERIVED_VIEW：项目 ${project.name}（${project.id}）；项目 ID：${project.id}，尚未计算完整度`
     ].join("\n"));
     sources.push(...(project.sourceIds ?? []).slice(0, 8));
     const scopedChunks = profileId ? projectKnowledgeChunks(profileId, project.id) : [];
@@ -982,7 +989,7 @@ async function streamChat(conversationId: string, content: string, resumeMessage
       ? `${contextForQuestion.text}\n\n原始用户问题：${userMessage.content}\n已有回答：${existing.content}\n请从中断位置继续回答。不要重复已有回答，保持原答案的语言、结构和语气，只输出新增内容。`
       : `${contextForQuestion.text}\n\n用户问题：${content}`;
     const systemInstruction = conversation.conversation.projectId
-      ? "你是项目资料整理 Agent。你的目标是把用户上传的源码/文档和用户补充说明整理成真实、自洽、能经受面试追问的项目库。必须区分 AUTHORITATIVE（eligible ProjectFact）、REVIEW_REQUIRED（系统待复核）、USER_ACTION_REQUIRED（确实需要用户决定）、PROJECT_SOURCE（当前项目原始资料）和 GLOBAL_REFERENCE（通用参考）。第一人称项目经历只能来自 AUTHORITATIVE；PROJECT_SOURCE 只能辅助解释实现，GLOBAL_REFERENCE 只能解释通用概念，二者都不能证明用户职责或项目指标。绝不补写没有证据的职责、指标、硬件型号或实现细节；不确定时直接提出一个短问题，并给 2~4 个互斥选项。回答必须是 JSON 对象 {text,sources,cards,actions,context}。可建议的 actions 只有 add_project_fact、review_fact、create_question，全部 requiresConfirmation=true。add_project_fact.payload 必须包含 projectId,type,title,content,sourceIds,evidence；evidence 每项必须包含真实 sourceId 和原文 quote。任何写入都只能说‘建议’，不能声称已经执行。代码题和面试题必须给口述思路、完整可运行代码、复杂度和边界。"
+      ? "你是项目资料整理 Agent。你的目标是把用户上传的源码/文档和用户补充说明整理成真实、自洽、能经受面试追问的项目库。必须区分 AUTHORITATIVE（eligible ProjectFact）、KEY_PARAMETERS（结构化配置参数）、TECHNICAL_DECISIONS（已有选择/原因/取舍）、PROBLEM_CHAINS（由既有事实派生）、REVIEW_REQUIRED（系统待复核）、USER_ACTION_REQUIRED（确实需要用户决定）、PROJECT_SOURCE（当前项目原始资料）和 GLOBAL_REFERENCE（通用参考）。ownershipMode 决定项目级语气：personal 可按 experienceRelation 使用第一人称，team/partial 只有 confirmed-user 职责或明确个人范围可用第一人称，reference 永远禁止第一人称。第一人称项目经历只能来自 AUTHORITATIVE；第三方库只能说使用/集成，不能说候选人实现了它；PROJECT_SOURCE 只能辅助解释实现，GLOBAL_REFERENCE 只能解释通用概念，二者都不能证明用户职责或项目指标。personal 项目不要把缺少 Responsibility 当成首要缺口，应优先提示缺少参数、Why 决策或问题链因果；绝不补写没有证据的职责、指标、硬件型号、参数或实现细节；不确定时直接提出一个短问题，并给 2~4 个互斥选项。回答必须是 JSON 对象 {text,sources,cards,actions,context}。可建议的 actions 只有 add_project_fact、review_fact、create_question，全部 requiresConfirmation=true。add_project_fact.payload 必须包含 projectId,type,title,content,sourceIds,evidence；evidence 每项必须包含真实 sourceId 和原文 quote。任何写入都只能说‘建议’，不能声称已经执行。代码题和面试题必须给口述思路、完整可运行代码、复杂度和边界。"
       : "你是 Interview Copilot 面试助手。只根据提供的 Profile、Resume、JD 和知识回答；如果资料不足，请明确说明，不要编造经历。普通问题输出简洁 Markdown。对于项目缺口、题库覆盖或明确要求执行动作的问题，可以输出一个 JSON 对象：{text, sources, cards, actions, context}；actions 只能是建议，必须 requiresConfirmation=true，绝不能声称已经写入数据库。";
     for await (const delta of provider.stream({ model: selectedModel, sections: [
       { name: "system/base", content: systemInstruction },
@@ -1568,8 +1575,9 @@ function registerIpc(): void {
     return runProviderPreflight({ llm: providerConfigStore.get("llm"), asr: providerConfigStore.get("asr"), embedding: providerConfigStore.get("embedding") }, Boolean(checkReachability), providerPreflightCache);
   });
   ipcMain.handle("projects:list", () => projectRepository?.list() ?? []);
-  ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string }) => projectRepository?.create(input.name, input.profileId));
+  ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => projectRepository?.create(input.name, input.profileId, Date.now(), input.ownershipMode, input.ownershipNote));
   ipcMain.handle("projects:rename", (_event, projectId: string, name: string) => projectRepository?.rename(projectId, name));
+  ipcMain.handle("projects:update", (_event, projectId: string, input: { name?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => projectRepository?.update(projectId, input));
   ipcMain.handle("projects:delete", (_event, projectId: string) => { projectRepository?.delete(projectId); return true; });
 }
 
@@ -1771,6 +1779,7 @@ if (hasSingleInstanceLock) {
     const knowledgeRoute = routeKnowledge(questionAnalysis);
     const detectedProjectId = questionAnalysis.project ? projectSnapshot.projects.find((project) => project.name.toLowerCase() === questionAnalysis.project?.toLowerCase())?.id : undefined;
     const targetProjectId = interviewContext?.projectId ?? detectedProjectId;
+    const targetProject = targetProjectId ? projectSnapshot.projects.find((project) => project.id === targetProjectId) : undefined;
     const useProjectContext = Boolean(interviewContext?.projectId) || knowledgeRoute.useProjectMemory;
     const embeddingSettings = providerConfigStore?.get("embedding");
     const embeddingKey = embeddingSettings?.apiKey && embeddingSettings.model
@@ -1798,7 +1807,8 @@ if (hasSingleInstanceLock) {
       detectedProjectId,
       questionType: questionAnalysis.type,
       limit: 5,
-      minScore: 0.18
+      minScore: 0.18,
+      includeReferenceProject: Boolean(interviewContext?.projectId)
     }) ?? [];
     const embeddingBudget = await resolveEmbeddingWithinBudget(queryEmbeddingPromise, 100);
     const queryEmbedding = embeddingBudget.vector;
@@ -1809,12 +1819,21 @@ if (hasSingleInstanceLock) {
         questionType: questionAnalysis.type,
         queryEmbedding,
         limit: 5,
-        minScore: 0.18
+        minScore: 0.18,
+        includeReferenceProject: Boolean(interviewContext?.projectId)
       });
     }
     const relevantFactMatches = (useProjectContext || (factMatches[0]?.score ?? 0) >= 0.28) ? factMatches : [];
     const trustedFactExperience = relevantFactMatches.filter((hit) => isFactEligible(hit.fact))
-      .map((hit) => `结构化项目事实（${hit.fact.type}，证据级别 ${hit.fact.evidenceLevel ?? "pending"}，归属 ${hit.fact.ownership ?? "unknown"}，来源 ${hit.fact.sourceIds.join("、")}）：\n${hit.fact.title}\n${hit.fact.content}`);
+      .map((hit) => { const perspective = targetProject ? resolveProjectAnswerPerspective(targetProject, hit.fact) : undefined; return `结构化项目事实（${hit.fact.type}，证据级别 ${hit.fact.evidenceLevel ?? "pending"}，归属 ${hit.fact.ownership ?? "unknown"}，经验 ${perspective?.relation ?? hit.fact.experienceRelation ?? "project"}，${perspective?.voice ?? "project"}，来源 ${hit.fact.sourceIds.join("、")}，键 ${hit.fact.canonicalKey ?? "none"}）：\n${hit.fact.title}\n${hit.fact.type === "parameter" ? formatProjectFactValue(hit.fact.value) || hit.fact.content : hit.fact.content}`; });
+    const targetProjectFacts = targetProject
+      ? (projectSnapshot.facts ?? []).filter((fact) => fact.projectId === targetProject.id && isFactEligible(fact))
+      : [];
+    const structuredProjectRetrieval = targetProject ? [
+      ...(targetProjectFacts.filter((fact) => fact.type === "parameter").slice(0, 8).length ? [`KEY_PARAMETERS（结构化配置值，优先于普通资料）：${targetProjectFacts.filter((fact) => fact.type === "parameter").slice(0, 8).map((fact) => `[${fact.canonicalKey ?? "parameter"}] ${fact.title}=${formatProjectFactValue(fact.value) || fact.content}`).join("；")}`] : []),
+      ...(deriveProjectTechnicalDecisions(targetProjectFacts).slice(0, 5).length ? [`TECHNICAL_DECISIONS（仅已有 choice/reason/tradeoff）：${deriveProjectTechnicalDecisions(targetProjectFacts).slice(0, 5).map((decision) => `${decision.choice}${decision.reason ? `；原因：${decision.reason}` : ""}${decision.tradeoff ? `；取舍：${decision.tradeoff}` : ""}`).join("\n")}`] : []),
+      ...(deriveProjectProblemChains(targetProjectFacts).slice(0, 4).length ? [`PROBLEM_CHAINS（由既有 challenge/cause/solution/result 派生）：${deriveProjectProblemChains(targetProjectFacts).slice(0, 4).map((chain) => `${chain.challenge?.content ?? "问题待补充"}；原因：${chain.cause?.content ?? "待补充"}；解决：${chain.solution?.content ?? "待补充"}；结果：${chain.result?.content ?? "待补充"}`).join("\n")}`] : [])
+    ] : [];
     const artifactExperience = retrieveProfileExperience(normalizedQuestion, profileBuilderService?.get(profileId)?.artifact).map((hit) => hit.text);
     // Profile Builder is asynchronous and may not exist yet on the first
     // question. Retrieve relevant resume excerpts directly so the first
@@ -1884,6 +1903,8 @@ if (hasSingleInstanceLock) {
       personalMemoryEvidence: personalEvidence,
       preparedAnswer: preparedCard && questionBankMatch ? { content: preparedCard.content, score: questionBankMatch.score, verified: preparedCard.verified, source: "question-bank" } : undefined,
       retrievedKnowledge: [
+        ...(targetProject ? [`项目回答视角政策：${resolveProjectAnswerPerspective(targetProject, relevantFactMatches[0]?.fact ?? { type: "background", title: "项目", content: "", id: "", projectId: targetProject.id, confidence: 0, verified: false, sourceIds: [] }).instruction}`] : []),
+        ...structuredProjectRetrieval,
         ...(preparedAnswer ? [preparedAnswer] : []),
         ...jobContext,
         ...retrieved.slice(0, preparedAnswer ? 2 : 3).map((chunk) => `[${chunk.metadata.scope === "global-reference" ? "GLOBAL_REFERENCE" : chunk.metadata.scope === "project" ? "PROJECT_SOURCE" : "PROFILE_SOURCE"}] ${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`)

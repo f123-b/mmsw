@@ -2,6 +2,7 @@ import { normalizeTechnicalTerms } from "../terminology";
 import { markdownSectionText, normalizedFieldName, parseMarkdownProjectDocument, type ProjectMarkdownSection } from "./project-document-parser";
 import { validateProjectTimeline } from "./project-timeline";
 import { areCanonicalFactValuesEquivalent, canonicalProjectFactKey, inferFactCardinality, isDeterministicContradiction, withFactSemantics } from "./project-semantics";
+import { canonicalProjectParameterKey, normalizeProjectFactValue } from "./project-technical-memory";
 import type { ProjectFact, ProjectFactEvidence, ProjectFactEvidenceLevel, ProjectFactScope, ProjectFactType, ProjectMemoryAnalysisInput, ProjectMemorySource } from "./types";
 
 export interface ProjectFactValidationIssue { code: string; message: string; }
@@ -27,6 +28,7 @@ const FIELD_LABELS = {
   solution: ["解决方案", "解决措施", "解决", "方案", "solution", "优化"],
   result: ["最终结果", "结果", "效果", "result"],
   metric: ["性能指标", "指标", "性能测试", "性能结果", "benchmark", "metric"],
+  parameter: ["关键参数", "项目参数", "配置参数", "参数", "parameter", "parameters"],
   application: ["应用场景", "使用场景", "落地场景", "application"],
   hardware: ["硬件", "硬件平台", "主控", "芯片", "hardware"],
   software: ["软件", "软件平台", "操作系统", "工具链", "software"],
@@ -96,6 +98,29 @@ export function valueAfterLabel(line: string, labels: readonly string[]): string
 function fieldMatch(line: string, field: keyof typeof FIELD_LABELS): string | undefined {
   return valueAfterLabel(line, FIELD_LABELS[field]);
 }
+
+const PARAMETER_TITLES: Record<string, string> = {
+  "control.current_loop.frequency": "电流环频率",
+  "control.speed_loop.frequency": "速度环频率",
+  "control.position_loop.frequency": "位置环频率",
+  "sampling.pwm.frequency": "PWM 频率",
+  "sampling.adc.frequency": "ADC 采样率",
+  "communication.can.bitrate": "CAN 波特率",
+  "communication.uart.baudrate": "UART 波特率",
+  "motor.current_limit": "电流限幅",
+  "motor.voltage_limit": "电压限幅",
+  "motor.pole_pairs": "电机极对数",
+  "sensor.encoder.resolution": "编码器分辨率",
+  "rtos.control_task.period": "控制任务周期",
+  "rtos.communication_task.period": "通信任务周期",
+  "rtos.task.period": "RTOS 任务周期",
+  "control.timeout": "控制超时时间",
+  "control.pi": "PI 参数",
+  "control.filter": "控制滤波参数",
+  "runtime.buffer.size": "缓冲区大小",
+  "runtime.queue.depth": "队列深度",
+  "sampling.window": "采样窗口"
+};
 
 function inlineFieldMatch(line: string, field: keyof typeof FIELD_LABELS, startAt = 1): string | undefined {
   const labels = [...FIELD_LABELS[field]].sort((a, b) => b.length - a.length).map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
@@ -177,6 +202,7 @@ function factForField(projectId: string, source: ProjectMemorySource, field: key
     case "solution": return [fact(projectId, source, "solution", "解决方案", content, lineIndex, common)];
     case "result": return [fact(projectId, source, "result", "项目结果", content, lineIndex, common)];
     case "metric": return [fact(projectId, source, "metric", "性能指标", content, lineIndex, { ...common, evidenceLevel: evidenceLevel ?? (/未测量|未测试|没有正式 benchmark/i.test(content) ? "not-measured" : undefined) })];
+    case "parameter": return [fact(projectId, source, "parameter", "关键参数", content, lineIndex, { ...common, confidence: 0.84 })];
     case "application": return [fact(projectId, source, "application", "应用场景", content, lineIndex, common)];
     default: return [];
   }
@@ -206,6 +232,7 @@ function fieldFromName(name: string): keyof typeof FIELD_LABELS | undefined {
   if (/解决|方案|优化/.test(name)) return "solution";
   if (/结果|效果/.test(name)) return "result";
   if (/指标|性能|benchmark/i.test(name)) return "metric";
+  if (/参数|配置/.test(name)) return "parameter";
   if (/应用|场景/.test(name)) return "application";
   return undefined;
 }
@@ -246,6 +273,7 @@ function sectionField(section: ProjectMarkdownSection): keyof typeof FIELD_LABEL
   if (/解决|方案|优化/.test(title)) return "solution";
   if (/结果|效果/.test(title)) return "result";
   if (/指标|性能|benchmark/i.test(title)) return "metric";
+  if (/参数|配置/.test(title)) return "parameter";
   if (/应用|场景/.test(title)) return "application";
   return undefined;
 }
@@ -261,6 +289,14 @@ function extractLabeledFacts(projectId: string, source: ProjectMemorySource): Pr
       const content = fieldMatch(line, field);
       if (!content) continue;
       result.push(...factForField(projectId, source, field, content, original, lineIndex, section, explicitEvidenceLevel(content)));
+    }
+    // A parameter section is convenient, but technical notes often use a
+    // compact unlabeled line such as “电流环 20kHz”. Recognize only stable
+    // parameter slots with a numeric value; measured performance remains a
+    // metric and is deliberately not matched here.
+    if (!fieldMatch(line, "parameter") && /\d/.test(line)) {
+      const parameterKey = canonicalProjectParameterKey({ type: "parameter", title: line, content: line });
+      if (parameterKey) result.push(fact(projectId, source, "parameter", PARAMETER_TITLES[parameterKey] ?? "关键参数", line, lineIndex, { quote: original, scope: inferScope(section), sectionPath: section?.path, evidenceLevel: explicitEvidenceLevel(line), confidence: 0.84 }));
     }
     const challenge = fieldMatch(line, "challenge");
     if (challenge) {
@@ -346,10 +382,13 @@ export class ProjectFactValidator {
   }
 
   static sanitize(fact: ProjectFact): ProjectFact | undefined {
-    const result = this.validate(fact);
+    const normalized = ["metric", "technology"].includes(fact.type) && canonicalProjectParameterKey(fact)
+      ? { ...fact, type: "parameter" as const, factType: "parameter" as const, value: normalizeProjectFactValue(fact.value, fact.content) }
+      : fact;
+    const result = this.validate(normalized);
     if (result.status === "rejected") return undefined;
-    const pending = result.status === "pending_review" || fact.evidenceLevel === "pending" || (fact.type === "timeline" && validateProjectTimeline(fact.content).status === "unknown");
-    return withFactSemantics({ ...fact, status: pending ? "pending_review" : "active" });
+    const pending = result.status === "pending_review" || normalized.evidenceLevel === "pending" || (normalized.type === "timeline" && validateProjectTimeline(normalized.content).status === "unknown");
+    return withFactSemantics({ ...normalized, status: pending ? "pending_review" : "active" });
   }
 }
 

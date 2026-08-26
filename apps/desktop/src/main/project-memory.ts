@@ -137,7 +137,7 @@ export class ProjectMemoryService {
        this.memories.replaceSnapshot(project.profileId, snapshot, Date.now(), project.id);
        // Reclassify legacy rows after each rebuild so old title-based false
        // conflicts are repaired without requiring manual cleanup.
-       this.memories.repairProjectFactSemantics(project.id);
+       this.memories.repairProjectTechnicalSemantics(project.id);
        const saved = this.memories.getSnapshot(project.profileId);
       await this.embedFacts?.(project.profileId, project.id);
       this.analysisRuns?.record({ id: runId, profileId: project.profileId, projectId: project.id, runType: "project-memory", inputHash, status: "completed", inputSnapshot, output: saved, snapshotVersion });
@@ -166,7 +166,7 @@ export function createProjectMemoryModel(answerProvider: AnswerProvider, setting
       for await (const delta of answerProvider.stream({ model: settings.model, maxOutputTokens: 4_000, sections: [
         { name: "system/base", content: "你是 Project Fact Extractor。输入已经绑定到一个项目，只能提取有 source id、quote 且能在对应资料中逐字定位的原子事实。禁止把 Resume 整体、其他项目、面试 AI 回答或通用技能写入当前项目。项目职责只能来自明确的项目级职责字段；时间只能是日期范围、持续周期或明确未知。不要把‘同步’‘划分’‘平台’等普通句子片段当成字段值。" },
         { name: "profile-context", content: JSON.stringify({ profileId: input.profileId, projectId: input.projectId, projectName: input.projectName, sources }) },
-        { name: "output-format", content: "只输出一个 JSON 对象，不要 Markdown，不要解释：{facts:[{id,factType,title,content,confidence,scope,evidenceLevel,sources:[{sourceId,quote,locator}]}]}。factType 必须属于 background/goal/responsibility/hardware/software/architecture/module/technology/technical_decision/challenge/decision/cause/solution/result/metric/application/timeline/limitation。scope 只能是 project/module/problem/architecture。项目事实必须原子化；没有逐字 quote 的候选不要输出；不要生成 projects、modules、technicalPoints、problems 或 interviewQuestions。" },
+        { name: "output-format", content: "只输出一个 JSON 对象，不要 Markdown，不要解释：{facts:[{id,factType,title,content,confidence,scope,evidenceLevel,experienceRelation,value,sources:[{sourceId,quote,locator}]}]}。factType 必须属于 background/goal/responsibility/hardware/software/architecture/module/technology/technical_decision/challenge/decision/cause/solution/result/metric/parameter/application/timeline/limitation。parameter 只表示配置/设计参数（如控制环频率、采样频率、CAN/UART 速率、限流/限压、极对数、编码器分辨率、任务周期）；metric 只表示实测性能结果。value 只能是 scalar/enum/range/boolean，无法从原文确定时省略。第三方库只能标记为 used/integrated/configured/debugged，不得标记 implemented。scope 只能是 project/module/problem/architecture。项目事实必须原子化；没有逐字 quote 的候选不要输出；不要生成 projects、modules、technicalPoints、problems 或 interviewQuestions。" },
         { name: "question", content: "本轮不生成面试题；题目由已合并且带证据的 Project Facts 在本地生成。" }
       ] })) output += delta;
       return output;
