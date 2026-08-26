@@ -19,6 +19,7 @@ import { discoverProviderModels } from "./model-catalog";
 import { parseDocument } from "./document-parsers";
 import { SafeLogger } from "./logger";
 import { buildConversationHistory } from "./chat-context";
+import { chatFailureText, classifyChatError, PROJECT_AGENT_TIMEOUT_MS } from "../shared/chat-errors";
 import { ShutdownController } from "./shutdown-controller";
 import { MiddleMouseShortcutManager, middleMouseHelperCandidates, shouldHandleMiddleMouseShortcut } from "./middle-mouse-shortcut";
 import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-service-manager";
@@ -851,9 +852,23 @@ function chatContext(profileId?: string, userMessage = "", projectId?: string): 
   if (project) {
     const projectFacts = snapshot?.facts ?? [];
     const facts = projectFacts.filter((fact) => fact.projectId === project.id && fact.verified && fact.status !== "rejected").slice(0, 24);
-    const pending = projectFacts.filter((fact) => fact.projectId === project.id && !fact.verified && fact.status !== "rejected").length;
+    const pendingFacts = projectFacts.filter((fact) => fact.projectId === project.id && !fact.verified && fact.status !== "rejected").slice(0, 30);
+    const conflictingFacts = pendingFacts.filter((fact) => fact.status === "conflicting" || fact.conflictStatus === "conflicting");
     const completeness = profileId ? projectMemoryRepository?.getProjectCompleteness(profileId, project.id) : undefined;
-    sections.push(`当前项目：${project.name}\n背景：${project.description || "未补充"}\n职责：${project.role || "未确认"}\n技术栈：${project.technologyStack.join("、") || "未确认"}\n${facts.length ? `已确认事实：\n${facts.map((fact) => `- [${fact.type}] ${fact.title}：${fact.content}`).join("\n")}` : "已确认事实：无"}\n待确认事实：${pending} 条${completeness ? `\n项目资料完整度：${completeness.completeness}%` : ""}`);
+    const modules = snapshot?.modules.filter((item) => item.projectId === project.id).slice(0, 12) ?? [];
+    const problems = snapshot?.problems.filter((item) => item.projectId === project.id).slice(0, 8) ?? [];
+    sections.push([
+      `当前项目：${project.name}`,
+      `项目 ID：${project.id}`,
+      `背景：${project.description || "未补充"}`,
+      `职责：${project.role || "未确认"}`,
+      `技术栈：${project.technologyStack.join("、") || "未确认"}`,
+      facts.length ? `已确认事实：\n${facts.map((fact) => `- [${fact.id}] [${fact.type}] ${fact.title}：${fact.content}`).join("\n")}` : "已确认事实：无",
+      pendingFacts.length ? `待确认/冲突事实：\n${pendingFacts.map((fact) => `- [${fact.id}] [${fact.status === "conflicting" ? "冲突" : "待确认"}] [${fact.type}] ${fact.title}：${fact.content}${fact.evidence?.[0]?.quote ? `；证据：“${fact.evidence[0].quote.slice(0, 240)}”` : "；无引用证据"}`).join("\n")}` : "待确认/冲突事实：无",
+      modules.length ? `模块：\n${modules.map((item) => `- ${item.moduleName}：${item.description}`).join("\n")}` : "模块：无",
+      problems.length ? `问题与解决：\n${problems.map((item) => `- ${item.problem}；原因：${item.cause}；方案：${item.solution}；结果：${item.result}`).join("\n")}` : "问题与解决：无",
+      completeness ? `项目资料状态：准备度 ${completeness.interviewReadinessScore}%；缺失类型 ${completeness.missingFactTypes.join("、") || "无"}；弱证据 ${completeness.weakEvidence.length} 项；冲突 ${conflictingFacts.length} 项。` : "项目资料状态：尚未计算"
+    ].join("\n"));
     sources.push(...(project.sourceIds ?? []).slice(0, 8));
     const details = projectMemoryRepository?.listSourceDetails(project.id).slice(0, 5) ?? [];
     if (details.length) sections.push(`项目来源（写入建议必须引用这里的 sourceId）：\n${details.map((source) => `- ${source.sourceId}：${source.title}`).join("\n")}`);
@@ -916,7 +931,12 @@ async function streamChat(conversationId: string, content: string, resumeMessage
   appLogger?.info("CHAT_STREAM_START", { conversationId, messageId: assistantMessage.id, provider: settings.providerName, model: selectedModel, charactersGenerated: existing?.content.length ?? 0 });
   let answer = existing?.content ?? "";
   let firstTokenAt = existing?.firstTokenAt;
-  const provider = new OpenAICompatibleAnswerProvider(settings);
+  // Project analysis often includes evidence, conflicts and structured action
+  // proposals. It needs a longer deadline than live interview answers.
+  const providerSettings = conversation.conversation.projectId
+    ? { ...settings, timeoutMs: Math.max(settings.timeoutMs, PROJECT_AGENT_TIMEOUT_MS) }
+    : settings;
+  const provider = new OpenAICompatibleAnswerProvider(providerSettings);
   const contextForQuestion = chatContext(conversation.conversation.profileId, userMessage.content, conversation.conversation.projectId);
   try {
     const history = buildConversationHistory(conversation.messages.filter((message) => message.id !== existing?.id));
@@ -949,7 +969,7 @@ async function streamChat(conversationId: string, content: string, resumeMessage
     const requestedCancel = entry.reason;
     const providerAbort = error instanceof Error && error.name === "AbortError";
     const status = requestedCancel ? "cancelled" : answer.trim() ? "partial_error" : "failed";
-    const errorCode = typeof (error as { code?: unknown })?.code === "string" ? String((error as { code: string }).code) : providerAbort ? "CHAT_PROVIDER_ABORT" : "CHAT_PROVIDER_ERROR";
+    const errorCode = providerAbort ? "CHAT_PROVIDER_ABORT" : classifyChatError(error);
     const cancelReason = requestedCancel ?? (providerAbort ? "provider_abort" : undefined);
     const telemetry = { provider: settings.providerName, model: selectedModel, charactersGenerated: answer.length, startedAt, firstTokenAt, finishedAt, durationMs: finishedAt - startedAt, finishReason: provider.lastStreamMetadata?.finishReason, ...(cancelReason ? { cancelReason } : {}), errorCode };
     conversationRepository.updateMessage(assistantMessage.id, answer, status, finishedAt, telemetry);
@@ -959,7 +979,8 @@ async function streamChat(conversationId: string, content: string, resumeMessage
       broadcast("chat:cancelled", { conversationId, messageId: assistantMessage.id, message, cancelReason });
       appLogger?.info("CHAT_STREAM_CANCEL", { conversationId, messageId: assistantMessage.id, ...telemetry });
     } else {
-      broadcast("chat:error", { conversationId, messageId: assistantMessage.id, code: errorCode, message: answer.trim() ? "回答生成中断，已保留当前内容。" : "AI 服务暂时中断，请重试。", userMessage: answer.trim() ? "回答生成中断，已保留当前内容。" : "生成失败", recoverable: true });
+      const failureText = answer.trim() ? "回答生成中断，已保留当前内容。" : chatFailureText(errorCode, selectedModel);
+      broadcast("chat:error", { conversationId, messageId: assistantMessage.id, code: errorCode, model: selectedModel, provider: settings.providerName, message: failureText, userMessage: failureText, recoverable: true });
       appLogger?.warn(answer.trim() ? "CHAT_STREAM_PARTIAL_ERROR" : "CHAT_STREAM_FAILED", { conversationId, messageId: assistantMessage.id, ...telemetry, error: String(error) });
     }
   } finally { chatAbortControllers.delete(conversationId); }
@@ -1313,14 +1334,17 @@ function registerIpc(): void {
     try {
       const chunks = chunkText(parsed.text, { documentId: parsed.documentId, filename: parsed.filename, documentType });
       knowledgeRepository.replaceChunks(document.id, chunks);
-      const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, status: "ready" });
+      // Preserve the resolved category when transitioning processing -> ready.
+      // Omitting it here used to overwrite every imported project as "other",
+      // which prevented automatic project assignment and left Project Library empty.
+      const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, documentType, status: "ready" });
       if (documentType === "project" && input.profileId && projectMemoryService) {
         const assignment = projectMemoryService.assignDocument(input.profileId, saved.id, input.projectId);
         return { ...saved, projectAssignment: assignment, ...(assignment.status === "needs_assignment" ? { error: assignment.message } : {}) };
       }
       return saved;
     } catch (error) {
-      const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, status: "error", error: String(error) });
+      const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, documentType, status: "error", error: String(error) });
       return saved;
     }
   });

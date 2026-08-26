@@ -21,6 +21,7 @@ await rm(userDataDirectory, { recursive: true, force: true });
 
 const answerRequests = [];
 const chatRequests = [];
+const projectAgentRequests = [];
 let chatSecondTurnContextObserved = false;
 let screenshotAnswerRequests = 0;
 let screenshotOnlyRequests = 0;
@@ -78,9 +79,17 @@ const mockServer = createServer(async (request, response) => {
   const isChatFirstTurn = messageContents.includes("用户问题：帮我分析 FOC 项目");
   const isChatSecondTurn = messageContents.includes("用户问题：把你刚才第二点详细展开");
   const isChatStructured = messageContents.includes("用户问题：结构化卡片与动作审批 E2E");
+  const isProjectAgent = messageContents.includes("你是项目资料整理 Agent");
+  const isProjectAgentFailure = isProjectAgent && messageContents.includes("触发项目 Agent 错误 E2E");
   if (isChatFirstTurn || isChatSecondTurn || isChatStructured) {
     chatRequests.push(payload);
     if (isChatSecondTurn && serializedMessages.includes("帮我分析 FOC 项目") && serializedMessages.includes("第一点 xxx；第二点是电流环与采样同步。")) chatSecondTurnContextObserved = true;
+  }
+  if (isProjectAgent) projectAgentRequests.push(payload);
+  if (isProjectAgentFailure) {
+    response.writeHead(401, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "invalid mock key" } }));
+    return;
   }
   const imageMessage = (payload.messages ?? []).some((message) => Array.isArray(message.content) && message.content.some((part) => part?.type === "image_url"));
   if (imageMessage) {
@@ -113,7 +122,10 @@ const mockServer = createServer(async (request, response) => {
   if (!isQuestionClassifier && !isChatFirstTurn && !isChatSecondTurn && !isChatStructured) answerRequests.push(payload);
   const slow = messageContents.includes("中断服务程序");
   const structuredAnswer = JSON.stringify({ text: "结构化缺口已识别", sources: [{ id: "e2e-source", label: "E2E 题库资料", kind: "question-bank" }], cards: [{ id: "e2e-coverage-card", kind: "coverage", title: "题库覆盖", body: "建议补充一张可核验答案卡。", data: { coverage: 50 } }], actions: [{ id: "e2e-create-question", type: "create_question", label: "加入题库", rationale: "保留为下一轮复习题。", payload: { canonicalText: "结构化覆盖 E2E 题" }, requiresConfirmation: true }] });
-  const answer = isChatStructured
+  const projectAgentAnswer = JSON.stringify({ text: "项目 Agent E2E 正常：已读取当前项目、待确认事实与证据。", sources: [], cards: [{ id: "project-gap-e2e", kind: "gap", title: "待确认职责", body: "请确认你是否负责电流环实现。" }], actions: [], context: { intent: "project-gap-analysis" } });
+  const answer = isProjectAgent
+    ? projectAgentAnswer
+    : isChatStructured
     ? structuredAnswer
     : isChatFirstTurn
     ? "第一点 xxx；第二点是电流环与采样同步。"
@@ -287,6 +299,30 @@ try {
   await waitFor(() => document.body.innerText.includes("Mock E2E Knowledge"));
   await screenshot("05-knowledge.png");
   evidence.push("Knowledge: PASS");
+
+  const projectSeed = await main.evaluate(`(async () => { const profile = await window.interviewCopilot.profiles.active(); const bases = await window.interviewCopilot.knowledge.listBases(); const base = bases.find((item) => item.name === 'Mock E2E Knowledge') ?? bases[0]; if (!profile?.id || !base?.id) throw new Error('project seed prerequisites missing'); if (!profile.knowledgeBaseIds.includes(base.id)) await window.interviewCopilot.profiles.save({ ...profile, knowledgeBaseIds: [...profile.knowledgeBaseIds, base.id] }); const text = ['# E2E FOC 电机控制项目', '项目名称：E2E FOC 电机控制项目', '项目背景：在 STM32F405 上实现单轴 FOC 电机控制。', '个人职责：负责电流环、ADC 与 PWM 同步实现。', '技术栈：STM32F405、FreeRTOS、FOC、CAN、DMA。', '问题：采样时序抖动。', '原因：ADC 触发点与 PWM 更新不同步。', '解决：统一定时器触发并记录时间戳。'].join('\\n'); const document = await window.interviewCopilot.knowledge.ingest({ knowledgeBaseId: base.id, profileId: profile.id, filename: 'e2e-foc-project.md', mimeType: 'text/markdown', bytes: new TextEncoder().encode(text), documentType: 'project' }); const memory = await window.interviewCopilot.projectMemory.rebuild(profile.id); return { document, project: memory.projects[0], factCount: memory.facts?.length ?? 0 }; })()`);
+  if (projectSeed?.document?.documentType !== "project" || projectSeed?.document?.projectAssignment?.status !== "assigned" || !projectSeed?.project?.id || projectSeed.factCount < 1) throw new Error(`Project Agent seed failed: ${JSON.stringify(projectSeed)}`);
+  await main.evaluate("location.reload()");
+  await waitFor(() => document.documentElement?.dataset.appReady === "true");
+  await clickText("项目库");
+  await waitFor(() => document.body.innerText.includes("项目资料整理助手") && document.body.innerText.toLowerCase().includes("e2e foc"), 15_000);
+  await fillSelector(".project-agent-composer textarea", "检查当前项目资料中的冲突、缺失和不确定项。");
+  await clickSelector(".project-agent-composer button");
+  await waitFor(() => document.body.innerText.includes("项目 Agent E2E 正常"), 15_000);
+  await waitForNode(() => projectAgentRequests.length === 1, 15_000);
+  const projectAgentPrompt = JSON.stringify(projectAgentRequests[0]?.messages ?? []);
+  if (!projectAgentPrompt.toLowerCase().includes("当前项目：e2e foc") || !projectAgentPrompt.includes("待确认/冲突事实：") || !projectAgentPrompt.includes("项目 ID：")) throw new Error("PROJECT_AGENT_GROUNDED_CONTEXT failed");
+  await main.evaluate("document.querySelector('.project-agent-panel')?.scrollIntoView({ block: 'center' }); true");
+  await sleep(250);
+  await screenshot("05b-project-agent.png");
+  evidence.push("Project Agent: PASS; PROJECT_AGENT_GROUNDED_CONTEXT: PASS; PROJECT_AGENT_STRUCTURED_RESPONSE: PASS");
+  await fillSelector(".project-agent-composer textarea", "触发项目 Agent 错误 E2E");
+  await clickSelector(".project-agent-composer button");
+  await waitFor(() => document.body.innerText.includes("模型密钥未配置、已失效或没有访问权限") && document.body.innerText.includes("重新生成") && document.body.innerText.includes("检查模型设置"), 15_000);
+  const failedAgentBubble = await main.evaluate("(() => { const item = document.querySelector('.project-agent-message.failed'); return item ? { text: item.innerText, buttons: item.querySelectorAll('button').length } : undefined; })()");
+  if (!failedAgentBubble?.text || failedAgentBubble.buttons !== 2) throw new Error(`PROJECT_AGENT_FAILURE_RECOVERY failed: ${JSON.stringify(failedAgentBubble)}`);
+  await screenshot("05c-project-agent-recovery.png");
+  evidence.push("PROJECT_AGENT_FAILURE_MESSAGE: PASS; PROJECT_AGENT_RETRY_ACTION: PASS; PROJECT_AGENT_SETTINGS_ACTION: PASS");
 
   await clickText("新对话");
   await fillSelector("textarea[aria-label='面试准备问题']", "帮我分析 FOC 项目");

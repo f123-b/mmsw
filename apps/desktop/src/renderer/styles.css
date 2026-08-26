@@ -1089,6 +1089,9 @@ body { background: #f1f1ee; color: var(--text-primary); }
 .project-agent-message.user { justify-self: end; background: #344f75; color: #fff; }
 .project-agent-message > strong { display: block; margin-bottom: 5px; font-size: 11px; opacity: .72; }
 .project-agent-message .markdown-answer { font-size: 13px; line-height: 1.6; }
+.project-agent-message.failed { border: 1px solid #e6b8b4; background: #fff7f6; color: #7f3632; }
+.project-agent-recovery { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.project-agent-recovery .outline-pill { min-height: 34px; padding: 7px 12px; }
 .project-agent-composer { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 10px; margin-top: 12px; }
 .project-agent-composer textarea { resize: vertical; min-height: 78px; border: 1px solid #d9e0e8; border-radius: 13px; padding: 12px 14px; outline: none; color: #2f3c4e; font: inherit; }
 .project-agent-composer textarea:focus { border-color: #7e9bc2; box-shadow: 0 0 0 3px rgba(69,103,149,.1); }
