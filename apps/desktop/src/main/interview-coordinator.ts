@@ -31,10 +31,24 @@ import {
   type QuestionEvent,
   type SessionState,
   type TranscriptRecord,
-  type TranscriptUtterance
+  type TranscriptUtterance,
+  type VisionInput
 } from "@interview-copilot/shared";
 import type { AudioStartOptions } from "./audio-manager";
 import type { RealtimeConnectOptions, RealtimeConnectionState } from "./realtime-session";
+import {
+  RuntimeAbortRegistry,
+  RuntimeTimerRegistry,
+  RuntimeTraceBuffer,
+  withRuntimeTimeout,
+  type InterviewRuntimeDiagnostics,
+  type RuntimeAnswerState,
+  type RuntimeQuestionState,
+  type RuntimeSessionState,
+  type RuntimeTraceEvent,
+  type RuntimeTraceEventName
+} from "./runtime-diagnostics";
+import type { ScreenshotTraceEvent, ScreenshotTraceEventName } from "./screenshot-pipeline";
 
 export interface InterviewAudioPort {
   readonly configuredPath?: string;
@@ -103,6 +117,12 @@ export interface InterviewCoordinatorOptions {
   questionSilenceMs?: number;
   /** Upper bound for one answer so a stalled provider cannot block queued questions. */
   answerTimeoutMs?: number;
+  /** Upper bound between provider start and its first visible token. */
+  providerFirstTokenTimeoutMs?: number;
+  /** Upper bound for profile/project retrieval before the answer is failed. */
+  contextTimeoutMs?: number;
+  /** Hard boundary for local session cleanup after graceful cancellation. */
+  stopTimeoutMs?: number;
 }
 
 export type InterviewCoordinatorEvent =
@@ -114,7 +134,29 @@ export type InterviewCoordinatorEvent =
   | { type: "automation_mode"; mode: "MANUAL" | "AUTO" }
   | { type: "answer_mode"; mode: AnswerMode }
   | { type: "diagnostic"; message: string }
-  | { type: "telemetry"; name: string; fields: Record<string, unknown> };
+  | { type: "telemetry"; name: string; fields: Record<string, unknown> }
+  | { type: "runtime_trace"; event: RuntimeTraceEvent }
+  | { type: "screenshot_trace"; event: ScreenshotTraceEvent };
+
+interface RuntimeQuestionRecord {
+  question: QuestionCandidate;
+  state: RuntimeQuestionState;
+  sessionGeneration: number;
+}
+
+interface RuntimeAnswerRecord {
+  operationId: string;
+  questionId: string;
+  sessionGeneration: number;
+  providerRequestId: string;
+  state: RuntimeAnswerState;
+  controller: AbortController;
+  answerId?: string;
+  startedAt: number;
+  firstTokenAt?: number;
+  detached?: boolean;
+  screenshotRequestId?: string;
+}
 
 export class InterviewCoordinator extends EventEmitter {
   private readonly detector: QuestionDetector;
@@ -166,6 +208,20 @@ export class InterviewCoordinator extends EventEmitter {
   private pendingQuestionTrace: QuestionTrace | undefined;
   private currentQuestionTrace: QuestionTrace | undefined;
   private activeQuestionTrace: QuestionTrace | undefined;
+  private runtimeSessionState: RuntimeSessionState = "idle";
+  private readonly runtimeTimers = new RuntimeTimerRegistry();
+  private readonly runtimeAbortControllers = new RuntimeAbortRegistry();
+  private readonly runtimeTrace = new RuntimeTraceBuffer();
+  private readonly runtimeQuestions = new Map<string, RuntimeQuestionRecord>();
+  private readonly runtimeAnswers = new Map<string, RuntimeAnswerRecord>();
+  private readonly answerTasks = new Set<Promise<void>>();
+  private readonly questionTasks = new Set<Promise<void>>();
+  private stopPromise: Promise<void> | undefined;
+  private lastProgressAt = Date.now();
+  private runtimeSessionStartedAt = 0;
+  private runtimeSessionId: string | undefined;
+  private lastRuntimeLifecycleEvent: RuntimeTraceEventName | undefined;
+  private lastRuntimeLifecycleEventAt: number | undefined;
 
   constructor(private readonly options: InterviewCoordinatorOptions) {
     super();
@@ -188,8 +244,157 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   get interviewId(): string | undefined { return this.activeInterviewId; }
-  get running(): boolean { return Boolean(this.activeInterviewId); }
+  get running(): boolean { return Boolean(this.activeInterviewId) && this.runtimeSessionState === "running"; }
   get automationMode(): "MANUAL" | "AUTO" { return this.activeOptions?.automationMode ?? this.defaultAutomationMode; }
+  get runtimeState(): RuntimeSessionState { return this.runtimeSessionState; }
+
+  getRuntimeDiagnostics(): InterviewRuntimeDiagnostics {
+    const pendingQuestions = [...this.runtimeQuestions.values()].filter((item) => ["detected", "confirmed", "queued"].includes(item.state)).length;
+    const activeAnswers = [...this.runtimeAnswers.values()].filter((item) => !["committed", "cancelled", "failed"].includes(item.state)).length;
+    const activeStreams = [...this.runtimeAnswers.values()].filter((item) => item.state === "provider_pending" || item.state === "streaming").length;
+    const activeProviderRequests = [...this.runtimeAnswers.values()].filter((item) => item.state === "provider_pending" || item.state === "streaming").length;
+    return {
+      ...(this.runtimeSessionId ? { sessionId: this.runtimeSessionId } : {}),
+      sessionState: this.runtimeSessionState,
+      pendingQuestions,
+      activeAnswers,
+      activeStreams,
+      transcriptQueueDepth: this.aggregator.pendingCount + this.questionTasks.size,
+      answerQueueDepth: this.answerQueue.length,
+      activeAbortControllers: this.runtimeAbortControllers.size,
+      activeTimers: this.runtimeTimers.size,
+      activeProviderRequests,
+      activeAudioSessions: this.options.audio.isRunning ? 1 : 0,
+      // Port listeners are application-scoped and bound once in the constructor;
+      // no session-owned listener is retained between starts.
+      activeListeners: 0,
+      ...(this.lastRuntimeLifecycleEvent ? { lastLifecycleEvent: this.lastRuntimeLifecycleEvent } : {}),
+      ...(this.lastRuntimeLifecycleEventAt ? { lastLifecycleEventAt: this.lastRuntimeLifecycleEventAt } : {})
+    };
+  }
+
+  getRuntimeTrace(limit = 30): RuntimeTraceEvent[] { return this.runtimeTrace.snapshot(limit); }
+
+  isRuntimeIdle(): boolean {
+    const diagnostics = this.getRuntimeDiagnostics();
+    return !["starting", "running", "stopping"].includes(diagnostics.sessionState)
+      && diagnostics.pendingQuestions === 0
+      && diagnostics.activeAnswers === 0
+      && diagnostics.activeStreams === 0
+      && diagnostics.transcriptQueueDepth === 0
+      && diagnostics.answerQueueDepth === 0
+      && diagnostics.activeProviderRequests === 0
+      && diagnostics.activeAbortControllers === 0
+      && diagnostics.activeTimers === 0
+      && diagnostics.activeAudioSessions === 0
+      && diagnostics.activeListeners === 0;
+  }
+
+  recordOverlayTrace(eventName: "OVERLAY_UPDATE_REQUESTED" | "OVERLAY_UPDATED", fields: Record<string, string | number | boolean | undefined> = {}): void {
+    this.recordRuntimeTrace(eventName, fields, {
+      ...(typeof fields.questionId === "string" ? { questionId: fields.questionId } : {}),
+      ...(typeof fields.answerId === "string" ? { answerId: fields.answerId } : {})
+    });
+  }
+
+  private recordScreenshotTrace(
+    name: ScreenshotTraceEventName,
+    screenshotRequestId: string,
+    details: Omit<Partial<ScreenshotTraceEvent>, "name" | "timestamp" | "elapsedMs" | "screenshotRequestId"> = {}
+  ): void {
+    const timestamp = this.now();
+    const event: ScreenshotTraceEvent = {
+      name,
+      timestamp,
+      elapsedMs: this.runtimeSessionStartedAt ? Math.max(0, timestamp - this.runtimeSessionStartedAt) : 0,
+      screenshotRequestId,
+      ...(this.runtimeSessionId ? { sessionId: this.runtimeSessionId } : {}),
+      ...details
+    };
+    this.emitEvent({ type: "screenshot_trace", event });
+  }
+
+  private recordRuntimeTrace(
+    name: RuntimeTraceEventName,
+    fields: Record<string, string | number | boolean | undefined> = {},
+    ids: { sessionId?: string; questionId?: string; answerId?: string; providerRequestId?: string; reasonCode?: string } = {}
+  ): void {
+    const timestamp = this.now();
+    const diagnostics = this.getRuntimeDiagnostics();
+    const event: RuntimeTraceEvent = {
+      name,
+      timestamp,
+      ...(this.runtimeSessionStartedAt ? { elapsedMs: Math.max(0, timestamp - this.runtimeSessionStartedAt) } : {}),
+      ...(ids.sessionId ?? diagnostics.sessionId ? { sessionId: ids.sessionId ?? diagnostics.sessionId } : {}),
+      ...(ids.questionId ? { questionId: ids.questionId } : {}),
+      ...(ids.answerId ? { answerId: ids.answerId } : {}),
+      ...(ids.providerRequestId ? { providerRequestId: ids.providerRequestId } : {}),
+      sessionState: diagnostics.sessionState,
+      ...(ids.questionId && this.runtimeQuestions.get(ids.questionId) ? { questionState: this.runtimeQuestions.get(ids.questionId)?.state } : {}),
+      ...(ids.questionId ? { answerState: [...this.runtimeAnswers.values()].find((item) => item.questionId === ids.questionId)?.state } : {}),
+      pendingQuestions: diagnostics.pendingQuestions,
+      activeAnswers: diagnostics.activeAnswers,
+      activeStreams: diagnostics.activeStreams,
+      transcriptQueueDepth: diagnostics.transcriptQueueDepth,
+      answerQueueDepth: diagnostics.answerQueueDepth,
+      activeAbortControllers: diagnostics.activeAbortControllers,
+      activeTimers: diagnostics.activeTimers,
+      activeProviderRequests: diagnostics.activeProviderRequests,
+      activeAudioSessions: diagnostics.activeAudioSessions,
+      activeListeners: diagnostics.activeListeners,
+      ...(ids.reasonCode ? { reasonCode: ids.reasonCode } : {}),
+      ...(Object.keys(fields).length ? { fields: { ...fields } } : {})
+    };
+    this.runtimeTrace.push(event);
+    if (name !== "STALE_RUNTIME_EVENT_DROPPED") this.lastProgressAt = timestamp;
+    this.lastRuntimeLifecycleEvent = name;
+    this.lastRuntimeLifecycleEventAt = timestamp;
+    this.emitEvent({ type: "runtime_trace", event });
+  }
+
+  private setRuntimeState(state: RuntimeSessionState): void {
+    if (this.runtimeSessionState === state) return;
+    this.runtimeSessionState = state;
+    this.lastProgressAt = this.now();
+  }
+
+  private markQuestionState(question: QuestionCandidate, state: RuntimeQuestionState): void {
+    this.runtimeQuestions.set(question.id, { question, state, sessionGeneration: this.sessionGeneration });
+  }
+
+  private markQuestionStateById(questionId: string, state: RuntimeQuestionState): void {
+    const existing = this.runtimeQuestions.get(questionId);
+    if (existing) this.runtimeQuestions.set(questionId, { ...existing, state });
+  }
+
+  private clearRuntimeTimers(): void { this.runtimeTimers.clearAll(); }
+
+  private clearRuntimeRegistries(): void {
+    this.runtimeAbortControllers.clear();
+    this.runtimeAnswers.clear();
+  }
+
+  private trackAnswerTask(task: Promise<void>): Promise<void> {
+    this.answerTasks.add(task);
+    void task.then(
+      () => this.answerTasks.delete(task),
+      () => this.answerTasks.delete(task)
+    );
+    return task;
+  }
+
+  private trackQuestionTask(task: Promise<void>): Promise<void> {
+    this.questionTasks.add(task);
+    void task.then(
+      () => this.questionTasks.delete(task),
+      () => this.questionTasks.delete(task)
+    );
+    return task;
+  }
+
+  private launchAnswer(question: QuestionCandidate, mode = this.activeOptions?.answerMode ?? "NORMAL"): void {
+    void this.trackAnswerTask(this.answer(question, mode));
+  }
 
   setAutomationMode(mode: "MANUAL" | "AUTO"): void {
     this.defaultAutomationMode = mode;
@@ -203,19 +408,24 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   async start(startOptions: InterviewStartOptions): Promise<string> {
-    if (this.options.audio.configuredPath && !existsSync(this.options.audio.configuredPath)) throw new Error(`SIDECAR_NOT_FOUND: Audio Sidecar not found: ${this.options.audio.configuredPath}`);
-    const asrSettings = this.options.asrSettingsProvider?.(startOptions.profileId);
-    const providerType = asrSettings?.providerType ?? startOptions.providerType ?? "custom-gateway";
-    const connectUrl = startOptions.url ?? asrSettings?.url ?? "";
-    if (providerType === "custom-gateway" && !connectUrl.trim()) throw new Error("Custom ASR Gateway URL is required");
-    if (this.running) await this.stop("user");
-    await this.options.audio.waitForIdle?.();
-    if (this.options.audio.isRunning) throw new Error("AUDIO_BUSY: audio sidecar is still running");
-    if (this.options.audio.hasValidProbe && !this.options.audio.hasValidProbe({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId })) throw new Error("AUDIO_PROBE_REQUIRED: a successful mic and system probe is required before formal capture");
-    const automationMode = startOptions.automationMode ?? this.defaultAutomationMode;
-    this.transition("CREATING");
-    const startedAt = this.now();
-    const record = this.history.createInterview({
+    if (this.activeInterviewId || this.stopPromise) await this.stop("user");
+    this.runtimeSessionId = undefined;
+    this.runtimeSessionStartedAt = 0;
+    this.setRuntimeState("starting");
+    this.recordRuntimeTrace("INTERVIEW_SESSION_START_REQUESTED", {}, { reasonCode: "start-requested" });
+    try {
+      if (this.options.audio.configuredPath && !existsSync(this.options.audio.configuredPath)) throw new Error(`SIDECAR_NOT_FOUND: Audio Sidecar not found: ${this.options.audio.configuredPath}`);
+      const asrSettings = this.options.asrSettingsProvider?.(startOptions.profileId);
+      const providerType = asrSettings?.providerType ?? startOptions.providerType ?? "custom-gateway";
+      const connectUrl = startOptions.url ?? asrSettings?.url ?? "";
+      if (providerType === "custom-gateway" && !connectUrl.trim()) throw new Error("Custom ASR Gateway URL is required");
+      await this.options.audio.waitForIdle?.();
+      if (this.options.audio.isRunning) throw new Error("AUDIO_BUSY: audio sidecar is still running");
+      if (this.options.audio.hasValidProbe && !this.options.audio.hasValidProbe({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId })) throw new Error("AUDIO_PROBE_REQUIRED: a successful mic and system probe is required before formal capture");
+      const automationMode = startOptions.automationMode ?? this.defaultAutomationMode;
+      this.transition("CREATING");
+      const startedAt = this.now();
+      const record = this.history.createInterview({
       profileId: startOptions.profileId,
       ...(startOptions.projectId ? { projectId: startOptions.projectId } : {}),
       ...(startOptions.jobTargetId ? { jobTargetId: startOptions.jobTargetId } : {}),
@@ -224,55 +434,115 @@ export class InterviewCoordinator extends EventEmitter {
       language: startOptions.language ?? "zh-CN",
       automationMode
     }, startedAt);
-    this.sessionGeneration += 1;
-    this.activeInterviewId = record.id;
-    this.activeOptions = { ...startOptions, automationMode };
-    this.activeProfileId = startOptions.profileId;
-    this.detector.reset();
-    this.anchorStore.reset();
-    this.memory.reset();
-    this.clearAnswerTrigger();
-    this.answerQueue.length = 0;
-    this.answerContextSnapshots.clear();
-    this.activeAnswerQuestion = undefined;
-    this.activeModelSnapshot = this.options.answerAgent.getModelSnapshot();
-    this.pendingQuestionTrace = undefined;
-    this.currentQuestionTrace = undefined;
-    this.activeQuestionTrace = undefined;
-    this.currentQuestion = undefined;
-    this.historyQuestionIds.clear();
-    this.questionConfirmedAt.clear();
-    this.recentTranscript.length = 0;
-    this.clearRemoteAssemblyTimer();
-    this.aggregator.clear();
-    this.transition("CONNECTING");
-    try {
+      this.sessionGeneration += 1;
+      this.activeInterviewId = record.id;
+      this.runtimeSessionId = record.id;
+      this.runtimeSessionStartedAt = startedAt;
+      this.activeOptions = { ...startOptions, automationMode };
+      this.activeProfileId = startOptions.profileId;
+      this.detector.reset();
+      this.anchorStore.reset();
+      this.memory.reset();
+      this.clearAnswerTrigger();
+      this.answerQueue.length = 0;
+      this.answerContextSnapshots.clear();
+      this.activeAnswerQuestion = undefined;
+      this.activeModelSnapshot = this.options.answerAgent.getModelSnapshot();
+      this.pendingQuestionTrace = undefined;
+      this.currentQuestionTrace = undefined;
+      this.activeQuestionTrace = undefined;
+      this.currentQuestion = undefined;
+      this.runtimeQuestions.clear();
+      this.clearRuntimeTimers();
+      this.clearRuntimeRegistries();
+      this.answerTasks.clear();
+      this.questionTasks.clear();
+      this.answerGeneration += 1;
+      this.historyQuestionIds.clear();
+      this.questionConfirmedAt.clear();
+      this.recentTranscript.length = 0;
+      this.clearRemoteAssemblyTimer();
+      this.aggregator.clear();
+      this.recordRuntimeTrace("INTERVIEW_SESSION_STARTED", {}, { reasonCode: "session-created" });
+      this.transition("CONNECTING");
       // The real interview path deliberately omits meterOnly so PCM reaches ASR.
       this.asr.connect({ ...startOptions, ...asrSettings, providerType, url: connectUrl, language: asrSettings?.language ?? (startOptions.language as AsrLanguage | undefined), autoReconnect: true });
       await this.options.audio.start({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true });
+      return record.id;
     } catch (error) {
       await Promise.resolve(this.options.audio.stop()).catch(() => undefined);
-      this.asr.disconnect();
+      try { this.asr.disconnect(); } catch { /* best-effort start unwind */ }
       this.failInterview(String(error));
       throw error;
     }
-    return record.id;
   }
 
   async stop(reason: "user" | "error" = "user"): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    this.stopPromise = this.performStop(reason);
+    try {
+      await this.stopPromise;
+    } finally {
+      this.stopPromise = undefined;
+    }
+  }
+
+  private async performStop(reason: "user" | "error"): Promise<void> {
     const interviewId = this.activeInterviewId;
-    if (!interviewId) return;
+    if (!interviewId && this.isRuntimeIdle()) return;
+    this.recordRuntimeTrace("INTERVIEW_SESSION_STOP_REQUESTED", {}, { reasonCode: reason });
+    this.setRuntimeState("stopping");
+    this.sessionGeneration += 1;
+    this.answerGeneration += 1;
+    this.recordRuntimeTrace("INTERVIEW_SESSION_STOPPING", {}, { reasonCode: "stop-boundary" });
     this.clearQuestionFlushTimer();
     this.clearRemoteAssemblyTimer();
-    this.answerQueue.length = 0;
+    this.clearAnswerTrigger();
+    for (const question of this.answerQueue.splice(0)) {
+      this.markQuestionStateById(question.id, "cancelled");
+      this.recordRuntimeTrace("QUESTION_CANCELLED", {}, { questionId: question.id, reasonCode: "session-stop" });
+    }
+    if (this.pendingAnswerQuestion) {
+      const questionId = this.pendingAnswerQuestion.id;
+      this.markQuestionStateById(questionId, "cancelled");
+      this.recordRuntimeTrace("QUESTION_CANCELLED", {}, { questionId, reasonCode: "session-stop" });
+    }
+    this.pendingAnswerQuestion = undefined;
     this.answerContextSnapshots.clear();
     this.cancelAnswer(reason === "error" ? "timeout" : "user");
-    try { await Promise.resolve(this.options.audio.stop()); } catch (error) { this.emitDiagnostic(`Audio stop failed: ${String(error)}`); }
-    try { await this.asr.finalize?.(1_000); } catch (error) { this.emitDiagnostic(`ASR finalize failed: ${String(error)}`); }
+    this.runtimeAbortControllers.abortAll();
+    for (const [questionId, record] of this.runtimeQuestions) {
+      if (["finished", "cancelled", "failed"].includes(record.state)) continue;
+      this.markQuestionStateById(questionId, "cancelled");
+      this.recordRuntimeTrace("QUESTION_CANCELLED", {}, { questionId, reasonCode: "session-stop" });
+    }
+    this.recordRuntimeTrace("RUNTIME_CLEANUP_STARTED", {}, { reasonCode: "abort-and-drain" });
+
+    const answerTasks = [...this.answerTasks, ...this.questionTasks];
+    const drain = Promise.allSettled(answerTasks);
+    const stopTimeoutMs = Math.max(250, this.options.stopTimeoutMs ?? 4_000);
+    const drained = await withRuntimeTimeout(drain, stopTimeoutMs, () => this.emitDiagnostic("RUNTIME_CLEANUP_TIMEOUT: answer task did not settle"));
+    if (drained === undefined) {
+      for (const answer of this.runtimeAnswers.values()) answer.detached = true;
+      this.answerTasks.clear();
+      this.questionTasks.clear();
+      this.runtimeAnswers.clear();
+      this.runtimeAbortControllers.clear();
+    }
+    try {
+      await withRuntimeTimeout(Promise.resolve(this.options.audio.stop()), stopTimeoutMs, () => this.emitDiagnostic("RUNTIME_CLEANUP_TIMEOUT: audio stop did not settle"));
+    } catch (error) { this.emitDiagnostic(`Audio stop failed: ${String(error)}`); }
+    try {
+      if (this.asr.finalize) await withRuntimeTimeout(this.asr.finalize(1_000), stopTimeoutMs, () => this.emitDiagnostic("RUNTIME_CLEANUP_TIMEOUT: ASR finalize did not settle"));
+    } catch (error) { this.emitDiagnostic(`ASR finalize failed: ${String(error)}`); }
     try { this.asr.disconnect(); } catch (error) { this.emitDiagnostic(`ASR disconnect failed: ${String(error)}`); }
+
     if (!this.options.session.canTransition("ENDING") && this.options.session.canTransition("ERROR")) this.transition("ERROR");
     if (this.options.session.canTransition("ENDING")) this.transition("ENDING");
-    this.history.endInterview(interviewId, reason === "error" ? "error" : "ended", this.now());
+    if (interviewId) {
+      try { this.history.endInterview(interviewId, reason === "error" ? "error" : "ended", this.now()); }
+      catch (error) { this.emitDiagnostic(`History end failed: ${String(error)}`); }
+    }
     if (this.options.session.canTransition("ENDED")) this.transition("ENDED");
     this.activeInterviewId = undefined;
     this.activeOptions = undefined;
@@ -281,8 +551,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.questionConfirmedAt.clear();
     this.recentTranscript.length = 0;
     this.aggregator.clear();
-    this.sessionGeneration += 1;
-    this.clearAnswerTrigger();
+    this.clearRuntimeTimers();
     this.finalQuestionQueue = undefined;
     this.detector.reset();
     this.anchorStore.reset();
@@ -292,19 +561,28 @@ export class InterviewCoordinator extends EventEmitter {
     this.pendingQuestionTrace = undefined;
     this.currentQuestionTrace = undefined;
     this.activeQuestionTrace = undefined;
+    this.runtimeQuestions.clear();
+    this.runtimeAnswers.clear();
+    this.runtimeAbortControllers.clear();
+    this.answerTasks.clear();
+    this.questionTasks.clear();
+    this.setRuntimeState(reason === "error" ? "failed" : "stopped");
+    this.recordRuntimeTrace("RUNTIME_CLEANUP_COMPLETED", {}, { reasonCode: drained === undefined ? "forced-local-close" : "drained" });
+    this.recordRuntimeTrace("INTERVIEW_SESSION_STOPPED", {}, { reasonCode: reason });
+    if (this.isRuntimeIdle()) this.recordRuntimeTrace("RUNTIME_IDLE", {}, { reasonCode: "all-runtime-resources-released" });
   }
 
   async answerLatest(): Promise<void> {
     if (this.currentQuestion) {
-      await this.answer(this.currentQuestion);
+      await this.trackAnswerTask(this.answer(this.currentQuestion));
       return;
     }
     const latest = this.detector.lastConfirmed;
-    if (latest) await this.answer(latest);
+    if (latest) await this.trackAnswerTask(this.answer(latest));
     else this.emitDiagnostic("No confirmed question is available");
   }
 
-  async answerScreenshot(dataUrl: string): Promise<void> {
+  async answerScreenshot(input: string | VisionInput, screenshotRequestId = `screenshot-${this.now()}`): Promise<void> {
     if (!this.running) {
       this.emitDiagnostic("Interview is not running");
       return;
@@ -323,7 +601,9 @@ export class InterviewCoordinator extends EventEmitter {
       this.emitQuestion({ type: "question_confirmed", question });
     }
     const mode = this.activeOptions?.answerMode ?? "NORMAL";
-    await this.answer(question, mode, { hasScreenshot: true, attachments: [{ mimeType: "image/png", dataUrl }] });
+    const dataUrl = typeof input === "string" ? input : `data:${input.image.mimeType};base64,${input.image.base64}`;
+    const mimeType = typeof input === "string" ? dataUrl.match(/^data:(image\/(?:png|jpeg));/)?.[1] ?? "image/png" : input.image.mimeType;
+    await this.trackAnswerTask(this.answer(question, mode, { hasScreenshot: true, attachments: [{ mimeType, dataUrl }], screenshotRequestId }));
   }
 
   async answerQuestionText(text: string): Promise<void> {
@@ -342,10 +622,10 @@ export class InterviewCoordinator extends EventEmitter {
       status: "confirmed"
     };
     if (this.activeInterviewId) this.emitQuestion({ type: "question_confirmed", question });
-    await this.answer(question);
+    await this.trackAnswerTask(this.answer(question));
   }
 
-  async answer(question: QuestionCandidate, mode = this.activeOptions?.answerMode ?? "NORMAL", streamOptions: { hasScreenshot?: boolean; attachments?: Array<{ mimeType: string; dataUrl: string }> } = {}): Promise<void> {
+  async answer(question: QuestionCandidate, mode = this.activeOptions?.answerMode ?? "NORMAL", streamOptions: { hasScreenshot?: boolean; attachments?: Array<{ mimeType: string; dataUrl: string }>; screenshotRequestId?: string } = {}): Promise<void> {
     if (!this.running) {
       this.emitDiagnostic("Interview is not running");
       return;
@@ -360,37 +640,64 @@ export class InterviewCoordinator extends EventEmitter {
       const alreadyQueued = this.answerQueue.some((queued) => queued.id === question.id);
       if (!alreadyQueued && this.activeAnswerQuestion?.id !== question.id) {
         this.answerQueue.push(question);
+        this.markQuestionState(question, "queued");
+        this.recordRuntimeTrace("QUESTION_QUEUED", {}, { questionId: question.id, reasonCode: "serial-answer-policy" });
         this.emitDiagnostic(`ANSWER_QUEUED: ${question.id} (${this.answerQueue.length})`);
       }
       return;
     }
     const generation = this.answerGeneration;
+    const sessionId = this.runtimeSessionId;
+    const answerSessionGeneration = this.sessionGeneration;
+    if (!this.runtimeQuestions.has(question.id)) {
+      this.markQuestionState(question, "confirmed");
+      this.recordRuntimeTrace("QUESTION_CONFIRMED", { textLength: question.text.length }, { questionId: question.id, reasonCode: "answer-request" });
+    }
+    const operationId = `answer-operation-${question.id}-${generation}-${this.now()}`;
+    const providerRequestId = `provider-request-${question.id}-${generation}-${this.now()}`;
     this.activeAnswerQuestion = question;
     const answerTrace = frozenContext.trace;
     this.activeQuestionTrace = answerTrace;
     this.detector.markAnswering(question.id);
+    this.markQuestionStateById(question.id, "answering");
     this.options.history?.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "answering");
-    const controller = new AbortController();
+    const controller = this.runtimeAbortControllers.create(operationId);
+    this.runtimeAnswers.set(operationId, { operationId, questionId: question.id, sessionGeneration: this.sessionGeneration, providerRequestId, state: "created", controller, startedAt: this.now(), ...(streamOptions.screenshotRequestId ? { screenshotRequestId: streamOptions.screenshotRequestId } : {}) });
     this.answerController = controller;
-    const answerTimeout = setTimeout(() => {
-      if (this.answerController !== controller || controller.signal.aborted) return;
+    this.recordRuntimeTrace("ANSWER_REQUEST_CREATED", {}, { questionId: question.id, providerRequestId });
+    this.runtimeTimers.set(`answer-total:${operationId}`, () => {
+      if (!this.runtimeAnswers.has(operationId) || controller.signal.aborted) return;
       this.emitDiagnostic(`ANSWER_TIMEOUT: ${question.id}`);
-      this.cancelAnswer("timeout");
-    }, Math.max(1_000, this.options.answerTimeoutMs ?? 20_000));
+      this.cancelAnswer("timeout", "answer-timeout");
+    }, Math.max(50, this.options.answerTimeoutMs ?? 20_000));
     const startedAt = this.now();
     answerTrace?.mark("retrievalStarted", startedAt);
     this.accumulatedAnswerText = "";
     try {
+      const answerOperation = this.runtimeAnswers.get(operationId);
+      if (answerOperation) answerOperation.state = "context_loading";
+      this.recordRuntimeTrace("PROJECT_CONTEXT_STARTED", {}, { questionId: question.id, providerRequestId });
       const providerContextResult = this.contextProvider(question, this.activeProfileId ?? "", [...frozenContext.recentTranscript], { projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId });
       // Keep the default synchronous context path truly synchronous. This
       // removes an avoidable microtask from consecutive-question handling;
       // async profile/knowledge retrieval still remains cancellable below.
       const isPromiseLike = (value: AnswerContextInput | Promise<AnswerContextInput>): value is Promise<AnswerContextInput> => Boolean(value && typeof (value as PromiseLike<AnswerContextInput>).then === "function");
-      const providerContext: AnswerContextInput = isPromiseLike(providerContextResult)
-        ? await providerContextResult
+      const contextTimeoutMs = Math.max(50, this.options.contextTimeoutMs ?? this.options.answerTimeoutMs ?? 20_000);
+      const providerContext: AnswerContextInput | undefined = isPromiseLike(providerContextResult)
+        ? await withRuntimeTimeout(providerContextResult, contextTimeoutMs, () => {
+          if (controller.signal.aborted || generation !== this.answerGeneration) return;
+          this.emitDiagnostic(`PROJECT_CONTEXT_TIMEOUT: ${question.id}`);
+          this.recordRuntimeTrace("PROJECT_CONTEXT_FAILED", {}, { questionId: question.id, providerRequestId, reasonCode: "context-timeout" });
+          this.cancelAnswer("timeout", "context-timeout");
+        })
         : providerContextResult;
       answerTrace?.mark("retrievalEnded", this.now());
-      if (controller.signal.aborted || generation !== this.answerGeneration) return;
+      if (!providerContext || controller.signal.aborted || generation !== this.answerGeneration) {
+        if (streamOptions.screenshotRequestId) throw Object.assign(new Error("Screenshot vision request cancelled"), { name: "AbortError" });
+        return;
+      }
+      if (answerOperation) answerOperation.state = "provider_pending";
+      this.recordRuntimeTrace("PROJECT_CONTEXT_READY", {}, { questionId: question.id, providerRequestId });
       const isFollowUp = question.speechAct === "FOLLOW_UP" || question.detectionType === "follow_up" || question.category === "followup";
       // A queued question must retain the topic and transcript that existed
       // when it was confirmed. Looking at global "latest" memory here caused
@@ -415,21 +722,33 @@ export class InterviewCoordinator extends EventEmitter {
         this.emitDiagnostic("QUESTION_BANK_DIRECT_HIT");
         const answerId = `question-bank-answer-${question.id}-${startedAt}`;
         const finishedAt = this.now();
+        const answerOperation = this.runtimeAnswers.get(operationId);
+        if (answerOperation) {
+          answerOperation.answerId = answerId;
+          answerOperation.firstTokenAt = finishedAt;
+          answerOperation.state = "completed";
+        }
+        this.runtimeTimers.clear(`answer-first-token:${operationId}`);
         this.answerId = answerId;
         this.answerQuestionId = question.id;
         this.answerMode = mode;
         this.answerModel = "question-bank";
         this.answerStartedAt = startedAt;
         this.answerFirstTokenAt = finishedAt;
-        this.emit("event", { type: "realtime_message", message: { type: "answer_start", answerId, questionId: question.id, mode, model: "question-bank" } });
+        this.emitRealtimeMessage({ type: "answer_start", answerId, questionId: question.id, mode, model: "question-bank" });
         const preparedText = normalizeTechnicalTerms(preparedAnswer.content);
-        this.emit("event", { type: "realtime_message", message: { type: "answer_end", answerId, text: preparedText } });
         const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
         this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: preparedText, model: "question-bank", mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
+        if (answerOperation) answerOperation.state = "committed";
+        this.recordRuntimeTrace("ANSWER_COMMITTED", {}, { questionId: question.id, answerId, providerRequestId, reasonCode: "question-bank" });
+        this.emitRealtimeMessage({ type: "answer_end", answerId, text: preparedText });
         answerTrace?.update({ answerSource: "question-bank" }).mark("answerLookupStarted", startedAt).mark("answerVisible", finishedAt).mark("answerEnded", finishedAt);
         this.emitQuestionTrace(answerTrace);
         this.memory.recordAnswer(preparedText, { question: question.text, createdAt: finishedAt });
         this.detector.markAnswered(question.id);
+        this.markQuestionStateById(question.id, "answered");
+        this.markQuestionStateById(question.id, "finished");
+        this.recordRuntimeTrace("QUESTION_FINISHED", {}, { questionId: question.id, answerId, providerRequestId, reasonCode: "answer-committed" });
         this.options.history?.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "answered");
         this.answerId = undefined;
         this.answerQuestionId = undefined;
@@ -441,6 +760,16 @@ export class InterviewCoordinator extends EventEmitter {
       }
       const context = { ...providerContext, recentTranscript: providerContext.recentTranscript ?? [...frozenContext.recentTranscript], interviewMemory: memorySnapshot, ...(followUpContext ? { followUpContext } : {}) };
       answerTrace?.update({ answerSource: "llm" }).mark("llmRequestStarted", this.now());
+      this.recordRuntimeTrace("PROVIDER_STREAM_REQUESTED", {}, { questionId: question.id, providerRequestId });
+      if (streamOptions.screenshotRequestId) {
+        this.recordScreenshotTrace("VISION_PROVIDER_REQUEST_STARTED", streamOptions.screenshotRequestId, { providerRequestId, status: "provider_pending", messageShape: "multimodal" });
+      }
+      this.runtimeTimers.set(`answer-first-token:${operationId}`, () => {
+        const answer = this.runtimeAnswers.get(operationId);
+        if (!answer || answer.firstTokenAt !== undefined || controller.signal.aborted) return;
+        this.emitDiagnostic(`PROVIDER_FIRST_TOKEN_TIMEOUT: ${question.id}`);
+        this.cancelAnswer("timeout", "first-token-timeout");
+      }, Math.max(50, this.options.providerFirstTokenTimeoutMs ?? 10_000));
       for await (const event of this.options.answerAgent.stream({ id: question.id, text: question.text, ...(isFollowUp ? { kind: "follow-up" as const } : {}) }, mode, context, controller.signal, {
         ...streamOptions,
         // Project answers are buffered until claim/evidence validation has
@@ -454,36 +783,82 @@ export class InterviewCoordinator extends EventEmitter {
         preferFastRoute: this.activeOptions?.automationMode === "AUTO" && !streamOptions.hasScreenshot,
         modelOverride: this.activeModelSnapshot
       })) {
-        if (controller.signal.aborted || generation !== this.answerGeneration) return;
+        if (controller.signal.aborted || generation !== this.answerGeneration || answerSessionGeneration !== this.sessionGeneration || sessionId !== this.runtimeSessionId || !this.activeInterviewId) {
+          this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "provider-stream-event", type: event.type }, { sessionId, questionId: question.id, providerRequestId, reasonCode: "stale-answer-generation" });
+          if (streamOptions.screenshotRequestId) throw Object.assign(new Error("Screenshot vision request became stale"), { name: "AbortError" });
+          return;
+        }
         if (event.type === "answer_start") {
+          const answerOperation = this.runtimeAnswers.get(operationId);
+          if (answerOperation) {
+            answerOperation.state = "streaming";
+            answerOperation.answerId = event.answerId;
+          }
           this.answerId = event.answerId;
           this.answerQuestionId = question.id;
           this.answerMode = event.mode;
           this.answerModel = event.model;
           this.answerStartedAt = this.now();
           this.answerFirstTokenAt = undefined;
-          this.emit("event", { type: "realtime_message", message: { type: "answer_start", answerId: event.answerId, questionId: event.questionId, mode: event.mode, model: event.model } });
+          this.recordRuntimeTrace("PROVIDER_STREAM_STARTED", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
+          if (streamOptions.screenshotRequestId) {
+            this.recordScreenshotTrace("VISION_PROVIDER_REQUEST_RECEIVED", streamOptions.screenshotRequestId, { providerRequestId, answerId: event.answerId, providerModel: event.model, status: "streaming", messageShape: "multimodal" });
+          }
+          this.emitRealtimeMessage({ type: "answer_start", answerId: event.answerId, questionId: event.questionId, mode: event.mode, model: event.model });
         } else if (event.type === "answer_delta") {
           this.accumulatedAnswerText += event.delta;
-          this.answerFirstTokenAt ??= this.now();
+          const firstTokenAt = this.answerFirstTokenAt ?? this.now();
+          const firstToken = this.answerFirstTokenAt === undefined;
+          this.answerFirstTokenAt = firstTokenAt;
+          const answerOperation = this.runtimeAnswers.get(operationId);
+          if (answerOperation) {
+            answerOperation.state = "streaming";
+            answerOperation.firstTokenAt ??= firstTokenAt;
+          }
+          if (firstToken) {
+            this.runtimeTimers.clear(`answer-first-token:${operationId}`);
+            this.recordRuntimeTrace("PROVIDER_FIRST_TOKEN", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
+            if (streamOptions.screenshotRequestId) this.recordScreenshotTrace("VISION_FIRST_TOKEN", streamOptions.screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "streaming" });
+          }
           answerTrace?.mark("firstToken", this.answerFirstTokenAt);
-          this.emit("event", { type: "realtime_message", message: { type: "answer_delta", answerId: event.answerId, delta: event.delta } });
+          this.emitRealtimeMessage({ type: "answer_delta", answerId: event.answerId, delta: event.delta });
         } else {
           const finishedAt = this.now();
           const answerText = event.text || this.accumulatedAnswerText;
           // If a provider does not emit deltas, completion is still the first
           // visible response. Normal live providers stream through the branch
           // above and set answerFirstTokenAt when the first delta arrives.
+          const hadFirstToken = this.answerFirstTokenAt !== undefined;
           this.answerFirstTokenAt ??= finishedAt;
+          const answerOperation = this.runtimeAnswers.get(operationId);
+          if (answerOperation) {
+            answerOperation.state = "completed";
+            answerOperation.firstTokenAt ??= finishedAt;
+          }
+          this.runtimeTimers.clear(`answer-first-token:${operationId}`);
+          this.runtimeTimers.clear(`answer-total:${operationId}`);
+          if (!hadFirstToken) {
+            this.answerFirstTokenAt = finishedAt;
+            if (answerOperation) answerOperation.firstTokenAt ??= finishedAt;
+            this.recordRuntimeTrace("PROVIDER_FIRST_TOKEN", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
+            if (streamOptions.screenshotRequestId) this.recordScreenshotTrace("VISION_FIRST_TOKEN", streamOptions.screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "completed" });
+          }
+          this.recordRuntimeTrace("PROVIDER_STREAM_COMPLETED", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
+          if (streamOptions.screenshotRequestId) this.recordScreenshotTrace("VISION_RESPONSE_COMPLETED", streamOptions.screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "completed" });
           answerTrace?.mark("answerEnded", finishedAt);
           if (event.quality?.issues.includes("QUALITY_UNGROUNDED_CLAIM")) this.emitDiagnostic("QUALITY_UNGROUNDED_CLAIM");
           if (event.quality?.issues.includes("strict-grounding-fallback")) this.emitDiagnostic("STRICT_GROUNDING_FALLBACK");
-          this.emit("event", { type: "realtime_message", message: { type: "answer_end", answerId: event.answerId, text: answerText, quality: event.quality } });
-          this.emitQuestionTrace(answerTrace);
           const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
           this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: answerText, model: this.answerModel ?? "configured", mode: this.answerMode ?? mode, startedAt: this.answerStartedAt ?? startedAt, firstTokenAt: this.answerFirstTokenAt, finishedAt, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
+          if (answerOperation) answerOperation.state = "committed";
+          this.recordRuntimeTrace("ANSWER_COMMITTED", {}, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "provider-completed" });
+          this.emitRealtimeMessage({ type: "answer_end", answerId: event.answerId, text: answerText, quality: event.quality });
+          this.emitQuestionTrace(answerTrace);
           this.memory.recordAnswer(answerText, { question: question.text, createdAt: finishedAt });
           this.detector.markAnswered(question.id);
+          this.markQuestionStateById(question.id, "answered");
+          this.markQuestionStateById(question.id, "finished");
+          this.recordRuntimeTrace("QUESTION_FINISHED", {}, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "answer-committed" });
           this.options.history?.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "answered");
           this.answerId = undefined;
           this.answerQuestionId = undefined;
@@ -495,21 +870,54 @@ export class InterviewCoordinator extends EventEmitter {
         }
       }
     } catch (error) {
-      if (controller.signal.aborted) return;
+      const answerOperation = this.runtimeAnswers.get(operationId);
+      if (controller.signal.aborted || generation !== this.answerGeneration) {
+        if (answerOperation && !answerOperation.detached && !["committed", "cancelled", "failed"].includes(answerOperation.state)) {
+          answerOperation.state = "cancelled";
+          this.recordRuntimeTrace("PROVIDER_STREAM_CANCELLED", {}, { questionId: question.id, answerId: answerOperation.answerId, providerRequestId, reasonCode: "abort" });
+          this.markQuestionStateById(question.id, "cancelled");
+          this.recordRuntimeTrace("QUESTION_CANCELLED", {}, { questionId: question.id, answerId: answerOperation.answerId, providerRequestId, reasonCode: "abort" });
+        }
+        if (streamOptions.screenshotRequestId) this.recordScreenshotTrace("VISION_RESPONSE_FAILED", streamOptions.screenshotRequestId, { providerRequestId, answerId: answerOperation?.answerId, status: "cancelled", reasonCode: "abort" });
+        if (streamOptions.screenshotRequestId) throw Object.assign(new Error("Screenshot vision request cancelled"), { name: "AbortError" });
+        return;
+      }
       // Always close the visible answer state on a provider failure. Without
       // this terminal event the overlay remains in “生成中” forever and the
       // next question can look as if it was ignored.
-      this.cancelAnswer("timeout");
+      const hadTrackedOperation = Boolean(answerOperation);
+      const contextWasActive = answerOperation?.state === "created" || answerOperation?.state === "context_loading";
+      if (contextWasActive) this.recordRuntimeTrace("PROJECT_CONTEXT_FAILED", {}, { questionId: question.id, providerRequestId, reasonCode: "context-error" });
+      this.cancelAnswer("timeout", contextWasActive ? "context-error" : "provider-error");
+      if (!hadTrackedOperation) {
+        this.recordRuntimeTrace("PROVIDER_STREAM_FAILED", {}, { questionId: question.id, providerRequestId, reasonCode: "provider-error" });
+        this.markQuestionStateById(question.id, "failed");
+        this.recordRuntimeTrace("QUESTION_FAILED", {}, { questionId: question.id, providerRequestId, reasonCode: "provider-error" });
+      }
       this.emitDiagnostic(`LLM_FAILED: ${String(error)}`);
-      this.emit("event", { type: "realtime_message", message: { type: "runtime_error", code: "LLM_FAILED", message: "答案生成失败，请检查模型配置后重试", recoverable: true } });
+      if (streamOptions.screenshotRequestId) this.recordScreenshotTrace("VISION_RESPONSE_FAILED", streamOptions.screenshotRequestId, { providerRequestId, answerId: answerOperation?.answerId, status: "failed", reasonCode: contextWasActive ? "context-error" : "provider-error", fields: { error: String(error) } });
+      this.emitRealtimeMessage({ type: "runtime_error", code: "LLM_FAILED", message: "答案生成失败，请检查模型配置后重试", recoverable: true });
+      if (streamOptions.screenshotRequestId) throw error;
     } finally {
-      clearTimeout(answerTimeout);
-      if (this.answerController === controller) this.answerController = undefined;
-      if (this.activeAnswerQuestion?.id === question.id) this.activeAnswerQuestion = undefined;
-      if (this.activeQuestionTrace === answerTrace) this.activeQuestionTrace = undefined;
-      this.answerContextSnapshots.delete(question.id);
-      const next = this.answerQueue.shift();
-      if (next && this.running) void this.answer(next);
+      this.runtimeTimers.clear(`answer-total:${operationId}`);
+      this.runtimeTimers.clear(`answer-first-token:${operationId}`);
+      this.runtimeAbortControllers.delete(operationId);
+      this.runtimeAnswers.delete(operationId);
+      if (sessionId === this.runtimeSessionId && this.runtimeSessionState === "running") {
+        this.recordRuntimeTrace("ANSWER_OPERATION_CLEANUP_COMPLETED", {}, { sessionId, questionId: question.id, answerId: this.answerId, providerRequestId, reasonCode: "answer-finally" });
+      }
+      const isCurrentOperation = generation === this.answerGeneration
+        && answerSessionGeneration === this.sessionGeneration
+        && sessionId === this.runtimeSessionId
+        && Boolean(this.activeInterviewId);
+      if (isCurrentOperation) {
+        if (this.answerController === controller) this.answerController = undefined;
+        if (this.activeAnswerQuestion?.id === question.id) this.activeAnswerQuestion = undefined;
+        if (this.activeQuestionTrace === answerTrace) this.activeQuestionTrace = undefined;
+        this.answerContextSnapshots.delete(question.id);
+        const next = this.answerQueue.shift();
+        if (next && this.running) this.launchAnswer(next);
+      }
     }
   }
 
@@ -517,9 +925,16 @@ export class InterviewCoordinator extends EventEmitter {
     this.options.audio.on("pcm-packet", (packet: Uint8Array) => this.asr.sendAudio(packet));
     this.asr.on("state", (state: RealtimeConnectionState) => {
       this.emitEvent({ type: "realtime_state", state });
+      if (!this.activeInterviewId || ["stopping", "stopped", "failed", "idle"].includes(this.runtimeSessionState)) {
+        this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "asr-state", state }, { reasonCode: "inactive-session" });
+        return;
+      }
       if (state === "connected" && this.options.session.canTransition("READY")) {
         this.transition("READY");
-        if (this.options.session.canTransition("RUNNING")) this.transition("RUNNING");
+        if (this.options.session.canTransition("RUNNING")) {
+          this.transition("RUNNING");
+          this.setRuntimeState("running");
+        }
       }
       if (state === "reconnecting" && this.options.session.canTransition("RECONNECTING")) this.transition("RECONNECTING");
       if (state === "error" && this.running) this.emitDiagnostic("ASR connection failed; reconnect is still enabled");
@@ -527,8 +942,12 @@ export class InterviewCoordinator extends EventEmitter {
     this.asr.on("transcript", (snapshot: unknown, rawSegment: TranscriptSegment) => {
       const receivedAt = this.now();
       const segment: TranscriptSegment = { ...rawSegment, text: normalizeTechnicalTerms(rawSegment.text) };
+      if (!this.activeInterviewId || this.runtimeSessionState !== "running") {
+        this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "transcript", source: segment.source, final: segment.final, textLength: segment.text.length }, { reasonCode: "inactive-session" });
+        return;
+      }
+      this.recordRuntimeTrace("TRANSCRIPT_RECEIVED", { source: segment.source, final: segment.final, textLength: segment.text.length });
       this.emit("event", { type: "transcript", snapshot, segment });
-      if (!this.activeInterviewId) return;
       if (segment.final) {
         this.history.addTranscript({ interviewId: this.activeInterviewId, source: segment.source, text: segment.text, startMs: segment.startMs, endMs: segment.endMs, final: true, confidence: segment.confidence });
         this.recentTranscript.push(`${segment.source === "remote" ? "面试官" : "我"}：${segment.text}`);
@@ -558,13 +977,34 @@ export class InterviewCoordinator extends EventEmitter {
       this.drainCompletedRemoteUtterances();
       this.scheduleRemoteAssembly(utterance, segment);
     });
-    this.asr.on("message", (message: RealtimeServerMessage) => this.emitEvent({ type: "realtime_message", message }));
+    this.asr.on("message", (message: RealtimeServerMessage) => {
+      if (!this.activeInterviewId || this.runtimeSessionState !== "running") {
+        this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "realtime-message", type: message.type }, { reasonCode: "inactive-session" });
+        return;
+      }
+      this.emitEvent({ type: "realtime_message", message });
+    });
     this.asr.on("diagnostic", (message: string) => this.emitDiagnostic(message));
   }
 
   private emitQuestion(inputEvent: QuestionEvent): QuestionEvent {
+    if ("question" in inputEvent) {
+      const existing = this.runtimeQuestions.get(inputEvent.question.id);
+      if (existing && existing.state !== "detected") {
+        this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "duplicate-question", textLength: inputEvent.question.text.length }, { questionId: inputEvent.question.id, reasonCode: "duplicate-question-id" });
+        const duplicate: QuestionEvent = { type: "question_diagnostic", text: inputEvent.question.text, questionScore: inputEvent.question.score, confidence: inputEvent.question.score, candidate: true, confirmed: false, reason: "duplicate-question-id", category: inputEvent.question.category, detectionType: inputEvent.question.detectionType, speechAct: inputEvent.question.speechAct, fingerprint: inputEvent.question.fingerprint, ignoredReason: "duplicate" };
+        this.emitEvent({ type: "question", event: duplicate });
+        return duplicate;
+      }
+      if (inputEvent.type === "question_candidate") {
+        this.markQuestionState(inputEvent.question, "detected");
+        this.recordRuntimeTrace("QUESTION_DETECTED", { textLength: inputEvent.question.text.length }, { questionId: inputEvent.question.id });
+      }
+    }
     const event = this.linkQuestionThread(inputEvent);
     if (event.type === "question_confirmed" || event.type === "question_superseded") {
+      this.markQuestionState(event.question, "confirmed");
+      this.recordRuntimeTrace("QUESTION_CONFIRMED", { textLength: event.question.text.length }, { questionId: event.question.id, reasonCode: event.type });
       this.currentQuestion = event.question;
       const trace = this.pendingQuestionTrace ?? new QuestionTrace({ questionTraceId: `question-trace-${event.question.id}`, questionScore: event.question.score, questionType: event.question.detectionType, followUp: event.question.speechAct === "FOLLOW_UP", projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId });
       if (trace.snapshot().questionDetectedAt === undefined) trace.mark("questionDetected", this.now());
@@ -591,6 +1031,8 @@ export class InterviewCoordinator extends EventEmitter {
         const previousId = this.historyQuestionIds.get(event.previousQuestionId);
         if (previousId) this.history.updateQuestionStatus?.(previousId, "superseded");
         this.detector.markSuperseded(event.previousQuestionId);
+        this.markQuestionStateById(event.previousQuestionId, "cancelled");
+        this.recordRuntimeTrace("QUESTION_CANCELLED", {}, { questionId: event.previousQuestionId, reasonCode: "superseded" });
       }
     }
     this.emitEvent({ type: "question", event });
@@ -620,7 +1062,7 @@ export class InterviewCoordinator extends EventEmitter {
     // This prevents a later short fragment from overtaking the assembled
     // question while ONNX classification is still running.
     if (!this.detector2.hasLocalClassifier) {
-      void this.observeFinalQuestion(utterance, sessionGeneration).catch((error) => this.emitDiagnostic(`Question 2.0 analysis failed: ${String(error)}`));
+      this.trackQuestionTask(this.observeFinalQuestion(utterance, sessionGeneration).catch((error) => this.emitDiagnostic(`Question 2.0 analysis failed: ${String(error)}`)));
       return;
     }
     const run = () => this.observeFinalQuestion(utterance, sessionGeneration);
@@ -631,6 +1073,7 @@ export class InterviewCoordinator extends EventEmitter {
       () => { if (this.finalQuestionQueue === tracked) this.finalQuestionQueue = undefined; },
       () => { if (this.finalQuestionQueue === tracked) this.finalQuestionQueue = undefined; }
     );
+    this.trackQuestionTask(tracked);
   }
 
   private drainCompletedRemoteUtterances(): number {
@@ -648,7 +1091,7 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private scheduleRemoteAssembly(utterance: TranscriptUtterance, latest: TranscriptSegment): void {
-    if (this.remoteAssemblyTimer) clearTimeout(this.remoteAssemblyTimer);
+    this.runtimeTimers.clear("remote-assembly");
     this.remoteAssemblyStartedAt ??= this.now();
     const elapsed = Math.max(0, this.now() - this.remoteAssemblyStartedAt);
     const remaining = Math.max(120, 1_800 - elapsed);
@@ -666,7 +1109,7 @@ export class InterviewCoordinator extends EventEmitter {
       : /^(?:比如|例如|然后|最后|接着|隔离|以及|包括|在|其中)/.test(latest.text.trim())
         ? 480
         : notPunctuated ? 420 : 360;
-    this.remoteAssemblyTimer = setTimeout(() => {
+    this.runtimeTimers.set("remote-assembly", () => {
       this.remoteAssemblyTimer = undefined;
       this.remoteAssemblyStartedAt = undefined;
       this.flushRemoteUtterances();
@@ -674,13 +1117,13 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private clearRemoteAssemblyTimer(): void {
-    if (this.remoteAssemblyTimer) clearTimeout(this.remoteAssemblyTimer);
+    this.runtimeTimers.clear("remote-assembly");
     this.remoteAssemblyTimer = undefined;
     this.remoteAssemblyStartedAt = undefined;
   }
 
   private clearQuestionFlushTimer(): void {
-    if (this.questionFlushTimer) clearTimeout(this.questionFlushTimer);
+    this.runtimeTimers.clear("question-flush");
     this.questionFlushTimer = undefined;
   }
 
@@ -863,9 +1306,12 @@ export class InterviewCoordinator extends EventEmitter {
   private scheduleQuestionFlush(delay = this.questionSilenceMs, sessionGeneration = this.sessionGeneration): void {
     this.clearQuestionFlushTimer();
     const dueAt = this.now() + delay;
-    this.questionFlushTimer = setTimeout(() => {
+    this.runtimeTimers.set("question-flush", () => {
       this.questionFlushTimer = undefined;
-      if (sessionGeneration !== this.sessionGeneration || !this.activeInterviewId) return;
+      if (sessionGeneration !== this.sessionGeneration || !this.activeInterviewId || this.runtimeSessionState !== "running") {
+        this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "question-flush" }, { reasonCode: "stale-question-timer" });
+        return;
+      }
       // Use the scheduled due time as a lower bound. The production clock
       // normally advances with the timer, while deterministic integrations
       // may provide a manually controlled `now()` function.
@@ -878,34 +1324,59 @@ export class InterviewCoordinator extends EventEmitter {
     // Completeness has already been established by the temporal detector.
     // Do not add another post-confirmation delay, especially for short but
     // complete follow-ups such as “为什么这样设计？”.
-    if (sessionGeneration === this.sessionGeneration && this.activeInterviewId) {
-      void this.answer(question);
+    if (sessionGeneration === this.sessionGeneration && this.activeInterviewId && this.runtimeSessionState === "running") {
+      this.launchAnswer(question);
       return;
     }
     this.pendingAnswerQuestion = question;
-    this.answerTriggerTimer = setTimeout(() => {
+    this.runtimeTimers.set("answer-trigger", () => {
       this.answerTriggerTimer = undefined;
       const pending = this.pendingAnswerQuestion;
       this.pendingAnswerQuestion = undefined;
-      if (!pending || sessionGeneration !== this.sessionGeneration || !this.activeInterviewId) return;
-      void this.answer(pending);
+      if (!pending || sessionGeneration !== this.sessionGeneration || !this.activeInterviewId || this.runtimeSessionState !== "running") {
+        if (pending) this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "answer-trigger" }, { questionId: pending.id, reasonCode: "stale-answer-trigger" });
+        return;
+      }
+      this.launchAnswer(pending);
     }, 0);
   }
 
   private clearAnswerTrigger(): void {
-    if (this.answerTriggerTimer) clearTimeout(this.answerTriggerTimer);
+    this.runtimeTimers.clear("answer-trigger");
     this.answerTriggerTimer = undefined;
     this.pendingAnswerQuestion = undefined;
   }
 
-  private cancelAnswer(reason: "user" | "superseded" | "timeout"): void {
+  private cancelAnswer(reason: "user" | "superseded" | "timeout", traceReasonCode: string = reason): void {
     this.answerGeneration += 1;
+    const activeOperation = [...this.runtimeAnswers.values()].find((answer) => answer.controller === this.answerController);
     const answerId = this.answerId;
     const questionId = this.answerQuestionId;
     const inFlight = Boolean(answerId || this.answerController || this.answerStartedAt !== undefined || this.accumulatedAnswerText);
     const persistedQuestionId = questionId ?? (inFlight ? this.activeAnswerQuestion?.id : undefined);
     const now = this.now();
     this.answerController?.abort();
+    if (activeOperation && !activeOperation.detached) {
+      this.runtimeTimers.clear(`answer-total:${activeOperation.operationId}`);
+      this.runtimeTimers.clear(`answer-first-token:${activeOperation.operationId}`);
+      const terminalState: RuntimeAnswerState = reason === "timeout" ? "failed" : "cancelled";
+      const wasActive = !["committed", "cancelled", "failed"].includes(activeOperation.state);
+      activeOperation.state = terminalState;
+      if (wasActive) {
+        this.recordRuntimeTrace(
+          terminalState === "cancelled" ? "PROVIDER_STREAM_CANCELLED" : "PROVIDER_STREAM_FAILED",
+          {},
+          { questionId: activeOperation.questionId, answerId: activeOperation.answerId, providerRequestId: activeOperation.providerRequestId, reasonCode: traceReasonCode }
+        );
+      }
+      const questionState: RuntimeQuestionState = reason === "timeout" ? "failed" : "cancelled";
+      this.markQuestionStateById(activeOperation.questionId, questionState);
+      this.recordRuntimeTrace(
+        questionState === "cancelled" ? "QUESTION_CANCELLED" : "QUESTION_FAILED",
+        {},
+        { questionId: activeOperation.questionId, answerId: activeOperation.answerId, providerRequestId: activeOperation.providerRequestId, reasonCode: traceReasonCode }
+      );
+    }
     this.answerController = undefined;
     this.activeAnswerQuestion = undefined;
     this.answerId = undefined;
@@ -927,7 +1398,7 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private emitAnswerCancelled(answerId: string, reason: "user" | "superseded" | "timeout"): void {
-    this.emit("event", { type: "realtime_message", message: { type: "answer_cancelled", answerId, reason } });
+    this.emitRealtimeMessage({ type: "answer_cancelled", answerId, reason });
   }
 
   private emitQuestionTrace(selectedTrace?: QuestionTrace): void {
@@ -943,8 +1414,16 @@ export class InterviewCoordinator extends EventEmitter {
     if (this.activeInterviewId) this.history.endInterview(this.activeInterviewId, "error", this.now());
     if (this.options.session.canTransition("ERROR")) this.transition("ERROR");
     this.activeInterviewId = undefined;
+    this.setRuntimeState("failed");
+    this.clearRuntimeTimers();
+    this.runtimeAbortControllers.abortAll();
+    this.clearRuntimeRegistries();
+    this.answerTasks.clear();
+    this.questionTasks.clear();
     this.anchorStore.reset();
     this.memory.reset();
+    this.recordRuntimeTrace("RUNTIME_CLEANUP_COMPLETED", {}, { reasonCode: "start-failed" });
+    if (this.isRuntimeIdle()) this.recordRuntimeTrace("RUNTIME_IDLE", {}, { reasonCode: "start-failed" });
   }
 
   private transition(state: SessionState): void {
@@ -954,6 +1433,29 @@ export class InterviewCoordinator extends EventEmitter {
 
   private emitEvent(event: InterviewCoordinatorEvent): void {
     this.emit("event", event);
+  }
+
+  private emitRealtimeMessage(message: RealtimeServerMessage): void {
+    const messageWithIds = message as RealtimeServerMessage & { questionId?: string; answerId?: string };
+    const screenshotAnswer = typeof messageWithIds.answerId === "string"
+      ? [...this.runtimeAnswers.values()].find((answer) => answer.answerId === messageWithIds.answerId && answer.screenshotRequestId)
+      : undefined;
+    const screenshotRequestId = screenshotAnswer?.screenshotRequestId;
+    const ids = {
+      ...(typeof messageWithIds.questionId === "string" ? { questionId: messageWithIds.questionId } : {}),
+      ...(typeof messageWithIds.answerId === "string" ? { answerId: messageWithIds.answerId } : {})
+    };
+    if (screenshotRequestId && message.type === "answer_end") {
+      this.recordScreenshotTrace("VISION_OVERLAY_UPDATE_REQUESTED", screenshotRequestId, { providerRequestId: screenshotAnswer.providerRequestId, answerId: messageWithIds.answerId, status: "completed" });
+    }
+    this.recordRuntimeTrace("OVERLAY_UPDATE_REQUESTED", { messageType: message.type }, ids);
+    this.emitEvent({ type: "realtime_message", message });
+    // Renderer delivery is best effort. There is deliberately no renderer
+    // acknowledgement in the answer/session completion barrier.
+    this.recordRuntimeTrace("OVERLAY_UPDATED", { messageType: message.type }, ids);
+    if (screenshotRequestId && message.type === "answer_end") {
+      this.recordScreenshotTrace("VISION_OVERLAY_UPDATED", screenshotRequestId, { providerRequestId: screenshotAnswer.providerRequestId, answerId: messageWithIds.answerId, status: "completed" });
+    }
   }
 
   private emitDiagnostic(message: string): void {

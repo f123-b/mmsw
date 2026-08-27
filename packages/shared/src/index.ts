@@ -1,4 +1,5 @@
 import { normalizeTechnicalTerms } from "./terminology";
+export { buildVisionInput, type ScreenshotImage, type VisionInput } from "./vision";
 
 export const SESSION_STATES = [
   "IDLE",

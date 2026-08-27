@@ -20,6 +20,8 @@
     "capture-helper:build": "npm --workspace apps/desktop run build:capture-helper",
     "visual:smoke": "npm --workspace apps/desktop run visual:smoke",
     "functional:e2e": "npm run ensure:electron-runtime && npm --workspace apps/desktop run functional:e2e",
+    "realtime:smoke": "npm run ensure:electron-runtime && npm --workspace @interview-copilot/desktop run realtime:smoke",
+    "screenshot:smoke": "npm run ensure:electron-runtime && npm --workspace @interview-copilot/desktop run screenshot:smoke",
     "probe-failure:e2e": "npm run ensure:electron-runtime && npm --workspace apps/desktop run probe-failure:e2e",
     "shutdown-process:e2e": "npm run ensure:electron-runtime && npm --workspace apps/desktop run shutdown-process:e2e",
     "verify:package": "node apps/desktop/scripts/verify-package.mjs",
@@ -29,6 +31,8 @@
     "benchmark:project-comprehension": "npm --workspace @interview-copilot/shared run benchmark:project-comprehension",
     "benchmark:project-semantic-intelligence": "npm --workspace @interview-copilot/shared run benchmark:project-semantic-intelligence",
     "benchmark:real-interview": "npm --workspace @interview-copilot/shared run benchmark:real-interview",
+    "benchmark:realtime-runtime": "npm --workspace @interview-copilot/desktop run benchmark:realtime-runtime",
+    "benchmark:screenshot-vision": "npm --workspace @interview-copilot/desktop run benchmark:screenshot-vision",
     "test:soak": "npm --workspace @interview-copilot/desktop run test:soak",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "format:check": "npm run format:check --workspaces --if-present"

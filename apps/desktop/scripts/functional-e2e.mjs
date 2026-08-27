@@ -27,6 +27,7 @@ let chatSecondTurnContextObserved = false;
 let screenshotAnswerRequests = 0;
 let screenshotOnlyRequests = 0;
 let visionRequestCount = 0;
+const visionRequests = [];
 let pcmPackets = 0;
 let activeAsrSocket;
 let scheduledQuestions = false;
@@ -121,7 +122,14 @@ const mockServer = createServer(async (request, response) => {
   if (imageMessage) {
     screenshotAnswerRequests += 1;
     visionRequestCount += 1;
-    if (messageContents.includes("请分析截图中的题目、代码或内容，并给出适合面试场景的回答。")) screenshotOnlyRequests += 1;
+    const imageParts = (payload.messages ?? []).flatMap((message) => Array.isArray(message.content) ? message.content.filter((part) => part?.type === "image_url") : []);
+    const imageUrls = imageParts.map((part) => part?.image_url?.url).filter((value) => typeof value === "string");
+    visionRequests.push({ requestType: "vision", hasImage: imageUrls.length > 0, imageCount: imageUrls.length, imageMimeType: imageUrls[0]?.match(/^data:([^;]+);/)?.[1], imageBytes: imageUrls.reduce((total, value) => total + Buffer.from(value.split(",", 2)[1] ?? "", "base64").byteLength, 0), promptText: messageContents.slice(0, 240) });
+    // The screenshot-only phase uses the same fixed screenshot prompt as the
+    // regular interview phase. Count real vision requests here and compare
+    // the counter before/after that phase instead of coupling the assertion
+    // to an obsolete prompt string.
+    screenshotOnlyRequests += 1;
   }
   if (request.url?.endsWith("/v1/embeddings")) {
     response.writeHead(200, { "content-type": "application/json" });
@@ -179,6 +187,7 @@ const child = spawn(electronExecutable, ["--disable-gpu", "--in-process-gpu", `-
     INTERVIEW_COPILOT_DISABLE_GPU: "1",
     ELECTRON_DISABLE_SECURITY_WARNINGS: "true",
     INTERVIEW_COPILOT_CAPTURE_TEST: "1",
+    INTERVIEW_COPILOT_SCREENSHOT_FIXTURE: "1",
     INTERVIEW_COPILOT_TEST_DATA_PATH: userDataDirectory,
     INTERVIEW_COPILOT_AUDIO_SIDECAR: audioSidecar,
     INTERVIEW_COPILOT_NODE_EXECUTABLE: process.execPath
@@ -193,7 +202,7 @@ child.on("error", (error) => { childOutput += String(error); });
 child.on("exit", (code) => { if (code && !childOutput.includes("E2E child exited")) childOutput += `E2E child exited ${code}`; });
 
 async function getTargets() {
-  try { return await (await fetch(`http://127.0.0.1:${debugPort}/json`)).json(); } catch { return []; }
+  try { return await (await fetch(`http://127.0.0.1:${debugPort}/json`, { signal: AbortSignal.timeout(2_000) })).json(); } catch { return []; }
 }
 
 async function waitForTarget(predicate, timeout = 20_000) {
@@ -216,9 +225,31 @@ function connectTarget(target) {
     if (message.method === "Runtime.exceptionThrown") rendererErrors.push(message.params?.exceptionDetails?.text ?? "Renderer exception");
     if (message.method === "Runtime.consoleAPICalled" && ["error", "assert"].includes(message.params?.type)) rendererErrors.push(message.params?.args?.map((arg) => arg.value ?? arg.description ?? "").join(" ") ?? "Renderer console error");
     if (message.method === "Log.entryAdded" && message.params?.entry?.level === "error") rendererErrors.push(message.params.entry.text ?? "Renderer log error");
-    if (message.id && commands.has(message.id)) { const resolve = commands.get(message.id); commands.delete(message.id); resolve(message.result); }
+    if (message.id && commands.has(message.id)) {
+      const command = commands.get(message.id);
+      commands.delete(message.id);
+      clearTimeout(command.timer);
+      if (message.error) command.reject(new Error(`CDP ${command.method} failed: ${message.error.message ?? JSON.stringify(message.error)}`));
+      else command.resolve(message.result);
+    }
   });
-  const command = (method, params = {}) => new Promise((resolve) => { const id = ++commandId; commands.set(id, resolve); socket.send(JSON.stringify({ id, method, params })); });
+  socket.on("close", () => {
+    for (const [id, command] of commands) {
+      clearTimeout(command.timer);
+      command.reject(new Error(`RUNTIME_E2E_TIMEOUT target closed while waiting for ${command.method} (${id})`));
+    }
+    commands.clear();
+  });
+  const command = (method, params = {}) => new Promise((resolve, reject) => {
+    const id = ++commandId;
+    const timer = setTimeout(() => {
+      commands.delete(id);
+      reject(new Error(`RUNTIME_E2E_TIMEOUT CDP command ${method} exceeded 5s`));
+    }, 5_000);
+    commands.set(id, { resolve, reject, timer, method });
+    try { socket.send(JSON.stringify({ id, method, params })); }
+    catch (error) { clearTimeout(timer); commands.delete(id); reject(error); }
+  });
   const evaluate = async (expression, awaitPromise = true) => {
     const result = await command("Runtime.evaluate", { expression, awaitPromise, returnByValue: true });
     if (result?.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text ?? "Renderer evaluation failed");
@@ -233,28 +264,56 @@ await new Promise((resolve, reject) => { main.socket.once("open", resolve); main
 await main.command("Runtime.enable");
 await main.command("Log.enable");
 
+async function dumpRuntimeDiagnostics(client = main) {
+  try {
+    return await client.evaluate(`(async () => ({
+      diagnostics: await window.interviewCopilot.interview.getRuntimeDiagnostics(),
+      trace: await window.interviewCopilot.interview.getRuntimeTrace(30),
+      screenshotDiagnostics: await window.interviewCopilot.screenshot.getDiagnostics(),
+      screenshotTrace: await window.interviewCopilot.screenshot.getTrace(30)
+    }))()`);
+  } catch (error) {
+    return { diagnostics: "unavailable", error: String(error) };
+  }
+}
+
 async function waitFor(predicate, timeout = 12_000, client = main) {
   const end = Date.now() + timeout;
+  let lastError;
   while (Date.now() < end) {
-    if (await client.evaluate(`(${predicate.toString()})()`)) return;
+    try {
+      if (await client.evaluate(`(${predicate.toString()})()`)) return;
+    } catch (error) {
+      lastError = error;
+      break;
+    }
     await sleep(150);
   }
-  throw new Error(`Timed out waiting for renderer condition\n${String(await client.evaluate("document.body.innerText").catch((error) => error)).slice(0, 3_000)}`);
+  const runtime = await dumpRuntimeDiagnostics(client);
+  throw new Error(`RUNTIME_E2E_TIMEOUT waiting for renderer condition${lastError ? `: ${String(lastError)}` : ""}\n${JSON.stringify(runtime)}\n${String(await client.evaluate("document.body.innerText").catch((error) => error)).slice(0, 3_000)}`);
 }
 
 async function waitForText(text, timeout = 12_000, client = main) {
   const end = Date.now() + timeout;
+  let lastError;
   while (Date.now() < end) {
-    if (await client.evaluate(`document.body.innerText.includes(${JSON.stringify(text)})`)) return;
+    try {
+      if (await client.evaluate(`document.body.innerText.includes(${JSON.stringify(text)})`)) return;
+    } catch (error) {
+      lastError = error;
+      break;
+    }
     await sleep(150);
   }
-  throw new Error(`Timed out waiting for renderer text: ${text}\n${String(await client.evaluate("document.body.innerText").catch((error) => error)).slice(0, 3_000)}`);
+  const runtime = await dumpRuntimeDiagnostics(client);
+  throw new Error(`RUNTIME_E2E_TIMEOUT waiting for renderer text: ${text}${lastError ? `: ${String(lastError)}` : ""}\n${JSON.stringify(runtime)}\n${String(await client.evaluate("document.body.innerText").catch((error) => error)).slice(0, 3_000)}`);
 }
 
-async function waitForNode(predicate, timeout = 12_000) {
+async function waitForNode(predicate, timeout = 12_000, client = main) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { if (predicate()) return; await sleep(100); }
-  throw new Error(`Timed out waiting for mock service condition\n${childOutput.slice(-2_000)}`);
+  const runtime = await dumpRuntimeDiagnostics(client);
+  throw new Error(`RUNTIME_E2E_TIMEOUT waiting for mock service condition\n${JSON.stringify(runtime)}\n${childOutput.slice(-2_000)}`);
 }
 
 async function clickText(text, client = main) {
@@ -538,7 +597,7 @@ try {
   const projectQuestionAssertions = [
     { question: "你的电流环频率多少？", markers: ["PROJECT_UNDERSTANDING_ROUTE=parameter", "control.current_loop.frequency", "20 kHz"], label: "EXACT_PARAMETER_RETRIEVAL" },
     { question: "为什么要 PWM 中心对齐？", markers: ["PROJECT_UNDERSTANDING_ROUTE=decision", "TECHNICAL_DECISIONS", "PWM 中心对齐"], label: "TECHNICAL_DECISION_RETRIEVAL" },
-    { question: "低速抖动怎么查？", markers: ["PROJECT_UNDERSTANDING_ROUTE=problem", "PROBLEM_CHAINS", "低速抖动", "采样窗口和参数问题"], label: "PROBLEM_CHAIN_RETRIEVAL" }
+    { question: "低速抖动怎么查？", markers: ["PROJECT_UNDERSTANDING_ROUTE=problem", "PROBLEM_CHAINS", "低速抖动", "增量 delta + frame rebase"], label: "PROBLEM_CHAIN_RETRIEVAL" }
   ];
   // Let the three scheduled interview answers drain before injecting the
   // explicit project questions. This keeps the assertion about project
@@ -579,13 +638,13 @@ try {
   await waitForNode(() => answerRequests.length > beforeManualSend, 15_000);
   evidence.push("OVERLAY_COMPOSER_REMOVED: PASS; MAIN_MANUAL_SEND: PASS");
 
-  const beforeScreenshot = answerRequests.length;
+  const beforeVisionRequests = visionRequests.length;
   const beforeCaptured = await main.evaluate("window.__e2eMainScreenshotCaptured ?? 0");
   await main.evaluate(`window.__e2eMainScreenshotBaseline = ${beforeCaptured}`);
   await waitFor(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('截图回答') || (item.innerText || '').includes('附截图')); return Boolean(button && !button.disabled); }, 15_000, overlay);
   const screenshotButtonState = await overlay.evaluate("(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('截图回答') || (item.innerText || '').includes('附截图')); if (!button) return { found: false }; button.click(); return { found: true, disabled: button.disabled }; })()");
   if (!screenshotButtonState?.found || screenshotButtonState.disabled) throw new Error(`Screenshot button unavailable: ${JSON.stringify(screenshotButtonState)}`);
-  await waitForNode(() => answerRequests.slice(beforeScreenshot).some((request) => (request.messages ?? []).some((message) => Array.isArray(message.content))), 15_000);
+  await waitForNode(() => visionRequests.slice(beforeVisionRequests).some((request) => request.requestType === "vision" && request.hasImage && request.imageBytes > 0 && request.imageMimeType === "image/png"), 15_000);
   await waitFor(() => (window.__e2eMainScreenshotCaptured ?? 0) > (window.__e2eMainScreenshotBaseline ?? 0), 15_000, main);
   await waitFor(() => document.body.innerText.includes("Mock vision answer"), 15_000, overlay);
   evidence.push("Overlay Screenshot Button: PASS; Vision Request: PASS");
@@ -620,7 +679,7 @@ try {
   await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "ENDED"), 15_000);
   const snapshot = await main.evaluate("(async () => { const records = await window.interviewCopilot.history.list(); const record = records[0]; return record ? { record, detail: await window.interviewCopilot.history.get(record.id), count: records.length } : undefined; })()");
   if (!snapshot?.record || snapshot.record.status !== "ended") throw new Error("Screenshot-only history interview did not end");
-  if (!(snapshot.detail?.questions ?? []).some((item) => item.text === "请分析截图中的题目、代码或内容，并给出适合面试场景的回答。")) throw new Error("Screenshot-only synthetic question was not persisted");
+  if (!(snapshot.detail?.questions ?? []).some((item) => item.text === "分析截图中的面试问题、代码或内容，并给出适合面试场景的回答。")) throw new Error("Screenshot-only synthetic question was not persisted");
   evidence.push(`History: PASS; interview count=${snapshot.count}; first interview remote transcripts=${firstSnapshot.detail.transcripts.filter((item) => item.source === "remote").length}; first interview questions=${firstSnapshot.detail.questions.length}; first interview answers=${firstSnapshot.detail.answers.length}; latest status=${snapshot.record.status}`);
   await clickText("面试历史");
   await clickSelector(".history-layout .history-record-row .row-main-button");

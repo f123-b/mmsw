@@ -1,5 +1,6 @@
 import type { AudioProcessState, AudioStartOptions } from "../main/audio-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
+import type { ScreenshotDiagnostics, ScreenshotTraceEvent } from "../main/screenshot-pipeline";
 import type { AudioDevices, AudioSidecarEvent } from "@interview-copilot/protocol";
 import type { RealtimeServerMessage } from "@interview-copilot/protocol";
 import type { RealtimeConnectOptions } from "../main/realtime-session";
@@ -55,6 +56,8 @@ declare global {
       };
       screenshot: {
         capture(): Promise<ScreenshotResult>;
+        getDiagnostics(): Promise<ScreenshotDiagnostics>;
+        getTrace(limit?: number): Promise<ScreenshotTraceEvent[]>;
       };
       session: {
         getState(): Promise<SessionState>;
@@ -216,7 +219,8 @@ declare global {
         onAudioProcess(listener: (state: AudioProcessState) => void): () => void;
         onScreenshot(listener: (result: ScreenshotResult) => void): () => void;
         onScreenshotError(listener: (message: string) => void): () => void;
-        onScreenshotDiagnostic(listener: (message: string) => void): () => void;
+      onScreenshotDiagnostic(listener: (message: string) => void): () => void;
+      onScreenshotTrace(listener: (event: ScreenshotTraceEvent) => void): () => void;
         onRealtimeState(listener: (state: string) => void): () => void;
         onRealtimeDiagnostics(listener: (diagnostics: AsrRuntimeDiagnostics) => void): () => void;
         onRealtimeTranscript(listener: (snapshot: TranscriptSnapshot) => void): () => void;

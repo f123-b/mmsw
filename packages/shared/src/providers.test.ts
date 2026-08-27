@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, providerEndpoint, validateLlmModelConfiguration } from "./index";
+import { OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, providerEndpoint, providerSupportsVision, validateLlmModelConfiguration } from "./index";
 
 function streamResponse(chunks: string[]): Response {
   const encoder = new TextEncoder();
@@ -13,6 +13,13 @@ function streamResponse(chunks: string[]): Response {
 }
 
 describe("OpenAICompatibleAnswerProvider", () => {
+  it("fails explicitly when the configured provider is text-only", async () => {
+    const settings = { providerName: "text-only", baseUrl: "https://llm.test", apiKey: "secret", model: "text-model", supportsVision: false, timeoutMs: 5_000, maxRetries: 0 };
+    expect(providerSupportsVision(settings)).toBe(false);
+    const provider = new OpenAICompatibleAnswerProvider(settings, async () => { throw new Error("network should not be called"); });
+    await expect((async () => { for await (const _delta of provider.stream({ model: "text-model", sections: [{ name: "question", content: "截图" }], attachments: [{ mimeType: "image/png", dataUrl: "data:image/png;base64,valid" }] })) { /* no-op */ } })()).rejects.toThrow("VISION_NOT_SUPPORTED");
+  });
+
   it("normalizes base URLs that already contain v1 or a full chat path", () => {
     const settings = { providerName: "custom", baseUrl: "https://llm.test/v1", apiKey: "secret", model: "chat", timeoutMs: 5_000, maxRetries: 0 };
     expect(providerEndpoint(settings, "v1/chat/completions")).toBe("https://llm.test/v1/chat/completions");
@@ -40,6 +47,33 @@ describe("OpenAICompatibleAnswerProvider", () => {
     expect(deltas.join("")).toBe("核心回答");
     expect(JSON.parse(String(request?.body)).model).toBe("configured-model");
     expect(JSON.parse(String(request?.body)).max_tokens).toBe(1_024);
+  });
+
+  it("sends the real image data through the multimodal provider contract", async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const provider = new OpenAICompatibleAnswerProvider({ providerName: "vision", baseUrl: "https://llm.test", apiKey: "secret", model: "vision-model", timeoutMs: 5_000, maxRetries: 0 }, async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return streamResponse(["data: {\"choices\":[{\"delta\":{\"content\":\"看到了\"}}]}\n\ndata: [DONE]\n\n"]);
+    });
+    const image = "data:image/png;base64,iVBORw0KGgo=";
+    const deltas: string[] = [];
+    for await (const delta of provider.stream({ model: "vision-model", sections: [{ name: "question", content: "分析截图" }], attachments: [{ mimeType: "image/png", dataUrl: image }] })) deltas.push(delta);
+    const messages = requestBody?.messages as Array<{ content: unknown }>;
+    const imagePart = (messages[1]?.content as Array<Record<string, unknown>>).find((part) => part.type === "image_url");
+    expect(imagePart?.image_url).toMatchObject({ url: image, mimeType: "image/png" });
+    expect(deltas.join("")).toBe("看到了");
+  });
+
+  it("surfaces a vision provider HTTP error without falling back to text", async () => {
+    let requests = 0;
+    const provider = new OpenAICompatibleAnswerProvider({ providerName: "vision", baseUrl: "https://llm.test", apiKey: "secret", model: "vision-model", timeoutMs: 5_000, maxRetries: 0 }, async () => {
+      requests += 1;
+      return new Response(JSON.stringify({ error: { message: "vision gateway unavailable" } }), { status: 503 });
+    });
+    await expect((async () => {
+      for await (const _delta of provider.stream({ model: "vision-model", sections: [{ name: "question", content: "分析截图" }], attachments: [{ mimeType: "image/png", dataUrl: "data:image/png;base64,iVBORw0KGgo=" }] })) { /* no-op */ }
+    })()).rejects.toThrow("503");
+    expect(requests).toBe(1);
   });
 
   it("stops when the provider sends finish_reason even without a DONE frame", async () => {

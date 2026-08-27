@@ -98,6 +98,11 @@ export class TranscriptAggregator {
     this.punctuationBoundary = options.punctuationBoundary ?? true;
   }
 
+  get pendingCount(): number {
+    return Object.values(this.current).filter(Boolean).length
+      + Object.values(this.completed).reduce((total, items) => total + (items?.length ?? 0), 0);
+  }
+
   /**
    * Only final segments are emitted. Partials are intentionally left to the
    * stabilizer/UI so the question detector never answers on unstable text.

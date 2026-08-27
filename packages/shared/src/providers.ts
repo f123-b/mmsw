@@ -24,6 +24,8 @@ export interface ProviderSettings {
   preparationModel?: string;
   timeoutMs: number;
   maxRetries: number;
+  /** Explicit vision capability override for providers/models that are text-only. */
+  supportsVision?: boolean;
   /** Explicitly override whether this provider requires an API key. */
   requiresApiKey?: boolean;
 }
@@ -31,6 +33,7 @@ export interface ProviderSettings {
 export interface ProviderCapabilities {
   requiresApiKey: boolean;
   supportsThinking: boolean;
+  supportsVision: boolean;
   chatPath: string;
   embeddingPath: string;
 }
@@ -65,9 +68,14 @@ export function providerCapabilities(settings: ProviderSettings): ProviderCapabi
   return {
     requiresApiKey: settings.requiresApiKey ?? (!local),
     supportsThinking: deepSeek,
+    supportsVision: settings.supportsVision ?? true,
     chatPath: deepSeek ? "chat/completions" : "v1/chat/completions",
     embeddingPath: "v1/embeddings"
   };
+}
+
+export function providerSupportsVision(settings: ProviderSettings): boolean {
+  return providerCapabilities(settings).supportsVision;
 }
 
 function cleanBaseUrl(baseUrl: string, settings: ProviderSettings): string {
@@ -277,6 +285,7 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
   }
 
   async *stream(request: AnswerProviderRequest, signal?: AbortSignal): AsyncIterable<string> {
+    if (request.attachments?.length && !providerSupportsVision(this.settings)) throw new Error("VISION_NOT_SUPPORTED");
     const externalSignal = signal ?? new AbortController().signal;
     const startedAt = Date.now();
     this.lastStreamMetadata = { startedAt };
@@ -348,6 +357,7 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
   }
 
   async complete(request: AnswerProviderRequest, signal?: AbortSignal): Promise<string> {
+    if (request.attachments?.length && !providerSupportsVision(this.settings)) throw new Error("VISION_NOT_SUPPORTED");
     const externalSignal = signal ?? new AbortController().signal;
     let lastError: unknown;
     const retries = Math.max(0, Math.min(5, request.maxRetries ?? this.settings.maxRetries));

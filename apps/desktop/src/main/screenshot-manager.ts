@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { readdir, stat, unlink } from "node:fs/promises";
 import { selectPrimaryScreenSource, type ScreenSourceLike } from "./screen-source-selection";
 import { isScreenshotExpired } from "./screenshot-cleanup";
+import type { ScreenshotImage } from "@interview-copilot/shared";
 
 export { selectPrimaryScreenSource } from "./screen-source-selection";
 export type { ScreenSourceLike } from "./screen-source-selection";
@@ -11,11 +12,8 @@ export type { ScreenSourceLike } from "./screen-source-selection";
 const MAX_DIMENSION = 1_280;
 const MAX_PNG_BYTES = 2 * 1024 * 1024;
 
-export interface ScreenshotResult {
+export interface ScreenshotResult extends ScreenshotImage {
   path: string;
-  mimeType: "image/png" | "image/jpeg";
-  width: number;
-  height: number;
   size: number;
   dataUrl: string;
 }
@@ -25,29 +23,72 @@ export interface ScreenshotManagerOptions {
   getOverlayWindow?: () => { isDestroyed(): boolean; isVisible(): boolean; hide(): void; showInactive(): void } | undefined;
   shouldUseInternalFallback?: (result: ScreenshotResult) => boolean | Promise<boolean>;
   captureRendererFallback?: () => Promise<ScreenshotResult>;
+  captureFixture?: () => Promise<ScreenshotResult>;
+}
+
+const MINIMAL_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+export function createScreenshotFixtureResult(path = `fixture://${Date.now()}.png`): ScreenshotResult {
+  const bytes = new Uint8Array(Buffer.from(MINIMAL_PNG_BASE64, "base64"));
+  return { path, mimeType: "image/png", bytes, width: 1, height: 1, size: bytes.byteLength, dataUrl: `data:image/png;base64,${MINIMAL_PNG_BASE64}` };
 }
 
 export class ScreenshotManager {
   constructor(private readonly options: ScreenshotManagerOptions = {}) {}
 
-  async capturePrimaryDisplay(): Promise<ScreenshotResult> {
+  async capturePrimaryDisplay(signal?: AbortSignal): Promise<ScreenshotResult> {
+    if (this.options.captureFixture) return await this.withAbort(this.options.captureFixture(), signal);
     let result: ScreenshotResult;
     try {
-      result = await Promise.race([
-        this.capturePrimaryDisplayDirect(),
-        new Promise<ScreenshotResult>((_resolve, reject) => setTimeout(() => reject(new Error("Display capture timed out")), 2_000))
-      ]);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const directCapture = this.capturePrimaryDisplayDirect();
+      try {
+        result = await this.withAbort(Promise.race([
+          directCapture,
+          new Promise<ScreenshotResult>((_resolve, reject) => {
+            timeout = setTimeout(() => reject(new Error("Display capture timed out")), 2_000);
+          })
+        ]), signal);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+        void directCapture.catch(() => undefined);
+      }
     } catch (error) {
       const fallback = this.options.captureRendererFallback;
       if (!fallback) throw error;
       this.options.onDiagnostic?.(`DISPLAY_CAPTURE_UNAVAILABLE_USING_RENDERER_TEST_SOURCE: ${String(error)}`);
-      result = await fallback();
+      result = await this.withAbort(fallback(), signal);
     }
+    if (signal?.aborted) throw this.abortError();
     if (await this.options.shouldUseInternalFallback?.(result)) {
       await this.cleanup(result);
-      return await this.captureWithInternalFallback();
+      return await this.withAbort(this.captureWithInternalFallback(), signal);
     }
     return result;
+  }
+
+  private abortError(): Error {
+    const error = new Error("Screenshot capture aborted");
+    error.name = "AbortError";
+    return error;
+  }
+
+  private async withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return await promise;
+    if (signal.aborted) {
+      void promise.catch(() => undefined);
+      throw this.abortError();
+    }
+    let onAbort: (() => void) | undefined;
+    const abort = new Promise<T>((_resolve, reject) => {
+      onAbort = () => reject(this.abortError());
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([promise, abort]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
   }
 
   private async capturePrimaryDisplayDirect(): Promise<ScreenshotResult> {
@@ -122,6 +163,7 @@ export class ScreenshotManager {
     const result = {
       path,
       mimeType,
+      bytes: new Uint8Array(buffer),
       width: size.width,
       height: size.height,
       size: buffer.byteLength,

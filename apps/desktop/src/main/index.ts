@@ -6,10 +6,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { AudioManager, type AudioStartOptions } from "./audio-manager";
 import { OverlayManager, type OverlayMode } from "./overlay-manager";
-import { ScreenshotManager } from "./screenshot-manager";
+import { createScreenshotFixtureResult, ScreenshotManager } from "./screenshot-manager";
+import { createScreenshotRequestId, SCREENSHOT_PROMPT, ScreenshotOperationRegistry, ScreenshotTraceBuffer, withScreenshotTimeout, type ScreenshotTraceEvent, type ScreenshotTraceEventName } from "./screenshot-pipeline";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeInterview, AnswerAgent, AgentToolRegistry, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
@@ -123,10 +124,12 @@ async function embedKnowledgeChunks(chunks: ReturnType<typeof chunkText>, settin
   return true;
 }
 
+const screenshotFixtureRequested = process.env.INTERVIEW_COPILOT_SCREENSHOT_FIXTURE === "1";
 const screenshotManager = new ScreenshotManager({
   onDiagnostic: (message) => broadcast("screenshot:diagnostic", message),
   getOverlayWindow: () => overlayManager?.currentWindow,
   shouldUseInternalFallback: (result) => captureTestRequested && captureContainsTestMarker(result.dataUrl),
+  captureFixture: screenshotFixtureRequested ? async () => createScreenshotFixtureResult() : undefined,
   captureRendererFallback: async () => {
     if (!captureTestRequested || !mainWindow || mainWindow.isDestroyed()) throw new Error("Renderer screenshot fallback is only available in capture-test mode");
     const image = await mainWindow.capturePage();
@@ -136,7 +139,7 @@ const screenshotManager = new ScreenshotManager({
     await mkdir(directory, { recursive: true });
     const path = join(directory, `${Date.now()}-renderer-test.png`);
     await writeFile(path, png);
-    return { path, mimeType: "image/png" as const, width: size.width, height: size.height, size: png.byteLength, dataUrl: `data:image/png;base64,${png.toString("base64")}` };
+    return { path, mimeType: "image/png" as const, bytes: new Uint8Array(png), width: size.width, height: size.height, size: png.byteLength, dataUrl: `data:image/png;base64,${png.toString("base64")}` };
   }
 });
 const session = new SessionStateMachine();
@@ -252,6 +255,8 @@ const visualSmokeRequested = process.argv.includes("--visual-smoke");
 const captureProtectionSmokeRequested = process.argv.includes("--capture-protection-smoke");
 const captureTestRequested = process.env.INTERVIEW_COPILOT_CAPTURE_TEST === "1";
 const productionSmokeRequested = process.argv.includes("--production-smoke") || visualSmokeRequested;
+const screenshotOperations = new ScreenshotOperationRegistry();
+const screenshotTrace = new ScreenshotTraceBuffer();
 let mainRendererLoad: Promise<void> | undefined;
 const rendererAppReadyWindows = new Set<number>();
 const rendererAppReadyWaiters = new Map<number, Set<() => void>>();
@@ -262,7 +267,7 @@ const shutdownController = new ShutdownController([
   { name: "abort-preparation", run: () => preparationAbortController?.abort() },
   { name: "abort-chat", run: () => chatAbortControllers.forEach((entry) => { entry.reason = "shutdown"; entry.controller.abort(); }) },
   { name: "wait-chat", run: async () => { await Promise.allSettled([...chatStreamPromises]); } },
-  { name: "stop-interview", run: async () => { await interviewCoordinator?.stop("user"); } },
+  { name: "stop-interview", run: async () => { screenshotOperations.abortAll(); await interviewCoordinator?.stop("user"); } },
   { name: "stop-written-test", run: () => { writtenTestController?.stop(); } },
   { name: "stop-audio", run: async () => { await audioManager.stop(); } },
   { name: "finalize-realtime", run: async () => { if (!interviewCoordinator?.running) await realtimeSession.finalize?.(1_000); } },
@@ -426,7 +431,14 @@ async function loadRenderer(window: BrowserWindow, overlay = false): Promise<voi
 
 function broadcastToWindows(channel: string, payload: unknown): void {
   for (const window of [mainWindow, overlayManager?.currentWindow]) {
-    if (window && !window.isDestroyed()) window.webContents.send(channel, payload);
+    if (!window || window.isDestroyed()) continue;
+    try {
+      window.webContents.send(channel, payload);
+    } catch (error) {
+      // A renderer can disappear between isDestroyed() and send(). IPC is a
+      // presentation side effect and must not reject an answer/session task.
+      appLogger?.warn("RENDERER_EVENT_DELIVERY_FAILED", { channel, error: String(error) });
+    }
   }
 }
 
@@ -497,31 +509,189 @@ function coordinator(): InterviewCoordinator {
   return interviewCoordinator;
 }
 
-async function captureScreenshot(trigger = "screenshot-answer"): Promise<void> {
+function screenshotSessionId(): string | undefined {
+  return interviewCoordinator?.getRuntimeDiagnostics().sessionId;
+}
+
+function recordScreenshotTrace(name: ScreenshotTraceEventName, screenshotRequestId: string, details: Partial<Omit<ScreenshotTraceEvent, "name" | "timestamp" | "elapsedMs" | "screenshotRequestId">> = {}): ScreenshotTraceEvent {
+  const operation = screenshotOperations.get(screenshotRequestId);
+  const event: ScreenshotTraceEvent = {
+    name,
+    timestamp: Date.now(),
+    elapsedMs: screenshotOperations.elapsedMs(screenshotRequestId),
+    screenshotRequestId,
+    ...(operation?.sessionId || screenshotSessionId() ? { sessionId: operation?.sessionId ?? screenshotSessionId() } : {}),
+    ...(operation?.providerRequestId ? { providerRequestId: operation.providerRequestId } : {}),
+    ...(operation?.state ? { status: operation.state } : {}),
+    ...details
+  };
+  screenshotTrace.push(event);
+  screenshotOperations.recordEvent(name, event.timestamp);
+  broadcast("screenshot:trace", event);
+  appLogger?.info(name, {
+    screenshotRequestId: event.screenshotRequestId,
+    sessionId: event.sessionId,
+    providerRequestId: event.providerRequestId,
+    imageMimeType: event.imageMimeType,
+    imageBytes: event.imageBytes,
+    imageWidth: event.imageWidth,
+    imageHeight: event.imageHeight,
+    messageShape: event.messageShape,
+    providerModel: event.providerModel,
+    status: event.status,
+    reasonCode: event.reasonCode,
+    fields: event.fields
+  });
+  return event;
+}
+
+function normalizeScreenshotResult(result: { mimeType: ScreenshotImage["mimeType"]; bytes: Uint8Array; width?: number; height?: number }): ScreenshotImage {
+  return { mimeType: result.mimeType, bytes: new Uint8Array(result.bytes), width: result.width, height: result.height };
+}
+
+async function runIndependentVisionAnswer(visionInput: ReturnType<typeof buildVisionInput>, screenshotRequestId: string, operation: ReturnType<ScreenshotOperationRegistry["begin"]>): Promise<{ answerId: string; answerText: string; model: string; startedAt: number; firstTokenAt: number; completedAt: number }> {
+  const providerRequestId = `vision-provider-${screenshotRequestId}`;
+  const questionId = `screenshot-question-${screenshotRequestId}`;
+  const question = { id: questionId, text: visionInput.prompt };
+  const imageDataUrl = `data:${visionInput.image.mimeType};base64,${visionInput.image.base64}`;
+  const startedAt = Date.now();
+  screenshotOperations.transition(screenshotRequestId, "provider_pending", providerRequestId);
+  recordScreenshotTrace("VISION_PROVIDER_REQUEST_STARTED", screenshotRequestId, { providerRequestId, imageMimeType: visionInput.image.mimeType, imageBytes: visionInput.image.bytes, imageWidth: visionInput.image.width, imageHeight: visionInput.image.height, messageShape: "multimodal", fields: { execution: "independent-screenshot-operation" } });
+  let answerId: string | undefined;
+  let providerModel = "vision";
+  let firstTokenAt: number | undefined;
+  let answerText = "";
+  const stream = answerAgent.stream(question, "NORMAL", {}, operation.controller.signal, {
+    hasScreenshot: true,
+    attachments: [{ mimeType: visionInput.image.mimeType, dataUrl: imageDataUrl }],
+    allowQualityRepair: false,
+    formatAnswer: true,
+    maxRetries: 1
+  })[Symbol.asyncIterator]();
   try {
-    const result = await screenshotManager.capturePrimaryDisplay();
-    broadcast("screenshot:captured", result);
-    broadcast("shortcut", trigger);
-    if (trigger === "screenshot-answer" && (interviewCoordinator?.running || writtenTestController?.running)) {
-      try {
-        if (interviewCoordinator?.running) await interviewCoordinator.answerScreenshot(result.dataUrl);
-        else await writtenTestController?.answerScreenshot(result.dataUrl);
-      } finally { await screenshotManager.cleanup(result); }
+    while (true) {
+      const next = firstTokenAt
+        ? await stream.next()
+        : await withScreenshotTimeout(stream.next(), 5_000, () => operation.controller.abort());
+      if (next.done) break;
+      const event = next.value;
+      if (operation.controller.signal.aborted) throw Object.assign(new Error("Screenshot vision request aborted"), { name: "AbortError" });
+      if (event.type === "answer_start") {
+        answerId = event.answerId;
+        providerModel = event.model;
+        screenshotOperations.transition(screenshotRequestId, "streaming", providerRequestId);
+        recordScreenshotTrace("VISION_PROVIDER_REQUEST_RECEIVED", screenshotRequestId, { providerRequestId, answerId, providerModel: event.model, status: "streaming", messageShape: "multimodal" });
+        broadcast("realtime:message", { type: "answer_start", answerId, questionId, mode: event.mode, model: event.model });
+      } else if (event.type === "answer_delta") {
+        answerText += event.delta;
+        if (!answerText) continue;
+        if (!firstTokenAt) {
+          firstTokenAt = Date.now();
+          recordScreenshotTrace("VISION_FIRST_TOKEN", screenshotRequestId, { providerRequestId, answerId, status: "streaming" });
+        }
+        broadcast("realtime:message", { type: "answer_delta", answerId: event.answerId, delta: event.delta });
+      } else {
+        if (!firstTokenAt) {
+          firstTokenAt = Date.now();
+          recordScreenshotTrace("VISION_FIRST_TOKEN", screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "completed" });
+        }
+        answerText = event.text || answerText;
+        screenshotOperations.transition(screenshotRequestId, "completed", providerRequestId);
+        recordScreenshotTrace("VISION_RESPONSE_COMPLETED", screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "completed" });
+        recordScreenshotTrace("VISION_OVERLAY_UPDATE_REQUESTED", screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "completed" });
+        broadcast("realtime:message", { type: "answer_end", answerId: event.answerId, text: answerText, quality: event.quality });
+        recordScreenshotTrace("VISION_OVERLAY_UPDATED", screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "completed" });
+      }
     }
+    if (!answerId) throw new Error("Vision provider returned no answer");
+    const completedAt = Date.now();
+    return { answerId, answerText, model: providerModel, startedAt, firstTokenAt: firstTokenAt ?? completedAt, completedAt };
+  } catch (error) {
+    const timedOut = error instanceof Error && error.name === "TimeoutError";
+    const aborted = !timedOut && (operation.controller.signal.aborted || (error instanceof Error && error.name === "AbortError"));
+    recordScreenshotTrace("VISION_RESPONSE_FAILED", screenshotRequestId, { providerRequestId, answerId, status: aborted ? "cancelled" : "failed", reasonCode: timedOut ? "first-token-timeout" : aborted ? "aborted" : "provider-error", fields: { error: String(error) } });
+    throw error;
+  }
+}
+
+async function captureScreenshot(trigger = "screenshot-answer"): Promise<void> {
+  const screenshotRequestId = createScreenshotRequestId();
+  try {
+    const mode = interviewCoordinator?.running ? "interview" : writtenTestController?.running ? "written-test" : undefined;
+    if (mode) await answerCapturedScreenshot(mode, screenshotRequestId, trigger);
+    else {
+      recordScreenshotTrace("SCREENSHOT_ACTION_REQUESTED", screenshotRequestId, { fields: { trigger, source: "global-shortcut" } });
+      const result = await screenshotManager.capturePrimaryDisplay();
+      try { broadcast("screenshot:captured", result); }
+      finally { await screenshotManager.cleanup(result); }
+    }
+    broadcast("shortcut", trigger);
   } catch (error) {
     broadcast("screenshot:error", userFacingError(error));
     broadcast("runtime:error", { code: "SCREENSHOT_FAILED", message: "截图失败，请重试", recoverable: true });
   }
 }
 
-async function answerCapturedScreenshot(mode: "interview" | "written-test" = "interview"): Promise<void> {
-  const result = await screenshotManager.capturePrimaryDisplay();
+async function answerCapturedScreenshot(mode: "interview" | "written-test" = "interview", screenshotRequestId = createScreenshotRequestId(), trigger = "ipc"): Promise<void> {
+  const sessionId = screenshotSessionId();
+  let operation = screenshotOperations.get(screenshotRequestId);
+  if (!operation) {
+    try {
+      operation = screenshotOperations.begin(screenshotRequestId, sessionId);
+    } catch (error) {
+      recordScreenshotTrace("SCREENSHOT_PIPELINE_FAILED", screenshotRequestId, { status: "failed", reasonCode: "duplicate-click", fields: { error: String(error) } });
+      throw error;
+    }
+    if (trigger !== "renderer-ipc") recordScreenshotTrace("SCREENSHOT_ACTION_REQUESTED", screenshotRequestId, { fields: { trigger, mode } });
+  }
+  recordScreenshotTrace("SCREENSHOT_IPC_RECEIVED", screenshotRequestId, { fields: { mode } });
+  let capturedResult: Awaited<ReturnType<ScreenshotManager["capturePrimaryDisplay"]>> | undefined;
   try {
-    broadcast("screenshot:captured", result);
-    if (mode === "written-test") await writtenTestController?.answerScreenshot(result.dataUrl);
-    else await coordinator().answerScreenshot(result.dataUrl);
+    recordScreenshotTrace("SCREENSHOT_CAPTURE_STARTED", screenshotRequestId, { fields: { mode } });
+    capturedResult = await withScreenshotTimeout(screenshotManager.capturePrimaryDisplay(operation.controller.signal), 3_000, () => operation.controller.abort());
+    screenshotOperations.setCaptureBytes(screenshotRequestId, capturedResult.bytes.byteLength);
+    recordScreenshotTrace("SCREENSHOT_CAPTURE_COMPLETED", screenshotRequestId, { imageMimeType: capturedResult.mimeType, imageBytes: capturedResult.bytes.byteLength, imageWidth: capturedResult.width, imageHeight: capturedResult.height, fields: { captureSource: screenshotFixtureRequested ? "test-fixture" : "primary-display" } });
+    broadcast("screenshot:captured", capturedResult);
+    const image = normalizeScreenshotResult(capturedResult);
+    recordScreenshotTrace("SCREENSHOT_IMAGE_NORMALIZED", screenshotRequestId, { imageMimeType: image.mimeType, imageBytes: image.bytes.byteLength, imageWidth: image.width, imageHeight: image.height });
+    screenshotOperations.transition(screenshotRequestId, "building_request");
+    recordScreenshotTrace("VISION_REQUEST_BUILD_STARTED", screenshotRequestId, { imageMimeType: image.mimeType, imageBytes: image.bytes.byteLength, imageWidth: image.width, imageHeight: image.height });
+    const visionInput = buildVisionInput(image, SCREENSHOT_PROMPT);
+    recordScreenshotTrace("VISION_REQUEST_BUILT", screenshotRequestId, { imageMimeType: visionInput.image.mimeType, imageBytes: visionInput.image.bytes, imageWidth: visionInput.image.width, imageHeight: visionInput.image.height, messageShape: "multimodal", fields: { promptLength: visionInput.prompt.length } });
+    screenshotOperations.transition(screenshotRequestId, "provider_pending");
+    if (mode === "written-test") await writtenTestController?.answerScreenshot(`data:${visionInput.image.mimeType};base64,${visionInput.image.base64}`);
+    else {
+      const answer = await withScreenshotTimeout(runIndependentVisionAnswer(visionInput, screenshotRequestId, operation), 20_000, () => operation.controller.abort());
+      const interviewId = coordinator().interviewId;
+      if (interviewId && historyRepository) {
+        try {
+          const storedQuestion = historyRepository.addQuestion({ interviewId, text: visionInput.prompt, confidence: "high", source: "extractor", detectedAt: answer.startedAt, status: "answered" });
+          historyRepository.addAnswer({ questionId: storedQuestion.id, text: answer.answerText, model: answer.model, mode: "NORMAL", startedAt: answer.startedAt, firstTokenAt: answer.firstTokenAt, finishedAt: answer.completedAt, latencyFirstToken: answer.firstTokenAt - answer.startedAt, latencyTotal: answer.completedAt - answer.startedAt, createdAt: answer.completedAt });
+        } catch (error) {
+          realtimeLogger?.warn("SCREENSHOT_HISTORY_PERSISTENCE_FAILED", { screenshotRequestId, error: String(error) });
+        }
+      }
+    }
+    screenshotOperations.finish(screenshotRequestId, "completed");
+    recordScreenshotTrace("SCREENSHOT_PIPELINE_COMPLETED", screenshotRequestId, { status: "completed" });
+  } catch (error) {
+    const message = userFacingError(error);
+    const errorCode = String((error as { code?: string })?.code ?? (error instanceof Error ? error.message : ""));
+    const imageFailure = ["EMPTY_IMAGE", "INVALID_PNG", "INVALID_JPEG", "IMAGE_TOO_LARGE"].includes(errorCode);
+    const timedOut = error instanceof Error && error.name === "TimeoutError";
+    const aborted = !timedOut && (operation.controller.signal.aborted || (error instanceof Error && error.name === "AbortError"));
+    const state = aborted ? "cancelled" : "failed";
+    if (operation.state === "capturing" || imageFailure) recordScreenshotTrace("SCREENSHOT_CAPTURE_FAILED", screenshotRequestId, { status: state, reasonCode: timedOut ? "capture-timeout" : aborted ? "aborted" : errorCode || "capture-error", fields: { error: message } });
+    if (operation.state !== "capturing" && !imageFailure) recordScreenshotTrace("VISION_RESPONSE_FAILED", screenshotRequestId, { status: state, reasonCode: timedOut ? "vision-timeout" : aborted ? "aborted" : "vision-error", fields: { error: message } });
+    screenshotOperations.finish(screenshotRequestId, state, message);
+    recordScreenshotTrace("SCREENSHOT_PIPELINE_FAILED", screenshotRequestId, { status: state, reasonCode: timedOut ? "timeout" : aborted ? "aborted" : "pipeline-error", fields: { error: message } });
+    broadcast("screenshot:error", message);
+    broadcast("runtime:error", { code: aborted ? "SCREENSHOT_CANCELLED" : "SCREENSHOT_FAILED", message: aborted ? "截图分析已取消" : "截图失败，请重试", recoverable: true });
+    throw error;
   } finally {
-    await screenshotManager.cleanup(result);
+    // The capture file is temporary and must be removed even when the vision
+    // provider fails. Fixture paths intentionally resolve to ENOENT.
+    if (capturedResult) await screenshotManager.cleanup(capturedResult);
   }
 }
 
@@ -825,6 +995,7 @@ function agentWorkspace(profileId: string): string {
 
 async function stopInterview(): Promise<void> {
   try {
+    screenshotOperations.abortAll();
     await coordinator().stop("user");
   } finally {
     // The HUD is a session-scoped window. Always restore the normal app even
@@ -1160,6 +1331,11 @@ async function readWorkspaceFile(root: string, requestedPath: string): Promise<s
 }
 
 function registerIpc(): void {
+  ipcMain.on("screenshot:trace", (_event, payload: { name?: string; screenshotRequestId?: string; fields?: Record<string, unknown> }) => {
+    const allowed = new Set<ScreenshotTraceEventName>(["SCREENSHOT_ACTION_REQUESTED", "SCREENSHOT_RENDERER_HANDLER_ENTERED", "SCREENSHOT_IPC_SENT"]);
+    if (!payload || typeof payload.screenshotRequestId !== "string" || !allowed.has(payload.name as ScreenshotTraceEventName)) return;
+    recordScreenshotTrace(payload.name as ScreenshotTraceEventName, payload.screenshotRequestId, { fields: payload.fields });
+  });
   // This low-level entry point is diagnostics-only. Product interview start goes through the coordinator.
   ipcMain.handle("audio:start", (_event, options: AudioStartOptions) => audioManager.start({ ...options, meterOnly: true, autoRecover: false }));
   ipcMain.handle("audio:stop", () => audioManager.stop());
@@ -1282,8 +1458,12 @@ function registerIpc(): void {
   ipcMain.handle("interview:stop", () => stopInterview());
   ipcMain.handle("interview:answer-latest", () => coordinator().answerLatest());
   ipcMain.handle("interview:answer-question", (_event, input: { text: string }) => coordinator().answerQuestionText(input.text));
-  ipcMain.handle("interview:answer-screenshot", () => answerCapturedScreenshot());
+  ipcMain.handle("interview:answer-screenshot", (_event, input?: { screenshotRequestId?: string }) => answerCapturedScreenshot("interview", input?.screenshotRequestId, "renderer-ipc"));
   ipcMain.handle("interview:get-state", () => ({ running: coordinator().running, interviewId: coordinator().interviewId, automationMode: coordinator().automationMode }));
+  ipcMain.handle("interview:get-runtime-diagnostics", () => coordinator().getRuntimeDiagnostics());
+  ipcMain.handle("interview:get-runtime-trace", (_event, limit?: number) => coordinator().getRuntimeTrace(limit));
+  ipcMain.handle("screenshot:get-diagnostics", () => screenshotOperations.diagnostics());
+  ipcMain.handle("screenshot:get-trace", (_event, limit?: number) => screenshotTrace.snapshot(limit));
   ipcMain.handle("interview:set-automation-mode", (_event, mode: "MANUAL" | "AUTO") => { const next = mode === "MANUAL" ? "MANUAL" : "AUTO"; overlaySettingsStore?.setAutomationMode(next); coordinator().setAutomationMode(next); return true; });
   ipcMain.handle("interview:set-answer-mode", (_event, mode: "FAST" | "NORMAL" | "DEEP") => { coordinator().setAnswerMode(mode); return true; });
   ipcMain.handle("written-test:start", (_event, options: WrittenTestStartOptions) => {
@@ -1297,7 +1477,7 @@ function registerIpc(): void {
     return true;
   });
   ipcMain.handle("written-test:stop", () => { stopWrittenTest(); return true; });
-  ipcMain.handle("written-test:answer-screenshot", () => answerCapturedScreenshot("written-test"));
+  ipcMain.handle("written-test:answer-screenshot", (_event, input?: { screenshotRequestId?: string }) => answerCapturedScreenshot("written-test", input?.screenshotRequestId, "renderer-ipc"));
   ipcMain.handle("written-test:get-state", () => writtenTestController?.state ?? { running: false, answerMode: "NORMAL" as const });
   ipcMain.handle("written-test:set-answer-mode", (_event, mode: "FAST" | "NORMAL" | "DEEP") => { writtenTestController?.setAnswerMode(mode); return true; });
   ipcMain.handle("chat:create-conversation", (_event, input: { profileId?: string; projectId?: string; title?: string }) => {
@@ -1955,9 +2135,13 @@ if (hasSingleInstanceLock) {
   const middleMouseHelper = firstExistingLocalPath(middleMouseHelperCandidates(process.resourcesPath, app.getAppPath()));
   if (middleMouseHelper) {
     middleMouseShortcutManager = new MiddleMouseShortcutManager(middleMouseHelper, () => {
-      if (!shouldHandleMiddleMouseShortcut({ interviewRunning: Boolean(interviewCoordinator?.running), automationMode: interviewCoordinator?.automationMode ?? "AUTO", writtenTestRunning: Boolean(writtenTestController?.running) })) return;
+      const interviewRunning = Boolean(interviewCoordinator?.running);
+      const writtenTestRunning = Boolean(writtenTestController?.running);
+      if (!shouldHandleMiddleMouseShortcut({ interviewRunning, automationMode: interviewCoordinator?.automationMode ?? "AUTO", writtenTestRunning })) return;
+      const mode = interviewRunning ? "interview" : writtenTestRunning ? "written-test" : undefined;
+      if (!mode) return;
       broadcast("shortcut", "middle-mouse-screenshot");
-      void answerCapturedScreenshot("interview").catch((error) => {
+      void answerCapturedScreenshot(mode, createScreenshotRequestId(), "middle-mouse-shortcut").catch((error) => {
         realtimeLogger?.warn("MIDDLE_MOUSE_SCREENSHOT_FAILED", { error: String(error) });
         broadcast("runtime:error", { code: "SCREENSHOT_FAILED", message: "鼠标中键截图识别失败，请重试", recoverable: true });
       });
@@ -2029,6 +2213,11 @@ if (hasSingleInstanceLock) {
     if (event.type === "answer_mode") broadcast("interview:answer-mode", event.mode);
     if (event.type === "telemetry") realtimeLogger?.info(String(event.name), (event.fields ?? {}) as Record<string, unknown>);
     if (event.type === "diagnostic") { realtimeLogger?.warn(String(event.message)); broadcast("realtime:diagnostic", event.message); }
+    if (event.type === "runtime_trace") broadcast("runtime:trace", event.event);
+    if (event.type === "screenshot_trace") {
+      screenshotTrace.push(event.event as ScreenshotTraceEvent);
+      broadcast("screenshot:trace", event.event);
+    }
   });
   writtenTestController?.on("event", (event: { type: string; [key: string]: unknown }) => {
     if (event.type === "state") broadcast("written-test:state", event.state);

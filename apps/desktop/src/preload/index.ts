@@ -1,11 +1,13 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { AudioProcessState, AudioStartOptions } from "../main/audio-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
+import type { ScreenshotDiagnostics, ScreenshotTraceEvent } from "../main/screenshot-pipeline";
 import type { AudioDevices, AudioSidecarEvent } from "@interview-copilot/protocol";
 import type { RealtimeServerMessage } from "@interview-copilot/protocol";
 import type { RealtimeConnectOptions } from "../main/realtime-session";
 import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
+import type { InterviewRuntimeDiagnostics, RuntimeTraceEvent } from "../main/runtime-diagnostics";
 import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
 import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
@@ -18,6 +20,18 @@ import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, Kn
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 import type { ModelCatalogResult } from "../main/model-catalog";
+
+function createRendererScreenshotRequestId(): string {
+  return `screenshot-${Date.now()}-${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2, 10)}`;
+}
+
+function requestScreenshotAnalysis(channel: "interview:answer-screenshot" | "written-test:answer-screenshot"): Promise<void> {
+  const screenshotRequestId = createRendererScreenshotRequestId();
+  ipcRenderer.send("screenshot:trace", { name: "SCREENSHOT_ACTION_REQUESTED", screenshotRequestId, fields: { source: "renderer" } });
+  ipcRenderer.send("screenshot:trace", { name: "SCREENSHOT_RENDERER_HANDLER_ENTERED", screenshotRequestId, fields: { channel } });
+  ipcRenderer.send("screenshot:trace", { name: "SCREENSHOT_IPC_SENT", screenshotRequestId, fields: { channel } });
+  return ipcRenderer.invoke(channel, { screenshotRequestId }) as Promise<void>;
+}
 
 const api = {
   diagnostics: {
@@ -54,7 +68,9 @@ const api = {
     setTencentValidation: (mode: "desktopShare" | "windowShare", status: TencentValidationStatus): Promise<TencentValidationState> => ipcRenderer.invoke("overlay:set-tencent-validation", mode, status)
   },
   screenshot: {
-    capture: (): Promise<ScreenshotResult> => ipcRenderer.invoke("screenshot:capture")
+    capture: (): Promise<ScreenshotResult> => ipcRenderer.invoke("screenshot:capture"),
+    getDiagnostics: (): Promise<ScreenshotDiagnostics> => ipcRenderer.invoke("screenshot:get-diagnostics"),
+    getTrace: (limit?: number): Promise<ScreenshotTraceEvent[]> => ipcRenderer.invoke("screenshot:get-trace", limit)
   },
   session: {
     getState: (): Promise<SessionState> => ipcRenderer.invoke("session:get-state")
@@ -72,15 +88,17 @@ const api = {
     stop: () => ipcRenderer.invoke("interview:stop") as Promise<void>,
     answerLatest: () => ipcRenderer.invoke("interview:answer-latest") as Promise<void>,
     answerQuestion: (text: string) => ipcRenderer.invoke("interview:answer-question", { text }) as Promise<void>,
-    answerScreenshot: () => ipcRenderer.invoke("interview:answer-screenshot") as Promise<void>,
+    answerScreenshot: () => requestScreenshotAnalysis("interview:answer-screenshot"),
     getState: () => ipcRenderer.invoke("interview:get-state") as Promise<{ running: boolean; interviewId?: string; automationMode: "MANUAL" | "AUTO" }>,
+    getRuntimeDiagnostics: () => ipcRenderer.invoke("interview:get-runtime-diagnostics") as Promise<InterviewRuntimeDiagnostics>,
+    getRuntimeTrace: (limit?: number) => ipcRenderer.invoke("interview:get-runtime-trace", limit) as Promise<RuntimeTraceEvent[]>,
     setAutomationMode: (mode: "MANUAL" | "AUTO") => ipcRenderer.invoke("interview:set-automation-mode", mode) as Promise<boolean>,
     setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => ipcRenderer.invoke("interview:set-answer-mode", mode) as Promise<boolean>
   },
   writtenTest: {
     start: (options: WrittenTestStartOptions) => ipcRenderer.invoke("written-test:start", options) as Promise<boolean>,
     stop: () => ipcRenderer.invoke("written-test:stop") as Promise<boolean>,
-    answerScreenshot: () => ipcRenderer.invoke("written-test:answer-screenshot") as Promise<void>,
+    answerScreenshot: () => requestScreenshotAnalysis("written-test:answer-screenshot"),
     getState: () => ipcRenderer.invoke("written-test:get-state") as Promise<WrittenTestState>,
     setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => ipcRenderer.invoke("written-test:set-answer-mode", mode) as Promise<boolean>
   },
@@ -268,6 +286,11 @@ const api = {
       ipcRenderer.on("screenshot:diagnostic", handler);
       return () => ipcRenderer.removeListener("screenshot:diagnostic", handler);
     },
+    onScreenshotTrace: (listener: (event: ScreenshotTraceEvent) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, trace: ScreenshotTraceEvent) => listener(trace);
+      ipcRenderer.on("screenshot:trace", handler);
+      return () => ipcRenderer.removeListener("screenshot:trace", handler);
+    },
       onRealtimeState: (listener: (state: string) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, state: string) => listener(state);
       ipcRenderer.on("realtime:state", handler);
@@ -292,6 +315,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, message: string) => listener(message);
       ipcRenderer.on("realtime:diagnostic", handler);
       return () => ipcRenderer.removeListener("realtime:diagnostic", handler);
+    },
+    onRuntimeTrace: (listener: (event: RuntimeTraceEvent) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, trace: RuntimeTraceEvent) => listener(trace);
+      ipcRenderer.on("runtime:trace", handler);
+      return () => ipcRenderer.removeListener("runtime:trace", handler);
     },
     onRuntimeError: (listener: (error: { code: string; message: string; recoverable: boolean }) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, error: { code: string; message: string; recoverable: boolean }) => listener(error);
