@@ -9,6 +9,8 @@ export interface ProjectUnderstandingHit {
   content: string;
   evidenceRefs: string[];
   score: number;
+  hop?: number;
+  whyRetrieved?: string;
 }
 
 export interface ProjectUnderstandingRetrievalResult {
@@ -34,6 +36,7 @@ function hybridRoute(query: string): { primaryRoute: ProjectUnderstandingRoute; 
   const secondary: ProjectUnderstandingRoute[] = [];
   if (/为什么|为何|时刻|同步|卡|采电流|采样|why|decision/i.test(query) && primaryRoute === "decision") secondary.push("flow");
   if (/流程|运行|怎么工作|数据流|control loop|采样/i.test(query) && primaryRoute === "flow") secondary.push("decision");
+  if (/模块|架构|接口|依赖|module|architecture|interface/i.test(query) && primaryRoute === "flow") secondary.push("architecture");
   if (primaryRoute === "general") {
     if (/电流|电压|频率|速率|配置|参数/i.test(query)) return { primaryRoute: "parameter", secondaryRoutes: ["flow"], confidence: 0.55 };
     if (/模块|服务|接口|总线|消息/i.test(query)) return { primaryRoute: "architecture", secondaryRoutes: ["flow"], confidence: 0.55 };
@@ -51,6 +54,12 @@ function scoreText(query: string, text: string, base: number): number {
   return base + words(query).reduce((score, word) => score + (normalized.includes(word) ? 2 : 0), 0);
 }
 
+function routeScore(route: ProjectUnderstandingRoute, primary: ProjectUnderstandingRoute, secondary: ProjectUnderstandingRoute[], primaryScore: number): number {
+  if (route === primary) return primaryScore;
+  if (secondary.includes(route)) return Math.max(5, primaryScore - 2);
+  return 2;
+}
+
 /** Routes questions into the comprehension model before Fact-first joins add grounding detail. */
 export class ProjectComprehensionRetriever {
   search(query: string, understanding: ProjectUnderstanding | undefined, limit = 5): ProjectUnderstandingRetrievalResult {
@@ -59,14 +68,48 @@ export class ProjectComprehensionRetriever {
     if (!understanding) return { route, primaryRoute: routed.primaryRoute, secondaryRoutes: routed.secondaryRoutes, confidence: routed.confidence, hits: [] };
     const hits: ProjectUnderstandingHit[] = [];
     const include = (hit: ProjectUnderstandingHit) => hits.push(hit);
-    for (const component of understanding.architecture.components) include({ kind: "component", id: component.id, title: component.name, content: component.description, evidenceRefs: component.evidenceRefs ?? [], score: scoreText(query, `${component.name} ${component.description}`, route === "architecture" ? 8 : 2) });
-    for (const relationship of understanding.architecture.relationships) include({ kind: "relationship", id: `${relationship.from}-${relationship.to}-${relationship.relation}`, title: `${relationship.from} ${relationship.relation} ${relationship.to}`, content: relationship.description ?? "", evidenceRefs: relationship.evidenceRefs, score: scoreText(query, `${relationship.from} ${relationship.to} ${relationship.relation} ${relationship.description ?? ""}`, route === "flow" || route === "architecture" ? 8 : 2) });
-    for (const flow of [...understanding.runtimeFlows, ...understanding.dataFlows, ...understanding.controlFlows]) include({ kind: "flow", id: flow.id, title: flow.name, content: `${flow.description} ${flow.steps.map((step) => step.action).join("；")}`, evidenceRefs: flow.evidenceRefs ?? [], score: scoreText(query, `${flow.name} ${flow.description}`, route === "flow" ? 10 : 2) });
-    for (const parameter of understanding.parameters) include({ kind: "parameter", id: parameter.id, title: parameter.name, content: `${parameter.semanticKey}=${parameter.value ?? "unknown"}${parameter.unit ?? ""} ${parameter.context ?? ""}`, evidenceRefs: parameter.evidenceRefs, score: scoreText(query, `${parameter.name} ${parameter.semanticKey} ${parameter.value ?? ""} ${parameter.context ?? ""}`, route === "parameter" ? 10 : 2) });
-    for (const decision of understanding.decisions) include({ kind: "decision", id: decision.id, title: decision.decision, content: `${decision.choice} ${decision.rationale ?? ""} ${decision.tradeoff ?? ""}`, evidenceRefs: decision.evidenceRefs, score: scoreText(query, `${decision.decision} ${decision.choice} ${decision.rationale ?? ""}`, route === "decision" ? 10 : 2) });
-    for (const problem of understanding.problems) include({ kind: "problem", id: problem.id, title: problem.problem, content: `${problem.symptom} ${problem.causeChain.join("；")} ${problem.fix}`, evidenceRefs: problem.evidenceRefs, score: scoreText(query, `${problem.problem} ${problem.symptom} ${problem.fix}`, route === "problem" ? 10 : 2) });
-    for (const result of understanding.results) include({ kind: "result", id: result.id, title: result.name, content: result.value, evidenceRefs: result.evidenceRefs, score: scoreText(query, `${result.name} ${result.value}`, route === "result" ? 10 : 2) });
+    for (const component of understanding.architecture.components) include({ kind: "component", id: component.id, title: component.name, content: component.description, evidenceRefs: component.evidenceRefs ?? [], score: scoreText(query, `${component.name} ${component.description}`, routeScore("architecture", route, routed.secondaryRoutes, 8)) });
+    for (const relationship of understanding.architecture.relationships.filter((item) => item.verificationStatus === "confirmed")) include({ kind: "relationship", id: `${relationship.from}-${relationship.to}-${relationship.relation}`, title: `${relationship.from} ${relationship.relation} ${relationship.to}`, content: relationship.description ?? "", evidenceRefs: relationship.evidenceRefs, score: scoreText(query, `${relationship.from} ${relationship.to} ${relationship.relation} ${relationship.description ?? ""}`, routeScore("flow", route, routed.secondaryRoutes, 8)) });
+    for (const flow of [...understanding.runtimeFlows, ...understanding.dataFlows, ...understanding.controlFlows]) include({ kind: "flow", id: flow.id, title: flow.name, content: `${flow.description} ${flow.steps.map((step) => step.action).join("；")}`, evidenceRefs: flow.evidenceRefs ?? [], score: scoreText(query, `${flow.name} ${flow.description}`, routeScore("flow", route, routed.secondaryRoutes, 10)) });
+    for (const parameter of understanding.parameters) include({ kind: "parameter", id: parameter.id, title: parameter.name, content: `${parameter.semanticKey}=${parameter.value ?? "unknown"}${parameter.unit ?? ""} ${parameter.context ?? ""}`, evidenceRefs: parameter.evidenceRefs, score: scoreText(query, `${parameter.name} ${parameter.semanticKey} ${parameter.value ?? ""} ${parameter.context ?? ""}`, routeScore("parameter", route, routed.secondaryRoutes, 10)) });
+    for (const decision of understanding.decisions) include({ kind: "decision", id: decision.id, title: decision.decision, content: `${decision.choice} ${decision.rationale ?? ""} ${decision.tradeoff ?? ""}`, evidenceRefs: decision.evidenceRefs, score: scoreText(query, `${decision.decision} ${decision.choice} ${decision.rationale ?? ""}`, routeScore("decision", route, routed.secondaryRoutes, 10)) });
+    for (const problem of understanding.problems) include({ kind: "problem", id: problem.id, title: problem.problem, content: `${problem.symptom} ${problem.causeChain.join("；")} ${problem.fix}`, evidenceRefs: problem.evidenceRefs, score: scoreText(query, `${problem.problem} ${problem.symptom} ${problem.fix}`, routeScore("problem", route, routed.secondaryRoutes, 10)) });
+    for (const result of understanding.results) include({ kind: "result", id: result.id, title: result.name, content: result.value, evidenceRefs: result.evidenceRefs, score: scoreText(query, `${result.name} ${result.value}`, routeScore("result", route, routed.secondaryRoutes, 10)) });
     for (const unknown of understanding.unknowns) include({ kind: "unknown", id: unknown.id, title: unknown.claim, content: unknown.reason, evidenceRefs: unknown.evidenceRefs, score: scoreText(query, `${unknown.claim} ${unknown.reason}`, 1) });
+    const byComponent = new Map(understanding.architecture.components.map((component) => [component.name, component]));
+    const byHitId = new Map(hits.map((hit) => [hit.id, hit]));
+    const adjacency = new Map<string, typeof understanding.architecture.relationships>();
+    for (const relationship of understanding.architecture.relationships.filter((item) => item.verificationStatus === "confirmed")) {
+      adjacency.set(relationship.from, [...(adjacency.get(relationship.from) ?? []), relationship]);
+      adjacency.set(relationship.to, [...(adjacency.get(relationship.to) ?? []), relationship]);
+    }
+    const seeds = hits.filter((hit) => hit.kind === "component").sort((left, right) => right.score - left.score).slice(0, 3).map((hit) => byComponent.get(hit.title)?.name).filter((name): name is string => Boolean(name));
+    const visited = new Set<string>();
+    let frontier = seeds;
+    for (let hop = 1; hop <= 2; hop += 1) {
+      const next: string[] = [];
+      for (const seed of frontier) for (const relationship of adjacency.get(seed) ?? []) {
+        const neighbor = relationship.from === seed ? relationship.to : relationship.from;
+        const relationshipId = `${relationship.from}-${relationship.to}-${relationship.relation}`;
+        if (byHitId.has(relationshipId)) {
+          const existing = byHitId.get(relationshipId);
+          if (existing && !existing.whyRetrieved) { existing.hop = hop; existing.whyRetrieved = `graph expansion from ${seed}`; }
+        } else {
+          const hit: ProjectUnderstandingHit = { kind: "relationship", id: relationshipId, title: `${relationship.from} ${relationship.relation} ${relationship.to}`, content: relationship.description ?? "", evidenceRefs: relationship.evidenceRefs, score: Math.max(1, 7 - hop), hop, whyRetrieved: `graph expansion from ${seed}` };
+          include(hit); byHitId.set(relationshipId, hit);
+        }
+        const neighborComponent = byComponent.get(neighbor);
+        if (neighborComponent && !visited.has(`${neighbor}:${hop}`)) {
+          const hit: ProjectUnderstandingHit = { kind: "component", id: neighborComponent.id, title: neighborComponent.name, content: neighborComponent.description, evidenceRefs: neighborComponent.evidenceRefs ?? [], score: Math.max(1, 6 - hop), hop, whyRetrieved: `graph neighbor of ${seed}` };
+          const existing = byHitId.get(hit.id);
+          if (existing) { if (!existing.whyRetrieved) { existing.hop = hop; existing.whyRetrieved = `graph neighbor of ${seed}`; } }
+          else { include(hit); byHitId.set(hit.id, hit); }
+          visited.add(`${neighbor}:${hop}`);
+          next.push(neighbor);
+        }
+      }
+      frontier = [...new Set(next)];
+    }
     return { route, primaryRoute: routed.primaryRoute, secondaryRoutes: routed.secondaryRoutes, confidence: routed.confidence, hits: hits.sort((left, right) => right.score - left.score || left.title.localeCompare(right.title)).slice(0, Math.max(0, limit)) };
   }
 }

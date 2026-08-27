@@ -1,5 +1,6 @@
 import type { ProjectMemorySource } from "../knowledge/types";
-import type { ProjectExplorer, ProjectExplorerLimits, ProjectFileReadResult, ProjectRepoEntryKind, ProjectRepoFile, ProjectSearchMatch, ProjectSymbol, ProjectSymbolIndex, ProjectTreeEntry, ProjectGitHistoryEntry } from "./types";
+import type { ProjectExplorer, ProjectExplorerLimits, ProjectFileReadResult, ProjectRepoEntryKind, ProjectRepoFile, ProjectSearchMatch, ProjectSymbolIndex, ProjectTreeEntry, ProjectGitHistoryEntry, ProjectRepositoryAdapter } from "./types";
+import { ProjectSemanticGraphBuilder, type ProjectSemanticFile } from "./semantic-graph";
 
 export const DEFAULT_PROJECT_EXCLUDED_PATTERNS = ["node_modules", "vendor", "build", "dist", "target", ".git", "generated", "third_party", "__pycache__", ".venv"];
 export const DEFAULT_PROJECT_ALLOWED_TEXT_EXTENSIONS = ["c", "h", "cc", "cpp", "cxx", "hpp", "py", "rs", "ts", "tsx", "js", "jsx", "java", "go", "lua", "json", "yaml", "yml", "toml", "md", "markdown", "txt", "cmake", "sh", "bat", "ps1", "ini", "cfg", "conf"];
@@ -131,38 +132,34 @@ function lineNumber(text: string, index: number): number { return text.slice(0, 
 
 /** Lightweight, language-agnostic symbol/call index used before AST/LSP integration. */
 export function buildProjectSymbolIndex(files: Array<ProjectRepoFile & { text?: string }>): ProjectSymbolIndex {
-  const symbols: ProjectSymbolIndex["symbols"] = [];
+  const semanticFiles: ProjectSemanticFile[] = files.filter((file) => Boolean(file.text)).map((file) => ({ path: file.path, sourceId: file.sourceId, kind: file.kind, language: file.language, text: file.text ?? "" }));
+  const graph = new ProjectSemanticGraphBuilder().build(semanticFiles);
   const definitions: ProjectSymbolIndex["definitions"] = {};
   const references: ProjectSymbolIndex["references"] = {};
   const calls: ProjectSymbolIndex["calls"] = {};
-  const addDefinition = (name: string, kind: ProjectSymbol["kind"], path: string, line: number): void => {
-    const item = { path, line, kind };
-    definitions[name] = [...(definitions[name] ?? []), item];
-    symbols.push({ name, kind, path, line, references: [], calls: [] });
-  };
-  const symbolPattern = /(?:^|\n)\s*(?:static\s+|inline\s+|async\s+|export\s+|public\s+|private\s+)*(?:void|int|float|double|bool|string|function|def|fn|class|struct|enum|const|let|var)?\s*([A-Za-z_$][\w$]*)\s*(?=\([^\n]*\)\s*(?:\{|=>|:)|[:=]\s*(?:function|class))/g;
-  for (const file of files) {
-    const text = file.text ?? "";
-    for (const match of text.matchAll(symbolPattern)) {
-      const name = match[1];
-      if (!name || ["if", "for", "while", "switch", "catch", "return"].includes(name)) continue;
-      const kind: ProjectSymbol["kind"] = /class|struct|enum/.test(match[0]) ? "class" : /[:=]/.test(match[0]) && !/\(/.test(match[0]) ? "variable" : "function";
-      addDefinition(name, kind, file.path, lineNumber(text, match.index ?? 0));
-    }
-    for (const match of text.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)) {
-      const name = match[1];
-      if (!name || ["if", "for", "while", "switch", "catch", "function", "def"].includes(name)) continue;
-      const item = { path: file.path, line: lineNumber(text, match.index ?? 0) };
-      references[name] = [...(references[name] ?? []), item];
-      const owner = symbols.find((symbol) => symbol.path === file.path && (symbol.line ?? 0) <= item.line);
-      if (owner && owner.name !== name) owner.calls = [...new Set([...(owner.calls ?? []), name])];
-    }
+  const calledBy: ProjectSymbolIndex["calledBy"] = {};
+  const readVariables: ProjectSymbolIndex["readVariables"] = {};
+  const writeVariables: ProjectSymbolIndex["writeVariables"] = {};
+  const imports: ProjectSymbolIndex["imports"] = {};
+  const includes: ProjectSymbolIndex["includes"] = {};
+  const callbacks: ProjectSymbolIndex["callbacks"] = {};
+  const registrations: ProjectSymbolIndex["registrations"] = {};
+  for (const symbol of graph.symbols) {
+    definitions[symbol.name] = [...(definitions[symbol.name] ?? []), { path: symbol.path, line: symbol.line, kind: symbol.kind }];
+    references[symbol.name] = [...(references[symbol.name] ?? []), ...(symbol.references ?? [])];
+    if (symbol.calls?.length) calls[symbol.name] = [...new Set([...(calls[symbol.name] ?? []), ...symbol.calls])];
+    if (symbol.calledBy?.length) calledBy[symbol.name] = [...new Set([...(calledBy[symbol.name] ?? []), ...symbol.calledBy])];
+    if (symbol.readVariables?.length) readVariables[symbol.name] = [...new Set([...(readVariables[symbol.name] ?? []), ...symbol.readVariables])];
+    if (symbol.writeVariables?.length) writeVariables[symbol.name] = [...new Set([...(writeVariables[symbol.name] ?? []), ...symbol.writeVariables])];
+    if (symbol.imports?.length) imports[symbol.name] = [...new Set([...(imports[symbol.name] ?? []), ...symbol.imports])];
+    if (symbol.includes?.length) includes[symbol.name] = [...new Set([...(includes[symbol.name] ?? []), ...symbol.includes])];
+    if (symbol.callbacks?.length) callbacks[symbol.name] = [...new Set([...(callbacks[symbol.name] ?? []), ...symbol.callbacks])];
+    if (symbol.registrations?.length) registrations[symbol.name] = [...new Set([...(registrations[symbol.name] ?? []), ...symbol.registrations])];
   }
-  for (const symbol of symbols) symbol.references = references[symbol.name] ?? [];
-  return { symbols, definitions, references, calls: Object.fromEntries(symbols.filter((symbol) => (symbol.calls ?? []).length).map((symbol) => [symbol.name, symbol.calls ?? []])) };
+  return { symbols: graph.symbols, definitions, references, calls, calledBy, readVariables, writeVariables, imports, includes, callbacks, registrations };
 }
 
-export class SourceProjectExplorer implements ProjectExplorer {
+export class SourceProjectExplorer implements ProjectRepositoryAdapter {
   private readonly files: VirtualFile[];
   readonly symbolIndex: ProjectSymbolIndex;
   private readonly history: ProjectGitHistoryEntry[];
@@ -184,6 +181,8 @@ export class SourceProjectExplorer implements ProjectExplorer {
     return matchesFor(this.files, query, Math.min(options.limit ?? this.limits.maxResults, this.limits.maxResults));
   }
 
+  search(query: string, options: { limit?: number } = {}): ProjectSearchMatch[] { return this.searchText(query, options); }
+
   readFile(path: string, options: { maxChars?: number; maxLines?: number } = {}): ProjectFileReadResult | undefined {
     const normalized = normalizePath(path);
     const file = this.files.find((candidate) => candidate.path === normalized);
@@ -203,6 +202,18 @@ export class SourceProjectExplorer implements ProjectExplorer {
     return matchesFor(this.files, `\\b${escapeRegExp(symbol.trim())}\\b`, options.limit ?? this.limits.maxResults);
   }
 
+  findCallers(symbol: string, options: { limit?: number } = {}): ProjectSearchMatch[] {
+    const callers = new Set(this.symbolIndex.calledBy[symbol.trim()] ?? []);
+    if (!callers.size) return [];
+    return this.searchText(`\\b(?:${[...callers].map(escapeRegExp).join("|")})\\b`, options).slice(0, options.limit ?? this.limits.maxResults);
+  }
+
+  findCallees(symbol: string, options: { limit?: number } = {}): ProjectSearchMatch[] {
+    const callees = this.symbolIndex.calls[symbol.trim()] ?? [];
+    if (!callees.length) return [];
+    return this.searchText(`\\b(?:${callees.map(escapeRegExp).join("|")})\\b`, options).slice(0, options.limit ?? this.limits.maxResults);
+  }
+
   inspectBuildConfig(): ProjectFileReadResult[] {
     return this.files.filter((file) => file.kind === "config" || /(^|\/)(makefile|cmakelists\.txt|package\.json|cargo\.toml|pyproject\.toml|requirements\.txt)$/i.test(file.path)).slice(0, 8).flatMap((file) => { const value = this.readFile(file.path); return value ? [value] : []; });
   }
@@ -219,7 +230,15 @@ export class SourceProjectExplorer implements ProjectExplorer {
   inspectGitHistory(): ProjectGitHistoryEntry[] {
     return this.history.length ? this.history.slice(0, this.limits.maxResults) : [{ subject: "git history unavailable", changedPaths: [] }];
   }
+
+  getHistory(options: { path?: string; limit?: number } = {}): ProjectGitHistoryEntry[] {
+    const entries = options.path ? this.history.filter((entry) => entry.path === options.path || entry.changedPaths?.includes(options.path as string)) : this.history;
+    return (entries.length ? entries : [{ subject: "git history unavailable", changedPaths: [] }]).slice(0, options.limit ?? this.limits.maxResults);
+  }
 }
+
+/** V6.2 public name; the in-memory/source-backed adapter remains the default. */
+export class SourceRepositoryAdapter extends SourceProjectExplorer {}
 
 export function projectExplorerLimits(input?: Partial<ProjectExplorerLimits>): ProjectExplorerLimits {
   return { ...DEFAULT_LIMITS, ...input };

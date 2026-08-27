@@ -9,7 +9,8 @@ describe("Project version resolver", () => {
     ]);
     expect(result.status).toBe("current");
     expect(result.current?.value).toBe(20);
-    expect(result.historical[0]?.value).toBe(32);
+    expect(result.historical).toHaveLength(0);
+    expect(result.alternatives?.[0]?.value).toBe(32);
   });
 
   it("does not collapse semantically different ADC and diagnostic numbers", () => {
@@ -24,4 +25,3 @@ describe("Project version resolver", () => {
     expect(values.get("diagnostic.sample_frequency")?.current?.value).toBe(1);
   });
 });
-

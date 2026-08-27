@@ -80,7 +80,7 @@ function parseObject(output: string): Record<string, unknown> | undefined {
 
 const actions = new Set<ProjectAgentDecision["action"]>([
   "readFile", "searchText", "findDefinitions", "findReferences", "inspectBuildConfig", "inspectTests",
-  "inspectProjectDocument", "inspectGitHistory", "verifyClaim", "synthesize",
+  "findCallers", "findCallees", "inspectProjectDocument", "inspectGitHistory", "verifyClaim", "synthesize",
 ]);
 
 function compactPlannerInput(input: ProjectComprehensionPlannerInput): ProjectComprehensionPlannerInput {
@@ -92,6 +92,7 @@ function compactPlannerInput(input: ProjectComprehensionPlannerInput): ProjectCo
   }));
   return {
     ...input,
+    semanticGraph: input.semanticGraph ? { ...input.semanticGraph, nodes: input.semanticGraph.nodes.slice(0, 160), edges: input.semanticGraph.edges.slice(0, 240), symbols: input.semanticGraph.symbols.slice(0, 160), dataObjects: input.semanticGraph.dataObjects.slice(0, 120), evidence: [] } : undefined,
     observations,
     hypotheses: input.hypotheses.slice(-12),
     confirmedConcepts: input.confirmedConcepts.slice(-24),
@@ -145,7 +146,7 @@ export function validateAgentDecision(decision: ProjectAgentDecision, repoMap: P
     if (!decision.target || !repoMap.files.some((file) => file.path === decision.target)) return { valid: false, reason: "PATH_NOT_IN_REPO" };
     if (budget.filesRead >= budget.maxFilesRead) return { valid: false, reason: "FILE_BUDGET_EXHAUSTED" };
   }
-  if (["searchText", "findDefinitions", "findReferences", "verifyClaim"].includes(decision.action) && (!decision.query && !decision.target && !decision.hypothesisId)) return { valid: false, reason: "QUERY_MISSING" };
+  if (["searchText", "findDefinitions", "findReferences", "findCallers", "findCallees", "verifyClaim"].includes(decision.action) && (!decision.query && !decision.target && !decision.hypothesisId)) return { valid: false, reason: "QUERY_MISSING" };
   if ((decision.query ?? decision.target ?? "").length > 500) return { valid: false, reason: "QUERY_TOO_LONG" };
   return { valid: true };
 }
@@ -156,6 +157,8 @@ export function decisionToAction(decision: ProjectAgentDecision): ProjectExplora
     case "searchText": return { type: "searchText", query: decision.query ?? decision.target ?? "" };
     case "findDefinitions": return { type: "findDefinitions", symbol: decision.query ?? decision.target ?? "" };
     case "findReferences": return { type: "findReferences", symbol: decision.query ?? decision.target ?? "" };
+    case "findCallers": return { type: "findCallers", symbol: decision.query ?? decision.target ?? "" };
+    case "findCallees": return { type: "findCallees", symbol: decision.query ?? decision.target ?? "" };
     case "inspectProjectDocument": return { type: "inspectProjectDocument", ...(decision.target ? { role: decision.target } : {}) };
     case "inspectBuildConfig": return { type: "inspectBuildConfig" };
     case "inspectTests": return { type: "inspectTests" };

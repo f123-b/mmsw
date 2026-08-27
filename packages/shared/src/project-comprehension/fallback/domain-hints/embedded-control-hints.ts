@@ -8,6 +8,7 @@ import type { ProjectComponent, ProjectRelationship, ProjectFlow } from "../../t
 export const embeddedControlComponentHints: Array<Pick<ProjectComponent, "name" | "kind" | "description"> & { pattern: RegExp }> = [
   { name: "Motor Control", kind: "control", pattern: /\bfoc\b|motor|current loop|speed loop|svpwm|clarke|park|pi controller|电机|电流环|速度环/i, description: "负责控制算法、环路计算和执行量生成。" },
   { name: "Current Sampling", kind: "sampling", pattern: /\badc\d*\b|current sample|sampling|采样|电流采集/i, description: "负责把 ADC/传感器采样整理为控制环可用的数据。" },
+  { name: "Current Loop", kind: "control", pattern: /current[_ -]?loop|电流环/i, description: "负责根据电流反馈计算控制输出。" },
   { name: "Encoder Feedback", kind: "feedback", pattern: /encoder|abz|position sensor|角度反馈|编码器/i, description: "提供位置或电角度反馈。" },
   { name: "Velocity Estimator", kind: "feedback", pattern: /velocity estimator|speed estimator|速度估算|转速估算/i, description: "根据反馈脉冲或位置变化估算速度。" },
   { name: "Protection", kind: "protection", pattern: /overcurrent|overvoltage|fault|protection|保护|过流|过压|故障/i, description: "负责故障检测、保护动作和安全停机。" },

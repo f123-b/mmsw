@@ -542,3 +542,4 @@ export * from "./interview-brain";
 export * from "./terminology";
 export * from "./chat-intent";
 export * from "./knowledge/index";
+export * from "./project-comprehension";

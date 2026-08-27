@@ -27,6 +27,7 @@
     "benchmark:question": "npm --workspace @interview-copilot/shared run benchmark:question",
     "benchmark:project-analysis": "npm --workspace @interview-copilot/shared run benchmark:project-analysis",
     "benchmark:project-comprehension": "npm --workspace @interview-copilot/shared run benchmark:project-comprehension",
+    "benchmark:project-semantic-intelligence": "npm --workspace @interview-copilot/shared run benchmark:project-semantic-intelligence",
     "benchmark:real-interview": "npm --workspace @interview-copilot/shared run benchmark:real-interview",
     "test:soak": "npm --workspace @interview-copilot/desktop run test:soak",
     "typecheck": "npm run typecheck --workspaces --if-present",

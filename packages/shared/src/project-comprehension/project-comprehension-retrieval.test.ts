@@ -2,19 +2,19 @@ import { describe, expect, it } from "vitest";
 import { ProjectComprehensionRetriever } from "./retrieval";
 import type { ProjectUnderstanding } from "./types";
 
-const understanding: ProjectUnderstanding = {
-  projectId: "p", schemaVersion: 1, status: "completed", identity: { name: "Drive" }, summary: "一个由采样、控制和反馈组件组成的电机控制项目理解摘要。",
-  architecture: { components: [{ id: "motor", name: "Motor Control", kind: "control", description: "电流环与 SVPWM", confidence: 0.9 }], relationships: [] },
-  runtimeFlows: [{ id: "flow", name: "Sampling Flow", kind: "data", description: "PWM 触发 ADC，DMA 写入缓冲区", steps: [], evidenceRefs: ["ref"] }], dataFlows: [], controlFlows: [], technologies: [], parameters: [{ id: "param", name: "ADC 控制触发频率", semanticKey: "adc.control_trigger_frequency", value: 20, unit: "kHz", versionStatus: "current", sourceIds: ["s"], evidenceRefs: ["ref"], confidence: 0.9 }], decisions: [{ id: "decision", decision: "中心对齐 PWM", choice: "在稳定窗口触发 ADC", relatedComponents: ["Motor Control"], flowIds: ["flow"], evidenceRefs: ["ref"], confidence: 0.9 }], problems: [], interfaces: [], protections: [], tests: [], results: [], limitations: [], unknowns: [], evidenceRefs: [{ id: "ref", sourceId: "s", quote: "evidence", kind: "code", confidence: 0.9 }], quality: { architectureCoverage: 50, flowCoverage: 50, parameterCoverage: 20, decisionCoverage: 20, problemCoverage: 0, groundingCoverage: 100, sufficient: true }, trace: { toolCalls: 3, filesRead: 2, modelTurns: 0, elapsedMs: 3, stages: ["completed"] }
-};
+function understanding(): ProjectUnderstanding {
+  const refs = ["e1", "e2", "e3"];
+  const component = (id: string, name: string) => ({ id, name, kind: "other" as const, description: `${name} module`, files: [`src/${name.toLowerCase()}.c`], symbols: [name.toLowerCase()], confidence: 0.9, evidenceRefs: refs });
+  const relationship = (from: string, to: string, relation: "calls" | "feeds", id: string) => ({ from, to, relation, evidenceRefs: refs, confidence: 0.95, evidenceStrength: "direct" as const, verificationStatus: "confirmed" as const, semanticEdgeId: id, source: "semantic" as const });
+  return { projectId: "retrieval", schemaVersion: 3, status: "completed", identity: { name: "Retrieval" }, summary: "一个用于验证语义图扩展与混合路由的最小项目理解摘要。", architecture: { components: [component("a", "Gateway"), component("b", "DataBus"), component("c", "MQTT")], relationships: [relationship("Gateway", "DataBus", "calls", "a"), relationship("DataBus", "MQTT", "feeds", "b")] }, runtimeFlows: [], dataFlows: [], controlFlows: [], technologies: [], parameters: [], decisions: [], problems: [], interfaces: [], protections: [], tests: [], results: [], limitations: [], unknowns: [], evidenceRefs: refs.map((id) => ({ id, sourceId: "repo", quote: id, kind: "code" as const, confidence: 0.9 })), quality: { architectureCoverage: 100, flowCoverage: 0, parameterCoverage: 0, decisionCoverage: 0, problemCoverage: 0, groundingCoverage: 100, sufficient: true }, trace: { toolCalls: 1, filesRead: 3, modelTurns: 0, elapsedMs: 1, stages: ["completed"] } };
+}
 
-describe("Project comprehension retrieval", () => {
-  it("routes flow and parameter questions before Fact-first grounding", () => {
-    const retriever = new ProjectComprehensionRetriever();
-    expect(retriever.search("PWM 如何触发 ADC，数据怎么运行", understanding).route).toBe("flow");
-    expect(retriever.search("ADC 控制触发频率是多少", understanding).route).toBe("parameter");
-    expect(retriever.search("为什么采用中心对齐 PWM", understanding).route).toBe("decision");
-    expect(retriever.search("ADC 控制触发频率是多少", understanding).hits[0]?.id).toBe("param");
+describe("Project comprehension graph retrieval", () => {
+  it("uses hybrid route and explains one-to-two-hop graph expansion", () => {
+    const result = new ProjectComprehensionRetriever().search("DataBus 模块流程", understanding(), 8);
+    expect(result.primaryRoute).toBe("flow");
+    expect(result.secondaryRoutes).toContain("architecture");
+    expect(result.hits.some((hit) => hit.title === "DataBus feeds MQTT" && hit.whyRetrieved?.includes("graph expansion"))).toBe(true);
+    expect(result.hits.some((hit) => hit.title === "MQTT" && hit.hop === 1)).toBe(true);
   });
 });
-

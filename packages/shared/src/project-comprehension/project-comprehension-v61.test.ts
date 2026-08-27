@@ -69,4 +69,21 @@ describe("Project Comprehension Agent V6.1", () => {
     expect(result.understanding.architecture.relationships.some((item) => item.from === "MQTT" && item.to === "Service" && item.verificationStatus === "confirmed")).toBe(false);
     expect(result.understanding.unknowns.some((item) => item.claim.includes("MQTT") && item.claim.includes("Service"))).toBe(true);
   });
+
+  it("records evidence requirements while the agent follows a missing-trigger hypothesis", async () => {
+    const decisions = [
+      { action: "searchText", query: "ExternalTrigConv", reason: "验证 ADC 触发配置", priority: "critical", hypothesisId: "hyp-trigger", expectedInformation: "TIM1 TRGO 可能触发 ADC1" },
+      { action: "readFile", target: "src/adc.c", reason: "读取 ADC 配置", priority: "critical", hypothesisId: "hyp-trigger" },
+      { action: "findCallers", query: "ADC1", reason: "检查相关调用图", priority: "high", hypothesisId: "hyp-trigger" },
+      { action: "readFile", target: "src/pwm.c", reason: "读取 TIM1 配置", priority: "high", hypothesisId: "hyp-trigger" },
+      { action: "synthesize", reason: "触发证据已覆盖", priority: "normal" },
+    ];
+    let index = 0;
+    const actions: string[] = [];
+    const model = { async generate(input: { purpose?: string }) { if (input.purpose === "plan") { const decision = decisions[index++] ?? decisions.at(-1); actions.push(decision?.action ?? ""); return JSON.stringify(decision); } return "{}"; } };
+    const result = await new ProjectComprehensionAgent({ model, trace: (event, fields) => { if (event === "PROJECT_AGENT_DECISION") actions.push(String(fields.action)); } }).comprehend({ projectId: "trigger", projectName: "Trigger Fixture", sources: [repository("文件：src/adc.c\nADC1->ExternalTrigger = ADC_EXTERNALTRIGCONV_T1_TRGO;\n\n---\n\n文件：src/pwm.c\nTIM1->TRGO = ENABLE;")] });
+    expect(actions).toEqual(expect.arrayContaining(["searchText", "readFile", "findCallers", "synthesize"]));
+    expect(result.state?.hypotheses.some((hypothesis) => hypothesis.id === "hyp-trigger" && hypothesis.evidenceRequirements?.some((item) => item.includes("config")))).toBe(true);
+    expect(result.understanding.architecture.relationships).toEqual(expect.arrayContaining([expect.objectContaining({ relation: "triggers", verificationStatus: "confirmed", source: "semantic" })]));
+  });
 });

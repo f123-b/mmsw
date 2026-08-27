@@ -1,4 +1,4 @@
-import type { ProjectEvidenceRef, ProjectFlow, ProjectRelationship, ProjectUnderstanding, ProjectEvidenceStrength } from "./types";
+import type { ProjectEvidenceRef, ProjectFlow, ProjectRelationship, ProjectUnderstanding, ProjectEvidenceStrength, ProjectSemanticEdge } from "./types";
 
 export interface ProjectClaimVerification {
   supported: boolean;
@@ -10,6 +10,16 @@ export interface ProjectClaimVerification {
 function validRefs(understanding: ProjectUnderstanding, refs: string[]): ProjectEvidenceRef[] {
   const available = new Map(understanding.evidenceRefs.map((ref) => [ref.id, ref]));
   return [...new Set(refs)].flatMap((ref) => { const value = available.get(ref); return value ? [value] : []; });
+}
+
+function semanticEdgeKey(edge: ProjectSemanticEdge): string {
+  return edge.id ?? `${edge.from}|${edge.to}|${edge.relation}|${edge.dataObjectId ?? ""}`;
+}
+
+function relationshipMatchesEdge(relationship: ProjectRelationship, edge: ProjectSemanticEdge): boolean {
+  if (relationship.semanticEdgeId !== semanticEdgeKey(edge)) return false;
+  if (relationship.relation === "depends-on") return edge.relation === "depends_on";
+  return relationship.relation === edge.relation;
 }
 
 function explicitPattern(relation: ProjectRelationship["relation"]): RegExp {
@@ -29,6 +39,20 @@ function explicitPattern(relation: ProjectRelationship["relation"]): RegExp {
   }
 }
 
+export function evidenceRequirementsForRelationship(relation: ProjectRelationship["relation"]): string[] {
+  switch (relation) {
+    case "calls": return ["call graph edge from caller to callee"];
+    case "triggers": return ["config edge, callback, or event registration"];
+    case "feeds": return ["writer and reader of the same data object, queue, or topic"];
+    case "publishes": return ["publish/send call with topic or interface"];
+    case "subscribes": return ["subscribe/register callback call with topic or interface"];
+    case "depends-on":
+    case "depends_on": return ["import/include/injection edge"];
+    case "controls": return ["output value reaches the controlled component"];
+    default: return ["direct semantic graph edge with evidence"];
+  }
+}
+
 function claimTerm(value: string): RegExp {
   const normalized = value.toLowerCase().replace(/[ _-]+/g, "");
   if (normalized.includes("pwm")) return /pwm|timer|trgo/i;
@@ -44,9 +68,22 @@ function claimTerm(value: string): RegExp {
 }
 
 export class ProjectClaimVerifier {
-  verifyRelationship(input: { relationship: ProjectRelationship; evidenceRefs: ProjectEvidenceRef[] }): ProjectClaimVerification {
+  verifyRelationship(input: { relationship: ProjectRelationship; evidenceRefs: ProjectEvidenceRef[]; semanticGraph?: ProjectUnderstanding["semanticGraph"] }): ProjectClaimVerification {
     const refs = input.evidenceRefs;
     if (!refs.length) return { supported: false, strength: "unsupported", reasonCode: "NO_SUPPORT", reason: "没有可定位的证据引用。" };
+    if (input.relationship.source === "model") return { supported: false, strength: "weak", reasonCode: "NO_SUPPORT", reason: "模型声明没有对应的语义图边。" };
+    if (input.relationship.source === "fallback") return { supported: false, strength: "weak", reasonCode: "CO_OCCURRENCE_ONLY", reason: "fallback domain hint 只能保留为 candidate，不能升级为 confirmed。" };
+    if (input.relationship.semanticEdgeId) {
+      const edge = input.semanticGraph?.edges.find((candidate) => relationshipMatchesEdge(input.relationship, candidate));
+      if (!edge) return { supported: false, strength: "weak", reasonCode: "NO_SUPPORT", reason: "声明的 semanticEdgeId 在当前语义图中不存在。" };
+      const edgeRefs = validRefs({ evidenceRefs: refs } as ProjectUnderstanding, edge.evidenceRefs);
+      if (!edgeRefs.length) return { supported: false, strength: "unsupported", reasonCode: "NO_SUPPORT", reason: "语义图边没有可定位的证据引用。" };
+      if (edge.source === "document" || edgeRefs.every((ref) => ref.kind === "document")) return { supported: true, strength: "strong", reasonCode: "DOCUMENT_ASSERTION", reason: "语义图中的文档边由同一文档证据直接支持。" };
+      if (edge.source === "test" || edgeRefs.some((ref) => ref.kind === "test")) return { supported: true, strength: "direct", reasonCode: "TEST_ASSERTION", reason: "语义图边由测试证据直接支持。" };
+      if (edge.source === "config" || edge.relation === "triggers" || edge.relation === "configures") return { supported: true, strength: "direct", reasonCode: "DIRECT_CONFIG", reason: "语义图边由显式配置绑定或触发配置支持。" };
+      if (edge.relation === "calls" || edge.relation === "invokes") return { supported: true, strength: "direct", reasonCode: "DIRECT_CALL", reason: "语义图边由符号调用关系支持。" };
+      return { supported: true, strength: "direct", reasonCode: "DIRECT_ASSIGNMENT", reason: "语义图边由符号、赋值或接口连接支持。" };
+    }
     const marker = explicitPattern(input.relationship.relation);
     const left = claimTerm(input.relationship.from);
     const right = claimTerm(input.relationship.to);
@@ -84,6 +121,36 @@ export interface ProjectGroundingResult {
   verifications?: Array<ProjectClaimVerification & { claimType: string; claim: string }>;
 }
 
+export interface ProjectHallucinationReport {
+  totalClaims: number;
+  unsupportedClaims: number;
+  unsupportedRelationships: number;
+  unsupportedFlows: number;
+  unsupportedComponents: number;
+  unsupportedClaimRate: number;
+  falseRelationshipRate: number;
+}
+
+/** Reports claims that cannot be traced to graph edges, evidence, or adjacent confirmed links. */
+export function detectUnsupportedUnderstanding(input: ProjectUnderstanding): ProjectHallucinationReport {
+  const components = input.architecture.components;
+  const relationships = input.architecture.relationships;
+  const flows = [...input.runtimeFlows, ...input.dataFlows, ...input.controlFlows];
+  const unsupportedComponents = components.filter((component) => !(component.files?.length || component.symbols?.length) || !(component.evidenceRefs?.length)).length;
+  const unsupportedRelationships = relationships.filter((relationship) => relationship.verificationStatus !== "confirmed" || (relationship.source === "semantic" && !relationship.semanticEdgeId) || !relationship.evidenceRefs.length).length;
+  const confirmedRelationships = relationships.filter((relationship) => relationship.verificationStatus === "confirmed");
+  const unsupportedFlows = flows.filter((flow) => {
+    const steps = flow.steps.map((step) => step.component).filter((component): component is string => Boolean(component));
+    if (steps.length < 2) return true;
+    return steps.slice(0, -1).some((from, index) => !confirmedRelationships.some((relationship) => relationship.from === from && relationship.to === steps[index + 1]));
+  }).length;
+  const totalClaims = components.length + relationships.length + flows.length;
+  const unsupportedClaims = unsupportedComponents + unsupportedRelationships + unsupportedFlows;
+  const confirmed = relationships.filter((relationship) => relationship.verificationStatus === "confirmed");
+  const falseConfirmed = confirmed.filter((relationship) => !relationship.evidenceRefs.length || relationship.source === "model" || (relationship.source === "semantic" && !relationship.semanticEdgeId)).length;
+  return { totalClaims, unsupportedClaims, unsupportedRelationships, unsupportedFlows, unsupportedComponents, unsupportedClaimRate: totalClaims ? unsupportedClaims / totalClaims : 0, falseRelationshipRate: confirmed.length ? falseConfirmed / confirmed.length : 0 };
+}
+
 function appendUnknown(unknowns: ProjectUnderstanding["unknowns"], projectId: string, claim: string, reason: string, category: ProjectUnderstanding["unknowns"][number]["category"] = "general"): ProjectUnderstanding["unknowns"] {
   if (unknowns.some((unknown) => unknown.claim === claim)) return unknowns;
   return [...unknowns, { id: `unknown-${projectId}-${unknowns.length}`, claim, reason, category, evidenceRefs: [] }];
@@ -103,18 +170,23 @@ export class ProjectGroundingService {
       const componentNames = new Set(components.map((component) => component.name));
       const verification = !componentNames.has(relationship.from) || !componentNames.has(relationship.to)
         ? { supported: false, strength: "unsupported" as const, reasonCode: "NO_SUPPORT" as const, reason: "关系端点没有对应的已验证组件。" }
-        : this.verifier.verifyRelationship({ relationship, evidenceRefs: refs });
+        : this.verifier.verifyRelationship({ relationship, evidenceRefs: refs, semanticGraph: input.semanticGraph });
       verifications.push({ ...verification, claimType: "relationship", claim: `${relationship.from} ${relationship.relation} ${relationship.to}` });
       if (verification.supported) relationships.push({ ...relationship, evidenceRefs: refs.map((ref) => ref.id), evidenceStrength: verification.strength, verificationStatus: "confirmed", confidenceReason: verification.reason });
-      else unknowns = appendUnknown(unknowns, input.projectId, `${relationship.from} ${relationship.relation} ${relationship.to}`, verification.reason, "flow");
+      else {
+        if (refs.length && componentNames.has(relationship.from) && componentNames.has(relationship.to)) relationships.push({ ...relationship, evidenceRefs: refs.map((ref) => ref.id), evidenceStrength: verification.strength, verificationStatus: "candidate", confidenceReason: verification.reason });
+        unknowns = appendUnknown(unknowns, input.projectId, `${relationship.from} ${relationship.relation} ${relationship.to}`, verification.reason, "unverifiedRelationship");
+      }
     }
     const allFlows = [...input.runtimeFlows, ...input.dataFlows, ...input.controlFlows];
     const groundedFlows: ProjectFlow[] = [];
     for (const flow of allFlows) {
       const result = this.verifier.verifyFlow(flow, relationships, input);
       verifications.push({ ...result.verification, claimType: "flow", claim: flow.name });
-      if (result.flow) groundedFlows.push(result.flow);
-      else unknowns = appendUnknown(unknowns, input.projectId, flow.name, result.verification.reason, "flow");
+      if (result.flow) {
+        groundedFlows.push(result.flow);
+        if (result.flow.partial) unknowns = appendUnknown(unknowns, input.projectId, `${flow.name} missing links`, "Flow 只确认了部分相邻语义边，缺失链路未被补齐。", "missingFlowLink");
+      } else unknowns = appendUnknown(unknowns, input.projectId, flow.name, result.verification.reason, "missingFlowLink");
     }
     const keep = <T extends { evidenceRefs: string[] }>(items: T[]): T[] => items.filter((item) => validRefs(input, item.evidenceRefs).length > 0).map((item) => ({ ...item, evidenceRefs: validRefs(input, item.evidenceRefs).map((ref) => ref.id) }));
     const parameters = keep(input.parameters);
@@ -138,6 +210,8 @@ export class ProjectGroundingService {
       unknowns,
       quality: { ...input.quality, groundingCoverage: totalClaims === 0 ? 0 : Math.round((groundedClaims / totalClaims) * 100) },
     };
+    const hallucination = detectUnsupportedUnderstanding(next);
+    next.quality = { ...next.quality, unsupportedClaimRate: hallucination.unsupportedClaimRate, falseRelationshipRate: hallucination.falseRelationshipRate };
     return { understanding: next, groundedClaims, ungroundedClaims, verifications };
   }
 }

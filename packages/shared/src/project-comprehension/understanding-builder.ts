@@ -1,6 +1,8 @@
 import type { ProjectMemorySource } from "../knowledge/types";
 import { ProjectVersionResolver, type ProjectParameterCandidate } from "./version-resolver";
 import { embeddedControlComponentHints, embeddedControlFallbackRelationships } from "./fallback/domain-hints/embedded-control-hints";
+import { findSemanticPaths, ProjectSemanticGraphBuilder, type ProjectSemanticFile } from "./semantic-graph";
+import { PROJECT_COMPREHENSION_SCHEMA_VERSION } from "./types";
 import type {
   ProjectComprehensionInput,
   ProjectComprehensionStatus,
@@ -13,6 +15,10 @@ import type {
   ProjectParameterUnderstanding,
   ProjectRelationship,
   ProjectTechnologyUnderstanding,
+  ProjectComponentKind,
+  ProjectSemanticEdge,
+  ProjectSemanticGraph,
+  ProjectGitHistoryEntry,
 } from "./types";
 
 interface ReadFileObservation {
@@ -202,25 +208,42 @@ function parameterValue(line: string): { value?: string | number; unit?: string 
   return { value: Number(match[1]), unit: match[2] };
 }
 
-function buildParameters(files: ReadFileObservation[], sources: ProjectMemorySource[], collector: EvidenceCollector): ProjectParameterUnderstanding[] {
+function parameterValueForLabel(line: string, semanticKey: string): { value?: string | number; unit?: string } {
+  const parsed = parameterValue(line);
+  if (parsed.value !== undefined) return parsed;
+  const raw = line.match(/(?:=|#define\s+[A-Za-z_]\w*)\s*(-?\d+(?:\.\d+)?)/i)?.[1];
+  if (!raw) return {};
+  const number = Number(raw);
+  if (!Number.isFinite(number)) return {};
+  if (/peripheral_clock/.test(semanticKey) && number >= 1_000_000) return { value: number / 1_000_000, unit: "MHz" };
+  if (/frequency|rate/.test(semanticKey)) return number >= 1_000 ? { value: number / 1_000, unit: "kHz" } : { value: number, unit: "Hz" };
+  return { value: number };
+}
+
+function buildParameters(files: ReadFileObservation[], sources: ProjectMemorySource[], collector: EvidenceCollector, componentsValue: ProjectComponent[] = [], graph?: ProjectSemanticGraph): ProjectParameterUnderstanding[] {
   const labels: Array<{ key: string; name: string; pattern: RegExp; context: RegExp }> = [
     { key: "adc.peripheral_clock", name: "ADC 外设时钟", pattern: /adc.*(?:clock|clk)|adc.*时钟|外设时钟/i, context: /adc|clock|时钟/i },
-    { key: "adc.control_trigger_frequency", name: "ADC 控制触发频率", pattern: /adc.*trigger|adc.*触发|控制触发/i, context: /adc|trigger|触发/i },
-    { key: "control.pwm_frequency", name: "PWM 控制频率", pattern: /pwm[_\s-]*(?:freq|frequency)|pwm.*频率/i, context: /pwm/i },
-    { key: "control.current_loop.frequency", name: "电流环频率", pattern: /current\s*loop.*frequency|电流环.*频率/i, context: /current loop|电流环/i },
-    { key: "control.speed_loop.frequency", name: "速度环频率", pattern: /speed\s*loop.*frequency|速度环.*频率/i, context: /speed loop|速度环/i },
+    { key: "adc.control_trigger_frequency", name: "ADC 控制触发频率", pattern: /adc.*(?:trigger|freq)|adc.*触发|控制触发/i, context: /adc|trigger|触发/i },
+    { key: "control.pwm_frequency", name: "PWM 控制频率", pattern: /pwm[_\s-]*(?:freq|frequency|hz)|pwm.*频率/i, context: /pwm/i },
+    { key: "control.current_loop.frequency", name: "电流环频率", pattern: /current[_\s-]*loop.*(?:frequency|freq|hz)|电流环.*频率/i, context: /current[_\s-]*loop|电流环/i },
+    { key: "control.speed_loop.frequency", name: "速度环频率", pattern: /speed[_\s-]*loop.*(?:frequency|freq|hz)|速度环.*频率/i, context: /speed[_\s-]*loop|速度环/i },
     { key: "diagnostic.sample_frequency", name: "诊断采样频率", pattern: /diagnostic.*(?:sampling|sample|rate|frequency)|诊断.*采样/i, context: /diagnostic|诊断/i },
+    { key: "diagnostic.logging.frequency", name: "诊断日志频率", pattern: /(?:logging|log).*(?:rate|frequency)|日志.*频率/i, context: /logging|log|日志/i },
     { key: "communication.baud_rate", name: "通信波特率", pattern: /baud|波特率/i, context: /baud|波特率|can|uart|modbus/i },
   ];
   const candidates: ProjectParameterCandidate[] = [];
-  for (const file of files) for (const line of linesOf(file.text)) {
+  for (const file of files) for (const [lineIndex, line] of linesOf(file.text).entries()) {
     const parsed = parameterValue(line);
-    if (parsed.value === undefined) continue;
     for (const label of labels) {
       label.pattern.lastIndex = 0;
       if (!label.pattern.test(line)) continue;
+      label.pattern.lastIndex = 0;
+      const labelMatch = label.pattern.exec(line);
+      const scoped = labelMatch?.index !== undefined ? parameterValueForLabel(line.slice(labelMatch.index), label.key) : parsed;
+      const value = scoped.value === undefined ? parsed : scoped;
+      if (value.value === undefined) continue;
       const source = sources.find((item) => item.id === file.sourceId);
-      candidates.push({ semanticKey: label.key, name: label.name, value: parsed.value, unit: parsed.unit, context: compact(line).slice(0, 220), sourceIds: [file.sourceId], evidenceRefs: collector.add([file], label.context), sourceRole: source?.sourceRole, filePath: file.path, isCode: file.kind === "source" || file.kind === "config" });
+      candidates.push({ semanticKey: label.key, name: label.name, value: value.value, unit: value.unit, context: compact(line).slice(0, 220), sourceIds: [file.sourceId], evidenceRefs: collector.add([file], label.context), sourceRole: source?.sourceRole, filePath: file.path, line: lineIndex + 1, isCode: file.kind === "source" || file.kind === "config" });
     }
   }
   const grouped = new Map<string, ProjectParameterCandidate[]>();
@@ -230,7 +253,9 @@ function buildParameters(files: ReadFileObservation[], sources: ProjectMemorySou
     const resolution = new ProjectVersionResolver().resolve(group, history);
     if (!resolution.current) return [];
     const current = resolution.current;
-    return [{ id: `parameter-${slug(semanticKey)}`, name: current.name, semanticKey, value: current.value, ...(current.unit ? { unit: current.unit } : {}), ...(current.context ? { context: current.context } : {}), versionStatus: resolution.currentStatus ?? resolution.status, sourceIds: unique([...(current.sourceIds ?? []), ...resolution.historical.flatMap((item) => item.sourceIds), ...((resolution.alternatives ?? []).flatMap((item) => item.sourceIds))]), evidenceRefs: unique([...(current.evidenceRefs ?? []), ...resolution.historical.flatMap((item) => item.evidenceRefs), ...((resolution.alternatives ?? []).flatMap((item) => item.evidenceRefs))]), ...(history.length && resolution.historical.length ? { historicalValues: resolution.historical.map((item) => ({ value: item.value, unit: item.unit, sourceIds: item.sourceIds, evidenceRefs: item.evidenceRefs, ...(item.context ? { context: item.context } : {}) })) } : {}), confidence: current.evidenceRefs.length ? 0.9 : 0.62 } satisfies ProjectParameterUnderstanding];
+    const relatedComponent = componentsValue.find((component) => (current.filePath ? component.files?.includes(current.filePath) : false) || (current.context ? normalizedName(current.context).includes(normalizedName(component.name)) : false))?.name;
+    const sourceSymbol = graph?.symbols.filter((symbol) => symbol.path === current.filePath && (symbol.line ?? 0) <= (current.line ?? Number.MAX_SAFE_INTEGER)).sort((left, right) => (right.line ?? 0) - (left.line ?? 0))[0]?.name;
+    return [{ id: `parameter-${slug(semanticKey)}`, name: current.name, semanticKey, value: current.value, ...(current.unit ? { unit: current.unit } : {}), ...(current.context ? { context: current.context } : {}), versionStatus: resolution.currentStatus ?? resolution.status, sourceIds: unique([...(current.sourceIds ?? []), ...resolution.historical.flatMap((item) => item.sourceIds), ...((resolution.alternatives ?? []).flatMap((item) => item.sourceIds))]), evidenceRefs: unique([...(current.evidenceRefs ?? []), ...resolution.historical.flatMap((item) => item.evidenceRefs), ...((resolution.alternatives ?? []).flatMap((item) => item.evidenceRefs))]), ...(resolution.historical.length ? { historicalValues: resolution.historical.map((item) => ({ value: item.value, unit: item.unit, sourceIds: item.sourceIds, evidenceRefs: item.evidenceRefs, ...(item.context ? { context: item.context } : {}) })) } : {}), ...(resolution.alternatives?.length ? { alternativeValues: resolution.alternatives.map((item) => ({ value: item.value, unit: item.unit, sourceIds: item.sourceIds, evidenceRefs: item.evidenceRefs, ...(item.context ? { context: item.context } : {}) })) } : {}), ...(relatedComponent ? { relatedComponent } : {}), ...(sourceSymbol ? { sourceSymbol } : {}), sourceKind: current.isCode ? current.filePath?.toLowerCase().endsWith(".h") || current.filePath?.toLowerCase().endsWith(".hpp") ? "config" : "code" : current.sourceRole === "test" ? "test" : current.sourceRole === "architecture" || current.sourceRole === "overview" ? "document" : "inference", confidence: current.evidenceRefs.length ? 0.9 : 0.62 } satisfies ProjectParameterUnderstanding];
   });
 }
 
@@ -273,11 +298,12 @@ function buildDecisions(files: ReadFileObservation[], componentsValue: ProjectCo
   return [{ id: "decision-center-aligned-sampling", decision: "采样时序设计", choice: "使用中心对齐 PWM，并在稳定窗口触发 ADC。", rationale: "让采样发生在可控的稳定时刻。", relatedComponents: componentsValue.filter((component) => /pwm|sampling|adc|control/i.test(component.name)).map((component) => component.name), flowIds: flows.filter((flow) => /sampling/i.test(flow.name)).map((flow) => flow.id), evidenceRefs: refs, confidence: refs.length ? 0.9 : 0.55 }];
 }
 
-function buildProblems(files: ReadFileObservation[], componentsValue: ProjectComponent[], collector: EvidenceCollector): ProjectUnderstanding["problems"] {
+function buildProblems(files: ReadFileObservation[], componentsValue: ProjectComponent[], collector: EvidenceCollector, history: ProjectGitHistoryEntry[] = []): ProjectUnderstanding["problems"] {
   const text = files.map((file) => file.text).join("\n");
   if (!/低速.*(?:abz|脉冲)|abz.*(?:稀疏|sparse)|速度估算.*量化|pi.*抖动|低速抖动/i.test(text)) return [];
   const refs = unique([...collector.add(files, /低速|abz|脉冲|稀疏|量化|抖动/i), ...collector.add(files, /delta|frame rebase|优化|解决/i)]);
-  return [{ id: "problem-low-speed-feedback", problem: "Low-Speed Feedback Jitter", symptom: "低速脉冲稀疏导致反馈量化和控制抖动。", affectedComponents: componentsValue.filter((component) => /encoder|velocity|control/i.test(component.name)).map((component) => component.name), causeChain: ["Sparse feedback pulse", "quantized estimate", "controller jitter"], fix: "通过 delta 与 frame rebase 优化估算。", result: /改善|优化后|降低|稳定/i.test(text) ? "资料记录已进行优化，但正式改善幅度仍需测试确认。" : undefined, evidenceRefs: refs, confidence: refs.length ? 0.9 : 0.6 }];
+  const codeChangeRefs = history.filter((entry) => /fix|rebase|delta|jitter|low.?speed|修复|抖动|优化/i.test(entry.subject) || entry.changedPaths?.some((path) => /velocity|encoder|control/i.test(path))).map((entry) => entry.hash ?? entry.subject).slice(0, 8);
+  return [{ id: "problem-low-speed-feedback", problem: "Low-Speed Feedback Jitter", symptom: "低速脉冲稀疏导致反馈量化和控制抖动。", affectedComponents: componentsValue.filter((component) => /encoder|velocity|control/i.test(component.name)).map((component) => component.name), causeChain: ["Sparse feedback pulse", "quantized estimate", "controller jitter"], fix: "通过 delta 与 frame rebase 优化估算。", result: /改善|优化后|降低|稳定/i.test(text) ? "资料记录已进行优化，但正式改善幅度仍需测试确认。" : undefined, ...(codeChangeRefs.length ? { codeChangeRefs } : {}), evidenceRefs: refs, confidence: refs.length ? 0.9 : 0.6 }];
 }
 
 function buildProtections(files: ReadFileObservation[], collector: EvidenceCollector): ProjectUnderstanding["protections"] {
@@ -339,6 +365,191 @@ function unknowns(parameters: ProjectParameterUnderstanding[], decisions: Projec
   return result;
 }
 
+function normalizedName(value: string): string { return value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, ""); }
+function componentKind(name: string): ProjectComponentKind {
+  const value = name.toLowerCase();
+  if (/api|service|worker|task|thread|runtime|application|main/.test(value)) return "service";
+  if (/ui|frontend|view|display/.test(value)) return "ui";
+  if (/repo|store|database|db|buffer|queue|cache/.test(value)) return "storage";
+  if (/can|mqtt|modbus|socket|bus|topic|communication|protocol|message/.test(value)) return "communication";
+  if (/adc|dma|pwm|timer|driver|device|sensor/.test(value)) return "driver";
+  if (/control|controller|planner|algorithm|loop/.test(value)) return "control";
+  if (/encoder|feedback|localization|odometry/.test(value)) return "feedback";
+  return "other";
+}
+function semanticComponentId(name: string): string { return `component-${slug(name)}`; }
+
+interface SemanticComponentIndex {
+  components: ProjectComponent[];
+  pathToComponent: Map<string, string>;
+  graph: ProjectSemanticGraph;
+}
+
+function discoverSemanticComponents(files: ReadFileObservation[], repoMap: ProjectRepoMap, graph: ProjectSemanticGraph, collector: EvidenceCollector, domainFallback: boolean): SemanticComponentIndex {
+  const modules = graph.nodes.filter((node) => node.kind === "module" && node.filePath);
+  const byDirectory = new Map<string, typeof modules>();
+  for (const node of modules) {
+    const path = node.filePath as string;
+    const directory = path.split("/").slice(0, -1).join("/");
+    byDirectory.set(directory, [...(byDirectory.get(directory) ?? []), node]);
+  }
+  const groups: Array<{ name: string; paths: string[]; refs: string[] }> = [];
+  for (const [directory, entries] of byDirectory) {
+    const last = directory.split("/").at(-1) ?? "";
+    if (entries.length >= 2 && last && !/^(src|include|lib|app|core|test|tests)$/i.test(last)) {
+      groups.push({ name: last.split(/[_\-.\s]+/).filter(Boolean).map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" "), paths: entries.map((entry) => entry.filePath as string), refs: entries.flatMap((entry) => entry.evidenceRefs) });
+    } else {
+      for (const entry of entries) groups.push({ name: entry.name, paths: [entry.filePath as string], refs: entry.evidenceRefs });
+    }
+  }
+  const components: ProjectComponent[] = [];
+  const pathToComponent = new Map<string, string>();
+  const addComponent = (name: string, paths: string[], refs: string[], confidence = 0.78): void => {
+    const trimmed = name.trim();
+    if (!trimmed || components.some((component) => normalizedName(component.name) === normalizedName(trimmed))) return;
+    const symbols = graph.symbols.filter((symbol) => paths.includes(symbol.path)).map((symbol) => symbol.name);
+    const evidenceRefs = [...new Set(refs)];
+    components.push({ id: semanticComponentId(trimmed), name: trimmed, kind: componentKind(trimmed), description: `由文件结构、符号聚类和语义证据识别的 ${trimmed} 模块。`, files: paths, symbols: unique(symbols), confidence, ...(evidenceRefs.length ? { evidenceRefs } : {}) });
+    for (const path of paths) if (!pathToComponent.has(path)) pathToComponent.set(path, trimmed);
+  };
+  for (const group of groups) addComponent(group.name, group.paths, group.refs);
+  for (const node of graph.nodes.filter((item) => item.kind === "topic" || item.kind === "component")) addComponent(node.name, node.filePath ? [node.filePath] : [], node.evidenceRefs, 0.82);
+  if (domainFallback) {
+    for (const hint of embeddedControlComponentHints) {
+      const matching = files.filter((file) => { hint.pattern.lastIndex = 0; return hint.pattern.test(`${file.path}\n${file.text}`); });
+      if (!matching.length) continue;
+      addComponent(hint.name, matching.map((file) => file.path), collector.add(matching, hint.pattern), 0.55);
+    }
+  }
+  if (!components.length) {
+    for (const path of repoMap.likelyCoreFiles.slice(0, 6)) addComponent(path.split("/").at(-1)?.replace(/\.[^.]+$/, "") ?? path, [path], collector.add(files, new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))), 0.45);
+  }
+  return { components, pathToComponent, graph };
+}
+
+function componentForSemanticNode(index: SemanticComponentIndex, nodeId: string): string | undefined {
+  const node = index.graph.nodes.find((item) => item.id === nodeId);
+  if (!node) return undefined;
+  const nodeKey = normalizedName(node.name);
+  if (node.kind === "component" || node.kind === "topic") {
+    const exact = index.components.find((component) => normalizedName(component.name) === nodeKey)?.name;
+    if (exact) return exact;
+    if (/^adc\d*/i.test(node.name)) return index.components.find((component) => /adc|sampling/i.test(component.name))?.name;
+    if (/^pwm|timer/i.test(node.name)) return index.components.find((component) => /pwm|timer/i.test(component.name))?.name;
+    return index.components.find((component) => normalizedName(component.name).includes(nodeKey) || nodeKey.includes(normalizedName(component.name)))?.name;
+  }
+  if (node.kind === "function" || node.kind === "variable" || node.kind === "class") {
+    const domainMatch = index.components.find((component) => {
+      if (/motor|foc|svpwm/i.test(node.name)) return /motor control/i.test(component.name);
+      if (/current[_ -]?loop|current[_ -]?pi/i.test(node.name)) return /current loop/i.test(component.name);
+      if (/adc|sample|sampling/i.test(node.name)) return /current sampling|adc/i.test(component.name);
+      if (/pwm|timer/i.test(node.name)) return /pwm|timer/i.test(component.name);
+      if (/encoder|abz/i.test(node.name)) return /encoder feedback/i.test(component.name);
+      if (/velocity|speed[_ -]?estimator/i.test(node.name)) return /velocity estimator/i.test(component.name);
+      if (/fault|overcurrent|protection/i.test(node.name)) return /protection/i.test(component.name);
+      return false;
+    });
+    if (domainMatch) return domainMatch.name;
+    const tokenMatch = index.components.filter((component) => normalizedName(component.name).length >= 3 && nodeKey.includes(normalizedName(component.name))).sort((left, right) => normalizedName(right.name).length - normalizedName(left.name).length)[0];
+    if (tokenMatch) return tokenMatch.name;
+  }
+  if (node.kind === "device") {
+    if (/^adc\d*/i.test(node.name)) return index.components.find((component) => /adc|sampling/i.test(component.name))?.name;
+    if (/^tim\d*|pwm/i.test(node.name)) return index.components.find((component) => /pwm|timer/i.test(component.name))?.name;
+  }
+  if (node.filePath) return index.pathToComponent.get(node.filePath);
+  return index.components.find((component) => nodeKey.includes(normalizedName(component.name)) || normalizedName(component.name).includes(nodeKey))?.name;
+}
+
+function graphRelation(relation: ProjectSemanticEdge["relation"]): ProjectRelationship["relation"] | undefined {
+  if (relation === "depends_on") return "depends-on";
+  if (relation === "invokes") return "invokes";
+  if (relation === "creates") return "creates";
+  if (["calls", "reads", "writes", "triggers", "publishes", "subscribes", "sends", "receives", "feeds", "controls"].includes(relation)) return relation;
+  return undefined;
+}
+
+function buildSemanticRelationships(index: SemanticComponentIndex): ProjectRelationship[] {
+  const result: ProjectRelationship[] = [];
+  for (const edge of index.graph.edges) {
+    if (edge.relation === "reads" || edge.relation === "writes" || edge.relation === "depends_on") continue;
+    const from = componentForSemanticNode(index, edge.from);
+    const to = componentForSemanticNode(index, edge.to);
+    const relation = graphRelation(edge.relation);
+    if (!from || !to || from === to || !relation || edge.source === "model") continue;
+    const id = edge.id ?? `${edge.from}|${edge.to}|${edge.relation}|${edge.dataObjectId ?? ""}`;
+    if (result.some((item) => item.semanticEdgeId === id || item.from === from && item.to === to && item.relation === relation)) continue;
+    result.push({ from, to, relation, description: `${from} ${relation} ${to}，由语义图边支持。`, evidenceRefs: edge.evidenceRefs, confidence: edge.strength === "direct" ? 0.96 : 0.86, evidenceStrength: edge.strength, verificationStatus: "confirmed", confidenceReason: `semantic graph ${edge.source} evidence`, semanticEdgeId: id, source: "semantic" });
+  }
+  return result;
+}
+
+function buildFallbackRelationshipCandidates(files: ReadFileObservation[], components: ProjectComponent[], collector: EvidenceCollector): ProjectRelationship[] {
+  const result: ProjectRelationship[] = [];
+  const lookup = (name: string): string | undefined => components.find((component) => normalizedName(component.name) === normalizedName(name))?.name;
+  for (const hint of embeddedControlFallbackRelationships()) {
+    const from = lookup(hint.from);
+    const to = lookup(hint.to);
+    if (!from || !to || from === to) continue;
+    const refs = unique([...collector.add(files, hint.left), ...collector.add(files, hint.right)]);
+    if (!refs.length) continue;
+    result.push({ from, to, relation: hint.relation, description: hint.description, evidenceRefs: refs, confidence: 0.45, evidenceStrength: "weak", verificationStatus: "candidate", confidenceReason: "domain hint only; no semantic edge", source: "fallback" });
+  }
+  return result.filter((item, position, all) => all.findIndex((candidate) => candidate.from === item.from && candidate.to === item.to && candidate.relation === item.relation) === position);
+}
+
+function flowKindForRelationships(relationships: ProjectRelationship[]): ProjectFlow["kind"] {
+  if (relationships.some((relationship) => /adc|dma|buffer|sampling|采样/i.test(`${relationship.from} ${relationship.to}`) || ["feeds", "writes", "reads", "publishes", "sends", "receives"].includes(relationship.relation))) return "data";
+  return relationships.some((relationship) => ["triggers", "creates", "invokes", "calls", "controls"].includes(relationship.relation)) ? "control" : "data";
+}
+
+function flowNameForPath(path: string[]): string {
+  const text = path.join(" ");
+  if (/modbus|databus|mqtt|socketcan/i.test(text)) return "Gateway Data Flow";
+  if (/adc|dma|buffer|sampling|current loop/i.test(text)) return "Sampling Flow";
+  return `${path[0] ?? "Semantic"} → ${path.at(-1) ?? "Flow"} Flow`;
+}
+
+function buildSemanticFlows(components: ProjectComponent[], relationships: ProjectRelationship[], graph?: ProjectSemanticGraph): { runtimeFlows: ProjectFlow[]; dataFlows: ProjectFlow[]; controlFlows: ProjectFlow[] } {
+  const confirmed = relationships.filter((relationship) => relationship.verificationStatus === "confirmed" && ["direct", "strong"].includes(relationship.evidenceStrength ?? "unsupported"));
+  const adjacency = new Map<string, ProjectRelationship[]>();
+  for (const relationship of confirmed) adjacency.set(relationship.from, [...(adjacency.get(relationship.from) ?? []), relationship]);
+  const paths: ProjectRelationship[][] = [];
+  const walk = (path: ProjectRelationship[], visited: Set<string>): void => {
+    const last = path.at(-1)?.to;
+    if (!last) return;
+    const next = (adjacency.get(last) ?? []).filter((relationship) => !visited.has(relationship.to));
+    if (path.length >= 2) paths.push(path);
+    if (path.length >= 4) return;
+    for (const relationship of next) walk([...path, relationship], new Set([...visited, relationship.to]));
+  };
+  for (const relationship of confirmed) walk([relationship], new Set([relationship.from, relationship.to]));
+  const graphPaths = graph ? findSemanticPaths(graph, { maxHops: 4, limit: 24 }).map((path) => path.edges.map((edge) => relationships.find((relationship) => relationship.semanticEdgeId === edge.id))).map((path) => path.filter((relationship): relationship is ProjectRelationship => Boolean(relationship))).filter((path) => path.length > 0) : [];
+  const candidatePaths = graphPaths.length ? graphPaths : paths;
+  const uniquePaths = candidatePaths.sort((left, right) => right.length - left.length).filter((path, position, all) => {
+    const key = path.map((relationship) => `${relationship.from}|${relationship.to}`).join(">>");
+    return all.findIndex((candidate) => candidate.map((relationship) => `${relationship.from}|${relationship.to}`).join(">>") === key) === position;
+  }).slice(0, 12);
+  const result: { runtimeFlows: ProjectFlow[]; dataFlows: ProjectFlow[]; controlFlows: ProjectFlow[] } = { runtimeFlows: [], dataFlows: [], controlFlows: [] };
+  const add = (path: ProjectRelationship[], partial = false, missingLinks: string[] = []): void => {
+    const baseNames = [path[0]?.from, ...path.map((relationship) => relationship.to)].filter((name): name is string => Boolean(name));
+    const names = partial && /buffer/i.test(baseNames.at(-1) ?? "") && !baseNames.includes("Current Loop") ? [...baseNames, "Current Loop"] : baseNames;
+    if (names.length < 2) return;
+    const kind = flowKindForRelationships(path);
+    const flow: ProjectFlow = { id: `semantic-flow-${slug(names.join("-"))}`, name: flowNameForPath(names), kind, steps: names.map((component, index) => ({ component, action: index === 0 ? `从 ${component} 开始` : `通过语义边进入 ${component}`, evidenceRefs: index === 0 ? [] : path[index - 1]?.evidenceRefs ?? [] })), description: "由 Semantic Graph 中的 confirmed edges 组成。", evidenceRefs: unique(path.flatMap((relationship) => relationship.evidenceRefs)), confidence: partial ? 0.65 : 0.92, ...(partial ? { partial: true, missingLinks } : {}) };
+    const bucket = kind === "control" ? "controlFlows" : "dataFlows";
+    if (!result[bucket].some((item) => item.id === flow.id)) result[bucket].push(flow);
+  };
+  for (const path of uniquePaths) add(path);
+  const hasCurrentLoop = components.some((component) => /current loop/i.test(component.name));
+  for (const path of uniquePaths) {
+    const names = [path[0]?.from, ...path.map((relationship) => relationship.to)].filter((name): name is string => Boolean(name));
+    if (hasCurrentLoop && /buffer/i.test(names.at(-1) ?? "") && !names.includes("Current Loop")) add(path, true, [`${names.at(-1)} → Current Loop`]);
+  }
+  if (!result.dataFlows.length && !result.controlFlows.length && confirmed.length) add([confirmed[0]]);
+  return result;
+}
+
 export class ProjectUnderstandingBuilder {
   private readonly observations: ProjectExplorerObservation[] = [];
   private domainFallbackEnabled: boolean;
@@ -349,16 +560,30 @@ export class ProjectUnderstandingBuilder {
   build(input: ProjectComprehensionInput, repoMap: ProjectRepoMap, trace: BuilderTrace): ProjectUnderstanding {
     const files = allReadFiles(input, this.observations);
     const collector = new EvidenceCollector(input.sources);
-    const domainFallback = this.domainFallbackEnabled && /foc|motor|svpwm|电机|current loop|电流环/i.test(files.map((file) => `${file.path}\n${file.text}`).join("\n"));
-    const componentList = discoverComponents(files, repoMap, collector, domainFallback);
-    const relationList = buildRelationships(files, componentList, collector, domainFallback);
-    const flowGroups = buildFlows(componentList, relationList.filter((item) => item.verificationStatus === "confirmed"), files, collector);
+    const domainFallback = this.domainFallbackEnabled && /foc|motor|svpwm|电机|current[_ -]?loop|电流环/i.test(files.map((file) => `${file.path}\n${file.text}`).join("\n"));
+    const semanticFiles: ProjectSemanticFile[] = files;
+    const graph = new ProjectSemanticGraphBuilder({
+      addEvidence: (file, line) => {
+        const observation = files.find((candidate) => candidate.path === file.path && candidate.sourceId === file.sourceId);
+        if (!observation) return [];
+        const sourceLine = linesOf(observation.text)[Math.max(0, line - 1)] ?? observation.path;
+        return collector.add([observation], new RegExp(sourceLine.replace(/[.*+?^${}()|[\[\]\\]/g, "\\$&"), "i"));
+      },
+    }).build(semanticFiles);
+    const componentIndex = discoverSemanticComponents(files, repoMap, graph, collector, domainFallback);
+    const componentList = componentIndex.components.length ? componentIndex.components : discoverComponents(files, repoMap, collector, domainFallback);
+    const semanticIndex: SemanticComponentIndex = { ...componentIndex, components: componentList };
+    const relationList = [
+      ...buildSemanticRelationships(semanticIndex),
+      ...(domainFallback ? buildFallbackRelationshipCandidates(files, componentList, collector) : []),
+    ];
+    const flowGroups = buildSemanticFlows(componentList, relationList, graph);
     const allFlows = [...flowGroups.runtimeFlows, ...flowGroups.dataFlows, ...flowGroups.controlFlows];
     const technologyList = buildTechnologies(files, collector, repoMap);
-    const parameterList = buildParameters(files, input.sources, collector);
+    const parameterList = buildParameters(files, input.sources, collector, componentList, graph);
     const decisionList = buildDecisions(files, componentList, allFlows, collector);
-    const problemList = buildProblems(files, componentList, collector);
-    const interfaceList = buildInterfaces(files, collector);
+    const problemList = buildProblems(files, componentList, collector, input.sources.flatMap((source) => source.repositoryHistory ?? []));
+    const interfaceList = [...buildInterfaces(files, collector), ...graph.interfaces.map((binding) => ({ id: binding.id, name: binding.name, kind: binding.kind, direction: binding.producer ? "out" : binding.consumer ? "in" : undefined, components: unique([binding.producer, binding.consumer].filter((value): value is string => Boolean(value))), evidenceRefs: binding.evidenceRefs, confidence: binding.evidenceRefs.length ? 0.9 : 0.65 }))].filter((item, index, all) => all.findIndex((candidate) => candidate.name === item.name && candidate.kind === item.kind) === index);
     const testList = buildTests(files, collector);
     const resultList = files.filter((file) => file.kind === "test" && /result|latency|throughput|误差|性能|benchmark/i.test(file.text)).map((file) => ({ id: `result-${slug(file.path)}`, name: "Measured Result", value: compact(file.text).slice(0, 220), measured: true, evidenceRefs: collector.add([file], /result|latency|throughput|误差|性能|benchmark/i), confidence: 0.82 }));
     const limitations = files.flatMap((file) => /未完成|无法确认|尚未|not measured|unknown/i.test(file.text) ? [{ id: `limitation-${slug(file.path)}`, claim: "部分指标或实现状态未完成确认", reason: "资料自身说明当前缺少正式测量或版本确认。", category: "result" as const, evidenceRefs: collector.add([file], /未完成|无法确认|尚未|not measured|unknown/i) }] : []);
@@ -369,6 +594,6 @@ export class ProjectUnderstandingBuilder {
     const criticalCoverage = { purpose: identityValue.purpose ? 100 : 0, architecture: componentList.length ? Math.min(100, componentList.length * 20) : 0, mainFlow: allFlows.length ? Math.min(100, allFlows.some((flow) => !flow.partial) ? 100 : 60) : 0, coreComponents: componentList.length ? Math.min(100, componentList.length * 20) : 0, parameters: parameterList.length ? 100 : 0, decisions: decisionList.length ? 100 : 0, problems: problemList.length ? 100 : 0, tests: testList.length ? 100 : 0 };
     const quality = { architectureCoverage: criticalCoverage.architecture, flowCoverage: criticalCoverage.mainFlow, parameterCoverage: criticalCoverage.parameters, decisionCoverage: criticalCoverage.decisions, problemCoverage: criticalCoverage.problems, groundingCoverage: allClaims ? Math.round((grounded / allClaims) * 100) : 0, sufficient: criticalCoverage.purpose >= 80 && criticalCoverage.architecture >= 60 && criticalCoverage.mainFlow >= 60, criticalCoverage };
     const stages = [...new Set([...trace.stages, "synthesizing" as ProjectComprehensionStatus])].filter((stage) => stage !== "completed") as ProjectComprehensionStatus[];
-    return { projectId: input.projectId, schemaVersion: 2, status: "synthesizing", identity: identityValue, summary: summary(identityValue, componentList, allFlows, technologyList), architecture: { overview: `工程由${componentList.slice(0, 8).map((component) => component.name).join("、") || "尚未分类的核心文件"}协同组成。`, components: componentList, relationships: relationList }, runtimeFlows: flowGroups.runtimeFlows, dataFlows: flowGroups.dataFlows, controlFlows: flowGroups.controlFlows, technologies: technologyList, parameters: parameterList, decisions: decisionList, problems: problemList, interfaces: interfaceList, protections: buildProtections(files, collector), tests: testList, results: resultList, limitations, unknowns: unknownList, evidenceRefs: collector.refs, quality, trace: { ...trace, stages } };
+    return { projectId: input.projectId, schemaVersion: PROJECT_COMPREHENSION_SCHEMA_VERSION, status: "synthesizing", identity: identityValue, summary: summary(identityValue, componentList, allFlows, technologyList), architecture: { overview: `工程由${componentList.slice(0, 8).map((component) => component.name).join("、") || "尚未分类的核心文件"}协同组成。`, components: componentList, relationships: relationList }, runtimeFlows: flowGroups.runtimeFlows, dataFlows: flowGroups.dataFlows, controlFlows: flowGroups.controlFlows, technologies: technologyList, parameters: parameterList, decisions: decisionList, problems: problemList, interfaces: interfaceList, protections: buildProtections(files, collector), tests: testList, results: resultList, limitations, unknowns: unknownList, evidenceRefs: collector.refs, semanticGraph: graph, quality, trace: { ...trace, stages } };
   }
 }

@@ -4,6 +4,8 @@ export * from "./planner";
 export * from "./repo-explorer";
 export * from "./repo-map";
 export * from "./retrieval";
+export * from "./semantic-graph";
+export * from "./repository-adapter";
 export * from "./types";
 export * from "./understanding-builder";
 export * from "./validator";

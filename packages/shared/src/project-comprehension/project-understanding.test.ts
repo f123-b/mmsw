@@ -9,8 +9,8 @@ describe("ProjectUnderstanding model", () => {
     });
     expect(result.understanding.architecture.components.map((item) => item.name)).toEqual(expect.arrayContaining(["Motor Control", "Current Sampling", "Encoder Feedback", "Velocity Estimator", "Protection"]));
     expect(result.understanding.architecture.relationships.length).toBeGreaterThan(0);
-    expect(result.understanding.runtimeFlows.length + result.understanding.dataFlows.length + result.understanding.controlFlows.length).toBeGreaterThan(0);
+    expect(result.understanding.runtimeFlows.length + result.understanding.dataFlows.length + result.understanding.controlFlows.length).toBe(0);
+    expect(result.understanding.unknowns.some((item) => item.category === "flow" || item.category === "missingFlowLink")).toBe(true);
     expect(result.understanding.parameters.map((item) => item.semanticKey)).toEqual(expect.arrayContaining(["adc.peripheral_clock", "adc.control_trigger_frequency"]));
   });
 });
-

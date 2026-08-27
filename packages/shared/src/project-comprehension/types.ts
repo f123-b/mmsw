@@ -1,10 +1,10 @@
 import type { ProjectMemoryAnalysisInput, ProjectMemorySource } from "../knowledge/types";
 
-export const PROJECT_COMPREHENSION_SCHEMA_VERSION = 2;
+export const PROJECT_COMPREHENSION_SCHEMA_VERSION = 3;
 
 export type ProjectComprehensionStatus = "scan" | "mapping" | "exploring" | "synthesizing" | "grounding" | "completed" | "failed";
 export type ProjectComponentKind = "control" | "sampling" | "feedback" | "communication" | "storage" | "ui" | "protection" | "driver" | "service" | "other";
-export type ProjectRelationshipKind = "calls" | "feeds" | "triggers" | "reads" | "writes" | "publishes" | "subscribes" | "controls" | "depends-on" | "provides" | "produces" | "other";
+export type ProjectRelationshipKind = "calls" | "feeds" | "triggers" | "reads" | "writes" | "publishes" | "subscribes" | "controls" | "configures" | "depends-on" | "depends_on" | "provides" | "produces" | "creates" | "invokes" | "sends" | "receives" | "other";
 export type ProjectFlowKind = "runtime" | "data" | "control" | "startup" | "fault";
 export type ProjectParameterVersionStatus = "current" | "preferred_current" | "confirmed_current" | "historical" | "alternative" | "contextual" | "unknown";
 export type ProjectEvidenceStrength = "direct" | "strong" | "weak" | "unsupported";
@@ -42,6 +42,8 @@ export interface ProjectRelationship {
   evidenceStrength?: ProjectEvidenceStrength;
   verificationStatus?: ProjectComprehensionVerificationStatus;
   confidenceReason?: string;
+  semanticEdgeId?: string;
+  source?: "semantic" | "fallback" | "model";
 }
 
 export interface ProjectFlowStep {
@@ -81,6 +83,10 @@ export interface ProjectParameterUnderstanding {
   sourceIds: string[];
   evidenceRefs: string[];
   historicalValues?: Array<{ value?: string | number; unit?: string; sourceIds: string[]; evidenceRefs: string[]; context?: string }>;
+  alternativeValues?: Array<{ value?: string | number; unit?: string; sourceIds: string[]; evidenceRefs: string[]; context?: string }>;
+  relatedComponent?: string;
+  sourceSymbol?: string;
+  sourceKind?: "code" | "config" | "document" | "test" | "inference";
   confidence: number;
 }
 
@@ -104,6 +110,7 @@ export interface ProjectProblemUnderstanding {
   causeChain: string[];
   fix: string;
   result?: string;
+  codeChangeRefs?: string[];
   evidenceRefs: string[];
   confidence: number;
 }
@@ -150,7 +157,7 @@ export interface ProjectUnknown {
   id: string;
   claim: string;
   reason: string;
-  category: "architecture" | "flow" | "parameter" | "decision" | "problem" | "result" | "version" | "general";
+  category: "architecture" | "flow" | "parameter" | "decision" | "problem" | "result" | "version" | "unverifiedRelationship" | "missingFlowLink" | "ambiguousComponent" | "parameterConflict" | "measurementUnknown" | "general";
   evidenceRefs: string[];
 }
 
@@ -162,6 +169,8 @@ export interface ProjectUnderstandingQuality {
   problemCoverage: number;
   groundingCoverage: number;
   sufficient: boolean;
+  unsupportedClaimRate?: number;
+  falseRelationshipRate?: number;
   criticalCoverage?: ProjectUnderstandingCoverage;
 }
 
@@ -215,6 +224,7 @@ export interface ProjectUnderstanding {
   limitations: ProjectUnknown[];
   unknowns: ProjectUnknown[];
   evidenceRefs: ProjectEvidenceRef[];
+  semanticGraph?: ProjectSemanticGraph;
   quality: ProjectUnderstandingQuality;
   trace: ProjectUnderstandingTraceSummary;
 }
@@ -253,6 +263,14 @@ export interface ProjectSymbol {
   line?: number;
   references?: Array<{ path: string; line?: number }>;
   calls?: string[];
+  calledBy?: string[];
+  readVariables?: string[];
+  writeVariables?: string[];
+  imports?: string[];
+  includes?: string[];
+  callbacks?: string[];
+  registrations?: string[];
+  definedAt?: { path: string; line?: number };
 }
 
 export interface ProjectSymbolIndex {
@@ -260,6 +278,91 @@ export interface ProjectSymbolIndex {
   definitions: Record<string, Array<{ path: string; line?: number; kind?: string }>>;
   references: Record<string, Array<{ path: string; line?: number }>>;
   calls: Record<string, string[]>;
+  calledBy: Record<string, string[]>;
+  readVariables: Record<string, string[]>;
+  writeVariables: Record<string, string[]>;
+  imports: Record<string, string[]>;
+  includes: Record<string, string[]>;
+  callbacks: Record<string, string[]>;
+  registrations: Record<string, string[]>;
+}
+
+export type ProjectSemanticNodeKind = "function" | "class" | "module" | "task" | "thread" | "service" | "driver" | "topic" | "queue" | "buffer" | "config" | "device" | "component" | "variable" | "other";
+export type ProjectSemanticEdgeRelation = "calls" | "reads" | "writes" | "triggers" | "publishes" | "subscribes" | "sends" | "receives" | "depends_on" | "configures" | "creates" | "feeds" | "controls" | "invokes";
+export type ProjectSemanticEdgeSource = "symbol" | "config" | "assignment" | "document" | "test" | "model";
+
+export interface ProjectSemanticNode {
+  id: string;
+  kind: ProjectSemanticNodeKind;
+  name: string;
+  filePath?: string;
+  symbol?: string;
+  evidenceRefs: string[];
+}
+
+export interface ProjectDataObject {
+  id: string;
+  name: string;
+  type?: string;
+  files: string[];
+  writers: string[];
+  readers: string[];
+  evidenceRefs: string[];
+}
+
+export interface ProjectConfigBinding {
+  id: string;
+  key: string;
+  value?: string;
+  filePath?: string;
+  symbol?: string;
+  evidenceRefs: string[];
+}
+
+export interface ProjectInterfaceBinding {
+  id: string;
+  name: string;
+  kind: "import" | "include" | "topic" | "queue" | "callback" | "api" | "other";
+  producer?: string;
+  consumer?: string;
+  evidenceRefs: string[];
+}
+
+export interface ProjectSemanticEvidence {
+  id: string;
+  type: "symbol" | "call" | "assignment" | "config" | "registration" | "document" | "test";
+  description: string;
+  evidenceRefs: string[];
+  filePath?: string;
+  line?: number;
+}
+
+export interface ProjectSemanticEdge {
+  id?: string;
+  from: string;
+  to: string;
+  relation: ProjectSemanticEdgeRelation;
+  evidenceRefs: string[];
+  strength: Exclude<ProjectEvidenceStrength, "unsupported">;
+  source: ProjectSemanticEdgeSource;
+  dataObjectId?: string;
+}
+
+export interface ProjectCallGraph {
+  callers: Record<string, string[]>;
+  callees: Record<string, string[]>;
+  edges: Array<{ caller: string; callee: string; path: string; line?: number; evidenceRefs: string[] }>;
+}
+
+export interface ProjectSemanticGraph {
+  nodes: ProjectSemanticNode[];
+  edges: ProjectSemanticEdge[];
+  symbols: ProjectSymbol[];
+  dataObjects: ProjectDataObject[];
+  configs: ProjectConfigBinding[];
+  interfaces: ProjectInterfaceBinding[];
+  evidence: ProjectSemanticEvidence[];
+  callGraph?: ProjectCallGraph;
 }
 
 export interface ProjectExplorerLimits {
@@ -305,6 +408,15 @@ export interface ProjectExplorer {
   inspectTests(): ProjectFileReadResult[];
   inspectProjectDocument(role?: string): ProjectFileReadResult[];
   inspectGitHistory(): ProjectGitHistoryEntry[];
+  findCallers?(symbol: string, options?: { limit?: number }): ProjectSearchMatch[];
+  findCallees?(symbol: string, options?: { limit?: number }): ProjectSearchMatch[];
+}
+
+export interface ProjectRepositoryAdapter extends ProjectExplorer {
+  search(query: string, options?: { limit?: number }): ProjectSearchMatch[];
+  getHistory(options?: { path?: string; limit?: number }): ProjectGitHistoryEntry[];
+  getCommit?(hash: string): { hash: string; subject: string; date?: string; changedPaths?: string[] } | undefined;
+  getDiff?(base: string, head?: string): { path: string; summary: string }[];
 }
 
 export interface ProjectGitHistoryEntry {
@@ -320,6 +432,8 @@ export type ProjectExplorationAction =
   | { type: "searchText"; query: string }
   | { type: "findDefinitions"; symbol: string }
   | { type: "findReferences"; symbol: string }
+  | { type: "findCallers"; symbol: string }
+  | { type: "findCallees"; symbol: string }
   | { type: "inspectBuildConfig" }
   | { type: "inspectTests" }
   | { type: "inspectProjectDocument"; role?: string }
@@ -347,13 +461,14 @@ export interface ProjectComprehensionModelInput {
   observations: ProjectExplorerObservation[];
   purpose?: "plan" | "synthesize";
   plannerState?: ProjectComprehensionPlannerInput;
+  semanticGraph?: ProjectSemanticGraph;
 }
 
 export interface ProjectComprehensionModel {
   generate(input: ProjectComprehensionModelInput): Promise<string>;
 }
 
-export type ProjectAgentAction = "readFile" | "searchText" | "findDefinitions" | "findReferences" | "inspectBuildConfig" | "inspectTests" | "inspectProjectDocument" | "inspectGitHistory" | "verifyClaim" | "synthesize";
+export type ProjectAgentAction = "readFile" | "searchText" | "findDefinitions" | "findReferences" | "findCallers" | "findCallees" | "inspectBuildConfig" | "inspectTests" | "inspectProjectDocument" | "inspectGitHistory" | "verifyClaim" | "synthesize";
 
 export interface ProjectAgentDecision {
   action: ProjectAgentAction;
@@ -372,6 +487,7 @@ export interface ProjectHypothesis {
   status: "candidate" | "verifying" | "confirmed" | "rejected" | "unknown";
   evidenceRefs: string[];
   missingEvidence?: string[];
+  evidenceRequirements?: string[];
   confidence: number;
 }
 
@@ -400,9 +516,10 @@ export interface ProjectComprehensionState {
   coverage: ProjectUnderstandingCoverage;
   budget: ProjectComprehensionBudget;
   filesRead: string[];
+  semanticGraph?: ProjectSemanticGraph;
 }
 
-export type ProjectComprehensionPlannerInput = Pick<ProjectComprehensionState, "repoMap" | "observations" | "hypotheses" | "confirmedConcepts" | "unknowns" | "coverage" | "budget" | "filesRead"> & {
+export type ProjectComprehensionPlannerInput = Pick<ProjectComprehensionState, "repoMap" | "observations" | "hypotheses" | "confirmedConcepts" | "unknowns" | "coverage" | "budget" | "filesRead" | "semanticGraph"> & {
   projectName?: string;
   currentUnderstandingSummary?: string;
   toolBudgetRemaining: number;

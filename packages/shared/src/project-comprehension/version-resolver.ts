@@ -11,6 +11,7 @@ export interface ProjectParameterCandidate {
   evidenceRefs: string[];
   sourceRole?: string;
   filePath?: string;
+  line?: number;
   isCode?: boolean;
 }
 
@@ -58,11 +59,10 @@ export class ProjectVersionResolver {
     const confirmedHistory = historyConfirmsChange(current, alternatives, history);
     return {
       current,
-      // Keep the legacy field populated for compatibility. Consumers must use
-      // currentStatus and only call these historical when Git confirmed it;
-      // otherwise they are merely alternatives/stale candidates.
-      historical: alternatives,
-      alternatives: alternatives.length ? alternatives : undefined,
+      // Historical is strict: it is populated only when Git explicitly
+      // confirms the transition. Without Git, these remain alternatives.
+      historical: confirmedHistory ? alternatives : [],
+      alternatives: confirmedHistory ? undefined : alternatives.length ? alternatives : undefined,
       // “current” is retained as the stable API value from V6. The richer
       // currentStatus is used by the V6.1 Understanding schema.
       status: "current",
@@ -85,7 +85,7 @@ export function markHistoricalParameters(parameters: ProjectParameterUnderstandi
   return parameters.map((parameter) => {
     const resolution = resolutions.get(parameter.semanticKey);
     if (!resolution?.current) return parameter;
-    return { ...parameter, versionStatus: resolution.currentStatus ?? parameter.versionStatus, historicalValues: resolution.historical.length ? resolution.historical.map((item) => ({ value: item.value, unit: item.unit, sourceIds: item.sourceIds, evidenceRefs: item.evidenceRefs, ...(item.context ? { context: item.context } : {}) })) : parameter.historicalValues };
+    return { ...parameter, versionStatus: resolution.currentStatus ?? parameter.versionStatus, historicalValues: resolution.historical.length ? resolution.historical.map((item) => ({ value: item.value, unit: item.unit, sourceIds: item.sourceIds, evidenceRefs: item.evidenceRefs, ...(item.context ? { context: item.context } : {}) })) : parameter.historicalValues, alternativeValues: resolution.alternatives?.length ? resolution.alternatives.map((item) => ({ value: item.value, unit: item.unit, sourceIds: item.sourceIds, evidenceRefs: item.evidenceRefs, ...(item.context ? { context: item.context } : {}) })) : parameter.alternativeValues };
   });
 }
 
