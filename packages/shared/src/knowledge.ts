@@ -49,6 +49,7 @@ export interface ParsedDocument {
   sha256: string;
   text: string;
   sections: string[];
+  repositoryFiles?: Array<{ path: string; text: string; size: number }>;
 }
 
 export interface KnowledgeChunk {
@@ -94,7 +95,7 @@ export function chunkText(text: string, metadata: DocumentMetadata, options: Chu
 }
 
 export interface DocumentParser {
-  parse(input: { filename: string; mimeType: string; bytes: Uint8Array }): Promise<{ text: string; sections?: string[] }>;
+  parse(input: { filename: string; mimeType: string; bytes: Uint8Array }): Promise<{ text: string; sections?: string[]; repositoryFiles?: Array<{ path: string; text: string; size?: number }> }>;
 }
 
 export class DocumentParserRegistry implements DocumentParser {
@@ -105,7 +106,7 @@ export class DocumentParserRegistry implements DocumentParser {
     return this;
   }
 
-  async parse(input: { filename: string; mimeType: string; bytes: Uint8Array }): Promise<{ text: string; sections?: string[] }> {
+  async parse(input: { filename: string; mimeType: string; bytes: Uint8Array }): Promise<{ text: string; sections?: string[]; repositoryFiles?: Array<{ path: string; text: string; size?: number }> }> {
     const parser = this.parsers.get(input.mimeType) ?? this.parsers.get("*");
     if (!parser) throw new Error(`No document parser registered for ${input.mimeType}`);
     return parser.parse(input);
@@ -128,7 +129,7 @@ export class DocumentMemoryCache {
     const cached = this.values.get(input.sha256);
     if (cached) return cached;
     const parsed = await parser.parse(input);
-    const document = { ...input, text: parsed.text, sections: parsed.sections ?? [] };
+    const document = { ...input, text: parsed.text, sections: parsed.sections ?? [], ...(parsed.repositoryFiles ? { repositoryFiles: parsed.repositoryFiles.map((file) => ({ ...file, size: file.size ?? file.text.length })) } : {}) };
     this.values.set(input.sha256, document);
     return document;
   }

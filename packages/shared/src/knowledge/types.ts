@@ -44,6 +44,9 @@ export interface ProjectMemorySource {
   projectName?: string;
   locator?: string;
   updatedAt?: number;
+  /** Optional materialized entries from a trusted archive reader. */
+  repositoryFiles?: Array<{ path: string; text: string; size?: number }>;
+  repositoryHistory?: Array<{ hash?: string; subject: string; path?: string; date?: string; changedPaths?: string[] }>;
 }
 
 export interface ProjectMemoryProject {

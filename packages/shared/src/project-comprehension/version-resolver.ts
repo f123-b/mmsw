@@ -1,5 +1,5 @@
 import type { ProjectMemorySource } from "../knowledge/types";
-import type { ProjectParameterUnderstanding, ProjectParameterVersionStatus } from "./types";
+import type { ProjectGitHistoryEntry, ProjectParameterUnderstanding, ProjectParameterVersionStatus } from "./types";
 
 export interface ProjectParameterCandidate {
   semanticKey: string;
@@ -17,7 +17,11 @@ export interface ProjectParameterCandidate {
 export interface ProjectVersionResolution {
   current?: ProjectParameterCandidate;
   historical: ProjectParameterCandidate[];
-  status: ProjectParameterVersionStatus;
+  /** Non-Git alternatives are deliberately not called historical. */
+  alternatives?: ProjectParameterCandidate[];
+  status: "current" | "historical" | "contextual" | "unknown";
+  currentStatus?: ProjectParameterVersionStatus;
+  historyAvailable?: boolean;
 }
 
 function priority(candidate: ProjectParameterCandidate): number {
@@ -30,37 +34,58 @@ function priority(candidate: ProjectParameterCandidate): number {
   return 2;
 }
 
-function comparable(candidate: ProjectParameterCandidate): string {
-  return `${candidate.value ?? ""}|${candidate.unit ?? ""}|${candidate.context ?? ""}`.toLowerCase();
+function comparable(candidate: ProjectParameterCandidate): string { return `${candidate.value ?? ""}|${candidate.unit ?? ""}|${candidate.context ?? ""}`.toLowerCase(); }
+function display(candidate: ProjectParameterCandidate): string { return `${candidate.value ?? ""}${candidate.unit ?? ""}`.toLowerCase(); }
+
+function historyConfirmsChange(current: ProjectParameterCandidate, alternatives: ProjectParameterCandidate[], history: ProjectGitHistoryEntry[]): boolean {
+  if (!history.length || !alternatives.length) return false;
+  const currentText = display(current).replace(/\s+/g, "");
+  const oldText = alternatives.map((candidate) => display(candidate).replace(/\s+/g, "")).filter(Boolean);
+  return history.some((entry) => {
+    const subject = entry.subject.toLowerCase().replace(/\s+/g, "");
+    const looksLikeChange = /change|changed|update|migrat|switch|from|to|改|修改|调整|变更|切换|升级/.test(subject);
+    return looksLikeChange && subject.includes(currentText) && oldText.some((value) => subject.includes(value));
+  });
 }
 
-/** Resolves semantic versions before candidates become canonical Facts. */
+/** Resolves semantic versions with Git as the only source of historical certainty. */
 export class ProjectVersionResolver {
-  resolve(candidates: ProjectParameterCandidate[]): ProjectVersionResolution {
-    if (candidates.length === 0) return { historical: [], status: "unknown" };
+  resolve(candidates: ProjectParameterCandidate[], history: ProjectGitHistoryEntry[] = []): ProjectVersionResolution {
+    if (candidates.length === 0) return { historical: [], status: "unknown", currentStatus: "unknown", historyAvailable: history.length > 0 };
     const ordered = [...candidates].sort((left, right) => priority(right) - priority(left) || right.evidenceRefs.length - left.evidenceRefs.length);
     const current = ordered[0];
-    const historical = ordered.slice(1).filter((candidate) => comparable(candidate) !== comparable(current));
-    return { current, historical, status: historical.length > 0 ? "current" : "current" };
+    const alternatives = ordered.slice(1).filter((candidate) => comparable(candidate) !== comparable(current));
+    const confirmedHistory = historyConfirmsChange(current, alternatives, history);
+    return {
+      current,
+      // Keep the legacy field populated for compatibility. Consumers must use
+      // currentStatus and only call these historical when Git confirmed it;
+      // otherwise they are merely alternatives/stale candidates.
+      historical: alternatives,
+      alternatives: alternatives.length ? alternatives : undefined,
+      // “current” is retained as the stable API value from V6. The richer
+      // currentStatus is used by the V6.1 Understanding schema.
+      status: "current",
+      currentStatus: confirmedHistory ? "confirmed_current" : "preferred_current",
+      historyAvailable: history.length > 0,
+    };
   }
 
-  resolveAll(candidates: ProjectParameterCandidate[]): Map<string, ProjectVersionResolution> {
+  resolveAll(candidates: ProjectParameterCandidate[], history: ProjectGitHistoryEntry[] = []): Map<string, ProjectVersionResolution> {
     const groups = new Map<string, ProjectParameterCandidate[]>();
     for (const candidate of candidates) groups.set(candidate.semanticKey, [...(groups.get(candidate.semanticKey) ?? []), candidate]);
-    return new Map([...groups.entries()].map(([key, values]) => [key, this.resolve(values)]));
+    return new Map([...groups.entries()].map(([key, values]) => [key, this.resolve(values, history)]));
   }
 }
 
-export function resolveProjectParameterVersions(candidates: ProjectParameterCandidate[]): Map<string, ProjectVersionResolution> {
-  return new ProjectVersionResolver().resolveAll(candidates);
-}
+export function resolveProjectParameterVersions(candidates: ProjectParameterCandidate[], history: ProjectGitHistoryEntry[] = []): Map<string, ProjectVersionResolution> { return new ProjectVersionResolver().resolveAll(candidates, history); }
 
-export function markHistoricalParameters(parameters: ProjectParameterUnderstanding[], candidates: ProjectParameterCandidate[]): ProjectParameterUnderstanding[] {
-  const resolutions = resolveProjectParameterVersions(candidates);
+export function markHistoricalParameters(parameters: ProjectParameterUnderstanding[], candidates: ProjectParameterCandidate[], history: ProjectGitHistoryEntry[] = []): ProjectParameterUnderstanding[] {
+  const resolutions = resolveProjectParameterVersions(candidates, history);
   return parameters.map((parameter) => {
     const resolution = resolutions.get(parameter.semanticKey);
-    if (!resolution?.current || resolution.current.value === parameter.value) return { ...parameter, versionStatus: resolution?.status ?? parameter.versionStatus, historicalValues: resolution?.historical.map((item) => ({ value: item.value, unit: item.unit, sourceIds: item.sourceIds, evidenceRefs: item.evidenceRefs, ...(item.context ? { context: item.context } : {}) })) };
-    return parameter;
+    if (!resolution?.current) return parameter;
+    return { ...parameter, versionStatus: resolution.currentStatus ?? parameter.versionStatus, historicalValues: resolution.historical.length ? resolution.historical.map((item) => ({ value: item.value, unit: item.unit, sourceIds: item.sourceIds, evidenceRefs: item.evidenceRefs, ...(item.context ? { context: item.context } : {}) })) : parameter.historicalValues };
   });
 }
 

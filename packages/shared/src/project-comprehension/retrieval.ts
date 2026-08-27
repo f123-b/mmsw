@@ -13,10 +13,13 @@ export interface ProjectUnderstandingHit {
 
 export interface ProjectUnderstandingRetrievalResult {
   route: ProjectUnderstandingRoute;
+  primaryRoute: ProjectUnderstandingRoute;
+  secondaryRoutes: ProjectUnderstandingRoute[];
+  confidence: number;
   hits: ProjectUnderstandingHit[];
 }
 
-function routeForQuery(query: string): ProjectUnderstandingRoute {
+export function routeForQuery(query: string): ProjectUnderstandingRoute {
   if (/参数|频率|时钟|周期|速率|分辨率|极对数|配置|设定|frequency|clock|period|rate|resolution/i.test(query)) return "parameter";
   if (/为什么|为何|选择|决策|取舍|原因|同步|why|decision|tradeoff|rationale/i.test(query)) return "decision";
   if (/问题|故障|异常|抖动|排查|修复|低速|problem|fault|debug|fix|issue/i.test(query)) return "problem";
@@ -24,6 +27,19 @@ function routeForQuery(query: string): ProjectUnderstandingRoute {
   if (/流程|运行|启动|数据流|控制链|怎么工作|如何工作|执行|flow|runtime|data path|control loop/i.test(query)) return "flow";
   if (/架构|模块|组成|接口|通信|依赖|architecture|module|component|interface/i.test(query)) return "architecture";
   return "general";
+}
+
+function hybridRoute(query: string): { primaryRoute: ProjectUnderstandingRoute; secondaryRoutes: ProjectUnderstandingRoute[]; confidence: number } {
+  const primaryRoute = routeForQuery(query);
+  const secondary: ProjectUnderstandingRoute[] = [];
+  if (/为什么|为何|时刻|同步|卡|采电流|采样|why|decision/i.test(query) && primaryRoute === "decision") secondary.push("flow");
+  if (/流程|运行|怎么工作|数据流|control loop|采样/i.test(query) && primaryRoute === "flow") secondary.push("decision");
+  if (primaryRoute === "general") {
+    if (/电流|电压|频率|速率|配置|参数/i.test(query)) return { primaryRoute: "parameter", secondaryRoutes: ["flow"], confidence: 0.55 };
+    if (/模块|服务|接口|总线|消息/i.test(query)) return { primaryRoute: "architecture", secondaryRoutes: ["flow"], confidence: 0.55 };
+    return { primaryRoute, secondaryRoutes: [], confidence: 0.35 };
+  }
+  return { primaryRoute, secondaryRoutes: secondary, confidence: secondary.length ? 0.78 : 0.92 };
 }
 
 function words(query: string): string[] {
@@ -38,8 +54,9 @@ function scoreText(query: string, text: string, base: number): number {
 /** Routes questions into the comprehension model before Fact-first joins add grounding detail. */
 export class ProjectComprehensionRetriever {
   search(query: string, understanding: ProjectUnderstanding | undefined, limit = 5): ProjectUnderstandingRetrievalResult {
-    const route = routeForQuery(query);
-    if (!understanding) return { route, hits: [] };
+    const routed = hybridRoute(query);
+    const route = routed.primaryRoute;
+    if (!understanding) return { route, primaryRoute: routed.primaryRoute, secondaryRoutes: routed.secondaryRoutes, confidence: routed.confidence, hits: [] };
     const hits: ProjectUnderstandingHit[] = [];
     const include = (hit: ProjectUnderstandingHit) => hits.push(hit);
     for (const component of understanding.architecture.components) include({ kind: "component", id: component.id, title: component.name, content: component.description, evidenceRefs: component.evidenceRefs ?? [], score: scoreText(query, `${component.name} ${component.description}`, route === "architecture" ? 8 : 2) });
@@ -50,11 +67,10 @@ export class ProjectComprehensionRetriever {
     for (const problem of understanding.problems) include({ kind: "problem", id: problem.id, title: problem.problem, content: `${problem.symptom} ${problem.causeChain.join("；")} ${problem.fix}`, evidenceRefs: problem.evidenceRefs, score: scoreText(query, `${problem.problem} ${problem.symptom} ${problem.fix}`, route === "problem" ? 10 : 2) });
     for (const result of understanding.results) include({ kind: "result", id: result.id, title: result.name, content: result.value, evidenceRefs: result.evidenceRefs, score: scoreText(query, `${result.name} ${result.value}`, route === "result" ? 10 : 2) });
     for (const unknown of understanding.unknowns) include({ kind: "unknown", id: unknown.id, title: unknown.claim, content: unknown.reason, evidenceRefs: unknown.evidenceRefs, score: scoreText(query, `${unknown.claim} ${unknown.reason}`, 1) });
-    return { route, hits: hits.sort((left, right) => right.score - left.score || left.title.localeCompare(right.title)).slice(0, Math.max(0, limit)) };
+    return { route, primaryRoute: routed.primaryRoute, secondaryRoutes: routed.secondaryRoutes, confidence: routed.confidence, hits: hits.sort((left, right) => right.score - left.score || left.title.localeCompare(right.title)).slice(0, Math.max(0, limit)) };
   }
 }
 
 export function retrieveProjectUnderstanding(query: string, understanding: ProjectUnderstanding | undefined, limit = 5): ProjectUnderstandingRetrievalResult {
   return new ProjectComprehensionRetriever().search(query, understanding, limit);
 }
-

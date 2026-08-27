@@ -1,7 +1,19 @@
 import type { ProjectMemorySource } from "../knowledge/types";
-import { normalizeTechnicalTerms } from "../terminology";
 import { ProjectVersionResolver, type ProjectParameterCandidate } from "./version-resolver";
-import type { ProjectComprehensionInput, ProjectComprehensionStatus, ProjectEvidenceRef, ProjectExplorerObservation, ProjectRepoMap, ProjectUnderstanding, ProjectComponent, ProjectFlow, ProjectParameterUnderstanding, ProjectTechnologyUnderstanding } from "./types";
+import { embeddedControlComponentHints, embeddedControlFallbackRelationships } from "./fallback/domain-hints/embedded-control-hints";
+import type {
+  ProjectComprehensionInput,
+  ProjectComprehensionStatus,
+  ProjectEvidenceRef,
+  ProjectExplorerObservation,
+  ProjectRepoMap,
+  ProjectUnderstanding,
+  ProjectComponent,
+  ProjectFlow,
+  ProjectParameterUnderstanding,
+  ProjectRelationship,
+  ProjectTechnologyUnderstanding,
+} from "./types";
 
 interface ReadFileObservation {
   path: string;
@@ -22,33 +34,46 @@ interface BuilderTrace {
 function unique(values: string[]): string[] { return [...new Set(values.map((value) => value.trim()).filter(Boolean))]; }
 function compact(value: string): string { return value.replace(/\s+/g, " ").trim(); }
 function slug(value: string): string { return value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "component"; }
+function linesOf(text: string): string[] { return text.replace(/\r/g, "").split("\n"); }
 function lineFor(text: string, pattern: RegExp): { line: string; lineNumber: number } | undefined {
-  const lines = text.replace(/\r/g, "").split("\n");
-  const index = lines.findIndex((line) => pattern.test(line));
+  const lines = linesOf(text);
+  const index = lines.findIndex((line) => { pattern.lastIndex = 0; return pattern.test(line); });
   return index < 0 ? undefined : { line: compact(lines[index] ?? "").slice(0, 600), lineNumber: index + 1 };
 }
+function has(files: ReadFileObservation[], pattern: RegExp): boolean { return files.some((file) => { pattern.lastIndex = 0; return pattern.test(`${file.path}\n${file.text}`); }); }
 
 class EvidenceCollector {
   readonly refs: ProjectEvidenceRef[] = [];
   private readonly seen = new Set<string>();
   constructor(private readonly sources: ProjectMemorySource[]) {}
 
-  add(files: ReadFileObservation[], pattern: RegExp, fallback?: ReadFileObservation): string[] {
+  add(files: ReadFileObservation[], pattern: RegExp): string[] {
+    return this.addLines(files, (line) => { pattern.lastIndex = 0; return pattern.test(line); });
+  }
+
+  addLines(files: ReadFileObservation[], predicate: (line: string) => boolean): string[] {
     const result: string[] = [];
     for (const file of files) {
-      const found = lineFor(file.text, pattern);
+      const found = lineFor(file.text, { test: predicate, lastIndex: 0 } as RegExp) ?? (predicate(file.path) ? { line: `path: ${file.path}`, lineNumber: 0 } : undefined);
       if (!found) continue;
       const id = `evidence-${file.sourceId}-${slug(file.path)}-${found.lineNumber}`;
       if (!this.seen.has(id)) {
         this.seen.add(id);
         const source = this.sources.find((item) => item.id === file.sourceId);
-        const sourceRole = source?.sourceRole;
-        this.refs.push({ id, sourceId: file.sourceId, filePath: file.path, quote: found.line, locator: `line:${found.lineNumber}`, kind: file.kind === "source" ? "code" : file.kind === "test" ? "test" : file.kind === "config" ? "config" : "document", confidence: file.kind === "source" ? 0.92 : 0.84, ...(sourceRole ? { sourceRole } : {}) } as ProjectEvidenceRef & { sourceRole?: string });
+        this.refs.push({
+          id,
+          sourceId: file.sourceId,
+          filePath: file.path,
+          quote: found.line,
+          locator: `line:${found.lineNumber}`,
+          kind: file.kind === "source" ? "code" : file.kind === "test" ? "test" : file.kind === "config" ? "config" : "document",
+          confidence: file.kind === "source" || file.kind === "config" ? 0.92 : 0.84,
+          ...(source?.sourceRole ? { sourceRole: source.sourceRole } : {}),
+        });
       }
       result.push(id);
       if (result.length >= 4) break;
     }
-    if (result.length === 0 && fallback) return this.add(files.filter((file) => file.path === fallback.path), /.+/);
     return result;
   }
 }
@@ -57,244 +82,293 @@ function allReadFiles(input: ProjectComprehensionInput, observations: ProjectExp
   const files = observations.flatMap((observation) => observation.files ?? []).map((file) => ({ path: file.path, sourceId: file.sourceId, kind: file.kind, language: file.language, text: file.text }));
   const uniqueFiles = files.filter((file, index, all) => all.findIndex((candidate) => candidate.path === file.path && candidate.sourceId === file.sourceId) === index);
   if (uniqueFiles.length > 0) return uniqueFiles;
-  return input.sources.map((source) => ({ path: source.filePath ?? source.title, sourceId: source.id, kind: source.kind === "repository" ? "source" : source.sourceRole === "test" ? "test" : source.sourceRole === "code" ? "source" : "document", language: source.language ?? "text", text: source.text }));
+  return input.sources.flatMap((source) => source.repositoryFiles?.length
+    ? source.repositoryFiles.map((file) => ({ path: file.path, sourceId: source.id, kind: "source" as const, language: source.language ?? "text", text: file.text }))
+    : [{ path: source.filePath ?? source.title, sourceId: source.id, kind: source.kind === "repository" || source.sourceRole === "code" ? "source" as const : source.sourceRole === "test" ? "test" as const : "document" as const, language: source.language ?? "text", text: source.text }]);
 }
-
-function has(files: ReadFileObservation[], pattern: RegExp): boolean { return files.some((file) => pattern.test(`${file.path}\n${file.text}`)); }
-function evidenceFor(collector: EvidenceCollector, files: ReadFileObservation[], pattern: RegExp): string[] { return collector.add(files, pattern); }
 
 interface ComponentRule { name: string; kind: ProjectComponent["kind"]; pattern: RegExp; description: string; }
-const componentRules: ComponentRule[] = [
-  { name: "Motor Control", kind: "control", pattern: /\bfoc\b|motor|current loop|speed loop|svpwm|clarke|park|pi controller|电机|电流环|速度环/i, description: "负责控制算法、环路计算和执行量生成。" },
-  { name: "Current Sampling", kind: "sampling", pattern: /\badc\b|current sample|sampling|采样|电流采集/i, description: "负责把 ADC/传感器采样整理为控制环可用的数据。" },
-  { name: "Encoder Feedback", kind: "feedback", pattern: /encoder|abz|position sensor|角度反馈|编码器/i, description: "提供位置或电角度反馈。" },
-  { name: "Velocity Estimator", kind: "feedback", pattern: /velocity estimator|speed estimator|速度估算|转速估算/i, description: "根据反馈脉冲或位置变化估算速度。" },
-  { name: "Communication", kind: "communication", pattern: /\bcan\b|socketcan|uart|usart|mqtt|modbus|通信|协议/i, description: "负责外部命令、状态和诊断数据交换。" },
-  { name: "Protection", kind: "protection", pattern: /overcurrent|overvoltage|fault|protection|保护|过流|过压|故障/i, description: "负责故障检测、保护动作和安全停机。" },
-  { name: "PWM Timer", kind: "control", pattern: /\bpwm\b|timer trigger|定时器触发/i, description: "产生控制时序并为采样提供触发。" },
+
+/** Generic vocabulary is intentionally domain-neutral. It is the primary discovery path. */
+const genericComponentRules: ComponentRule[] = [
+  { name: "API", kind: "service", pattern: /\bapi\b|endpoint|route|controller/i, description: "对外提供请求入口并协调应用服务。" },
+  { name: "Service", kind: "service", pattern: /\bservice\b|服务|handler|use.?case/i, description: "承载应用服务逻辑和请求处理。" },
+  { name: "Repository", kind: "storage", pattern: /\brepository\b|repo\b|数据访问层|dao/i, description: "封装持久化数据的读取和写入。" },
+  { name: "Database", kind: "storage", pattern: /\bdatabase\b|\bsqlite\b|postgres|mysql|数据库/i, description: "保存项目状态、业务数据或分析结果。" },
+  { name: "Worker", kind: "service", pattern: /\bworker\b|job queue|background worker|后台任务/i, description: "执行异步任务或后台处理。" },
+  { name: "DataBus", kind: "communication", pattern: /data.?bus|databus|message bus|消息总线|数据总线/i, description: "在模块之间传递结构化数据或消息。" },
+  { name: "Modbus", kind: "communication", pattern: /modbus/i, description: "负责 Modbus 工业协议通信。" },
+  { name: "SocketCAN", kind: "communication", pattern: /socketcan|socket.?can/i, description: "负责 Linux SocketCAN 总线通信。" },
+  { name: "MQTT", kind: "communication", pattern: /mqtt/i, description: "负责 MQTT 消息发布和订阅。" },
+  { name: "Communication", kind: "communication", pattern: /\bcan\b|\buart\b|\busart\b|communication|通信|protocol|协议/i, description: "负责外部命令、状态和诊断数据交换。" },
+  { name: "UI", kind: "ui", pattern: /\blvgl\b|\bui\b|frontend|界面|显示屏/i, description: "负责用户界面或现场显示。" },
+  { name: "PWM Timer", kind: "driver", pattern: /\bpwm\d*\b|timer trigger|定时器触发/i, description: "提供周期性输出或外设触发时序。" },
+  { name: "ADC", kind: "driver", pattern: /\badc\d*\b/i, description: "提供模拟量转换或采样输入。" },
+  { name: "DMA", kind: "driver", pattern: /\bdma\d*\b/i, description: "负责外设与内存之间的数据搬运。" },
+  { name: "Buffer", kind: "storage", pattern: /\bbuffer\b|缓冲区/i, description: "暂存模块间传递或批量处理的数据。" },
+  { name: "Current Loop", kind: "control", pattern: /current[_ -]?loop|电流环/i, description: "根据采样反馈计算当前控制输出。" },
+  { name: "Control Loop", kind: "control", pattern: /control loop|控制环|controller|调节器/i, description: "根据输入反馈计算控制输出。" },
   { name: "Runtime Service", kind: "service", pattern: /freertos|rtos|thread|task|service|线程|任务|服务/i, description: "承载任务调度、后台服务或实时运行时。" },
-  { name: "UI", kind: "ui", pattern: /lvgl|\bui\b|界面|显示屏/i, description: "负责用户界面或现场显示。" },
-  { name: "Storage", kind: "storage", pattern: /flash|eeprom|sqlite|storage|存储|数据库/i, description: "负责参数、状态或结果持久化。" }
+  { name: "Storage", kind: "storage", pattern: /flash|eeprom|storage|存储/i, description: "负责参数、状态或结果持久化。" },
 ];
 
-function components(files: ReadFileObservation[], repoMap: ProjectRepoMap, collector: EvidenceCollector): ProjectComponent[] {
-  const result = componentRules.flatMap((rule) => {
-    if (!has(files, rule.pattern)) return [];
-    const matchingFiles = files.filter((file) => rule.pattern.test(`${file.path}\n${file.text}`));
-    const refs = evidenceFor(collector, files, rule.pattern);
-    const symbols = unique(matchingFiles.flatMap((file) => {
-      const matches = [...file.text.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)];
-      return matches.map((match) => match[1] ?? "").filter((symbol) => symbol.length > 2);
-    }).slice(0, 12));
-    return [{ id: `component-${slug(rule.name)}`, name: rule.name, kind: rule.kind, description: rule.description, files: unique(matchingFiles.map((file) => file.path)).slice(0, 8), ...(symbols.length ? { symbols } : {}), confidence: refs.length ? 0.88 : 0.62, ...(refs.length ? { evidenceRefs: refs } : {}) }];
-  });
-  if (result.length > 0) return result;
-  const fallback = repoMap.likelyCoreFiles.slice(0, 4).map((path) => ({ id: `component-${slug(path)}`, name: path.split("/").at(-1)?.replace(/\.[^.]+$/, "") ?? path, kind: "other" as const, description: "源码核心文件，当前缺少足够语义证据进行进一步分类。", files: [path], confidence: 0.45 }));
-  return fallback;
+function functionSymbols(file: ReadFileObservation): string[] {
+  return unique([...file.text.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)].map((match) => match[1] ?? "").filter((symbol) => symbol.length > 2)).slice(0, 16);
 }
 
-function relationshipEvidence(collector: EvidenceCollector, files: ReadFileObservation[], left: RegExp, right: RegExp): string[] {
-  const direct = files.filter((file) => left.test(file.text) && right.test(file.text));
-  return direct.length ? evidenceFor(collector, direct, new RegExp(`${left.source}|${right.source}`, "i")) : [...evidenceFor(collector, files, left), ...evidenceFor(collector, files, right)].slice(0, 4);
-}
-
-function buildRelationships(files: ReadFileObservation[], collector: EvidenceCollector): ProjectUnderstanding["architecture"]["relationships"] {
-  const result: ProjectUnderstanding["architecture"]["relationships"] = [];
-  const add = (from: string, to: string, relation: ProjectUnderstanding["architecture"]["relationships"][number]["relation"], description: string, left: RegExp, right: RegExp): void => {
-    if (!has(files, left) || !has(files, right)) return;
-    const refs = relationshipEvidence(collector, files, left, right);
-    result.push({ from, to, relation, description, evidenceRefs: refs, confidence: refs.length ? 0.84 : 0.5 });
+function discoverComponents(files: ReadFileObservation[], repoMap: ProjectRepoMap, collector: EvidenceCollector, domainFallback: boolean): ProjectComponent[] {
+  const result: ProjectComponent[] = [];
+  const add = (name: string, kind: ProjectComponent["kind"], pattern: RegExp, description: string, fallback = false): void => {
+    if (result.some((item) => item.name === name) || !has(files, pattern)) return;
+    const matchingFiles = files.filter((file) => { pattern.lastIndex = 0; return pattern.test(`${file.path}\n${file.text}`); });
+    const refs = collector.add(files, pattern);
+    result.push({ id: `component-${slug(name)}`, name, kind, description, files: unique(matchingFiles.map((file) => file.path)).slice(0, 8), symbols: unique(matchingFiles.flatMap(functionSymbols)).slice(0, 16), confidence: fallback ? 0.55 : refs.length ? 0.88 : 0.62, ...(refs.length ? { evidenceRefs: refs } : {}) });
   };
-  add("PWM", "ADC", "triggers", "PWM 定时事件触发 ADC 转换或采样窗口。", /\bpwm\b|timer/i, /\badc\b/i);
-  add("ADC", "DMA", "writes", "ADC 结果通过 DMA 写入缓冲区。", /\badc\b/i, /\bdma\b/i);
-  add("DMA", "Current Sampling", "feeds", "DMA 缓冲区把采样结果交给当前采样模块。", /\bdma\b/i, /\bcurrent\b|采样|adc/i);
-  add("Current Samples", "Motor Control", "feeds", "采样数据进入电流环或 FOC 计算。", /current|采样|adc/i, /foc|current loop|电流环|svpwm/i);
-  add("Encoder", "Electrical Angle", "provides", "编码器提供电角度或位置反馈。", /encoder|abz|编码器/i, /angle|position|电角度|位置/i);
-  add("Encoder", "Velocity Estimator", "feeds", "编码器脉冲或位置变化进入速度估算。", /encoder|abz|编码器/i, /velocity|speed|速度|转速/i);
-  add("Velocity Estimator", "Speed PI", "feeds", "速度估算结果进入速度 PI。", /velocity|speed|速度|转速/i, /\bpi\b|controller|控制器|调节/i);
-  add("Speed PI", "Iq Reference", "produces", "速度环产生 Iq 给定。", /speed|速度/i, /iq|q[-_ ]?reference|给定/i);
-  add("Fault Handler", "PWM", "controls", "保护故障触发 PWM 禁止或安全停机。", /fault|overcurrent|overvoltage|故障|过流|保护/i, /pwm|disable|stop|关闭/i);
+  for (const rule of genericComponentRules) add(rule.name, rule.kind, rule.pattern, rule.description);
+  if (domainFallback) for (const hint of embeddedControlComponentHints) add(hint.name, hint.kind, hint.pattern, hint.description, true);
+  if (!result.length) {
+    for (const path of repoMap.likelyCoreFiles.slice(0, 6)) result.push({ id: `component-${slug(path)}`, name: path.split("/").at(-1)?.replace(/\.[^.]+$/, "") ?? path, kind: "other", description: "源码核心文件，当前缺少足够语义证据进行分类。", files: [path], confidence: 0.45 });
+  }
+  return result;
+}
+
+function lineEvidence(files: ReadFileObservation[], left: RegExp, right: RegExp, marker: RegExp, collector: EvidenceCollector): { refs: string[]; kind: "direct" | "strong" | "weak" | "unsupported" } {
+  const directFiles = files.filter((file) => linesOf(file.text).some((line) => {
+    left.lastIndex = 0; right.lastIndex = 0; marker.lastIndex = 0;
+    return left.test(`${file.path} ${line}`) && right.test(`${file.path} ${line}`) && marker.test(line);
+  }));
+  if (directFiles.length) return { refs: collector.addLines(directFiles, (line) => { left.lastIndex = 0; right.lastIndex = 0; marker.lastIndex = 0; return left.test(line) && right.test(line) && marker.test(line); }), kind: "direct" };
+  const documented = files.filter((file) => file.kind === "document" && linesOf(file.text).some((line) => {
+    left.lastIndex = 0; right.lastIndex = 0; marker.lastIndex = 0;
+    return left.test(line) && right.test(line) && marker.test(line);
+  }));
+  if (documented.length) return { refs: collector.addLines(documented, (line) => { left.lastIndex = 0; right.lastIndex = 0; marker.lastIndex = 0; return left.test(line) && right.test(line) && marker.test(line); }), kind: "strong" };
+  const leftFiles = files.filter((file) => { left.lastIndex = 0; return left.test(file.text); });
+  const rightFiles = files.filter((file) => { right.lastIndex = 0; return right.test(file.text); });
+  if (leftFiles.length && rightFiles.length) return { refs: unique([...collector.add(leftFiles, left), ...collector.add(rightFiles, right)]).slice(0, 4), kind: "weak" };
+  return { refs: [], kind: "unsupported" };
+}
+
+interface RelationshipRule { from: string; to: string; relation: ProjectRelationship["relation"]; left: RegExp; right: RegExp; marker: RegExp; description: string; }
+const relationshipRules: RelationshipRule[] = [
+  { from: "Modbus", to: "DataBus", relation: "publishes", left: /modbus/i, right: /data.?bus|databus/i, marker: /publish|send|write|enqueue|push|->|=>/i, description: "Modbus 接收的数据被发布到数据总线。" },
+  { from: "SocketCAN", to: "DataBus", relation: "publishes", left: /socket.?can/i, right: /data.?bus|databus/i, marker: /publish|send|write|enqueue|push|->|=>/i, description: "SocketCAN 接收的数据被发布到数据总线。" },
+  { from: "DataBus", to: "MQTT", relation: "feeds", left: /data.?bus|databus/i, right: /mqtt/i, marker: /publish|send|write|enqueue|push|feed|feeds|->|=>/i, description: "数据总线向 MQTT 发布消息。" },
+  { from: "DataBus", to: "UI", relation: "feeds", left: /data.?bus|databus/i, right: /\bui\b|lvgl/i, marker: /publish|send|write|enqueue|push|feed|feeds|render|update|->|=>/i, description: "数据总线向 UI 提供状态数据。" },
+  { from: "ADC", to: "DMA", relation: "writes", left: /\badc\d*\b/i, right: /\bdma\d*\b/i, marker: /dma|transfer|buffer|start|write|->|=>/i, description: "ADC 结果通过 DMA 写入内存。" },
+  { from: "DMA", to: "Buffer", relation: "writes", left: /\bdma\d*\b/i, right: /buffer|缓冲区/i, marker: /dma|transfer|buffer|write|->|=>/i, description: "DMA 把数据写入缓冲区。" },
+  { from: "PWM Timer", to: "ADC", relation: "triggers", left: /pwm|timer|trgo|externaltrig/i, right: /\badc\d*\b|externaltrig/i, marker: /trigger|trgo|externaltrig|触发|->|=>/i, description: "PWM/定时器事件明确触发 ADC 转换。" },
+  { from: "ADC", to: "Control Loop", relation: "feeds", left: /\badc\b|current|采样/i, right: /control loop|controller|current loop|电流环/i, marker: /call|update|input|sample|current|->|=>|进入/i, description: "采样结果进入控制环。" },
+  { from: "Encoder Feedback", to: "Velocity Estimator", relation: "feeds", left: /encoder|abz|编码器/i, right: /velocity|speed|速度|转速/i, marker: /call|update|convert|estimate|->|=>/i, description: "编码器反馈进入速度估算。" },
+  { from: "Fault Handler", to: "PWM Timer", relation: "controls", left: /fault|overcurrent|overvoltage|故障|过流|保护/i, right: /pwm|disable|stop|关闭/i, marker: /disable|stop|latch|lock|关闭|禁止|->|=>/i, description: "故障处理明确禁止 PWM 或进入安全状态。" },
+];
+
+function normalizedComponent(value: string, componentsValue: ProjectComponent[]): string | undefined {
+  const lower = value.toLowerCase().replace(/[ _-]+/g, "");
+  return componentsValue.find((component) => component.name.toLowerCase().replace(/[ _-]+/g, "") === lower || lower.includes(component.name.toLowerCase().replace(/[ _-]+/g, "")))?.name;
+}
+
+function buildRelationships(files: ReadFileObservation[], componentsValue: ProjectComponent[], collector: EvidenceCollector, domainFallback: boolean): ProjectRelationship[] {
+  const result: ProjectRelationship[] = [];
+  const add = (rule: RelationshipRule, fallback = false): void => {
+    const from = normalizedComponent(rule.from, componentsValue);
+    const to = normalizedComponent(rule.to, componentsValue);
+    if (!from || !to || from === to) return;
+    const evidence = lineEvidence(files, rule.left, rule.right, rule.marker, collector);
+    if (evidence.kind === "unsupported") return;
+    result.push({ from, to, relation: rule.relation, description: rule.description, evidenceRefs: evidence.refs, confidence: evidence.kind === "direct" ? 0.94 : evidence.kind === "strong" ? 0.86 : 0.55, evidenceStrength: fallback ? "weak" : evidence.kind, verificationStatus: fallback || evidence.kind === "weak" ? "candidate" : "confirmed", confidenceReason: fallback ? "domain hint only" : evidence.kind === "weak" ? "co-occurrence without an explicit link" : "explicit link evidence" });
+  };
+  for (const rule of relationshipRules) add(rule);
+  if (domainFallback) for (const rule of embeddedControlFallbackRelationships()) add({ ...rule, description: rule.description ?? "领域提示关系。", marker: /trigger|feed|call|update|->|=>/i }, true);
+  // Parse explicit textual edges such as “ADC -> DMA” without inventing edges
+  // from merely seeing both nouns in different files.
+  for (const file of files) for (const [index, line] of linesOf(file.text).entries()) {
+    const match = line.match(/\b([A-Za-z][A-Za-z0-9 _-]{1,28})\s*(?:->|=>|publishes(?:\s+to)?|feeds|writes|triggers|calls)\s*([A-Za-z][A-Za-z0-9 _-]{1,28})\b/i);
+    if (!match) continue;
+    const from = normalizedComponent(match[1] ?? "", componentsValue);
+    const to = normalizedComponent(match[2] ?? "", componentsValue);
+    if (!from || !to || from === to) continue;
+    const phrase = compact(line).slice(0, 300);
+    const relation: ProjectRelationship["relation"] = /publishes/i.test(line) ? "publishes" : /feeds/i.test(line) ? "feeds" : /writes/i.test(line) ? "writes" : /triggers/i.test(line) ? "triggers" : from === "ADC" && to === "DMA" || from === "DMA" && to === "Buffer" ? "writes" : from === "Modbus" || from === "SocketCAN" ? "publishes" : from === "DataBus" ? "feeds" : "calls";
+    const refs = collector.add([file], new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+    result.push({ from, to, relation, description: phrase, evidenceRefs: refs, confidence: 0.96, evidenceStrength: "direct", verificationStatus: "confirmed", confidenceReason: `explicit edge at line ${index + 1}` });
+  }
   return result.filter((item, index, all) => all.findIndex((candidate) => candidate.from === item.from && candidate.to === item.to && candidate.relation === item.relation) === index);
 }
 
-function flow(id: string, name: string, kind: ProjectFlow["kind"], steps: ProjectFlow["steps"], collector: EvidenceCollector, files: ReadFileObservation[], patterns: RegExp[]): ProjectFlow | undefined {
-  if (patterns.some((pattern) => !has(files, pattern))) return undefined;
-  const evidenceRefs = [...new Set(patterns.flatMap((pattern) => evidenceFor(collector, files, pattern)))];
-  return { id, name, kind, steps: steps.map((step, index) => ({ ...step, evidenceRefs: evidenceRefs.slice(index % Math.max(1, evidenceRefs.length), index % Math.max(1, evidenceRefs.length) + 2) })), description: `${name}描述系统中关键组件的先后关系。`, evidenceRefs, confidence: evidenceRefs.length ? 0.86 : 0.52 };
-}
-
-function buildFlows(files: ReadFileObservation[], collector: EvidenceCollector): { runtimeFlows: ProjectFlow[]; dataFlows: ProjectFlow[]; controlFlows: ProjectFlow[] } {
-  const runtimeFlows: ProjectFlow[] = [];
-  const dataFlows: ProjectFlow[] = [];
-  const controlFlows: ProjectFlow[] = [];
-  const sampling = flow("flow-sampling", "Sampling Flow", "data", [{ action: "PWM 产生采样触发" }, { action: "ADC 完成转换" }, { action: "DMA 写入 Current Buffer" }, { action: "Current Samples 进入 Current Loop" }], collector, files, [/pwm|timer/i, /adc/i, /dma/i, /current|采样/i]);
-  if (sampling) dataFlows.push(sampling);
-  const current = flow("flow-current-control", "Current Control Flow", "control", [{ action: "读取 Current Samples" }, { action: "执行 Clarke / Park 变换" }, { action: "Current PI 计算" }, { action: "SVPWM 更新 PWM" }], collector, files, [/current|采样/i, /clarke|park|foc/i, /\bpi\b|controller/i, /svpwm|pwm/i]);
-  if (current) controlFlows.push(current);
-  const speed = flow("flow-speed-control", "Speed Control Flow", "control", [{ action: "Encoder 提供位置反馈" }, { action: "Velocity Estimator 计算速度" }, { action: "Speed PI 生成 Iq Reference" }, { action: "Iq Reference 进入 Current Loop" }], collector, files, [/encoder|abz|编码器/i, /velocity|speed|速度/i, /\bpi\b|controller/i, /iq|reference|给定/i]);
-  if (speed) controlFlows.push(speed);
-  const fault = flow("flow-fault", "Fault Flow", "fault", [{ action: "检测 Overcurrent 或 Fault" }, { action: "Fault Handler 锁存故障" }, { action: "Disable PWM" }], collector, files, [/fault|overcurrent|故障|过流/i, /handler|保护|latch|锁存/i, /pwm|disable|关闭/i]);
-  if (fault) runtimeFlows.push(fault);
-  if (runtimeFlows.length + dataFlows.length + controlFlows.length === 0) {
-    const generic = flow("flow-runtime", "Runtime Flow", "runtime", [{ action: "启动入口初始化运行时" }, { action: "调用核心模块" }, { action: "输出控制或服务结果" }], collector, files, [/main|startup|init|入口/i, /return|run|process|loop/i]);
-    if (generic) runtimeFlows.push(generic);
-  }
-  return { runtimeFlows, dataFlows, controlFlows };
-}
-
-function identity(input: ProjectComprehensionInput, files: ReadFileObservation[], componentsValue: ProjectComponent[]): ProjectUnderstanding["identity"] {
-  const text = files.map((file) => file.text).join("\n");
-  const purposeLine = text.split(/\n+/).map((line) => compact(line)).find((line) => /用于|实现|目标|purpose|designed to|实现了/.test(line) && line.length > 12);
-  const domain = /foc|motor|电机|svpwm|电流环/i.test(text) ? "嵌入式电机控制" : /gateway|网关|mqtt|modbus|数据采集/i.test(text) ? "嵌入式数据网关" : /robot|机器人/i.test(text) ? "机器人系统" : undefined;
-  return { name: input.projectName, ...(purposeLine ? { purpose: purposeLine.slice(0, 220) } : { purpose: `${input.projectName} 的工程实现与运行流程。` }), ...(domain ? { domain } : {}), application: componentsValue.filter((component) => ["communication", "ui", "control"].includes(component.kind)).map((component) => component.name).slice(0, 5) };
-}
-
-function technologies(files: ReadFileObservation[], collector: EvidenceCollector): ProjectTechnologyUnderstanding[] {
-  const candidates: Array<{ name: string; category: string; pattern: RegExp; role: string }> = [
-    { name: "C", category: "language", pattern: /\.(?:c|h)\b|\bC11\b/, role: "核心实现语言" },
-    { name: "C++", category: "language", pattern: /\.(?:cpp|cc|hpp)\b|c\+\+/, role: "核心实现语言" },
-    { name: "Python", category: "language", pattern: /\.py\b|\bpython\b/i, role: "脚本或测试语言" },
-    { name: "CMake", category: "build", pattern: /cmakelists|\bcmake\b/i, role: "构建系统" },
-    { name: "FreeRTOS", category: "rtos", pattern: /free\s*rtos/i, role: "实时操作系统" },
-    { name: "STM32", category: "mcu", pattern: /stm32[a-z]?\d+/i, role: "主控平台" },
-    { name: "FOC", category: "control", pattern: /\bfoc\b/i, role: "电机控制算法" },
-    { name: "CAN", category: "communication", pattern: /\bcan\b|socketcan/i, role: "通信接口" },
-    { name: "MQTT", category: "communication", pattern: /\bmqtt\b/i, role: "消息通信" },
-    { name: "Modbus", category: "communication", pattern: /modbus/i, role: "工业通信协议" },
-    { name: "ADC", category: "sampling", pattern: /\badc\b/i, role: "采样外设" },
-    { name: "DMA", category: "sampling", pattern: /\bdma\b/i, role: "采样数据搬运" }
-  ];
-  return candidates.flatMap((candidate) => {
-    if (!has(files, candidate.pattern)) return [];
-    return [{ name: candidate.name, category: candidate.category, role: candidate.role, evidenceRefs: evidenceFor(collector, files, candidate.pattern), confidence: 0.86 }];
-  });
-}
-
-function valueFromLine(line: string): { value?: string | number; unit?: string } {
+function parameterValue(line: string): { value?: string | number; unit?: string } {
   const match = line.match(/(?:=|：|:)\s*(-?\d+(?:\.\d+)?)\s*(MHz|kHz|Hz|us|ms|A|V|毫秒|微秒|%)\b/i) ?? line.match(/(-?\d+(?:\.\d+)?)\s*(MHz|kHz|Hz|us|ms|A|V|毫秒|微秒|%)\b/i);
   if (!match) return {};
-  const numeric = Number(match[1]);
-  return { value: Number.isFinite(numeric) ? numeric : match[1], unit: match[2] };
+  return { value: Number(match[1]), unit: match[2] };
 }
 
-function parameters(files: ReadFileObservation[], sources: ProjectMemorySource[], collector: EvidenceCollector): ProjectParameterUnderstanding[] {
-  const candidates: ProjectParameterCandidate[] = [];
+function buildParameters(files: ReadFileObservation[], sources: ProjectMemorySource[], collector: EvidenceCollector): ProjectParameterUnderstanding[] {
   const labels: Array<{ key: string; name: string; pattern: RegExp; context: RegExp }> = [
-    { key: "adc.peripheral_clock", name: "ADC 外设时钟", pattern: /adc.*(?:clock|clk)|adc.*时钟|外设时钟/i, context: /adc/i },
+    { key: "adc.peripheral_clock", name: "ADC 外设时钟", pattern: /adc.*(?:clock|clk)|adc.*时钟|外设时钟/i, context: /adc|clock|时钟/i },
     { key: "adc.control_trigger_frequency", name: "ADC 控制触发频率", pattern: /adc.*trigger|adc.*触发|控制触发/i, context: /adc|trigger|触发/i },
-    { key: "diagnostic.sample_frequency", name: "诊断采样频率", pattern: /diagnostic.*(?:sampling|sample|rate|frequency)|诊断.*采样/i, context: /diagnostic|诊断/i },
-    { key: "pwm.control_frequency", name: "PWM 控制频率", pattern: /pwm[_\s-]*(?:freq|frequency)|pwm.*频率/i, context: /pwm/i },
+    { key: "control.pwm_frequency", name: "PWM 控制频率", pattern: /pwm[_\s-]*(?:freq|frequency)|pwm.*频率/i, context: /pwm/i },
     { key: "control.current_loop.frequency", name: "电流环频率", pattern: /current\s*loop.*frequency|电流环.*频率/i, context: /current loop|电流环/i },
-    { key: "control.speed_loop.frequency", name: "速度环频率", pattern: /speed\s*loop.*frequency|速度环.*频率/i, context: /speed loop|速度环/i }
+    { key: "control.speed_loop.frequency", name: "速度环频率", pattern: /speed\s*loop.*frequency|速度环.*频率/i, context: /speed loop|速度环/i },
+    { key: "diagnostic.sample_frequency", name: "诊断采样频率", pattern: /diagnostic.*(?:sampling|sample|rate|frequency)|诊断.*采样/i, context: /diagnostic|诊断/i },
+    { key: "communication.baud_rate", name: "通信波特率", pattern: /baud|波特率/i, context: /baud|波特率|can|uart|modbus/i },
   ];
-  for (const file of files) {
-    for (const line of file.text.replace(/\r/g, "").split("\n")) {
-      for (const segment of line.split(/[;；]+/)) {
-        const parsed = valueFromLine(segment);
-        if (parsed.value === undefined) continue;
-        for (const label of labels) {
-          if (!label.pattern.test(segment)) continue;
-          const refs = collector.add([file], label.context);
-          candidates.push({ semanticKey: label.key, name: label.name, value: parsed.value, unit: parsed.unit, context: compact(segment).slice(0, 180), sourceIds: [file.sourceId], evidenceRefs: refs, sourceRole: sources.find((source) => source.id === file.sourceId)?.sourceRole, filePath: file.path, isCode: file.kind === "source" || file.kind === "config" });
-        }
-      }
+  const candidates: ProjectParameterCandidate[] = [];
+  for (const file of files) for (const line of linesOf(file.text)) {
+    const parsed = parameterValue(line);
+    if (parsed.value === undefined) continue;
+    for (const label of labels) {
+      label.pattern.lastIndex = 0;
+      if (!label.pattern.test(line)) continue;
+      const source = sources.find((item) => item.id === file.sourceId);
+      candidates.push({ semanticKey: label.key, name: label.name, value: parsed.value, unit: parsed.unit, context: compact(line).slice(0, 220), sourceIds: [file.sourceId], evidenceRefs: collector.add([file], label.context), sourceRole: source?.sourceRole, filePath: file.path, isCode: file.kind === "source" || file.kind === "config" });
     }
   }
   const grouped = new Map<string, ProjectParameterCandidate[]>();
   for (const candidate of candidates) grouped.set(candidate.semanticKey, [...(grouped.get(candidate.semanticKey) ?? []), candidate]);
   return [...grouped.entries()].flatMap(([semanticKey, group]) => {
-    const resolution = new ProjectVersionResolver().resolve(group);
+    const history = sources.flatMap((source) => source.repositoryHistory ?? []);
+    const resolution = new ProjectVersionResolver().resolve(group, history);
     if (!resolution.current) return [];
     const current = resolution.current;
-    return [{ id: `parameter-${slug(semanticKey)}`, name: current.name, semanticKey, value: current.value, ...(current.unit ? { unit: current.unit } : {}), ...(current.context ? { context: current.context } : {}), versionStatus: resolution.status, sourceIds: unique([...(current.sourceIds ?? []), ...resolution.historical.flatMap((item) => item.sourceIds)]), evidenceRefs: unique([...(current.evidenceRefs ?? []), ...resolution.historical.flatMap((item) => item.evidenceRefs)]), ...(resolution.historical.length ? { historicalValues: resolution.historical.map((item) => ({ value: item.value, unit: item.unit, sourceIds: item.sourceIds, evidenceRefs: item.evidenceRefs, ...(item.context ? { context: item.context } : {}) })) } : {}), confidence: current.evidenceRefs.length ? 0.9 : 0.62 } satisfies ProjectParameterUnderstanding];
+    return [{ id: `parameter-${slug(semanticKey)}`, name: current.name, semanticKey, value: current.value, ...(current.unit ? { unit: current.unit } : {}), ...(current.context ? { context: current.context } : {}), versionStatus: resolution.currentStatus ?? resolution.status, sourceIds: unique([...(current.sourceIds ?? []), ...resolution.historical.flatMap((item) => item.sourceIds), ...((resolution.alternatives ?? []).flatMap((item) => item.sourceIds))]), evidenceRefs: unique([...(current.evidenceRefs ?? []), ...resolution.historical.flatMap((item) => item.evidenceRefs), ...((resolution.alternatives ?? []).flatMap((item) => item.evidenceRefs))]), ...(history.length && resolution.historical.length ? { historicalValues: resolution.historical.map((item) => ({ value: item.value, unit: item.unit, sourceIds: item.sourceIds, evidenceRefs: item.evidenceRefs, ...(item.context ? { context: item.context } : {}) })) } : {}), confidence: current.evidenceRefs.length ? 0.9 : 0.62 } satisfies ProjectParameterUnderstanding];
   });
 }
 
-function decisions(files: ReadFileObservation[], componentsValue: ProjectComponent[], flows: ProjectFlow[], collector: EvidenceCollector): ProjectUnderstanding["decisions"] {
-  const result: ProjectUnderstanding["decisions"] = [];
-  if (has(files, /center[- ]aligned|中心对齐/i) && has(files, /stable.*window|稳定.*窗口|采样窗口/i)) {
-    const refs = [...evidenceFor(collector, files, /center[- ]aligned|中心对齐/i), ...evidenceFor(collector, files, /stable.*window|稳定.*窗口|采样窗口/i)];
-    result.push({ id: "decision-center-aligned-pwm", decision: "Center-aligned PWM", choice: "使用中心对齐 PWM，并在稳定窗口触发 ADC。", rationale: "稳定 ADC 电流采样窗口，减少采样时刻不确定性。", relatedComponents: componentsValue.filter((item) => ["PWM Timer", "Current Sampling", "Motor Control"].includes(item.name)).map((item) => item.name), flowIds: flows.filter((flow) => /sampling|current/i.test(flow.name)).map((flow) => flow.id), evidenceRefs: unique(refs), confidence: refs.length ? 0.9 : 0.6 });
-  }
-  const decisionLines = files.flatMap((file) => file.text.split(/\r?\n/).filter((line) => /选择|采用|决策|因为|trade.?off|rationale|why/i.test(line) && line.trim().length > 8).map((line) => ({ file, line })));
-  for (const item of decisionLines.slice(0, 6)) {
-    const refs = collector.add([item.file], /选择|采用|决策|因为|trade.?off|rationale|why/i);
-    const text = compact(item.line).slice(0, 260);
-    if (!result.some((decision) => decision.choice === text)) result.push({ id: `decision-${slug(text)}`, decision: text.slice(0, 90), choice: text, relatedComponents: componentsValue.filter((component) => new RegExp(component.name.split(" ")[0], "i").test(text)).map((component) => component.name), flowIds: [], evidenceRefs: refs, confidence: refs.length ? 0.82 : 0.55 });
-  }
+function buildTechnologies(files: ReadFileObservation[], collector: EvidenceCollector, repoMap: ProjectRepoMap): ProjectTechnologyUnderstanding[] {
+  const rules: Array<{ name: string; category: string; pattern: RegExp; role: string }> = [
+    { name: "C", category: "language", pattern: /\.(?:c|h)\b/, role: "核心实现语言" },
+    { name: "C++", category: "language", pattern: /\.(?:cpp|cc|hpp|cxx)\b|c\+\+/i, role: "核心实现语言" },
+    { name: "Python", category: "language", pattern: /\.py\b|\bpython\b/i, role: "脚本或测试语言" },
+    { name: "TypeScript", category: "language", pattern: /\.tsx?\b|typescript/i, role: "应用实现语言" },
+    { name: "CMake", category: "build", pattern: /cmakelists|\bcmake\b/i, role: "构建系统" },
+    { name: "FreeRTOS", category: "runtime", pattern: /free\s*rtos/i, role: "实时运行时" },
+    { name: "MQTT", category: "communication", pattern: /mqtt/i, role: "消息通信" },
+    { name: "Modbus", category: "communication", pattern: /modbus/i, role: "工业通信协议" },
+    { name: "SocketCAN", category: "communication", pattern: /socket.?can/i, role: "总线通信" },
+  ];
+  const result = rules.flatMap((rule) => has(files, rule.pattern) ? [{ name: rule.name, category: rule.category, role: rule.role, evidenceRefs: collector.add(files, rule.pattern), confidence: 0.86 }] : []);
+  for (const language of repoMap.languages) if (!result.some((item) => item.name === language)) result.push({ name: language, category: "language", role: "仓库识别的实现语言", evidenceRefs: [], confidence: 0.7 });
   return result;
 }
 
-function problems(files: ReadFileObservation[], componentsValue: ProjectComponent[], collector: EvidenceCollector): ProjectUnderstanding["problems"] {
+function identity(input: ProjectComprehensionInput, files: ReadFileObservation[], componentsValue: ProjectComponent[]): ProjectUnderstanding["identity"] {
+  const text = files.map((file) => file.text).join("\n");
+  const purposeLine = linesOf(text).map(compact).find((line) => /用于|实现|目标|purpose|designed to|project|gateway|service/i.test(line) && line.length > 12);
+  const domain = /foc|motor|电机|svpwm|电流环/i.test(text) ? "嵌入式电机控制" : /gateway|网关|mqtt|modbus|数据采集/i.test(text) ? "嵌入式数据网关" : /api|service|repository|database|worker/i.test(text) ? "Web/API 服务" : /robot|机器人/i.test(text) ? "机器人系统" : undefined;
+  return { name: input.projectName, purpose: purposeLine?.slice(0, 220) ?? `${input.projectName} 的工程实现与运行流程。`, ...(domain ? { domain } : {}), application: componentsValue.filter((component) => ["communication", "ui", "service", "control"].includes(component.kind)).map((component) => component.name).slice(0, 8) };
+}
+
+function buildInterfaces(files: ReadFileObservation[], collector: EvidenceCollector): ProjectUnderstanding["interfaces"] {
+  return [{ name: "CAN", kind: "bus", pattern: /\bcan\b|socketcan/i }, { name: "UART", kind: "serial", pattern: /\buart\b|\busart\b/i }, { name: "MQTT", kind: "message", pattern: /mqtt/i }, { name: "Modbus", kind: "industrial-bus", pattern: /modbus/i }, { name: "HTTP API", kind: "http", pattern: /http|endpoint|api/i }].flatMap((rule) => has(files, rule.pattern) ? [{ id: `interface-${slug(rule.name)}`, name: rule.name, kind: rule.kind, components: [], evidenceRefs: collector.add(files, rule.pattern), confidence: 0.84 }] : []);
+}
+
+function buildTests(files: ReadFileObservation[], collector: EvidenceCollector): ProjectUnderstanding["tests"] {
+  return files.filter((file) => file.kind === "test").slice(0, 12).map((file) => { const refs = collector.add([file], /.+/); const status = /fail|失败/i.test(file.text) ? "failed" as const : /pass|passed|通过|success|成功/i.test(file.text) ? "passed" as const : "exists" as const; return { id: `test-${slug(file.path)}`, name: file.path, status, evidenceRefs: refs, confidence: refs.length ? 0.82 : 0.5 }; });
+}
+
+function buildDecisions(files: ReadFileObservation[], componentsValue: ProjectComponent[], flows: ProjectFlow[], collector: EvidenceCollector): ProjectUnderstanding["decisions"] {
+  const text = files.map((file) => file.text).join("\n");
+  if (!/center[- ]aligned|中心对齐/i.test(text) || !/stable.*window|稳定.*窗口|采样窗口/i.test(text)) return [];
+  const refs = unique([...collector.add(files, /center[- ]aligned|中心对齐/i), ...collector.add(files, /stable.*window|稳定.*窗口|采样窗口/i)]);
+  return [{ id: "decision-center-aligned-sampling", decision: "采样时序设计", choice: "使用中心对齐 PWM，并在稳定窗口触发 ADC。", rationale: "让采样发生在可控的稳定时刻。", relatedComponents: componentsValue.filter((component) => /pwm|sampling|adc|control/i.test(component.name)).map((component) => component.name), flowIds: flows.filter((flow) => /sampling/i.test(flow.name)).map((flow) => flow.id), evidenceRefs: refs, confidence: refs.length ? 0.9 : 0.55 }];
+}
+
+function buildProblems(files: ReadFileObservation[], componentsValue: ProjectComponent[], collector: EvidenceCollector): ProjectUnderstanding["problems"] {
   const text = files.map((file) => file.text).join("\n");
   if (!/低速.*(?:abz|脉冲)|abz.*(?:稀疏|sparse)|速度估算.*量化|pi.*抖动|低速抖动/i.test(text)) return [];
-  const refs = [...evidenceFor(collector, files, /低速|abz|脉冲|稀疏|量化|抖动/i), ...evidenceFor(collector, files, /delta|frame rebase|优化|解决/i)];
-  const affected = componentsValue.filter((component) => ["Encoder Feedback", "Velocity Estimator", "Motor Control"].includes(component.name)).map((component) => component.name);
-  return [{ id: "problem-low-speed-velocity-feedback", problem: "Low-Speed Velocity Feedback", symptom: "低速 ABZ 脉冲稀疏导致速度反馈抖动。", affectedComponents: affected, causeChain: ["Sparse ABZ pulse", "quantized velocity", "Speed PI jitter"], fix: "通过 delta + frame rebase 优化速度估算。", result: /改善|优化后|降低|稳定/i.test(text) ? "资料记录已进行优化，但仍需以正式测试结果确认改善幅度。" : undefined, evidenceRefs: unique(refs), confidence: refs.length ? 0.9 : 0.6 }];
+  const refs = unique([...collector.add(files, /低速|abz|脉冲|稀疏|量化|抖动/i), ...collector.add(files, /delta|frame rebase|优化|解决/i)]);
+  return [{ id: "problem-low-speed-feedback", problem: "Low-Speed Feedback Jitter", symptom: "低速脉冲稀疏导致反馈量化和控制抖动。", affectedComponents: componentsValue.filter((component) => /encoder|velocity|control/i.test(component.name)).map((component) => component.name), causeChain: ["Sparse feedback pulse", "quantized estimate", "controller jitter"], fix: "通过 delta 与 frame rebase 优化估算。", result: /改善|优化后|降低|稳定/i.test(text) ? "资料记录已进行优化，但正式改善幅度仍需测试确认。" : undefined, evidenceRefs: refs, confidence: refs.length ? 0.9 : 0.6 }];
 }
 
-function interfaces(files: ReadFileObservation[], collector: EvidenceCollector): ProjectUnderstanding["interfaces"] {
-  const rules = [{ name: "CAN", kind: "bus", pattern: /\bcan\b|socketcan/i }, { name: "UART", kind: "serial", pattern: /\buart\b|\busart\b/i }, { name: "MQTT", kind: "message", pattern: /\bmqtt\b/i }, { name: "Modbus", kind: "industrial-bus", pattern: /modbus/i }];
-  return rules.flatMap((rule) => has(files, rule.pattern) ? [{ id: `interface-${slug(rule.name)}`, name: rule.name, kind: rule.kind, components: ["Communication"], evidenceRefs: evidenceFor(collector, files, rule.pattern), confidence: 0.84 }] : []);
-}
-
-function protections(files: ReadFileObservation[], collector: EvidenceCollector): ProjectUnderstanding["protections"] {
+function buildProtections(files: ReadFileObservation[], collector: EvidenceCollector): ProjectUnderstanding["protections"] {
   if (!has(files, /overcurrent|overvoltage|fault|protection|过流|过压|故障|保护/i)) return [];
-  const refs = evidenceFor(collector, files, /overcurrent|overvoltage|fault|protection|过流|过压|故障|保护/i);
-  return [{ id: "protection-fault-handler", name: "Fault Protection", trigger: "Overcurrent / Overvoltage / Fault", action: "Fault Handler 禁止 PWM 或锁存故障。", components: ["Protection", "PWM Timer"], evidenceRefs: refs, confidence: refs.length ? 0.86 : 0.55 }];
+  return [{ id: "protection-fault-handler", name: "Fault Protection", trigger: "Overcurrent / Overvoltage / Fault", action: "故障处理器禁止输出或锁存故障。", components: [], evidenceRefs: collector.add(files, /overcurrent|overvoltage|fault|protection|过流|过压|故障|保护/i), confidence: 0.86 }];
 }
 
-function tests(files: ReadFileObservation[], collector: EvidenceCollector): ProjectUnderstanding["tests"] {
-  return files.filter((file) => file.kind === "test").slice(0, 12).map((file) => { const refs = collector.add([file], /.+/); const passed = /pass|passed|通过|success|成功/i.test(file.text); return { id: `test-${slug(file.path)}`, name: file.path, status: passed ? "passed" as const : "exists" as const, ...(passed ? { measuredValues: file.text.match(/(?:误差|latency|throughput|accuracy|准确率)[^\n]{0,80}/i)?.slice(0, 2) } : {}), evidenceRefs: refs, confidence: refs.length ? 0.82 : 0.5 }; });
-}
-
-function results(files: ReadFileObservation[], collector: EvidenceCollector): ProjectUnderstanding["results"] {
-  return files.filter((file) => file.kind === "test" || /result|benchmark|测试|结果|性能/i.test(file.path)).flatMap((file) => file.text.split(/\r?\n/).filter((line) => /误差|准确率|latency|throughput|性能|提升|benchmark|结果/i.test(line) && /\d/.test(line)).slice(0, 8).map((line, index) => { const refs = collector.add([file], /误差|准确率|latency|throughput|性能|提升|benchmark|结果/i); return { id: `result-${slug(file.path)}-${index}`, name: "Measured Result", value: compact(line).slice(0, 220), measured: file.kind === "test", evidenceRefs: refs, confidence: refs.length ? 0.84 : 0.55 }; }));
-}
-
-function unknowns(files: ReadFileObservation[], parametersValue: ProjectParameterUnderstanding[], decisionsValue: ProjectUnderstanding["decisions"], problemsValue: ProjectUnderstanding["problems"], flows: ProjectFlow[]): ProjectUnderstanding["unknowns"] {
-  const result: ProjectUnderstanding["unknowns"] = [];
-  const text = files.map((file) => file.text).join("\n");
-  if (parametersValue.length === 0) result.push({ id: "unknown-parameters", claim: "关键运行参数", reason: "当前已读取资料没有可定位的配置值。", category: "parameter", evidenceRefs: [] });
-  if (decisionsValue.length === 0) result.push({ id: "unknown-decisions", claim: "关键设计取舍", reason: "当前资料没有明确记录决策原因。", category: "decision", evidenceRefs: [] });
-  if (problemsValue.length === 0) result.push({ id: "unknown-problems", claim: "主要问题链", reason: "当前资料没有同时出现现象、原因和修复链。", category: "problem", evidenceRefs: [] });
-  if (flows.length === 0) result.push({ id: "unknown-flow", claim: "主运行流程", reason: "当前读取范围不足以确认模块调用顺序。", category: "flow", evidenceRefs: [] });
-  if (/未完成|没有正式|无法确认|尚未|not measured|unknown/i.test(text)) result.push({ id: "unknown-measurement", claim: "部分性能或版本信息", reason: "资料明确标记为未测量、未完成或无法确认。", category: "result", evidenceRefs: [] });
+function buildFlows(componentsValue: ProjectComponent[], relationships: ProjectRelationship[], files: ReadFileObservation[], collector: EvidenceCollector): { runtimeFlows: ProjectFlow[]; dataFlows: ProjectFlow[]; controlFlows: ProjectFlow[] } {
+  const result: { runtimeFlows: ProjectFlow[]; dataFlows: ProjectFlow[]; controlFlows: ProjectFlow[] } = { runtimeFlows: [], dataFlows: [], controlFlows: [] };
+  const hasLink = (from: string, to: string): ProjectRelationship | undefined => relationships.find((item) => item.from === from && item.to === to && item.verificationStatus === "confirmed" && (item.evidenceStrength === "direct" || item.evidenceStrength === "strong"));
+  const addChain = (id: string, name: string, kind: ProjectFlow["kind"], chain: string[], bucket: "runtimeFlows" | "dataFlows" | "controlFlows"): void => {
+    const actual = chain.filter((nameValue) => componentsValue.some((component) => component.name === nameValue));
+    if (actual.length < 2) return;
+    const links = actual.slice(0, -1).map((from, index) => hasLink(from, actual[index + 1] ?? ""));
+    const known = links.filter((link): link is ProjectRelationship => Boolean(link));
+    if (!known.length) return;
+    // One isolated confirmed edge is a confirmed partial path, not evidence
+    // that every vocabulary item in a domain chain belongs to this Flow. Only
+    // expose missingLinks after at least two adjacent edges establish a path.
+    const firstKnownIndex = links.findIndex(Boolean);
+    const visibleChain = known.length < 2 ? actual.slice(firstKnownIndex, firstKnownIndex + 2) : actual;
+    const visibleLinks = visibleChain.slice(0, -1).map((from, index) => hasLink(from, visibleChain[index + 1] ?? ""));
+    const missingLinks = known.length < 2 ? [] : links.flatMap((link, index) => link ? [] : [`${actual[index]} → ${actual[index + 1]}`]);
+    const refs = unique(known.flatMap((link) => link.evidenceRefs));
+    const flow: ProjectFlow = { id, name, kind, steps: visibleChain.map((component, index) => ({ component, action: index === 0 ? `从 ${component} 开始` : `将数据交给 ${component}`, evidenceRefs: visibleLinks[index - 1]?.evidenceRefs ?? [] })), description: `${name} 仅由已确认的组件关系组成。`, evidenceRefs: refs, confidence: missingLinks.length ? 0.65 : 0.9, ...(missingLinks.length ? { partial: true, missingLinks } : {}) };
+    result[bucket].push(flow);
+  };
+  addChain("flow-gateway", "Gateway Data Flow", "data", ["Modbus", "DataBus", "MQTT"], "dataFlows");
+  addChain("flow-gateway-ui", "Gateway UI Flow", "data", ["SocketCAN", "DataBus", "UI"], "dataFlows");
+  addChain("flow-sampling", "Sampling Flow", "data", ["ADC", "DMA", "Buffer", "Current Loop"], "dataFlows");
+  if (hasLink("PWM Timer", "ADC")) addChain("flow-timed-sampling", "Timed Sampling Flow", "data", ["PWM Timer", "ADC", "DMA", "Current Loop"], "dataFlows");
+  addChain("flow-control", "Control Flow", "control", ["ADC", "Control Loop"], "controlFlows");
+  addChain("flow-feedback", "Feedback Flow", "control", ["Encoder Feedback", "Velocity Estimator", "Control Loop"], "controlFlows");
+  if (!result.runtimeFlows.length && !result.dataFlows.length && !result.controlFlows.length) {
+    const entry = files.find((file) => /(^|\/)(main|index|startup|app)\./i.test(file.path) || /\bmain\s*\(/i.test(file.text));
+    if (entry) {
+      const refs = collector.add([entry], /main|startup|init|run|process|loop/i);
+      result.runtimeFlows.push({ id: "flow-runtime", name: "Runtime Flow", kind: "runtime", steps: [{ action: "启动入口并初始化运行时", evidenceRefs: refs }, { action: "调用已识别的核心模块", evidenceRefs: refs }], description: "入口和核心模块之间的运行路径，具体调用关系仍可能不完整。", evidenceRefs: refs, confidence: 0.6, partial: true, missingLinks: ["入口 → 核心模块的完整调用链"] });
+    }
+  }
   return result;
 }
 
 function summary(identityValue: ProjectUnderstanding["identity"], componentsValue: ProjectComponent[], flows: ProjectFlow[], technologiesValue: ProjectTechnologyUnderstanding[]): string {
-  const main = `${identityValue.name}${identityValue.domain ? `是一个${identityValue.domain}` : "是一个嵌入式工程"}，目标是${identityValue.purpose ?? "完成稳定的工程运行流程"}。系统由${componentsValue.slice(0, 6).map((component) => component.name).join("、") || "多个协同模块"}组成，${flows.length ? `通过${flows.slice(0, 2).map((item) => item.name).join("和")}串起采样、控制与运行时处理` : "核心模块之间的运行关系仍在分析"}。主要技术包括${technologiesValue.slice(0, 6).map((item) => item.name).join("、") || "项目实际使用的软硬件组件"}。`;
-  if (main.length >= 80) return main.slice(0, 180);
-  return `${main}当前模型保留了可验证的证据引用和仍待确认的工程边界。`.slice(0, 180);
+  const name = identityValue.name || "项目";
+  const domain = identityValue.domain ? `一个${identityValue.domain}` : "一个软件工程";
+  const componentsText = componentsValue.slice(0, 6).map((component) => component.name).join("、") || "多个待确认模块";
+  const flowText = flows.slice(0, 2).map((flow) => flow.name).join("和") || "尚未完整确认的运行路径";
+  const techText = technologiesValue.slice(0, 6).map((item) => item.name).join("、") || "仓库中的实际技术栈";
+  return `${name}是${domain}，目标是${identityValue.purpose ?? "完成稳定的工程运行流程"}。系统由${componentsText}组成，当前通过${flowText}描述已确认的运行关系。主要技术包括${techText}；未有直接证据的声明会保留为待确认边界。`.slice(0, 220);
+}
+
+function unknowns(parameters: ProjectParameterUnderstanding[], decisions: ProjectUnderstanding["decisions"], problems: ProjectUnderstanding["problems"], flows: ProjectFlow[]): ProjectUnderstanding["unknowns"] {
+  const result: ProjectUnderstanding["unknowns"] = [];
+  if (!parameters.length) result.push({ id: "unknown-parameters", claim: "关键运行参数", reason: "当前已读取资料没有可定位的配置值。", category: "parameter", evidenceRefs: [] });
+  if (!decisions.length) result.push({ id: "unknown-decisions", claim: "关键设计取舍", reason: "当前资料没有明确记录决策原因。", category: "decision", evidenceRefs: [] });
+  if (!problems.length) result.push({ id: "unknown-problems", claim: "主要问题链", reason: "当前资料没有同时出现现象、原因和修复链。", category: "problem", evidenceRefs: [] });
+  if (!flows.length || flows.some((flow) => flow.partial)) result.push({ id: "unknown-flow-links", claim: "主运行流程中的未连接链路", reason: "只有部分连接有 direct/strong 证据，系统没有自动补齐缺失关系。", category: "flow", evidenceRefs: [] });
+  return result;
 }
 
 export class ProjectUnderstandingBuilder {
   private readonly observations: ProjectExplorerObservation[] = [];
+  private domainFallbackEnabled: boolean;
+  constructor(private readonly options: { domainFallback?: boolean } = {}) { this.domainFallbackEnabled = options.domainFallback !== false; }
+  enableDomainFallback(): void { this.domainFallbackEnabled = true; }
   update(observation: ProjectExplorerObservation): void { this.observations.push(observation); }
 
   build(input: ProjectComprehensionInput, repoMap: ProjectRepoMap, trace: BuilderTrace): ProjectUnderstanding {
     const files = allReadFiles(input, this.observations);
     const collector = new EvidenceCollector(input.sources);
-    const componentList = components(files, repoMap, collector);
-    const relationList = buildRelationships(files, collector);
-    const flowGroups = buildFlows(files, collector);
+    const domainFallback = this.domainFallbackEnabled && /foc|motor|svpwm|电机|current loop|电流环/i.test(files.map((file) => `${file.path}\n${file.text}`).join("\n"));
+    const componentList = discoverComponents(files, repoMap, collector, domainFallback);
+    const relationList = buildRelationships(files, componentList, collector, domainFallback);
+    const flowGroups = buildFlows(componentList, relationList.filter((item) => item.verificationStatus === "confirmed"), files, collector);
     const allFlows = [...flowGroups.runtimeFlows, ...flowGroups.dataFlows, ...flowGroups.controlFlows];
-    const technologyList = technologies(files, collector);
-    const parameterList = parameters(files, input.sources, collector);
-    const decisionList = decisions(files, componentList, allFlows, collector);
-    const problemList = problems(files, componentList, collector);
-    const interfaceList = interfaces(files, collector);
-    const protectionList = protections(files, collector);
-    const testList = tests(files, collector);
-    const resultList = results(files, collector);
-    const limitationList = files.flatMap((file) => /未完成|没有正式|无法确认|尚未|not measured|unknown/i.test(file.text) ? [{ id: `limitation-${slug(file.path)}`, claim: "部分指标或实现状态未完成确认", reason: "资料自身说明当前缺少正式测量或版本确认。", category: "result" as const, evidenceRefs: collector.add([file], /未完成|没有正式|无法确认|尚未|not measured|unknown/i) }] : []);
-    const unknownList = unknowns(files, parameterList, decisionList, problemList, allFlows);
+    const technologyList = buildTechnologies(files, collector, repoMap);
+    const parameterList = buildParameters(files, input.sources, collector);
+    const decisionList = buildDecisions(files, componentList, allFlows, collector);
+    const problemList = buildProblems(files, componentList, collector);
+    const interfaceList = buildInterfaces(files, collector);
+    const testList = buildTests(files, collector);
+    const resultList = files.filter((file) => file.kind === "test" && /result|latency|throughput|误差|性能|benchmark/i.test(file.text)).map((file) => ({ id: `result-${slug(file.path)}`, name: "Measured Result", value: compact(file.text).slice(0, 220), measured: true, evidenceRefs: collector.add([file], /result|latency|throughput|误差|性能|benchmark/i), confidence: 0.82 }));
+    const limitations = files.flatMap((file) => /未完成|无法确认|尚未|not measured|unknown/i.test(file.text) ? [{ id: `limitation-${slug(file.path)}`, claim: "部分指标或实现状态未完成确认", reason: "资料自身说明当前缺少正式测量或版本确认。", category: "result" as const, evidenceRefs: collector.add([file], /未完成|无法确认|尚未|not measured|unknown/i) }] : []);
+    const unknownList = unknowns(parameterList, decisionList, problemList, allFlows);
     const identityValue = identity(input, files, componentList);
     const allClaims = relationList.length + allFlows.length + parameterList.length + decisionList.length + problemList.length;
-    const groundedClaims = relationList.filter((item) => item.evidenceRefs.length).length + allFlows.filter((item) => (item.evidenceRefs ?? []).length).length + parameterList.filter((item) => item.evidenceRefs.length).length + decisionList.filter((item) => item.evidenceRefs.length).length + problemList.filter((item) => item.evidenceRefs.length).length;
-    const quality = { architectureCoverage: componentList.length ? Math.min(100, componentList.length * 15) : 0, flowCoverage: Math.min(100, allFlows.length * 25), parameterCoverage: Math.min(100, parameterList.length * 20), decisionCoverage: Math.min(100, decisionList.length * 25), problemCoverage: Math.min(100, problemList.length * 25), groundingCoverage: allClaims ? Math.round((groundedClaims / allClaims) * 100) : 0, sufficient: componentList.length >= 3 && allFlows.length >= 1 && technologyList.length >= 1 };
+    const grounded = relationList.filter((item) => item.evidenceRefs.length && item.verificationStatus === "confirmed").length + allFlows.filter((item) => (item.evidenceRefs ?? []).length).length + parameterList.filter((item) => item.evidenceRefs.length).length;
+    const criticalCoverage = { purpose: identityValue.purpose ? 100 : 0, architecture: componentList.length ? Math.min(100, componentList.length * 20) : 0, mainFlow: allFlows.length ? Math.min(100, allFlows.some((flow) => !flow.partial) ? 100 : 60) : 0, coreComponents: componentList.length ? Math.min(100, componentList.length * 20) : 0, parameters: parameterList.length ? 100 : 0, decisions: decisionList.length ? 100 : 0, problems: problemList.length ? 100 : 0, tests: testList.length ? 100 : 0 };
+    const quality = { architectureCoverage: criticalCoverage.architecture, flowCoverage: criticalCoverage.mainFlow, parameterCoverage: criticalCoverage.parameters, decisionCoverage: criticalCoverage.decisions, problemCoverage: criticalCoverage.problems, groundingCoverage: allClaims ? Math.round((grounded / allClaims) * 100) : 0, sufficient: criticalCoverage.purpose >= 80 && criticalCoverage.architecture >= 60 && criticalCoverage.mainFlow >= 60, criticalCoverage };
     const stages = [...new Set([...trace.stages, "synthesizing" as ProjectComprehensionStatus])].filter((stage) => stage !== "completed") as ProjectComprehensionStatus[];
-    return { projectId: input.projectId, schemaVersion: 1, status: "synthesizing", identity: identityValue, summary: summary(identityValue, componentList, allFlows, technologyList), architecture: { overview: `工程由${componentList.slice(0, 6).map((component) => component.name).join("、") || "尚未分类的核心文件"}协同组成。`, components: componentList, relationships: relationList }, runtimeFlows: flowGroups.runtimeFlows, dataFlows: flowGroups.dataFlows, controlFlows: flowGroups.controlFlows, technologies: technologyList, parameters: parameterList, decisions: decisionList, problems: problemList, interfaces: interfaceList, protections: protectionList, tests: testList, results: resultList, limitations: limitationList, unknowns: unknownList, evidenceRefs: collector.refs, quality, trace: { ...trace, stages } };
+    return { projectId: input.projectId, schemaVersion: 2, status: "synthesizing", identity: identityValue, summary: summary(identityValue, componentList, allFlows, technologyList), architecture: { overview: `工程由${componentList.slice(0, 8).map((component) => component.name).join("、") || "尚未分类的核心文件"}协同组成。`, components: componentList, relationships: relationList }, runtimeFlows: flowGroups.runtimeFlows, dataFlows: flowGroups.dataFlows, controlFlows: flowGroups.controlFlows, technologies: technologyList, parameters: parameterList, decisions: decisionList, problems: problemList, interfaces: interfaceList, protections: buildProtections(files, collector), tests: testList, results: resultList, limitations, unknowns: unknownList, evidenceRefs: collector.refs, quality, trace: { ...trace, stages } };
   }
 }

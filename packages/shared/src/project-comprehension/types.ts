@@ -1,12 +1,14 @@
 import type { ProjectMemoryAnalysisInput, ProjectMemorySource } from "../knowledge/types";
 
-export const PROJECT_COMPREHENSION_SCHEMA_VERSION = 1;
+export const PROJECT_COMPREHENSION_SCHEMA_VERSION = 2;
 
 export type ProjectComprehensionStatus = "scan" | "mapping" | "exploring" | "synthesizing" | "grounding" | "completed" | "failed";
 export type ProjectComponentKind = "control" | "sampling" | "feedback" | "communication" | "storage" | "ui" | "protection" | "driver" | "service" | "other";
 export type ProjectRelationshipKind = "calls" | "feeds" | "triggers" | "reads" | "writes" | "publishes" | "subscribes" | "controls" | "depends-on" | "provides" | "produces" | "other";
 export type ProjectFlowKind = "runtime" | "data" | "control" | "startup" | "fault";
-export type ProjectParameterVersionStatus = "current" | "historical" | "contextual" | "unknown";
+export type ProjectParameterVersionStatus = "current" | "preferred_current" | "confirmed_current" | "historical" | "alternative" | "contextual" | "unknown";
+export type ProjectEvidenceStrength = "direct" | "strong" | "weak" | "unsupported";
+export type ProjectComprehensionVerificationStatus = "confirmed" | "candidate" | "unknown";
 
 export interface ProjectEvidenceRef {
   id: string;
@@ -16,6 +18,7 @@ export interface ProjectEvidenceRef {
   locator?: string;
   kind: "code" | "document" | "test" | "config" | "inference";
   confidence: number;
+  sourceRole?: string;
 }
 
 export interface ProjectComponent {
@@ -36,6 +39,9 @@ export interface ProjectRelationship {
   description?: string;
   evidenceRefs: string[];
   confidence?: number;
+  evidenceStrength?: ProjectEvidenceStrength;
+  verificationStatus?: ProjectComprehensionVerificationStatus;
+  confidenceReason?: string;
 }
 
 export interface ProjectFlowStep {
@@ -52,6 +58,8 @@ export interface ProjectFlow {
   description: string;
   evidenceRefs?: string[];
   confidence?: number;
+  partial?: boolean;
+  missingLinks?: string[];
 }
 
 export interface ProjectTechnologyUnderstanding {
@@ -154,6 +162,18 @@ export interface ProjectUnderstandingQuality {
   problemCoverage: number;
   groundingCoverage: number;
   sufficient: boolean;
+  criticalCoverage?: ProjectUnderstandingCoverage;
+}
+
+export interface ProjectUnderstandingCoverage {
+  purpose: number;
+  architecture: number;
+  mainFlow: number;
+  coreComponents: number;
+  parameters: number;
+  decisions: number;
+  problems: number;
+  tests: number;
 }
 
 export interface ProjectUnderstandingTraceSummary {
@@ -223,6 +243,23 @@ export interface ProjectRepoMap {
   files: ProjectRepoFile[];
   excludedPatterns: string[];
   sourceIds: string[];
+  symbolIndex?: ProjectSymbolIndex;
+}
+
+export interface ProjectSymbol {
+  name: string;
+  kind: "function" | "class" | "module" | "variable" | "macro" | "topic" | "other";
+  path: string;
+  line?: number;
+  references?: Array<{ path: string; line?: number }>;
+  calls?: string[];
+}
+
+export interface ProjectSymbolIndex {
+  symbols: ProjectSymbol[];
+  definitions: Record<string, Array<{ path: string; line?: number; kind?: string }>>;
+  references: Record<string, Array<{ path: string; line?: number }>>;
+  calls: Record<string, string[]>;
 }
 
 export interface ProjectExplorerLimits {
@@ -267,7 +304,15 @@ export interface ProjectExplorer {
   inspectBuildConfig(): ProjectFileReadResult[];
   inspectTests(): ProjectFileReadResult[];
   inspectProjectDocument(role?: string): ProjectFileReadResult[];
-  inspectGitHistory(): Array<{ subject: string; path?: string; date?: string }>;
+  inspectGitHistory(): ProjectGitHistoryEntry[];
+}
+
+export interface ProjectGitHistoryEntry {
+  hash?: string;
+  subject: string;
+  path?: string;
+  date?: string;
+  changedPaths?: string[];
 }
 
 export type ProjectExplorationAction =
@@ -285,7 +330,7 @@ export interface ProjectExplorerObservation {
   action: ProjectExplorationAction;
   files?: ProjectFileReadResult[];
   matches?: ProjectSearchMatch[];
-  history?: Array<{ subject: string; path?: string; date?: string }>;
+  history?: ProjectGitHistoryEntry[];
   elapsedMs: number;
 }
 
@@ -300,10 +345,78 @@ export interface ProjectComprehensionModelInput {
   input: Pick<ProjectComprehensionInput, "projectId" | "projectName" | "options">;
   repoMap: ProjectRepoMap;
   observations: ProjectExplorerObservation[];
+  purpose?: "plan" | "synthesize";
+  plannerState?: ProjectComprehensionPlannerInput;
 }
 
 export interface ProjectComprehensionModel {
   generate(input: ProjectComprehensionModelInput): Promise<string>;
+}
+
+export type ProjectAgentAction = "readFile" | "searchText" | "findDefinitions" | "findReferences" | "inspectBuildConfig" | "inspectTests" | "inspectProjectDocument" | "inspectGitHistory" | "verifyClaim" | "synthesize";
+
+export interface ProjectAgentDecision {
+  action: ProjectAgentAction;
+  reason: string;
+  target?: string;
+  query?: string;
+  hypothesisId?: string;
+  expectedInformation?: string;
+  priority: "critical" | "high" | "normal" | "low";
+}
+
+export interface ProjectHypothesis {
+  id: string;
+  claim: string;
+  type: "component" | "relationship" | "flow" | "parameter" | "decision" | "problem" | "version";
+  status: "candidate" | "verifying" | "confirmed" | "rejected" | "unknown";
+  evidenceRefs: string[];
+  missingEvidence?: string[];
+  confidence: number;
+}
+
+export interface ProjectComprehensionBudget {
+  maxToolCalls: number;
+  maxFilesRead: number;
+  maxModelTurns: number;
+  maxInputChars: number;
+  toolCalls: number;
+  modelTurns: number;
+  inputChars: number;
+}
+
+export interface ProjectComprehensionState {
+  repoMap: ProjectRepoMap;
+  observations: ProjectExplorerObservation[];
+  hypotheses: ProjectHypothesis[];
+  confirmedConcepts: string[];
+  candidateComponents: ProjectComponent[];
+  candidateRelationships: ProjectRelationship[];
+  candidateFlows: ProjectFlow[];
+  candidateParameters: ProjectParameterUnderstanding[];
+  candidateDecisions: ProjectDecisionUnderstanding[];
+  candidateProblems: ProjectProblemUnderstanding[];
+  unknowns: ProjectUnknown[];
+  coverage: ProjectUnderstandingCoverage;
+  budget: ProjectComprehensionBudget;
+  filesRead: string[];
+}
+
+export type ProjectComprehensionPlannerInput = Pick<ProjectComprehensionState, "repoMap" | "observations" | "hypotheses" | "confirmedConcepts" | "unknowns" | "coverage" | "budget" | "filesRead"> & {
+  projectName?: string;
+  currentUnderstandingSummary?: string;
+  toolBudgetRemaining: number;
+  timeBudgetRemaining: number;
+};
+
+export interface ProjectComprehensionPlannerModel {
+  generate(input: ProjectComprehensionModelInput): Promise<string>;
+}
+
+export interface ProjectVersionHistory {
+  available: boolean;
+  entries: ProjectGitHistoryEntry[];
+  reason?: string;
 }
 
 export interface ProjectUnderstandingSnapshotRecord {

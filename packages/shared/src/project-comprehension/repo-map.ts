@@ -1,3 +1,4 @@
+import { buildProjectSymbolIndex } from "./repo-explorer";
 import type { ProjectExplorer, ProjectRepoFile, ProjectRepoMap } from "./types";
 
 const buildFileNames = /^(cmakelists\.txt|makefile|meson\.build|cargo\.toml|package\.json|package-lock\.json|pyproject\.toml|requirements\.txt|build\.gradle|pom\.xml|dockerfile)$/i;
@@ -19,7 +20,7 @@ function scoreCoreFile(file: ProjectRepoFile): number {
 export function buildProjectRepoMap(input: { projectId: string; tree: ReturnType<ProjectExplorer["listTree"]> }): ProjectRepoMap {
   const files = input.tree.filter((file) => file.kind !== "generated" && file.kind !== "third-party");
   const sourceIds = unique(files.map((file) => file.sourceId));
-  const languages = unique(files.map((file) => file.language).filter((language) => language !== "text" && language !== "Markdown" && language !== "JSON" && language !== "YAML" && language !== "TOML"));
+  const languages = unique(files.map((file) => file.language).filter((language) => language !== "text" && language !== "unknown" && language !== "Markdown" && language !== "JSON" && language !== "YAML" && language !== "TOML"));
   const buildSystems: string[] = [];
   for (const file of files) {
     const name = file.path.split("/").at(-1) ?? "";
@@ -39,7 +40,7 @@ export function buildProjectRepoMap(input: { projectId: string; tree: ReturnType
   const testFiles = files.filter((file) => file.kind === "test").map((file) => file.path);
   const configFiles = files.filter((file) => file.kind === "config" || buildFileNames.test(file.path.split("/").at(-1) ?? "")).map((file) => file.path);
   const documentFiles = files.filter((file) => file.kind === "document").map((file) => file.path);
-  return { projectId: input.projectId, languages: unique(languages), buildSystems: unique(buildSystems), entryPoints: unique(entryPoints), directories, likelyCoreFiles, testFiles, configFiles: unique(configFiles), documentFiles: unique(documentFiles), files, excludedPatterns: ["node_modules", "vendor", "build", "dist", "target", ".git", "generated", "third_party", "__pycache__", ".venv"], sourceIds };
+  return { projectId: input.projectId, languages: unique(languages), buildSystems: unique(buildSystems), entryPoints: unique(entryPoints), directories, likelyCoreFiles, testFiles, configFiles: unique(configFiles), documentFiles: unique(documentFiles), files, excludedPatterns: ["node_modules", "vendor", "build", "dist", "target", ".git", "generated", "third_party", "__pycache__", ".venv"], sourceIds, symbolIndex: buildProjectSymbolIndex(input.tree as Array<ProjectRepoFile & { text?: string }>) };
 }
 
 export class ProjectRepoMapper {

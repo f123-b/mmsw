@@ -13,11 +13,12 @@ describe("Project comprehension benchmark", () => {
     const started = performance.now();
     const result = await new ProjectComprehensionAgent().comprehend(benchmarkInput);
     const understanding = result.understanding;
-    const report = { projectId: benchmarkInput.projectId, repoFiles: result.repoMap.files.length, filesRead: understanding.trace.filesRead, toolCalls: understanding.trace.toolCalls, modelTurns: understanding.trace.modelTurns, elapsedMs: Math.round((performance.now() - started) * 100) / 100, components: understanding.architecture.components.length, relationships: understanding.architecture.relationships.length, flows: understanding.runtimeFlows.length + understanding.dataFlows.length + understanding.controlFlows.length, groundedClaims: Math.round(understanding.quality.groundingCoverage) };
+    const report = { projectId: benchmarkInput.projectId, repoFiles: result.repoMap.files.length, filesRead: understanding.trace.filesRead, toolCalls: understanding.trace.toolCalls, plannerModelTurns: understanding.trace.modelTurns, elapsedMs: Math.round((performance.now() - started) * 100) / 100, confirmedComponents: understanding.architecture.components.length, confirmedRelationships: understanding.architecture.relationships.filter((item) => item.verificationStatus === "confirmed").length, rejectedRelationships: understanding.unknowns.filter((item) => item.category === "flow").length, completeFlows: [...understanding.runtimeFlows, ...understanding.dataFlows, ...understanding.controlFlows].filter((flow) => !flow.partial).length, partialFlows: [...understanding.runtimeFlows, ...understanding.dataFlows, ...understanding.controlFlows].filter((flow) => flow.partial).length, parameters: understanding.parameters.length, decisions: understanding.decisions.length, problems: understanding.problems.length, unknowns: understanding.unknowns.length, groundingCoverage: Math.round(understanding.quality.groundingCoverage), falseRelationshipCount: understanding.architecture.relationships.filter((item) => item.verificationStatus !== "confirmed" || item.evidenceStrength === "weak").length };
     console.info("PROJECT_COMPREHENSION_BENCHMARK", JSON.stringify(report));
     expect(report.repoFiles).toBeGreaterThanOrEqual(5);
-    expect(report.components).toBeGreaterThanOrEqual(4);
-    expect(report.flows).toBeGreaterThanOrEqual(1);
-    expect(report.groundedClaims).toBeGreaterThanOrEqual(50);
+    expect(report.confirmedComponents).toBeGreaterThanOrEqual(4);
+    expect(report.completeFlows + report.partialFlows).toBeGreaterThanOrEqual(1);
+    expect(report.groundingCoverage).toBeGreaterThanOrEqual(50);
+    expect(report.falseRelationshipCount).toBe(0);
   });
 });

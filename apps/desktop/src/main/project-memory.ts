@@ -259,6 +259,13 @@ export function createProjectComprehensionModel(answerProvider: AnswerProvider, 
     async generate(input) {
       if (!settings.apiKey) throw new Error("LLM_NOT_CONFIGURED");
       let output = "";
+      if (input.purpose === "plan") {
+        for await (const delta of answerProvider.stream({ model: settings.model, maxOutputTokens: 700, sections: [
+          { name: "system/base", content: `${PROJECT_COMPREHENSION_SYSTEM_PROMPT}\n你现在只负责选择下一步。只输出一个 JSON：{action,reason,target?,query?,hypothesisId?,expectedInformation?,priority}。reason 只能是一句简短的可审计 rationale，不要输出思维过程。一次只选一个工具；如果关键覆盖已足够且没有高优先级缺口，选择 synthesize。` },
+          { name: "retrieval-context", content: JSON.stringify(input.plannerState ?? { repoMap: input.repoMap, observations: input.observations.slice(-3) }) },
+        ] })) output += delta;
+        return output;
+      }
       const observations = input.observations.map((observation) => ({
         action: observation.action,
         elapsedMs: observation.elapsedMs,
@@ -270,7 +277,7 @@ export function createProjectComprehensionModel(answerProvider: AnswerProvider, 
         { name: "system/base", content: PROJECT_COMPREHENSION_SYSTEM_PROMPT },
         { name: "profile-context", content: JSON.stringify({ projectId: input.input.projectId, projectName: input.input.projectName }) },
         { name: "retrieval-context", content: JSON.stringify({ repoMap: input.repoMap, observations }) },
-        { name: "output-format", content: "只输出一个 JSON 对象，不要 Markdown 或解释。字段包括 identity、summary、architecture(components/relationships)、runtimeFlows、dataFlows、controlFlows、technologies、parameters、decisions、problems、interfaces、protections、tests、results、limitations、unknowns。所有声明必须使用已探索文件的 evidenceRefs；无法证明的内容放入 unknowns。不要输出 facts、projects、interviewQuestions，也不要补造文件内容。" },
+        { name: "output-format", content: "只输出一个 JSON 对象，不要 Markdown 或解释。字段包括 identity、summary、architecture(components/relationships)、runtimeFlows、dataFlows、controlFlows、technologies、parameters、decisions、problems、interfaces、protections、tests、results、limitations、unknowns。关系只能输出已探索证据支持的 candidate，填写 evidenceStrength/direct 或 strong、verificationStatus；两个模块仅共现时不要输出关系。Flow 只能由已验证关系组成，缺失链路用 partial:true 和 missingLinks 表示。所有声明必须使用已探索文件的 evidenceRefs；无法证明的内容放入 unknowns。不要输出 facts、projects、interviewQuestions，也不要补造文件内容。" },
       ] })) output += delta;
       return output;
     }

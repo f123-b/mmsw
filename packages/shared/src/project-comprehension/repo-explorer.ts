@@ -1,14 +1,15 @@
 import type { ProjectMemorySource } from "../knowledge/types";
-import type { ProjectExplorer, ProjectExplorerLimits, ProjectFileReadResult, ProjectRepoEntryKind, ProjectRepoFile, ProjectSearchMatch, ProjectTreeEntry } from "./types";
+import type { ProjectExplorer, ProjectExplorerLimits, ProjectFileReadResult, ProjectRepoEntryKind, ProjectRepoFile, ProjectSearchMatch, ProjectSymbol, ProjectSymbolIndex, ProjectTreeEntry, ProjectGitHistoryEntry } from "./types";
 
 export const DEFAULT_PROJECT_EXCLUDED_PATTERNS = ["node_modules", "vendor", "build", "dist", "target", ".git", "generated", "third_party", "__pycache__", ".venv"];
+export const DEFAULT_PROJECT_ALLOWED_TEXT_EXTENSIONS = ["c", "h", "cc", "cpp", "cxx", "hpp", "py", "rs", "ts", "tsx", "js", "jsx", "java", "go", "lua", "json", "yaml", "yml", "toml", "md", "markdown", "txt", "cmake", "sh", "bat", "ps1", "ini", "cfg", "conf"];
 
 const DEFAULT_LIMITS: ProjectExplorerLimits = {
-  maxToolCalls: 40,
-  maxFilesRead: 30,
+  maxToolCalls: 50,
+  maxFilesRead: 35,
   maxInputChars: 120_000,
-  timeoutMs: 15_000,
-  maxModelTurns: 4,
+  timeoutMs: 60_000,
+  maxModelTurns: 12,
   maxResults: 12,
   maxFileChars: 24_000,
   maxFileLines: 500
@@ -41,6 +42,13 @@ function normalizePath(path: string): string {
   return normalized;
 }
 
+function isAllowedTextPath(path: string): boolean {
+  const base = path.split("/").at(-1)?.toLowerCase() ?? "";
+  if (["readme", "makefile", "dockerfile", "cmakelists.txt", "kconfig"].includes(base)) return true;
+  const ext = extension(base);
+  return DEFAULT_PROJECT_ALLOWED_TEXT_EXTENSIONS.includes(ext);
+}
+
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
 function classifyPath(path: string): ProjectRepoEntryKind {
@@ -58,23 +66,37 @@ interface VirtualFile extends ProjectRepoFile {
 }
 
 function parseArchiveSource(source: ProjectMemorySource): VirtualFile[] {
+  if (source.repositoryFiles?.length) {
+    return source.repositoryFiles.flatMap((entry) => {
+      try {
+        const path = normalizePath(entry.path);
+        if (isExcluded(path) || !isAllowedTextPath(path) || entry.text.length > 2_000_000) return [];
+        return [{ path, sourceId: source.id, kind: classifyPath(path), language: languageForPath(path), size: entry.size ?? entry.text.length, text: entry.text }];
+      } catch { return []; }
+    });
+  }
   let archiveText = source.text;
   const encoded = source.text.match(/PROJECT_REPO_ARCHIVE_BASE64:([A-Za-z0-9+/=]+)/)?.[1];
-  if (encoded) {
+  if (encoded && encoded.length <= 40_000_000) {
     try {
       const binary = globalThis.atob(encoded);
       archiveText = new TextDecoder().decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)));
     } catch { archiveText = source.text; }
   }
+  if (archiveText.length > 12_000_000) archiveText = archiveText.slice(0, 12_000_000);
   const matches = [...archiveText.matchAll(/(?:^|\n)文件：([^\n]+)\n([\s\S]*?)(?=\n\n---\n\n文件：|$)/g)];
   if (!matches.length) {
     const path = normalizePath(source.filePath ?? source.title);
+    if (!isAllowedTextPath(path)) return [];
     return [{ path, sourceId: source.id, kind: classifyPath(path), language: source.language ?? languageForPath(path), size: source.text.length, text: source.text }];
   }
   return matches.flatMap((match) => {
-    const path = normalizePath(match[1] ?? "");
-    const text = match[2] ?? "";
-    return [{ path, sourceId: source.id, kind: classifyPath(path), language: languageForPath(path), size: text.length, text }];
+    try {
+      const path = normalizePath(match[1] ?? "");
+      const text = match[2] ?? "";
+      if (isExcluded(path) || !isAllowedTextPath(path) || text.length > 2_000_000) return [];
+      return [{ path, sourceId: source.id, kind: classifyPath(path), language: languageForPath(path), size: text.length, text }];
+    } catch { return []; }
   });
 }
 
@@ -105,12 +127,51 @@ function matchesFor(files: VirtualFile[], query: string, limit: number): Project
   return result;
 }
 
+function lineNumber(text: string, index: number): number { return text.slice(0, index).split(/\r?\n/).length; }
+
+/** Lightweight, language-agnostic symbol/call index used before AST/LSP integration. */
+export function buildProjectSymbolIndex(files: Array<ProjectRepoFile & { text?: string }>): ProjectSymbolIndex {
+  const symbols: ProjectSymbolIndex["symbols"] = [];
+  const definitions: ProjectSymbolIndex["definitions"] = {};
+  const references: ProjectSymbolIndex["references"] = {};
+  const calls: ProjectSymbolIndex["calls"] = {};
+  const addDefinition = (name: string, kind: ProjectSymbol["kind"], path: string, line: number): void => {
+    const item = { path, line, kind };
+    definitions[name] = [...(definitions[name] ?? []), item];
+    symbols.push({ name, kind, path, line, references: [], calls: [] });
+  };
+  const symbolPattern = /(?:^|\n)\s*(?:static\s+|inline\s+|async\s+|export\s+|public\s+|private\s+)*(?:void|int|float|double|bool|string|function|def|fn|class|struct|enum|const|let|var)?\s*([A-Za-z_$][\w$]*)\s*(?=\([^\n]*\)\s*(?:\{|=>|:)|[:=]\s*(?:function|class))/g;
+  for (const file of files) {
+    const text = file.text ?? "";
+    for (const match of text.matchAll(symbolPattern)) {
+      const name = match[1];
+      if (!name || ["if", "for", "while", "switch", "catch", "return"].includes(name)) continue;
+      const kind: ProjectSymbol["kind"] = /class|struct|enum/.test(match[0]) ? "class" : /[:=]/.test(match[0]) && !/\(/.test(match[0]) ? "variable" : "function";
+      addDefinition(name, kind, file.path, lineNumber(text, match.index ?? 0));
+    }
+    for (const match of text.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)) {
+      const name = match[1];
+      if (!name || ["if", "for", "while", "switch", "catch", "function", "def"].includes(name)) continue;
+      const item = { path: file.path, line: lineNumber(text, match.index ?? 0) };
+      references[name] = [...(references[name] ?? []), item];
+      const owner = symbols.find((symbol) => symbol.path === file.path && (symbol.line ?? 0) <= item.line);
+      if (owner && owner.name !== name) owner.calls = [...new Set([...(owner.calls ?? []), name])];
+    }
+  }
+  for (const symbol of symbols) symbol.references = references[symbol.name] ?? [];
+  return { symbols, definitions, references, calls: Object.fromEntries(symbols.filter((symbol) => (symbol.calls ?? []).length).map((symbol) => [symbol.name, symbol.calls ?? []])) };
+}
+
 export class SourceProjectExplorer implements ProjectExplorer {
   private readonly files: VirtualFile[];
+  readonly symbolIndex: ProjectSymbolIndex;
+  private readonly history: ProjectGitHistoryEntry[];
   private readonly limits: ProjectExplorerLimits;
   constructor(sources: ProjectMemorySource[], limits: Partial<ProjectExplorerLimits> = {}) {
     this.files = sourceFiles(sources);
     this.limits = { ...DEFAULT_LIMITS, ...limits };
+    this.symbolIndex = buildProjectSymbolIndex(this.files);
+    this.history = sources.flatMap((source) => source.repositoryHistory ?? []).map((entry) => ({ ...entry }));
   }
 
   listTree(options: { prefix?: string; limit?: number } = {}): ProjectTreeEntry[] {
@@ -155,7 +216,9 @@ export class SourceProjectExplorer implements ProjectExplorer {
     return this.files.filter((file) => file.kind === "document" && (!rolePattern || rolePattern.test(file.path))).slice(0, 8).flatMap((file) => { const value = this.readFile(file.path); return value ? [value] : []; });
   }
 
-  inspectGitHistory(): Array<{ subject: string; path?: string; date?: string }> { return []; }
+  inspectGitHistory(): ProjectGitHistoryEntry[] {
+    return this.history.length ? this.history.slice(0, this.limits.maxResults) : [{ subject: "git history unavailable", changedPaths: [] }];
+  }
 }
 
 export function projectExplorerLimits(input?: Partial<ProjectExplorerLimits>): ProjectExplorerLimits {

@@ -42,21 +42,40 @@ const pdfDocumentParser = {
 
 const repositoryArchiveParser = {
   async parse(input: { bytes: Uint8Array }) {
+    const maxArchiveSize = 50 * 1024 * 1024;
+    const maxExpandedSize = 120 * 1024 * 1024;
+    const maxFileCount = 1_000;
+    const maxSingleFileSize = 2 * 1024 * 1024;
+    if (input.bytes.byteLength > maxArchiveSize) throw new Error("ZIP_ARCHIVE_TOO_LARGE");
     const zip = await JSZip.loadAsync(input.bytes);
     const allowed = /\.(c|h|cc|cpp|cxx|hpp|py|ts|tsx|js|jsx|rs|md|markdown|cmake|json|toml|yml|yaml|txt|ini|cfg|conf)$/i;
     const allowedBasename = /(^|\/)(readme(?:\.[^/]+)?|makefile|cmakelists\.txt|kconfig(?:\.[^/]+)?)$/i;
-    const ignored = /(^|\/)(node_modules|dist|build|target|\.git|__pycache__)(\/|$)/i;
-    const names = Object.keys(zip.files).filter((name) => !zip.files[name]?.dir && (allowed.test(name) || allowedBasename.test(name)) && !ignored.test(name)).sort();
+    const ignored = /(^|\/)(node_modules|vendor|dist|build|target|\.git|__pycache__|\.venv)(\/|$)/i;
+    const safePath = (name: string): string | undefined => {
+      const normalized = name.replaceAll("\\", "/").replace(/^\/+/, "");
+      if (!normalized || normalized.split("/").some((part) => part === ".." || part === ".")) return undefined;
+      return normalized;
+    };
+    const names = Object.keys(zip.files).map(safePath).filter((name): name is string => Boolean(name)).filter((name) => !zip.files[name]?.dir && (allowed.test(name) || allowedBasename.test(name)) && !ignored.test(name)).sort();
+    if (names.length > maxFileCount) throw new Error("ZIP_FILE_COUNT_EXCEEDED");
     const blocks: string[] = [];
+    const repositoryFiles: Array<{ path: string; text: string; size: number }> = [];
+    let expandedSize = 0;
     for (const name of names.slice(0, 300)) {
       const entry = zip.file(name);
       if (!entry) continue;
-      const text = await entry.async("text");
+      const declaredSize = Number((entry as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize ?? 0);
+      if (declaredSize > maxSingleFileSize) continue;
+      const bytes = await entry.async("uint8array");
+      if (bytes.byteLength > maxSingleFileSize || expandedSize + bytes.byteLength > maxExpandedSize) continue;
+      expandedSize += bytes.byteLength;
+      const text = new TextDecoder().decode(bytes);
       blocks.push(`文件：${name}\n${text.slice(0, 40_000)}`);
+      repositoryFiles.push({ path: name, text: text.slice(0, 40_000), size: bytes.byteLength });
     }
     const text = blocks.join("\n\n---\n\n").trim();
     if (!text) throw new Error("ZIP_NO_SUPPORTED_FILES: 压缩包中没有可分析的源码、README 或项目配置文件");
-    return { text, sections: names.slice(0, 300) };
+    return { text, sections: names.slice(0, 300), repositoryFiles };
   }
 };
 
@@ -109,5 +128,5 @@ export async function parseDocument(input: { documentId: string; filename: strin
   const normalizedMimeType = (input.mimeType ?? "").split(";", 1)[0]?.trim().toLowerCase();
   const mimeType = isZipBytes(bytes) ? "application/zip" : extensionMime[extension ?? ""] ?? normalizedMimeType;
   const parsed = await registry.parse({ ...input, bytes, mimeType });
-  return { documentId: input.documentId, filename: input.filename, mimeType, sha256: createHash("sha256").update(bytes).digest("hex"), text: parsed.text, sections: parsed.sections ?? [] };
+  return { documentId: input.documentId, filename: input.filename, mimeType, sha256: createHash("sha256").update(bytes).digest("hex"), text: parsed.text, sections: parsed.sections ?? [], ...(parsed.repositoryFiles ? { repositoryFiles: parsed.repositoryFiles.map((file) => ({ ...file, size: file.size ?? file.text.length })) } : {}) };
 }
