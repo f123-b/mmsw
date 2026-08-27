@@ -45,8 +45,9 @@ export function Sidebar({ page, profileName, projects, conversations, onNavigate
           </button>
         ))}
       </nav>
-      <div className="sidebar-section-label">对话工作区</div>
-      {projects.length === 0 ? <div className="sidebar-empty">还没有对话项目</div> : projects.slice(0, 6).map((project) => <div className="sidebar-project-row" key={project.id}><button className="sidebar-conversation" onClick={() => onOpenProject(project.id)}><span>▸</span><span className="sidebar-conversation-title">{project.name}</span></button><button className="sidebar-project-action" title="重命名对话项目" onClick={() => onRenameProject(project.id, project.name)}>✎</button><button className="sidebar-project-action danger-text" title="删除对话项目" onClick={() => onDeleteProject(project.id, project.name)}>×</button></div>)}
+      <div className="sidebar-section-label">{page === "project-library" ? "我的项目" : "对话工作区"}</div>
+      {projects.length === 0 ? <div className="sidebar-empty">还没有项目</div> : projects.slice(0, page === "project-library" ? 5 : 6).map((project) => <div className="sidebar-project-row" key={project.id}><button className={`sidebar-conversation ${page === "project-library" ? "sidebar-project-library-link" : ""}`} onClick={() => onOpenProject(project.id)}><span>▸</span><span className="sidebar-conversation-title">{project.name}</span></button><button className="sidebar-project-action" title="重命名对话项目" onClick={() => onRenameProject(project.id, project.name)}>✎</button><button className="sidebar-project-action danger-text" title="删除对话项目" onClick={() => onDeleteProject(project.id, project.name)}>×</button></div>)}
+      {page === "project-library" && projects.length > 5 && <button className="sidebar-conversation sidebar-project-more" onClick={() => onNavigate("project-library")}><span>＋</span><span className="sidebar-conversation-title">查看全部项目</span></button>}
       <div className="sidebar-section-label conversation-label">最近对话</div>
       {conversations.length === 0 ? <div className="sidebar-empty">还没有对话</div> : conversations.slice(0, 8).map((conversation) => <button className="sidebar-conversation" key={conversation.id} onClick={() => onOpenConversation(conversation.id)}><span>•</span><span className="sidebar-conversation-title">{conversation.title}</span></button>)}
       <div className="sidebar-bottom">

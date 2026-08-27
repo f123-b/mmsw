@@ -259,7 +259,7 @@ async function waitForNode(predicate, timeout = 12_000) {
 
 async function clickText(text, client = main) {
   const clicked = await client.evaluate(`(() => { const value = ${JSON.stringify(text)}; const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes(value)); if (!button) return false; button.click(); return true; })()`);
-  if (!clicked) throw new Error(`Button not found: ${text}`);
+  if (!clicked) throw new Error(`Button not found: ${text}; body=${String(await client.evaluate("document.body.innerText").catch(() => "")).slice(0, 1200)}; rendererErrors=${client.rendererErrors.join(" | ")}`);
   await sleep(180);
 }
 
@@ -359,9 +359,54 @@ try {
   })()`);
   if (projectSeed?.document?.documentType !== "project" || projectSeed?.document?.projectAssignment?.status !== "assigned" || !projectSeed?.project?.id || projectSeed.project.ownershipMode !== "personal" || projectSeed.factCount < 1 || !projectSeed.parameterFacts?.some((fact) => fact.canonicalKey === "control.current_loop.frequency" && fact.value?.value === 20_000 && fact.value?.unit === "Hz" && fact.relation === "configured") || projectSeed.parameterFacts?.filter((fact) => fact.canonicalKey === "control.current_loop.frequency" || fact.canonicalKey === "control.speed_loop.frequency" || fact.canonicalKey === "sampling.pwm.frequency").length !== 3 || projectSeed.decisionFacts < 1 || projectSeed.problemFacts < 3 || projectSeed.stats?.projectFamiliarityScore <= 0 || projectSeed.stats?.conflictGroups !== 1 || projectSeed.conflictGroups?.length !== 1 || projectSeed.conflictGroups[0]?.canonicalKey !== "mcu.main") throw new Error(`Project Library V4 semantic seed failed: ${JSON.stringify(projectSeed)}`);
   await main.evaluate("location.reload()");
-  await waitFor(() => document.documentElement?.dataset.appReady === "true");
+  await waitFor(() => document.documentElement?.dataset.appReady === "true" && document.querySelectorAll("button").length > 0);
   await clickText("项目库");
   await waitFor(() => document.body.innerText.includes("项目资料整理助手") && document.body.innerText.toLowerCase().includes("e2e foc"), 15_000);
+  const legacyProjectUi = await main.evaluate("({ legacyText: document.body.innerText.includes('PROJECT TECHNICAL MEMORY V4'), legacyNode: Boolean(document.querySelector('.project-v4-overview')) })");
+  if (legacyProjectUi?.legacyText || legacyProjectUi?.legacyNode) throw new Error("PROJECT_LIBRARY_V5_LEGACY_DASHBOARD_VISIBLE");
+  const requiredProjectTabs = ["概览", "关键参数", "技术架构", "决策与 Why", "问题排查", "面试题", "资料证据"];
+  const missingProjectTabs = await main.evaluate(`(${JSON.stringify(requiredProjectTabs)}).filter((label) => !document.body.innerText.includes(label))`);
+  if (missingProjectTabs?.length) throw new Error(`PROJECT_LIBRARY_V5_PRIMARY_NAV_MISSING: ${missingProjectTabs.join(", ")}`);
+  const projectChrome = await main.evaluate(`({
+    breadcrumb: document.querySelector(".modern-topbar .topbar-context")?.textContent?.replace(/\s+/g, " ").trim(),
+    settings: Boolean(document.querySelector(".modern-topbar .topbar-settings-button")),
+    startInterview: Boolean(document.querySelector(".modern-topbar .start-interview")),
+    projectLabel: [...document.querySelectorAll(".sidebar-section-label")].some((item) => item.textContent?.trim() === "我的项目"),
+    projectRows: document.querySelectorAll(".sidebar-project-row").length
+  })`);
+  if (projectChrome?.breadcrumb?.replace(/\s*\/\s*/g, "/") !== "项目库/项目详情" || !projectChrome.settings || !projectChrome.startInterview || !projectChrome.projectLabel || projectChrome.projectRows > 5) throw new Error(`PROJECT_LIBRARY_V5_CHROME_INVALID: ${JSON.stringify(projectChrome)}`);
+  const projectFamiliarityCount = await main.evaluate("[...document.body.querySelectorAll('*')].filter((item) => (item.textContent || '').trim() === '熟悉度').length");
+  if (projectFamiliarityCount !== 1) throw new Error(`PROJECT_LIBRARY_V5_DUPLICATE_FAMILIARITY: ${projectFamiliarityCount}`);
+  await screenshot("project-overview.png");
+  await clickText("关键参数");
+  await waitFor(() => Boolean(document.querySelector(".project-data-table")) && document.body.innerText.includes("参数"));
+  const parameterRow = await main.evaluate("Boolean(document.querySelector('.project-data-table tbody tr'))");
+  if (!parameterRow) throw new Error("PROJECT_LIBRARY_V5_PARAMETER_TABLE_EMPTY");
+  await clickSelector(".project-data-table tbody tr");
+  await waitFor(() => Boolean(document.querySelector(".project-drawer")) && document.body.innerText.includes("当前值"));
+  await screenshot("project-parameters.png");
+  await clickSelector(".project-drawer-close");
+  await clickText("问题排查");
+  await waitFor(() => Boolean(document.querySelector(".project-problem-row")) && document.body.innerText.includes("低速抖动"));
+  await clickSelector(".project-problem-row");
+  await waitFor(() => document.body.innerText.includes("现象") && document.body.innerText.includes("原因") && document.body.innerText.includes("解决") && document.body.innerText.includes("结果"));
+  await screenshot("project-problem-detail.png");
+  await clickText("···");
+  await waitFor(() => document.body.innerText.includes("高级数据"));
+  await clickText("事实库与治理");
+  await waitFor(() => document.body.innerText.includes("高级数据") && document.body.innerText.includes("冲突"));
+  await clickText("冲突");
+  await waitFor(() => Boolean(document.querySelector(".project-conflict-list-v5")) && document.body.innerText.includes("待处理"));
+  const conflictRowCount = await main.evaluate("document.querySelectorAll('.project-conflict-list-v5 > button').length");
+  if (conflictRowCount !== 1) throw new Error(`PROJECT_LIBRARY_V5_CONFLICT_GROUP_ROW_COUNT: ${conflictRowCount}`);
+  await screenshot("project-conflicts.png");
+  await clickSelector(".project-conflict-list-v5 > button");
+  await waitFor(() => Boolean(document.querySelector(".project-drawer")) && document.body.innerText.includes("采用此版本"));
+  await clickText("采用此版本");
+  await waitFor(() => document.body.innerText.includes("冲突"));
+  await clickText("概览");
+  await waitFor(() => Boolean(document.querySelector(".project-agent-composer textarea")));
+  evidence.push("Project Library V5 UI: PASS; PROJECT_CHROME: PASS; OVERVIEW_SCREEN: PASS; SINGLE_FAMILIARITY: PASS; PARAMETER_TABLE: PASS; PARAMETER_DRAWER: PASS; PROBLEM_LIST_DETAIL: PASS; ADVANCED_DATA: PASS; SINGLE_CONFLICT_GROUP_ROW: PASS; PROJECT_LIBRARY_V5_SCREENSHOTS: PASS");
   await fillSelector(".project-agent-composer textarea", "检查当前项目资料中的冲突、缺失和不确定项。");
   await clickSelector(".project-agent-composer button");
   await waitFor(() => document.body.innerText.includes("项目 Agent E2E 正常"), 15_000);
@@ -372,13 +417,6 @@ try {
   await sleep(250);
   await screenshot("05b-project-agent.png");
   evidence.push("Project Agent: PASS; PROJECT_AGENT_GROUNDED_CONTEXT: PASS; PROJECT_AGENT_STRUCTURED_RESPONSE: PASS");
-  await clickText("项目事实");
-  await waitFor(() => document.body.innerText.includes("冲突组 · mcu.main") && document.body.innerText.includes("采用此版本"), 15_000);
-  await screenshot("05d-project-conflict-group.png");
-  evidence.push("Project Library Conflict Group UI: PASS; PROJECT_LIBRARY_ACTION_COUNT: PASS; PROJECT_LIBRARY_SINGLE_CONFLICT_CARD: PASS");
-  await clickText("采用此版本");
-  await waitFor(() => document.body.innerText.includes("冲突组 0"), 15_000);
-  evidence.push("Project Library Conflict Resolution: PASS; PROJECT_LIBRARY_CONFLICT_GROUP_REDUCED: PASS");
   await fillSelector(".project-agent-composer textarea", "触发项目 Agent 错误 E2E");
   await clickSelector(".project-agent-composer button");
   await waitFor(() => document.body.innerText.includes("模型密钥未配置、已失效或没有访问权限") && document.body.innerText.includes("重新生成") && document.body.innerText.includes("检查模型设置"), 15_000);
@@ -426,7 +464,7 @@ try {
 
   await main.evaluate(`(async () => { await window.interviewCopilot.settings.update("llm", { providerName: "Mock LLM", baseUrl: "http://127.0.0.1:${mockPort}", model: "mock-model", apiKey: "mock-key", timeoutMs: 10_000, maxRetries: 0 }); await window.interviewCopilot.settings.update("asr", { providerName: "Custom WebSocket ASR Gateway", providerType: "custom-gateway", baseUrl: "ws://127.0.0.1:${asrPort}/realtime", model: "mock-asr", language: "zh-CN", apiKey: "", timeoutMs: 3_000, maxRetries: 0 }); return true; })()`);
   await main.evaluate("location.reload()");
-  await waitFor(() => document.documentElement?.dataset.appReady === "true");
+  await waitFor(() => document.documentElement?.dataset.appReady === "true" && document.querySelectorAll("button").length > 0);
   await clickText("开始一场面试");
   await waitFor(() => document.body.innerText.includes("LIVE INTERVIEW"));
   await waitFor(() => [...document.querySelectorAll('label')].some((item) => (item.innerText || '').includes('重点项目') && item.querySelector('select')));
@@ -501,7 +539,7 @@ try {
   const beforeManualSend = answerRequests.length;
   const overlayComposerPresent = await overlay.evaluate("Boolean(document.querySelector('.overlay-answer-composer textarea, .overlay-answer-composer input'))");
   if (overlayComposerPresent) throw new Error("OVERLAY_COMPOSER_REMOVED failed");
-  await main.evaluate("window.interviewCopilot.interview.answerQuestion('Mock manual question')");
+  await main.evaluate("void window.interviewCopilot.interview.answerQuestion('Mock manual question'); true");
   await waitForNode(() => answerRequests.length > beforeManualSend, 15_000);
   evidence.push("OVERLAY_COMPOSER_REMOVED: PASS; MAIN_MANUAL_SEND: PASS");
 

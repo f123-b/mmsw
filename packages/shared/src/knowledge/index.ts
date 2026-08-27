@@ -12,6 +12,7 @@ export * from "./project-taxonomy";
 export * from "./project-actions";
 export * from "./project-fact-eligibility";
 export * from "./project-view";
+export * from "./project-library-view-model";
 export * from "./project-completeness";
 export * from "./project-document-parser";
 export * from "./project-timeline";
