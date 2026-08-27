@@ -76,6 +76,8 @@ archiveEntries.slice(0, 20).forEach((entry, index) => console.log(`${index + 1}.
 const entriesByNormalizedPath = new Map(archiveEntries.map((entry) => [normalizeArchiveEntry(entry), entry]));
 const forbiddenModelEntries = archiveEntries.filter((entry) => /(?:^|[\\/_.-])q8(?:[_.-]|$)/i.test(normalizeArchiveEntry(entry)));
 if (forbiddenModelEntries.length > 0) throw new Error(`Forbidden q8 model entries found in app.asar: ${forbiddenModelEntries.join(", ")}`);
+const forbiddenArchiveEntries = archiveEntries.filter((entry) => /(?:^|[\\/])(?:history|secrets\.json|[^\\/]+\.(?:db|db-shm|db-wal|sqlite|sqlite-shm|sqlite-wal|log))$/i.test(normalizeArchiveEntry(entry)));
+if (forbiddenArchiveEntries.length > 0) throw new Error(`Forbidden user data entries found in app.asar: ${forbiddenArchiveEntries.join(", ")}`);
 for (const entry of archiveRequired) {
   const normalizedEntry = normalizeArchiveEntry(entry);
   if (!entriesByNormalizedPath.has(normalizedEntry)) throw new Error(`Missing packaged app.asar entry: ${entry}`);
@@ -105,9 +107,14 @@ const packagedQ8Files = listFiles(join(unpackedDirectory, "resources", "local-as
   .filter((path) => /(?:^|[\\/_.-])q8(?:[_.-]|$)/i.test(path));
 if (packagedQ8Files.length > 0) throw new Error(`Forbidden q8 model files found in packaged resources: ${packagedQ8Files.join(", ")}`);
 
+const forbiddenSensitiveFiles = listFiles(join(unpackedDirectory, "resources"))
+  .filter((path) => /(?:^|[\\/])(?:history|secrets\.json|[^\\/]+\.(?:db|db-shm|db-wal|sqlite|sqlite-shm|sqlite-wal|log))$/i.test(path));
+if (forbiddenSensitiveFiles.length > 0) throw new Error(`Forbidden user data files found in packaged resources: ${forbiddenSensitiveFiles.join(", ")}`);
+
 console.log(`Verified app.asar entries: ${archiveRequired.join(", ")}`);
 console.log(`Verified packaged runtime dependencies: ${unpackedRequired.join(", ")}`);
 console.log(`VAD_MODEL_PRESENT ${vadModel}`);
 console.log(`Verified question classifier resources: ${classifierFiles.join(", ")}`);
 console.log(`QUESTION_CLASSIFIER_ARTIFACT ${classifierManifest.artifactId ?? "unknown"}@${classifierManifest.artifactVersion ?? "unknown"}`);
 console.log("Verified packaged resources do not contain q8 model files");
+console.log("Verified packaged resources do not contain user databases, ASR history, logs, or secrets files");
