@@ -1,3 +1,5 @@
+import type { ProjectUnderstanding } from "../project-comprehension/types";
+
 export type ProjectMemorySourceKind = "resume" | "resume-section" | "project-document" | "repository" | "readme" | "interview" | "manual" | "user-fact";
 
 export type ProjectSourceType = "document" | "repository" | "resume_section" | "user_fact" | "interview_note";
@@ -217,6 +219,8 @@ export interface ProjectMemorySnapshot {
   problems: ProjectProblem[];
   interviewQuestions: ProjectInterviewQuestion[];
   facts?: ProjectFact[];
+  understanding?: ProjectUnderstanding;
+  understandings?: ProjectUnderstanding[];
 }
 
 export interface ProjectMemoryAnalysisInput {

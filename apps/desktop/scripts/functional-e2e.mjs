@@ -342,9 +342,22 @@ try {
     if (!profile?.id || !base?.id) throw new Error('project seed prerequisites missing');
     if (!profile.knowledgeBaseIds.includes(base.id)) await window.interviewCopilot.profiles.save({ ...profile, knowledgeBaseIds: [...profile.knowledgeBaseIds, base.id] });
     const project = await window.interviewCopilot.projects.create({ profileId: profile.id, name: 'E2E FOC 电机控制项目' });
+    const repoArchive = [
+      '文件：src/main.c\\n// FOC motor control entry point\\nint main(void) { pwm_init(); motor_task(); }',
+      '文件：src/control.c\\n// current loop: Clarke, Park, current PI, SVPWM\\n// PWM control frequency = 20 kHz\\n// current loop frequency = 20 kHz\\n// speed loop frequency = 1 kHz',
+      '文件：src/adc.c\\n// ADC peripheral clock = 80 MHz\\n// ADC control trigger frequency = 20 kHz\\n// DMA writes current buffer',
+      '文件：src/encoder.c\\n// ABZ encoder provides electrical angle\\n// velocity estimator converts sparse pulses into speed',
+      '文件：src/can.c\\n// CAN communication receives commands and publishes status',
+      '文件：include/config.h\\n// production control configuration',
+      '文件：README.md\\nFOC motor control for a robot, using center-aligned PWM and a stable ADC sampling window.',
+      '文件：docs/ARCHITECTURE.md\\nDecision: choose center-aligned PWM because it provides a stable ADC current sampling window.',
+      '文件：docs/DEBUG.md\\nSparse ABZ pulses cause velocity quantization and PI jitter; delta + frame rebase improves stability.',
+      '文件：tests/control.test.c\\n// passed: current loop error < 2%\\n// benchmark result: latency 20 us'
+    ].join('\\n\\n---\\n\\n');
+    const encodedRepoArchive = btoa(unescape(encodeURIComponent(repoArchive)));
     const materials = [
       { filename: 'PROJECT_OVERVIEW.md', text: ['# 项目说明', '项目名称：E2E FOC 电机控制项目', '项目背景：在 STM32F405 上实现单轴 FOC 电机控制。', '个人职责：负责电流环、ADC 与 PWM 同步实现。', '技术栈：STM32F405、FreeRTOS、FOC、CAN、DMA。'].join('\\n') },
-      { filename: 'PROJECT_ARCHITECTURE.md', text: ['# 系统架构', '控制系统由采样、控制算法和通信模块组成。', '采用 PWM 中心对齐，用于稳定 ADC 采样时刻。', '技术决策：选择：PWM 中心对齐；原因：方便在稳定采样窗口采 ADC。', '核心模块：电流环、速度环、保护状态机。'].join('\\n') },
+      { filename: 'PROJECT_ARCHITECTURE.md', text: ['# 系统架构', '控制系统由采样、控制算法和通信模块组成。', '采用 PWM 中心对齐，用于稳定 ADC 采样时刻。', '技术决策：选择：PWM 中心对齐；原因：方便在稳定采样窗口采 ADC。', '核心模块：电流环、速度环、保护状态机。', 'PROJECT_REPO_ARCHIVE_BASE64:' + encodedRepoArchive].join('\\n') },
       { filename: 'PROJECT_TECHNICAL_DETAILS.md', text: ['# 技术设计', 'PWM频率：20kHz', '电流环频率：20kHz', '速度环频率：1kHz', 'CAN 波特率：1Mbps'].join('\\n') },
       { filename: 'PROJECT_DEBUG.md', text: ['# 问题排查', '问题：低速抖动。', '现象：ABZ 低速脉冲稀疏。', '原因：低速量化明显。', '解决：增量 delta + frame rebase。', '结果：速度反馈结构修复。'].join('\\n') },
       { filename: 'PROJECT_RESULTS.md', text: ['# 测试结果', '测试结果：低速运行稳定。', '性能指标：稳态误差 1%。', '限制：尚未完成正式 benchmark。'].join('\\n') }
@@ -363,9 +376,10 @@ try {
     const stats = await window.interviewCopilot.projectMemory.stats(profile.id, project.id);
     const conflictGroups = await window.interviewCopilot.projectMemory.conflictGroups(project.id);
     const projectFacts = currentMemory.facts?.filter((fact) => fact.projectId === project.id) ?? memory.facts?.filter((fact) => fact.projectId === project.id) ?? [];
-    return { document, batchReport, roles: batchReport.imported.map((item) => item.sourceRole), project: currentMemory.projects.find((item) => item.id === project.id), factCount: projectFacts.length, parameterFacts: projectFacts.filter((fact) => fact.type === 'parameter').map((fact) => ({ canonicalKey: fact.canonicalKey, value: fact.value, relation: fact.experienceRelation })), decisionFacts: projectFacts.filter((fact) => fact.type === 'technical_decision' || fact.type === 'decision').length, problemFacts: projectFacts.filter((fact) => ['challenge', 'cause', 'solution'].includes(fact.type)).length, stats, conflictGroups: conflictGroups.map((group) => ({ id: group.id, canonicalKey: group.canonicalKey, factIds: group.factIds })) };
+    const understanding = currentMemory.understandings?.find((item) => item.projectId === project.id) ?? (currentMemory.understanding?.projectId === project.id ? currentMemory.understanding : undefined);
+    return { document, batchReport, roles: batchReport.imported.map((item) => item.sourceRole), project: currentMemory.projects.find((item) => item.id === project.id), factCount: projectFacts.length, parameterFacts: projectFacts.filter((fact) => fact.type === 'parameter').map((fact) => ({ canonicalKey: fact.canonicalKey, value: fact.value, relation: fact.experienceRelation })), decisionFacts: projectFacts.filter((fact) => fact.type === 'technical_decision' || fact.type === 'decision').length, problemFacts: projectFacts.filter((fact) => ['challenge', 'cause', 'solution'].includes(fact.type)).length, stats, conflictGroups: conflictGroups.map((group) => ({ id: group.id, canonicalKey: group.canonicalKey, factIds: group.factIds })), understanding: understanding ? { status: understanding.status, summary: understanding.summary, components: understanding.architecture.components.map((item) => item.name), relationships: understanding.architecture.relationships.length, flows: [...understanding.runtimeFlows, ...understanding.dataFlows, ...understanding.controlFlows].map((item) => item.name), parameters: understanding.parameters.map((item) => item.semanticKey), unknowns: understanding.unknowns.length, trace: understanding.trace } : undefined };
   })()`);
-  if (projectSeed?.document?.documentType !== "project" || projectSeed?.batchReport?.summary?.assigned !== 5 || projectSeed.batchReport.rebuild.status !== "completed" || JSON.stringify(projectSeed.roles) !== JSON.stringify(["overview", "architecture", "architecture", "debug", "test"]) || !projectSeed?.project?.id || projectSeed.project.ownershipMode !== "personal" || projectSeed.factCount < 1 || !projectSeed.parameterFacts?.some((fact) => fact.canonicalKey === "control.current_loop.frequency" && fact.value?.value === 20_000 && fact.value?.unit === "Hz" && fact.relation === "configured") || projectSeed.parameterFacts?.filter((fact) => fact.canonicalKey === "control.current_loop.frequency" || fact.canonicalKey === "control.speed_loop.frequency" || fact.canonicalKey === "sampling.pwm.frequency").length !== 3 || projectSeed.decisionFacts < 1 || projectSeed.problemFacts < 3 || projectSeed.stats?.projectFamiliarityScore <= 0 || projectSeed.stats?.conflictGroups !== 1 || projectSeed.conflictGroups?.length !== 1 || projectSeed.conflictGroups[0]?.canonicalKey !== "mcu.main") throw new Error(`Project Library V5.1 semantic seed failed: ${JSON.stringify(projectSeed)}`);
+  if (projectSeed?.document?.documentType !== "project" || projectSeed?.batchReport?.summary?.assigned !== 5 || projectSeed.batchReport.rebuild.status !== "completed" || JSON.stringify(projectSeed.roles) !== JSON.stringify(["overview", "architecture", "architecture", "debug", "test"]) || !projectSeed?.project?.id || projectSeed.project.ownershipMode !== "personal" || projectSeed.factCount < 1 || !projectSeed.parameterFacts?.some((fact) => fact.canonicalKey === "control.current_loop.frequency" && fact.value?.value === 20_000 && fact.value?.unit === "Hz" && fact.relation === "configured") || projectSeed.parameterFacts?.filter((fact) => fact.canonicalKey === "control.current_loop.frequency" || fact.canonicalKey === "control.speed_loop.frequency" || fact.canonicalKey === "sampling.pwm.frequency").length !== 3 || projectSeed.decisionFacts < 1 || projectSeed.problemFacts < 3 || projectSeed.stats?.projectFamiliarityScore <= 0 || projectSeed.stats?.conflictGroups !== 1 || projectSeed.conflictGroups?.length !== 1 || projectSeed.conflictGroups[0]?.canonicalKey !== "mcu.main" || projectSeed.understanding?.status !== "completed" || projectSeed.understanding.summary.length < 40 || projectSeed.understanding.summary.includes("PROJECT_") || !projectSeed.understanding.components.includes("Motor Control") || !projectSeed.understanding.components.includes("Current Sampling") || projectSeed.understanding.relationships < 1 || projectSeed.understanding.flows.length < 1 || !projectSeed.understanding.parameters.includes("control.current_loop.frequency") || projectSeed.understanding.trace.toolCalls < 1) throw new Error(`Project Comprehension V6 semantic seed failed: ${JSON.stringify(projectSeed)}`);
   await main.evaluate("location.reload()");
   await waitFor(() => document.documentElement?.dataset.appReady === "true" && document.querySelectorAll("button").length > 0);
   await clickText("项目库");
@@ -428,7 +442,7 @@ try {
   if (sourceUi?.count !== 5 || !sourceUi.hasOverview || sourceUi.hasArchitecture !== 2 || !sourceUi.hasDebug || !sourceUi.hasTest || !sourceUi.hasExtractedCount) throw new Error(`PROJECT_SOURCE_SUMMARY_UI failed: ${JSON.stringify(sourceUi)}`);
   await clickText("概览");
   await waitFor(() => Boolean(document.querySelector(".project-agent-composer textarea")));
-  evidence.push("Project Library V5 UI: PASS; PROJECT_CHROME: PASS; OVERVIEW_SCREEN: PASS; SINGLE_FAMILIARITY: PASS; PARAMETER_TABLE: PASS; PARAMETER_DRAWER: PASS; PROBLEM_LIST_DETAIL: PASS; ADVANCED_DATA: PASS; SINGLE_CONFLICT_GROUP_ROW: PASS; PROJECT_LIBRARY_V5_SCREENSHOTS: PASS");
+  evidence.push("Project Library V5 UI: PASS; PROJECT_CHROME: PASS; OVERVIEW_SCREEN: PASS; SINGLE_FAMILIARITY: PASS; PARAMETER_TABLE: PASS; PARAMETER_DRAWER: PASS; PROBLEM_LIST_DETAIL: PASS; ADVANCED_DATA: PASS; SINGLE_CONFLICT_GROUP_ROW: PASS; PROJECT_LIBRARY_V5_SCREENSHOTS: PASS; PROJECT_COMPREHENSION_V6_MODEL: PASS");
   await fillSelector(".project-agent-composer textarea", "检查当前项目资料中的冲突、缺失和不确定项。");
   await clickSelector(".project-agent-composer button");
   await waitFor(() => document.body.innerText.includes("项目 Agent E2E 正常"), 15_000);
@@ -522,9 +536,9 @@ try {
   evidence.push("Remote Transcript: PASS; Question Confirmed: PASS; AUTO_3_QUESTIONS: PASS; AUTO Answer: PASS; Overlay: PASS");
 
   const projectQuestionAssertions = [
-    { question: "你的电流环频率多少？", markers: ["control.current_loop.frequency", "20 kHz"], label: "EXACT_PARAMETER_RETRIEVAL" },
-    { question: "为什么要 PWM 中心对齐？", markers: ["TECHNICAL_DECISIONS", "PWM 中心对齐"], label: "TECHNICAL_DECISION_RETRIEVAL" },
-    { question: "低速抖动怎么查？", markers: ["PROBLEM_CHAINS", "低速抖动", "采样窗口和参数问题"], label: "PROBLEM_CHAIN_RETRIEVAL" }
+    { question: "你的电流环频率多少？", markers: ["PROJECT_UNDERSTANDING_ROUTE=parameter", "control.current_loop.frequency", "20 kHz"], label: "EXACT_PARAMETER_RETRIEVAL" },
+    { question: "为什么要 PWM 中心对齐？", markers: ["PROJECT_UNDERSTANDING_ROUTE=decision", "TECHNICAL_DECISIONS", "PWM 中心对齐"], label: "TECHNICAL_DECISION_RETRIEVAL" },
+    { question: "低速抖动怎么查？", markers: ["PROJECT_UNDERSTANDING_ROUTE=problem", "PROBLEM_CHAINS", "低速抖动", "采样窗口和参数问题"], label: "PROBLEM_CHAIN_RETRIEVAL" }
   ];
   // Let the three scheduled interview answers drain before injecting the
   // explicit project questions. This keeps the assertion about project

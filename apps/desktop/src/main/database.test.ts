@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository } from "./database";
+import type { ProjectUnderstanding } from "@interview-copilot/shared";
 
 describe("SQLite persistence", () => {
   it("persists profile CRUD, clone and active selection", async () => {
@@ -205,7 +206,7 @@ describe("SQLite persistence", () => {
   it("applies migration 23 ownership and technical memory semantics", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(23);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(24);
       expect(database.all<{ name: string }>("PRAGMA table_info(projects)").map((row) => row.name)).toEqual(expect.arrayContaining(["ownership_mode", "ownership_note"]));
       expect(database.all<{ name: string }>("PRAGMA table_info(project_facts)").map((row) => row.name)).toEqual(expect.arrayContaining(["experience_relation", "value_json"]));
       new SqliteProfileRepository(database).save({ id: "profile-v4", name: "V4", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
@@ -274,7 +275,7 @@ describe("SQLite persistence", () => {
       first.close();
       const second = await SqliteDatabase.open(filePath);
       try {
-        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(23);
+        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(24);
         const repaired = new SqliteProjectMemoryRepository(second);
         repaired.repairProjectTechnicalSemantics("project-migration");
         expect(repaired.listFacts(profile.id, "project-migration", { includeStale: true, includeRejected: true })).toHaveLength(2);
@@ -297,6 +298,23 @@ describe("SQLite persistence", () => {
       const fact = memory.getFact("fact-rich");
       expect(fact).toMatchObject({ evidenceLevel: "confirmed-document", scope: "architecture", sectionPath: ["架构", "主控"], subtype: "mcu", conflictStatus: "conflicting", conflictGroupId: "group-mcu", ownership: "project", stale: false });
       expect(fact?.evidence?.map((item) => item.relation)).toEqual(["support", "refute"]);
+    } finally { database.close(); }
+  });
+
+  it("stores and reuses project understanding snapshots by input hash", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const profile = profiles.save({ id: "profile-understanding", name: "理解快照", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
+      const memory = new SqliteProjectMemoryRepository(database);
+      const project = memory.createProject(profile.id, "FOC", 2);
+      const understanding = { projectId: project.id, schemaVersion: 1, status: "completed", identity: { name: "FOC" }, summary: "这是一个可缓存的项目理解摘要，用于验证快照版本和输入复用。", architecture: { components: [], relationships: [] }, runtimeFlows: [], dataFlows: [], controlFlows: [], technologies: [], parameters: [], decisions: [], problems: [], interfaces: [], protections: [], tests: [], results: [], limitations: [], unknowns: [], evidenceRefs: [], quality: { architectureCoverage: 0, flowCoverage: 0, parameterCoverage: 0, decisionCoverage: 0, problemCoverage: 0, groundingCoverage: 0, sufficient: false }, trace: { toolCalls: 1, filesRead: 1, modelTurns: 0, elapsedMs: 1, stages: ["completed"] } } as ProjectUnderstanding;
+      const saved = memory.saveUnderstandingSnapshot({ projectId: project.id, inputHash: "hash-a", understanding, now: 10 });
+      expect(saved).toMatchObject({ projectId: project.id, inputHash: "hash-a", version: 1, status: "completed" });
+      expect(memory.getUnderstandingSnapshot(project.id, "hash-a")?.understanding.summary).toContain("可缓存");
+      expect(memory.getSnapshot(profile.id).understandings?.[0]?.projectId).toBe(project.id);
+      expect(memory.getUnderstandingSnapshot(project.id, "different-hash")).toBeUndefined();
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(24);
     } finally { database.close(); }
   });
 

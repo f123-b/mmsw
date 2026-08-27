@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "benchmark:project-analysis": "vitest run src/knowledge/project-analysis-benchmark.test.ts --reporter=verbose",
+    "benchmark:project-comprehension": "vitest run src/project-comprehension/project-comprehension-benchmark.test.ts --reporter=verbose",
     "benchmark:question": "vitest run src/question-benchmark.test.ts --reporter=verbose",
     "benchmark:real-interview": "vitest run src/real-interview-benchmark.test.ts --reporter=verbose"
   },

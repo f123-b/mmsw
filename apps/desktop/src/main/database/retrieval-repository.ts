@@ -5,7 +5,7 @@ function retrievalId(prefix: string, now: number): string {
 }
 
 export interface RetrievalHitInput {
-  resultType: "question" | "project-fact" | "document-chunk" | "job-requirement";
+  resultType: "question" | "project-fact" | "project-understanding" | "document-chunk" | "job-requirement";
   resultId: string;
   score: number;
   verified?: boolean;

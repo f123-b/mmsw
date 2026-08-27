@@ -29,7 +29,8 @@ describe("ProjectMemoryService project isolation", () => {
       const base = knowledge.createKnowledgeBase("批量资料");
       const profile = profiles.save({ name: "批量导入", language: "zh-CN", skills: [], knowledgeBaseIds: [base.id] });
       const project = memories.createProject(profile.id, "FOC 批量项目");
-      const service = new ProjectMemoryService(profiles, knowledge, new SqliteInterviewHistoryRepository(database), memories, undefined, undefined, analyses);
+      const traces: Array<{ event: string; fields: Record<string, unknown> }> = [];
+      const service = new ProjectMemoryService(profiles, knowledge, new SqliteInterviewHistoryRepository(database), memories, undefined, undefined, analyses, undefined, (event, fields) => traces.push({ event, fields }));
       const text = (value: string): Uint8Array => new TextEncoder().encode(value);
       const report = await service.importProjectMaterials({ profileId: profile.id, projectId: project.id, knowledgeBaseId: base.id, files: [
         { filename: "project-overview.md", mimeType: "text/markdown", bytes: text("# 项目说明\n项目背景：实现单轴 FOC 电机控制。\n技术栈：STM32F405、FreeRTOS。") },
@@ -44,6 +45,9 @@ describe("ProjectMemoryService project isolation", () => {
       expect(memories.listProjectSources(project.id).map((source) => source.sourceRole)).toEqual(expect.arrayContaining(["overview", "architecture", "debug", "test"]));
       expect(analyses.list(profile.id).filter((run) => run.projectId === project.id)).toHaveLength(1);
       expect(memories.listFacts(profile.id, project.id).length).toBeGreaterThan(0);
+      expect(memories.getUnderstandingSnapshot(project.id)?.understanding.status, JSON.stringify(traces)).toBe("completed");
+      expect(memories.getUnderstandingSnapshot(project.id)?.understanding.architecture.components.map((item) => item.name)).toEqual(expect.arrayContaining(["Motor Control", "Current Sampling"]));
+      expect(memories.getSnapshot(profile.id).understandings?.find((item) => item.projectId === project.id)?.summary).toBeTruthy();
     } finally { database.close(); }
   });
 

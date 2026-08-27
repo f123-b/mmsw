@@ -9,7 +9,7 @@ import { OverlayManager, type OverlayMode } from "./overlay-manager";
 import { ScreenshotManager } from "./screenshot-manager";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planChatContext, PreparationAgentRuntime, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeInterview, AnswerAgent, AgentToolRegistry, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
@@ -24,7 +24,7 @@ import { ShutdownController } from "./shutdown-controller";
 import { MiddleMouseShortcutManager, middleMouseHelperCandidates, shouldHandleMiddleMouseShortcut } from "./middle-mouse-shortcut";
 import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-service-manager";
 import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
-import { createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
+import { createProjectComprehensionModel, createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
 import { deriveProjectProblemChains, deriveProjectTechnicalDecisions, formatProjectFactValue, isFactEligible, isFactReviewRequired, normalizeProjectOwnershipMode, resolveProjectAnswerPerspective } from "@interview-copilot/shared";
 import type { ChatAction, ChatCancelReason, ChatResponse } from "@interview-copilot/shared";
@@ -1746,7 +1746,8 @@ if (hasSingleInstanceLock) {
         const result = await projectMemoryRepository.embedFacts(profileId, (text) => embeddingProvider.embed(text), { projectId, model: settings.model, version: "project-facts-v1", concurrency: 4 });
         if (result.failed > 0) appLogger?.warn("PROJECT_MEMORY_EMBEDDING_PARTIAL", { profileId, ...result });
       },
-      (event, fields) => appLogger?.info(event, fields)
+      (event, fields) => appLogger?.info(event, fields),
+      { generate: (input) => { const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings; return createProjectComprehensionModel(answerProvider, { ...settings, model: taskModel(settings, "projectAnalyzerModel", "normalModel") }).generate(input); } }
     );
   }
   const resumeChunkCache = new Map<string, { source: string; chunks: ReturnType<typeof chunkText> }>();
@@ -1785,6 +1786,11 @@ if (hasSingleInstanceLock) {
     const targetProjectId = interviewContext?.projectId ?? detectedProjectId;
     const targetProject = targetProjectId ? projectSnapshot.projects.find((project) => project.id === targetProjectId) : undefined;
     const useProjectContext = Boolean(interviewContext?.projectId) || knowledgeRoute.useProjectMemory;
+    const targetUnderstanding = targetProjectId
+      ? projectSnapshot.understandings?.find((item) => item.projectId === targetProjectId) ?? (projectSnapshot.understanding?.projectId === targetProjectId ? projectSnapshot.understanding : undefined)
+      : projectSnapshot.understanding;
+    const understandingRetrieval = new ProjectComprehensionRetriever().search(normalizedQuestion, targetUnderstanding, 5);
+    const understandingContext = understandingRetrieval.hits.map((hit) => `项目理解（${hit.kind}，${hit.title}，证据 ${hit.evidenceRefs.join("、") || "unknown"}）：${hit.content}`).join("\n");
     const embeddingSettings = providerConfigStore?.get("embedding");
     const embeddingKey = embeddingSettings?.apiKey && embeddingSettings.model
       ? `${embeddingSettings.baseUrl}|${embeddingSettings.model}|${normalizedQuestion.toLowerCase()}`
@@ -1890,6 +1896,7 @@ if (hasSingleInstanceLock) {
       route: knowledgeRoute.reason,
       metadata: retrievalDiagnostics,
       hits: [
+        ...understandingRetrieval.hits.map((hit) => ({ resultType: "project-understanding" as const, resultId: hit.id, score: Math.min(1, hit.score / 12), verified: hit.evidenceRefs.length > 0, preview: `${hit.title}: ${hit.content}`, metadata: { projectId: targetProjectId ?? null, kind: hit.kind, route: understandingRetrieval.route, evidenceRefs: hit.evidenceRefs } })),
         ...(questionBankMatch ? [{ resultType: "question" as const, resultId: questionBankMatch.question.id, score: questionBankMatch.score, verified: questionBankMatch.question.verified, preview: questionBankMatch.question.canonicalText, metadata: { scope: questionBankMatch.question.scope, type: questionBankMatch.question.type } }] : []),
         ...factMatches.map((hit) => ({ resultType: "project-fact" as const, resultId: hit.fact.id, score: hit.finalScore, verified: hit.fact.verified, preview: `${hit.fact.title}: ${hit.fact.content}`, metadata: { projectId: hit.fact.projectId, type: hit.fact.type, evidenceLevel: hit.fact.evidenceLevel ?? "pending", ownership: hit.fact.ownership ?? "unknown", eligible: isFactEligible(hit.fact), stale: Boolean(hit.fact.stale), conflictStatus: hit.fact.conflictStatus ?? "confirmed", lexicalScore: hit.lexicalScore, vectorScore: hit.vectorScore, typeScore: hit.typeScore, projectScore: hit.projectScore, verifiedBoost: hit.verifiedBoost, reason: hit.reason } })),
         ...jobMatches.map((hit) => ({ resultType: "job-requirement" as const, resultId: hit.requirement.id, score: hit.score, verified: hit.requirement.verified, preview: hit.requirement.requirement, metadata: { category: hit.requirement.category, importance: hit.requirement.importance } })),
@@ -1908,6 +1915,7 @@ if (hasSingleInstanceLock) {
       preparedAnswer: preparedCard && questionBankMatch ? { content: preparedCard.content, score: questionBankMatch.score, verified: preparedCard.verified, source: "question-bank" } : undefined,
       retrievedKnowledge: [
         ...(targetProject ? [`项目回答视角政策：${resolveProjectAnswerPerspective(targetProject, relevantFactMatches[0]?.fact ?? { type: "background", title: "项目", content: "", id: "", projectId: targetProject.id, confidence: 0, verified: false, sourceIds: [] }).instruction}`] : []),
+        ...(understandingContext ? [`PROJECT_UNDERSTANDING_ROUTE=${understandingRetrieval.route}\n${understandingContext}`] : []),
         ...structuredProjectRetrieval,
         ...(preparedAnswer ? [preparedAnswer] : []),
         ...jobContext,

@@ -13,6 +13,7 @@ export * from "./project-actions";
 export * from "./project-fact-eligibility";
 export * from "./project-view";
 export * from "./project-library-view-model";
+export * from "../project-comprehension";
 export * from "./project-source-role";
 export * from "./project-source-summary";
 export * from "./project-material-import";

@@ -64,7 +64,9 @@ import {
   inferExperienceRelation,
   normalizeProjectFactValue,
   normalizeProjectOwnershipMode,
-  type ProjectOwnershipMode
+  type ProjectOwnershipMode,
+  type ProjectUnderstanding,
+  type ProjectUnderstandingSnapshotRecord
 } from "@interview-copilot/shared";
 import type { ChatCancelReason, ChatMessageStatus, ChatResponse, ChatStreamTelemetry } from "@interview-copilot/shared";
 
@@ -643,6 +645,21 @@ export class SqliteDatabase {
         WHERE experience_relation = 'project';
         CREATE INDEX IF NOT EXISTS project_facts_runtime_v4_idx ON project_facts(project_id, status, stale, fact_type, canonical_key);
       `],
+      [24, `
+        CREATE TABLE IF NOT EXISTS project_understanding_snapshots (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          version INTEGER NOT NULL,
+          input_hash TEXT NOT NULL,
+          model TEXT,
+          status TEXT NOT NULL,
+          understanding_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS project_understanding_project_idx ON project_understanding_snapshots(project_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS project_understanding_input_idx ON project_understanding_snapshots(project_id, input_hash, updated_at DESC);
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -1052,6 +1069,33 @@ export class SqliteProjectMemoryRepository {
     return this.getProject(projectId) as { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[]; ownershipMode: ProjectOwnershipMode; ownershipNote?: string };
   }
 
+  getUnderstandingSnapshot(projectId: string, inputHash?: string, completedOnly = true): ProjectUnderstandingSnapshotRecord | undefined {
+    const conditions = ["project_id = ?"];
+    const params: Array<string | number> = [projectId];
+    if (inputHash) { conditions.push("input_hash = ?"); params.push(inputHash); }
+    if (completedOnly) conditions.push("status = 'completed'");
+    const row = this.database.first<Record<string, unknown>>(`SELECT id, project_id AS projectId, version, input_hash AS inputHash, model, status, understanding_json AS understandingJson, created_at AS createdAt, updated_at AS updatedAt FROM project_understanding_snapshots WHERE ${conditions.join(" AND ")} ORDER BY version DESC, updated_at DESC LIMIT 1`, params);
+    const understanding = row ? safeJson<ProjectUnderstanding>(row.understandingJson) : undefined;
+    return row && understanding ? { id: String(row.id), projectId: String(row.projectId), version: Number(row.version), inputHash: String(row.inputHash), ...(row.model ? { model: String(row.model) } : {}), status: String(row.status) as ProjectUnderstandingSnapshotRecord["status"], understanding, createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) } : undefined;
+  }
+
+  listUnderstandingSnapshots(projectId: string, limit = 20): ProjectUnderstandingSnapshotRecord[] {
+    return this.database.all<Record<string, unknown>>("SELECT id, project_id AS projectId, version, input_hash AS inputHash, model, status, understanding_json AS understandingJson, created_at AS createdAt, updated_at AS updatedAt FROM project_understanding_snapshots WHERE project_id = ? ORDER BY version DESC, updated_at DESC LIMIT ?", [projectId, Math.max(1, Math.min(100, limit))]).flatMap((row) => {
+      const understanding = safeJson<ProjectUnderstanding>(row.understandingJson);
+      return understanding ? [{ id: String(row.id), projectId: String(row.projectId), version: Number(row.version), inputHash: String(row.inputHash), ...(row.model ? { model: String(row.model) } : {}), status: String(row.status) as ProjectUnderstandingSnapshotRecord["status"], understanding, createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) }] : [];
+    });
+  }
+
+  saveUnderstandingSnapshot(input: { projectId: string; inputHash: string; understanding: ProjectUnderstanding; model?: string; status?: ProjectUnderstandingSnapshotRecord["status"]; version?: number; id?: string; now?: number }): ProjectUnderstandingSnapshotRecord {
+    const now = input.now ?? Date.now();
+    const snapshotId = input.id ?? `project-understanding-${input.projectId}-${input.inputHash.slice(0, 24)}`;
+    const existing = this.getUnderstandingSnapshot(input.projectId, input.inputHash, false);
+    const version = input.version ?? existing?.version ?? Number(this.database.first<{ version: number }>("SELECT COALESCE(MAX(version), 0) AS version FROM project_understanding_snapshots WHERE project_id = ?", [input.projectId])?.version ?? 0) + 1;
+    this.database.run("INSERT INTO project_understanding_snapshots(id, project_id, version, input_hash, model, status, understanding_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET version=excluded.version, input_hash=excluded.input_hash, model=excluded.model, status=excluded.status, understanding_json=excluded.understanding_json, updated_at=excluded.updated_at", [snapshotId, input.projectId, version, input.inputHash, input.model ?? null, input.status ?? input.understanding.status, JSON.stringify({ ...input.understanding, version }), existing?.createdAt ?? now, now]);
+    this.database.flushNow();
+    return this.getUnderstandingSnapshot(input.projectId, input.inputHash, false) as ProjectUnderstandingSnapshotRecord;
+  }
+
   getSnapshot(profileId: string): ProjectMemorySnapshot {
     const projects = this.database.all<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, description, role, hardware_json AS hardwareJson, software_json AS softwareJson, technology_stack_json AS technologyStackJson, time, source_ids_json AS sourceIdsJson, confidence, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects WHERE profile_id = ? ORDER BY updated_at DESC", [profileId]).filter((row) => {
       const state = this.database.first<{ status: string; lastSuccessfulAnalysisId: string | null }>("SELECT status, last_successful_analysis_id AS lastSuccessfulAnalysisId FROM project_analysis_state WHERE project_id = ?", [String(row.id)]);
@@ -1060,14 +1104,18 @@ export class SqliteProjectMemoryRepository {
       id: String(row.id), profileId: String(row.profileId), name: String(row.name), description: String(row.description ?? ""), role: String(row.role ?? ""), hardware: jsonArray(row.hardwareJson), software: jsonArray(row.softwareJson), technologyStack: jsonArray(row.technologyStackJson), ...(row.time ? { time: String(row.time) } : {}), sourceIds: jsonArray(row.sourceIdsJson), confidence: Number(row.confidence ?? 1), ownershipMode: normalizeProjectOwnershipMode(row.ownershipMode), ...(row.ownershipNote ? { ownershipNote: String(row.ownershipNote) } : {})
     }));
     const projectIds = projects.map((project) => project.id);
-    if (projectIds.length === 0) return { projects, modules: [], technicalPoints: [], problems: [], interviewQuestions: [], facts: [] };
+    if (projectIds.length === 0) return { projects, modules: [], technicalPoints: [], problems: [], interviewQuestions: [], facts: [], understandings: [] };
     const placeholders = projectIds.map(() => "?").join(",");
     const modules = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, module_name AS moduleName, description, file_path AS filePath, source_ids_json AS sourceIdsJson FROM project_modules WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), moduleName: String(row.moduleName), description: String(row.description), ...(row.filePath ? { filePath: String(row.filePath) } : {}), sourceIds: jsonArray(row.sourceIdsJson) }));
     const technicalPoints = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, topic, content, importance, source_ids_json AS sourceIdsJson FROM technical_points WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), topic: String(row.topic), content: String(row.content), importance: String(row.importance) as ProjectTechnicalPoint["importance"], sourceIds: jsonArray(row.sourceIdsJson) }));
     const problems = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, problem, cause, solution, result, source_ids_json AS sourceIdsJson FROM project_problems WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), problem: String(row.problem), cause: String(row.cause), solution: String(row.solution), result: String(row.result), sourceIds: jsonArray(row.sourceIdsJson) }));
     const interviewQuestions = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, question, answer_points_json AS answerPointsJson, keywords_json AS keywordsJson, source_ids_json AS sourceIdsJson FROM interview_questions WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), question: String(row.question), answerPoints: jsonArray(row.answerPointsJson), keywords: jsonArray(row.keywordsJson), sourceIds: jsonArray(row.sourceIdsJson), factIds: this.database.all<{ factId: string }>("SELECT fact_id AS factId FROM question_bank_question_facts WHERE question_id = ?", [String(row.id)]).map((item) => item.factId), stale: Number(this.database.first<{ stale: number }>("SELECT stale FROM question_bank_questions WHERE id = ?", [String(row.id)])?.stale ?? 0) === 1 }));
     const facts = this.listFacts(profileId);
-    return { projects: projects.map((project) => deriveProjectView(project, facts)), modules, technicalPoints, problems, interviewQuestions, facts };
+    const understandings = projectIds.flatMap((projectId) => {
+      const record = this.getUnderstandingSnapshot(projectId);
+      return record ? [record.understanding] : [];
+    });
+    return { projects: projects.map((project) => deriveProjectView(project, facts)), modules, technicalPoints, problems, interviewQuestions, facts, understandings, ...(understandings.length === 1 ? { understanding: understandings[0] } : {}) };
   }
 
   replaceSnapshot(profileId: string, snapshot: ProjectMemorySnapshot, now = Date.now(), onlyProjectId?: string): ProjectMemorySnapshot {

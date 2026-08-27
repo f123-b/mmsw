@@ -1,5 +1,5 @@
-import type { AnswerProvider, ProjectMemoryAnalysisInput, ProjectMemoryModel, ProjectMemorySource, ProjectMemorySnapshot, ProjectSourceRole, ProjectSourceAssignmentMethod, ProjectMaterialImportFile, ProjectMaterialImportReport } from "@interview-copilot/shared";
-import { analyzeCodeFile, chunkText, extractResumeProjectSections, inferProjectSourceRole, languageForFilename, parseMarkdownProjectDocument, ProjectAnalyzerAgent as ProjectAnalyzerAgentClass, resolveProjectAssignment } from "@interview-copilot/shared";
+import type { AnswerProvider, ProjectComprehensionModel, ProjectMemoryAnalysisInput, ProjectMemoryModel, ProjectMemorySource, ProjectMemorySnapshot, ProjectSourceRole, ProjectSourceAssignmentMethod, ProjectMaterialImportFile, ProjectMaterialImportReport } from "@interview-copilot/shared";
+import { analyzeCodeFile, chunkText, extractResumeProjectSections, inferProjectSourceRole, languageForFilename, parseMarkdownProjectDocument, ProjectAnalyzerAgent as ProjectAnalyzerAgentClass, PROJECT_COMPREHENSION_SYSTEM_PROMPT, resolveProjectAssignment } from "@interview-copilot/shared";
 import { createHash } from "node:crypto";
 import { SqliteInterviewHistoryRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectMemoryRepository } from "./database";
 import { normalizeDocumentBytes, parseDocument } from "./document-parsers";
@@ -24,7 +24,9 @@ export class ProjectMemoryService {
     private readonly onUpdated?: (profileId: string, projectId?: string) => void,
     private readonly analysisRuns?: SqliteKnowledgeAnalysisRepository,
     private readonly embedFacts?: (profileId: string, projectId?: string) => Promise<void>,
-    private readonly onTrace?: (event: string, fields: Record<string, unknown>) => void
+    private readonly onTrace?: (event: string, fields: Record<string, unknown>) => void,
+    private readonly comprehensionModel?: ProjectComprehensionModel,
+    private readonly comprehensionEnabled: boolean = process.env.INTERVIEW_COPILOT_PROJECT_COMPREHENSION !== "0"
   ) {}
 
   get(profileId: string): ProjectMemorySnapshot { return this.memories.getSnapshot(profileId); }
@@ -205,9 +207,14 @@ export class ProjectMemoryService {
     this.analysisRuns?.record({ id: runId, profileId: project.profileId, projectId: project.id, runType: "project-memory", inputHash, status: "running", inputSnapshot, snapshotVersion });
     this.analysisRuns?.setProjectState({ projectId: project.id, latestAnalysisId: runId, status: "running", snapshotVersion });
     try {
-      const snapshot = await new ProjectAnalyzerAgentClass(this.model).analyze(input);
+      const cachedUnderstanding = this.memories.getUnderstandingSnapshot(project.id, inputHash);
+      const snapshot = await new ProjectAnalyzerAgentClass(this.model, this.comprehensionModel, (event, fields) => this.onTrace?.(event, fields), this.comprehensionEnabled).analyze(input, { cachedUnderstanding: cachedUnderstanding?.understanding });
       this.onTrace?.("PROJECT_PARSE_TRACE", { projectId, sourceCount: sources.length, factCount: snapshot.facts?.length ?? 0, moduleCount: snapshot.modules.length, problemCount: snapshot.problems.length, questionCount: snapshot.interviewQuestions.length, sourceIds: sources.map((source) => source.id) });
        this.memories.replaceSnapshot(project.profileId, snapshot, Date.now(), project.id);
+       if (snapshot.understanding && !cachedUnderstanding && snapshot.understanding.status === "completed") {
+         const latest = this.memories.getUnderstandingSnapshot(project.id, undefined, false);
+         this.memories.saveUnderstandingSnapshot({ projectId: project.id, inputHash, version: (latest?.version ?? 0) + 1, understanding: snapshot.understanding, now: Date.now() });
+       }
        // Reclassify legacy rows after each rebuild so old title-based false
        // conflicts are repaired without requiring manual cleanup.
        this.memories.repairProjectTechnicalSemantics(project.id);
@@ -241,6 +248,29 @@ export function createProjectMemoryModel(answerProvider: AnswerProvider, setting
         { name: "profile-context", content: JSON.stringify({ profileId: input.profileId, projectId: input.projectId, projectName: input.projectName, sources }) },
         { name: "output-format", content: "只输出一个 JSON 对象，不要 Markdown，不要解释：{facts:[{id,factType,title,content,confidence,scope,evidenceLevel,experienceRelation,value,sources:[{sourceId,quote,locator}]}]}。factType 必须属于 background/goal/responsibility/hardware/software/architecture/module/technology/technical_decision/challenge/decision/cause/solution/result/metric/parameter/application/timeline/limitation。parameter 只表示配置/设计参数（如控制环频率、采样频率、CAN/UART 速率、限流/限压、极对数、编码器分辨率、任务周期）；metric 只表示实测性能结果。value 只能是 scalar/enum/range/boolean，无法从原文确定时省略。第三方库只能标记为 used/integrated/configured/debugged，不得标记 implemented。scope 只能是 project/module/problem/architecture。项目事实必须原子化；没有逐字 quote 的候选不要输出；不要生成 projects、modules、technicalPoints、problems 或 interviewQuestions。" },
         { name: "question", content: "本轮不生成面试题；题目由已合并且带证据的 Project Facts 在本地生成。" }
+      ] })) output += delta;
+      return output;
+    }
+  };
+}
+
+export function createProjectComprehensionModel(answerProvider: AnswerProvider, settings: { model: string; apiKey?: string }): ProjectComprehensionModel {
+  return {
+    async generate(input) {
+      if (!settings.apiKey) throw new Error("LLM_NOT_CONFIGURED");
+      let output = "";
+      const observations = input.observations.map((observation) => ({
+        action: observation.action,
+        elapsedMs: observation.elapsedMs,
+        files: observation.files?.map((file) => ({ path: file.path, sourceId: file.sourceId, kind: file.kind, language: file.language, lineCount: file.lineCount, text: file.text.slice(0, 1_200) })),
+        matches: observation.matches?.map((match) => ({ path: match.path, sourceId: match.sourceId, line: match.line, snippet: match.snippet })),
+        history: observation.history,
+      }));
+      for await (const delta of answerProvider.stream({ model: settings.model, maxOutputTokens: 6_000, sections: [
+        { name: "system/base", content: PROJECT_COMPREHENSION_SYSTEM_PROMPT },
+        { name: "profile-context", content: JSON.stringify({ projectId: input.input.projectId, projectName: input.input.projectName }) },
+        { name: "retrieval-context", content: JSON.stringify({ repoMap: input.repoMap, observations }) },
+        { name: "output-format", content: "只输出一个 JSON 对象，不要 Markdown 或解释。字段包括 identity、summary、architecture(components/relationships)、runtimeFlows、dataFlows、controlFlows、technologies、parameters、decisions、problems、interfaces、protections、tests、results、limitations、unknowns。所有声明必须使用已探索文件的 evidenceRefs；无法证明的内容放入 unknowns。不要输出 facts、projects、interviewQuestions，也不要补造文件内容。" },
       ] })) output += delta;
       return output;
     }

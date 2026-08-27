@@ -1,3 +1,5 @@
+import type { ProjectComprehensionModel, ProjectComprehensionTrace, ProjectUnderstanding } from "../project-comprehension";
+import { ProjectComprehensionAgent } from "../project-comprehension";
 import type { ProjectMemoryAnalysisInput, ProjectMemoryModel, ProjectMemorySnapshot } from "./types";
 import { ProjectMemoryAgent } from "./project-memory";
 
@@ -7,8 +9,31 @@ export interface ProjectAnalyzer {
 
 export class ProjectAnalyzerAgent implements ProjectAnalyzer {
   private readonly agent: ProjectMemoryAgent;
-  constructor(model?: ProjectMemoryModel) { this.agent = new ProjectMemoryAgent(model); }
-  analyze(input: ProjectMemoryAnalysisInput): Promise<ProjectMemorySnapshot> { return this.agent.build(input); }
+  private readonly comprehensionModel?: ProjectComprehensionModel;
+  private readonly comprehensionTrace?: ProjectComprehensionTrace;
+  private readonly comprehensionEnabled: boolean;
+
+  constructor(model?: ProjectMemoryModel, comprehensionModel?: ProjectComprehensionModel, comprehensionTrace?: ProjectComprehensionTrace, comprehensionEnabled = true) {
+    this.agent = new ProjectMemoryAgent(model);
+    this.comprehensionModel = comprehensionModel;
+    this.comprehensionTrace = comprehensionTrace;
+    this.comprehensionEnabled = comprehensionEnabled;
+  }
+
+  async analyze(input: ProjectMemoryAnalysisInput, options: { cachedUnderstanding?: ProjectUnderstanding } = {}): Promise<ProjectMemorySnapshot> {
+    let understanding: ProjectUnderstanding | undefined;
+    if (this.comprehensionEnabled && input.sources.length > 0) {
+      const projectId = input.projectId ?? `project-${(input.projectName ?? "unknown").toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-").slice(0, 50)}`;
+      try {
+        const result = await new ProjectComprehensionAgent({ model: this.comprehensionModel, trace: this.comprehensionTrace }).comprehend({ ...input, projectId, projectName: input.projectName ?? "待确认项目" }, options.cachedUnderstanding);
+        understanding = result.understanding;
+      } catch (error) {
+        this.comprehensionTrace?.("PROJECT_COMPREHENSION_FAILED", { projectId, stage: "agent", error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    const snapshot = await this.agent.build(input);
+    return understanding ? { ...snapshot, understanding } : snapshot;
+  }
 }
 
 export interface CodeAnalysisResult {

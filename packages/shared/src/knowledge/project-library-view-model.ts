@@ -11,6 +11,7 @@ import type {
   ProjectProblem,
   ProjectTechnologyGroup
 } from "./types";
+import type { ProjectFlow, ProjectRelationship, ProjectComponent, ProjectUnknown, ProjectUnderstanding } from "../project-comprehension/types";
 
 export interface ProjectLibraryNextAction {
   type: "analyze_sources" | "missing_parameters" | "missing_decisions" | "conflict" | "missing_sources";
@@ -32,6 +33,11 @@ export interface ProjectLibraryViewModel {
   questions: ProjectInterviewQuestion[];
   results: ProjectFact[];
   limitations: ProjectFact[];
+  understanding?: ProjectUnderstanding;
+  components: ProjectComponent[];
+  relationships: ProjectRelationship[];
+  flows: ProjectFlow[];
+  unknowns: ProjectUnknown[];
   conflicts: ProjectConflictGroup[];
   familiarity: {
     overall: number;
@@ -81,6 +87,7 @@ export function deriveProjectLibraryViewModel(input: {
   analysisRuns?: Array<{ projectId?: string; status: "running" | "completed" | "failed"; updatedAt: number }>;
   analysisRunning?: boolean;
   latestSourceUpdatedAt?: number;
+  understanding?: ProjectUnderstanding;
 }): ProjectLibraryViewModel {
   const scopedFacts = input.facts.filter((fact) => fact.projectId === input.project.id);
   const eligibleFacts = scopedFacts.filter(isFactEligible);
@@ -97,6 +104,7 @@ export function deriveProjectLibraryViewModel(input: {
   const problems = (input.problems ?? []).filter((problem) => problem.projectId === input.project.id);
   const modules = (input.modules ?? []).filter((module) => module.projectId === input.project.id);
   const questions = (input.questions ?? []).filter((question) => question.projectId === input.project.id);
+  const understanding = input.understanding?.projectId === input.project.id ? input.understanding : undefined;
   const actions = listUserActions(scopedFacts, input.project.id, input.project.ownershipMode);
   const sourceCount = input.sourceCount ?? project.sourceIds.length;
   const projectRuns = (input.analysisRuns ?? []).filter((run) => run.projectId === input.project.id).sort((left, right) => right.updatedAt - left.updatedAt);
@@ -129,7 +137,14 @@ export function deriveProjectLibraryViewModel(input: {
 
   return {
     project,
-    summary: sourceCount > 0 && eligibleFacts.length === 0
+    understanding,
+    components: understanding?.architecture.components ?? [],
+    relationships: understanding?.architecture.relationships ?? [],
+    flows: understanding ? [...understanding.runtimeFlows, ...understanding.dataFlows, ...understanding.controlFlows] : [],
+    unknowns: understanding?.unknowns ?? [],
+    summary: understanding?.status === "completed" && understanding.summary.trim()
+      ? understanding.summary
+      : sourceCount > 0 && eligibleFacts.length === 0
       ? analysisStatus === "analyzing" ? "正在分析项目资料，完成后会自动生成技术事实、参数、决策和问题链。"
         : analysisStatus === "failed" ? "项目分析失败，请点击“重新分析”重试。"
           : "已上传项目资料，等待项目分析。"
