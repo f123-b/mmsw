@@ -3,7 +3,7 @@ import type { JSX } from "react";
 import { create } from "zustand";
 import type { AudioDevices, AudioDrift, AudioSidecarEvent, ProbeResult, RealtimeServerMessage } from "@interview-copilot/protocol";
 import { QUESTION_BANK_TYPE_LABELS, QUESTION_BANK_TYPES, validateLlmModelConfiguration } from "@interview-copilot/shared";
-import { QWEN_REALTIME_ASR_MODEL, QWEN_REALTIME_ASR_URL, type AsrProviderType, type ChatAction, type ChatResponse, type ProjectFact, type ProjectMemorySnapshot, type QuestionBankCoverageResult, type QuestionBankJobProfileRecord, type QuestionBankQuestionRecord, type QuestionBankSkillRecord, type QuestionBankType, type QuestionCandidate, type QuestionEvent, type SessionState, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { QWEN_REALTIME_ASR_MODEL, QWEN_REALTIME_ASR_URL, type AsrProviderType, type ChatAction, type ChatResponse, type ProjectFact, type ProjectMaterialImportReport, type ProjectMemorySnapshot, type ProjectSourceRole, type QuestionBankCoverageResult, type QuestionBankJobProfileRecord, type QuestionBankQuestionRecord, type QuestionBankSkillRecord, type QuestionBankType, type QuestionCandidate, type QuestionEvent, type SessionState, type TranscriptSnapshot } from "@interview-copilot/shared";
 import type { Profile } from "@interview-copilot/shared";
 import type { JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectMemoryStats, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, RetrievalRunRecord } from "../main/database";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
@@ -1211,7 +1211,7 @@ export function App(): JSX.Element {
       store.setNotice(`Provider 配置保存失败：${userFacingError(error)}`);
     }
   };
-  const uploadKnowledgeFile = async (file: File, documentType: KnowledgeDocumentTypeOption = "auto", projectId?: string, sourceRole?: string) => {
+  const uploadKnowledgeFile = async (file: File, documentType: KnowledgeDocumentTypeOption = "auto", projectId?: string, sourceRole?: ProjectSourceRole | "auto") => {
     if (!knowledgeBaseId) return;
     try {
     const imported = await window.interviewCopilot.knowledge.ingest({ profileId: selectedProfile?.id, projectId, sourceRole, knowledgeBaseId, filename: file.name, mimeType: file.type || "application/octet-stream", documentType: projectId ? "project" : documentType, bytes: new Uint8Array(await file.arrayBuffer()) }) as { status?: string; error?: string; projectAssignment?: { status?: string; message?: string } };
@@ -1234,6 +1234,38 @@ export function App(): JSX.Element {
     setQuestionBankTotal(total);
     setQuestionBankSkills(skills);
     setQuestionBankJobs(jobs);
+  };
+  const importProjectMaterials = async (projectId: string, files: Array<{ file: File; sourceRole: ProjectSourceRole | "auto" }>): Promise<ProjectMaterialImportReport | undefined> => {
+    if (!knowledgeBaseId || !profileId || files.length === 0) return undefined;
+    setProjectMemoryRunning(true);
+    try {
+      const report = await window.interviewCopilot.knowledge.ingestProjectMaterials({
+        profileId,
+        projectId,
+        knowledgeBaseId,
+        files: await Promise.all(files.map(async ({ file, sourceRole }) => ({ filename: file.name, mimeType: file.type || "application/octet-stream", bytes: new Uint8Array(await file.arrayBuffer()), sourceRole })))
+      });
+      setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId));
+      // Batch mode deliberately has one final refresh after ingest + rebuild.
+      const refreshed = await refreshProjectState(profileId);
+      const failed = report.imported.filter((item) => item.status === "failed" || item.assignmentStatus !== "assigned");
+      const successCount = report.imported.length - failed.length;
+      if (report.rebuild.status === "skipped") store.setNotice(`项目资料导入完成：${successCount} 成功${failed.length ? `，${failed.length} 失败` : ""}；没有成功绑定的资料，未执行项目分析`);
+      else if (report.rebuild.status === "failed") store.setNotice(`项目资料已导入 ${successCount} 份，${failed.length} 份失败；项目分析失败，可点击“重新分析”重试`);
+      else {
+        const projectFacts = refreshed.facts.filter((fact) => fact.projectId === projectId);
+        const projectProblems = refreshed.memory.problems.filter((problem) => problem.projectId === projectId);
+        const parameterCount = projectFacts.filter((fact) => fact.type === "parameter").length;
+        const decisionCount = projectFacts.filter((fact) => fact.type === "technical_decision" || fact.type === "decision").length;
+        store.setNotice(`项目分析完成：技术事实 ${projectFacts.length} · 关键参数 ${parameterCount} · 技术决策 ${decisionCount} · 问题 ${projectProblems.length}${failed.length ? ` · ${failed.length} 份资料失败` : ""}`);
+      }
+      return report;
+    } catch (error) {
+      store.setNotice(`项目资料导入失败：${userFacingError(error)}`);
+      return undefined;
+    } finally {
+      setProjectMemoryRunning(false);
+    }
   };
   const createProjectMemory = async (input: { name: string; ownershipMode: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }) => {
     if (!profileId) return;
@@ -1275,8 +1307,8 @@ export function App(): JSX.Element {
     }
   };
   const selectedProfile = profiles.find((profile) => profile.id === profileId);
-  const refreshProjectState = async (profile = profileId): Promise<void> => {
-    if (!profile) return;
+  const refreshProjectState = async (profile = profileId): Promise<{ memory: ProjectMemorySnapshot; facts: ProjectFact[] }> => {
+    if (!profile) return { memory: projectMemory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] }, facts: [] };
     const [memory, stats, facts, allFacts, targets, analyses, retrievals] = await Promise.all([
       window.interviewCopilot.projectMemory.get(profile),
       window.interviewCopilot.projectMemory.stats(profile),
@@ -1286,7 +1318,9 @@ export function App(): JSX.Element {
       window.interviewCopilot.projectMemory.analysisRuns(profile),
       window.interviewCopilot.retrieval.list(profile, 20)
     ]);
+    const resolvedMemory = memory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] };
     setProjectMemory(memory); setProjectMemoryStats(stats); setProjectFacts(facts); setStaleProjectFacts(allFacts.filter((fact) => fact.stale)); setJobTargets(targets); setKnowledgeAnalysisRuns(analyses); setRetrievalRuns(retrievals);
+    return { memory: resolvedMemory, facts };
   };
   const refreshProfiles = async () => { const next = await window.interviewCopilot.profiles.list(); setProfiles(next); };
   const renameProfile = async () => { if (!selectedProfile) return; const name = await requestDialog({ kind: "form", title: "重命名 Profile", label: "Profile 名称", defaultValue: selectedProfile.name, required: true, confirmLabel: "保存" }); if (typeof name === "string" && name.trim()) { await window.interviewCopilot.profiles.save({ ...selectedProfile, name: name.trim() }); await refreshProfiles(); } };
@@ -1525,7 +1559,7 @@ export function App(): JSX.Element {
   const specialPageContent = page === "knowledge"
     ? <KnowledgePage knowledgeBases={knowledgeBases} knowledgeBaseId={knowledgeBaseId} knowledgeDocuments={knowledgeDocuments} requestDialog={requestDialog} onSelectBase={setKnowledgeBaseId} onCreateBase={async (name) => { const created = await window.interviewCopilot.knowledge.createBase(name); if (created) { setKnowledgeBases((current) => [created, ...current]); setKnowledgeBaseId(created.id); setKnowledgeDocuments([]); } }} onRenameBase={async (id, name) => { const updated = await window.interviewCopilot.knowledge.renameBase(id, name); if (updated) setKnowledgeBases((current) => current.map((item) => item.id === updated.id ? updated : item)); }} onDeleteBase={async (id, name) => { const confirmed = await requestDialog({ kind: "confirm", title: `删除 ${name}？`, description: "删除后资料库和其中的文档会一起删除。", confirmLabel: "删除" }); if (confirmed === true) { await window.interviewCopilot.knowledge.deleteBase(id); const next = await window.interviewCopilot.knowledge.listBases(); const nextId = next[0]?.id ?? ""; setKnowledgeBases(next); setKnowledgeBaseId(nextId); setKnowledgeDocuments(nextId ? await window.interviewCopilot.knowledge.listDocuments(nextId) : []); } }} onUpload={uploadKnowledgeFile} onUpdateType={async (id, type) => { await window.interviewCopilot.knowledge.updateType(id, type); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onReindex={async (id) => { await window.interviewCopilot.knowledge.reindex(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onDeleteDocument={async (id) => { await window.interviewCopilot.knowledge.delete(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} />
     : page === "project-library"
-      ? <ProjectLibraryPage profileId={profileId} memory={projectMemory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] }} stats={projectMemoryStats} facts={projectFacts} staleFacts={staleProjectFacts} analysisRuns={knowledgeAnalysisRuns} rebuilding={projectMemoryRunning} selectedProjectId={selectedProjectId} onSelectProject={setSelectedProjectId} onUploadProject={(file, projectId, sourceRole) => uploadKnowledgeFile(file, "project", projectId, sourceRole)} onCreateProject={createProjectMemory} onUpdateProject={updateProjectOwnership} onRebuild={(projectId) => void rebuildProjectMemory(projectId)} onReviewFact={reviewProjectFact} onResolveConflict={resolveProjectConflict} onUnassignSource={unassignProjectSource} onAddResponsibility={addProjectResponsibility} agentMessages={chatMessages} agentSending={chatSending} agentProjectId={conversations.find((item) => item.id === activeConversationId)?.projectId} onSendAgent={sendProjectAgent} onRetryAgent={retryChatMessage} onOpenSettings={() => setPage("settings")} onApproveAgentAction={approveChatAction} />
+      ? <ProjectLibraryPage profileId={profileId} memory={projectMemory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] }} stats={projectMemoryStats} facts={projectFacts} staleFacts={staleProjectFacts} analysisRuns={knowledgeAnalysisRuns} rebuilding={projectMemoryRunning} selectedProjectId={selectedProjectId} onSelectProject={setSelectedProjectId} onImportProjectMaterials={importProjectMaterials} onCreateProject={createProjectMemory} onUpdateProject={updateProjectOwnership} onRebuild={(projectId) => void rebuildProjectMemory(projectId)} onReviewFact={reviewProjectFact} onResolveConflict={resolveProjectConflict} onUnassignSource={unassignProjectSource} onAddResponsibility={addProjectResponsibility} agentMessages={chatMessages} agentSending={chatSending} agentProjectId={conversations.find((item) => item.id === activeConversationId)?.projectId} onSendAgent={sendProjectAgent} onRetryAgent={retryChatMessage} onOpenSettings={() => setPage("settings")} onApproveAgentAction={approveChatAction} />
       : page === "job-targets"
       ? <JobTargetsPage targets={jobTargets} onUploadJob={uploadJobDescription} onOpenProfile={() => setPage("profiles")} />
       : undefined;

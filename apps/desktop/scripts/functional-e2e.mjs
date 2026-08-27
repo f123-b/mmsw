@@ -342,9 +342,17 @@ try {
     if (!profile?.id || !base?.id) throw new Error('project seed prerequisites missing');
     if (!profile.knowledgeBaseIds.includes(base.id)) await window.interviewCopilot.profiles.save({ ...profile, knowledgeBaseIds: [...profile.knowledgeBaseIds, base.id] });
     const project = await window.interviewCopilot.projects.create({ profileId: profile.id, name: 'E2E FOC 电机控制项目' });
-    const text = ['# E2E FOC 电机控制项目', '项目名称：E2E FOC 电机控制项目', '项目背景：在 STM32F405 上实现单轴 FOC 电机控制。', '个人职责：负责电流环、ADC 与 PWM 同步实现。', '技术栈：STM32F405、FreeRTOS、FOC、CAN、DMA。', '电流环频率：20 kHz', '速度环频率：1 kHz', 'PWM 频率：20 kHz', 'CAN 波特率：1 Mbps', '技术决策：选择：PWM 中心对齐；原因：方便在稳定采样窗口采 ADC。', '问题：低速抖动。', '原因：采样窗口和参数问题。', '解决：调整采样窗口及 PI。', '结果：低速运行稳定。'].join('\\n');
-    const document = await window.interviewCopilot.knowledge.ingest({ knowledgeBaseId: base.id, profileId: profile.id, projectId: project.id, sourceRole: 'overview', filename: 'e2e-foc-project.md', mimeType: 'text/markdown', bytes: new TextEncoder().encode(text), documentType: 'project' });
-    const memory = await window.interviewCopilot.projectMemory.rebuildProject(project.id);
+    const materials = [
+      { filename: 'PROJECT_OVERVIEW.md', text: ['# 项目说明', '项目名称：E2E FOC 电机控制项目', '项目背景：在 STM32F405 上实现单轴 FOC 电机控制。', '个人职责：负责电流环、ADC 与 PWM 同步实现。', '技术栈：STM32F405、FreeRTOS、FOC、CAN、DMA。'].join('\\n') },
+      { filename: 'PROJECT_ARCHITECTURE.md', text: ['# 系统架构', '控制系统由采样、控制算法和通信模块组成。', '采用 PWM 中心对齐，用于稳定 ADC 采样时刻。', '技术决策：选择：PWM 中心对齐；原因：方便在稳定采样窗口采 ADC。', '核心模块：电流环、速度环、保护状态机。'].join('\\n') },
+      { filename: 'PROJECT_TECHNICAL_DETAILS.md', text: ['# 技术设计', 'PWM频率：20kHz', '电流环频率：20kHz', '速度环频率：1kHz', 'CAN 波特率：1Mbps'].join('\\n') },
+      { filename: 'PROJECT_DEBUG.md', text: ['# 问题排查', '问题：低速抖动。', '现象：ABZ 低速脉冲稀疏。', '原因：低速量化明显。', '解决：增量 delta + frame rebase。', '结果：速度反馈结构修复。'].join('\\n') },
+      { filename: 'PROJECT_RESULTS.md', text: ['# 测试结果', '测试结果：低速运行稳定。', '性能指标：稳态误差 1%。', '限制：尚未完成正式 benchmark。'].join('\\n') }
+    ];
+    const batchReport = await window.interviewCopilot.knowledge.ingestProjectMaterials({ profileId: profile.id, projectId: project.id, knowledgeBaseId: base.id, files: materials.map((material) => ({ filename: material.filename, mimeType: 'text/markdown', bytes: new TextEncoder().encode(material.text), sourceRole: 'auto' })) });
+    if (batchReport.summary.assigned !== materials.length || batchReport.rebuild.status !== 'completed') throw new Error('batch project import failed: ' + JSON.stringify(batchReport));
+    const document = (await window.interviewCopilot.knowledge.listDocuments(base.id)).find((item) => item.id === batchReport.imported[0]?.documentId);
+    const memory = await window.interviewCopilot.projectMemory.get(profile.id);
     const conflictCandidates = [
       { id: 'e2e-mcu-f405', content: 'STM32F405' },
       { id: 'e2e-mcu-g431', content: 'STM32G431' }
@@ -355,15 +363,23 @@ try {
     const stats = await window.interviewCopilot.projectMemory.stats(profile.id, project.id);
     const conflictGroups = await window.interviewCopilot.projectMemory.conflictGroups(project.id);
     const projectFacts = currentMemory.facts?.filter((fact) => fact.projectId === project.id) ?? memory.facts?.filter((fact) => fact.projectId === project.id) ?? [];
-    return { document, project: currentMemory.projects.find((item) => item.id === project.id), factCount: projectFacts.length, parameterFacts: projectFacts.filter((fact) => fact.type === 'parameter').map((fact) => ({ canonicalKey: fact.canonicalKey, value: fact.value, relation: fact.experienceRelation })), decisionFacts: projectFacts.filter((fact) => fact.type === 'technical_decision' || fact.type === 'decision').length, problemFacts: projectFacts.filter((fact) => ['challenge', 'cause', 'solution'].includes(fact.type)).length, stats, conflictGroups: conflictGroups.map((group) => ({ id: group.id, canonicalKey: group.canonicalKey, factIds: group.factIds })) };
+    return { document, batchReport, roles: batchReport.imported.map((item) => item.sourceRole), project: currentMemory.projects.find((item) => item.id === project.id), factCount: projectFacts.length, parameterFacts: projectFacts.filter((fact) => fact.type === 'parameter').map((fact) => ({ canonicalKey: fact.canonicalKey, value: fact.value, relation: fact.experienceRelation })), decisionFacts: projectFacts.filter((fact) => fact.type === 'technical_decision' || fact.type === 'decision').length, problemFacts: projectFacts.filter((fact) => ['challenge', 'cause', 'solution'].includes(fact.type)).length, stats, conflictGroups: conflictGroups.map((group) => ({ id: group.id, canonicalKey: group.canonicalKey, factIds: group.factIds })) };
   })()`);
-  if (projectSeed?.document?.documentType !== "project" || projectSeed?.document?.projectAssignment?.status !== "assigned" || !projectSeed?.project?.id || projectSeed.project.ownershipMode !== "personal" || projectSeed.factCount < 1 || !projectSeed.parameterFacts?.some((fact) => fact.canonicalKey === "control.current_loop.frequency" && fact.value?.value === 20_000 && fact.value?.unit === "Hz" && fact.relation === "configured") || projectSeed.parameterFacts?.filter((fact) => fact.canonicalKey === "control.current_loop.frequency" || fact.canonicalKey === "control.speed_loop.frequency" || fact.canonicalKey === "sampling.pwm.frequency").length !== 3 || projectSeed.decisionFacts < 1 || projectSeed.problemFacts < 3 || projectSeed.stats?.projectFamiliarityScore <= 0 || projectSeed.stats?.conflictGroups !== 1 || projectSeed.conflictGroups?.length !== 1 || projectSeed.conflictGroups[0]?.canonicalKey !== "mcu.main") throw new Error(`Project Library V4 semantic seed failed: ${JSON.stringify(projectSeed)}`);
+  if (projectSeed?.document?.documentType !== "project" || projectSeed?.batchReport?.summary?.assigned !== 5 || projectSeed.batchReport.rebuild.status !== "completed" || JSON.stringify(projectSeed.roles) !== JSON.stringify(["overview", "architecture", "architecture", "debug", "test"]) || !projectSeed?.project?.id || projectSeed.project.ownershipMode !== "personal" || projectSeed.factCount < 1 || !projectSeed.parameterFacts?.some((fact) => fact.canonicalKey === "control.current_loop.frequency" && fact.value?.value === 20_000 && fact.value?.unit === "Hz" && fact.relation === "configured") || projectSeed.parameterFacts?.filter((fact) => fact.canonicalKey === "control.current_loop.frequency" || fact.canonicalKey === "control.speed_loop.frequency" || fact.canonicalKey === "sampling.pwm.frequency").length !== 3 || projectSeed.decisionFacts < 1 || projectSeed.problemFacts < 3 || projectSeed.stats?.projectFamiliarityScore <= 0 || projectSeed.stats?.conflictGroups !== 1 || projectSeed.conflictGroups?.length !== 1 || projectSeed.conflictGroups[0]?.canonicalKey !== "mcu.main") throw new Error(`Project Library V5.1 semantic seed failed: ${JSON.stringify(projectSeed)}`);
   await main.evaluate("location.reload()");
   await waitFor(() => document.documentElement?.dataset.appReady === "true" && document.querySelectorAll("button").length > 0);
   await clickText("项目库");
   await waitFor(() => document.body.innerText.includes("项目资料整理助手") && document.body.innerText.toLowerCase().includes("e2e foc"), 15_000);
-  const legacyProjectUi = await main.evaluate("({ legacyText: document.body.innerText.includes('PROJECT TECHNICAL MEMORY V4'), legacyNode: Boolean(document.querySelector('.project-v4-overview')) })");
-  if (legacyProjectUi?.legacyText || legacyProjectUi?.legacyNode) throw new Error("PROJECT_LIBRARY_V5_LEGACY_DASHBOARD_VISIBLE");
+  const projectLibraryState = await main.evaluate(`(async () => {
+    const memory = await window.interviewCopilot.projectMemory.get((await window.interviewCopilot.profiles.active()).id);
+    const project = memory.projects.find((item) => item.id === ${JSON.stringify(projectSeed.project.id)});
+    const sources = await window.interviewCopilot.projectMemory.sources(${JSON.stringify(projectSeed.project.id)});
+    const facts = (memory.facts ?? []).filter((fact) => fact.projectId === ${JSON.stringify(projectSeed.project.id)});
+    return { sourceCount: sources.length, sourceRoles: sources.map((source) => source.sourceRole), factCount: facts.length, parameterCount: facts.filter((fact) => fact.type === 'parameter').length, decisionCount: facts.filter((fact) => ['technical_decision', 'decision'].includes(fact.type)).length, problemCount: (memory.problems ?? []).filter((problem) => problem.projectId === ${JSON.stringify(projectSeed.project.id)}).length, summary: project?.description ?? '' };
+  })()`);
+  if (projectLibraryState?.sourceCount !== 5 || projectLibraryState.factCount < 1 || projectLibraryState.parameterCount < 1 || projectLibraryState.decisionCount < 1 || projectLibraryState.problemCount < 1 || !projectLibraryState.summary.trim() || JSON.stringify(projectLibraryState.sourceRoles) !== JSON.stringify(["overview", "architecture", "architecture", "debug", "test"])) throw new Error(`PROJECT_LIBRARY_V5_1_BATCH_STATE failed: ${JSON.stringify(projectLibraryState)}`);
+  const legacyProjectUi = await main.evaluate("({ legacyText: document.body.innerText.includes('PROJECT TECHNICAL MEMORY V4'), legacyNode: Boolean(document.querySelector('.project-v4-overview')), localSidebar: Boolean(document.querySelector('.project-local-sidebar')), duplicateBreadcrumb: document.querySelectorAll('.project-header-kicker').length })");
+  if (legacyProjectUi?.legacyText || legacyProjectUi?.legacyNode || legacyProjectUi?.localSidebar || legacyProjectUi?.duplicateBreadcrumb) throw new Error(`PROJECT_LIBRARY_V5_UI_CLEANUP failed: ${JSON.stringify(legacyProjectUi)}`);
   const requiredProjectTabs = ["概览", "关键参数", "技术架构", "决策与 Why", "问题排查", "面试题", "资料证据"];
   const missingProjectTabs = await main.evaluate(`(${JSON.stringify(requiredProjectTabs)}).filter((label) => !document.body.innerText.includes(label))`);
   if (missingProjectTabs?.length) throw new Error(`PROJECT_LIBRARY_V5_PRIMARY_NAV_MISSING: ${missingProjectTabs.join(", ")}`);
@@ -404,6 +420,12 @@ try {
   await waitFor(() => Boolean(document.querySelector(".project-drawer")) && document.body.innerText.includes("采用此版本"));
   await clickText("采用此版本");
   await waitFor(() => document.body.innerText.includes("冲突"));
+  await clickText("概览");
+  await waitFor(() => Boolean(document.querySelector(".project-agent-composer textarea")));
+  await clickText("资料证据");
+  await waitFor(() => document.querySelectorAll(".project-source-list-v5 > button").length === 5);
+  const sourceUi = await main.evaluate("(() => { const rows = [...document.querySelectorAll('.project-source-list-v5 > button')].map((item) => item.innerText); return { count: rows.length, hasOverview: rows.some((row) => row.includes('项目说明')), hasArchitecture: rows.filter((row) => row.includes('架构设计')).length, hasDebug: rows.some((row) => row.includes('问题排查')), hasTest: rows.some((row) => row.includes('测试与指标')), hasExtractedCount: rows.some((row) => /\\d+ 条信息/.test(row)) }; })()");
+  if (sourceUi?.count !== 5 || !sourceUi.hasOverview || sourceUi.hasArchitecture !== 2 || !sourceUi.hasDebug || !sourceUi.hasTest || !sourceUi.hasExtractedCount) throw new Error(`PROJECT_SOURCE_SUMMARY_UI failed: ${JSON.stringify(sourceUi)}`);
   await clickText("概览");
   await waitFor(() => Boolean(document.querySelector(".project-agent-composer textarea")));
   evidence.push("Project Library V5 UI: PASS; PROJECT_CHROME: PASS; OVERVIEW_SCREEN: PASS; SINGLE_FAMILIARITY: PASS; PARAMETER_TABLE: PASS; PARAMETER_DRAWER: PASS; PROBLEM_LIST_DETAIL: PASS; ADVANCED_DATA: PASS; SINGLE_CONFLICT_GROUP_ROW: PASS; PROJECT_LIBRARY_V5_SCREENSHOTS: PASS");

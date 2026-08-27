@@ -12,7 +12,7 @@ import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { OverlayPreferences, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
-import type { ChatAction, Profile, ProfileInput, ProjectFact, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
+import type { ChatAction, Profile, ProfileInput, ProjectFact, ProjectMaterialImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
 import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
@@ -161,7 +161,8 @@ const api = {
     renameBase: (knowledgeBaseId: string, name: string) => ipcRenderer.invoke("knowledge:rename-base", knowledgeBaseId, name),
     deleteBase: (knowledgeBaseId: string) => ipcRenderer.invoke("knowledge:delete-base", knowledgeBaseId) as Promise<boolean>,
     listDocuments: (knowledgeBaseId?: string) => ipcRenderer.invoke("knowledge:list-documents", knowledgeBaseId),
-    ingest: (input: { knowledgeBaseId?: string; profileId?: string; projectId?: string; sourceRole?: string; filename: string; mimeType: string; bytes: Uint8Array; documentType?: string }) => ipcRenderer.invoke("knowledge:ingest", input),
+    ingest: (input: { knowledgeBaseId?: string; profileId?: string; projectId?: string; sourceRole?: ProjectSourceRole | "auto"; filename: string; mimeType: string; bytes: Uint8Array; documentType?: string }) => ipcRenderer.invoke("knowledge:ingest", input),
+    ingestProjectMaterials: (input: { profileId: string; projectId: string; knowledgeBaseId: string; files: Array<{ filename: string; mimeType: string; bytes: Uint8Array; sourceRole?: ProjectSourceRole | "auto" }> }): Promise<ProjectMaterialImportReport> => ipcRenderer.invoke("knowledge:ingest-project-materials", input),
     updateType: (documentId: string, documentType: string) => ipcRenderer.invoke("knowledge:update-type", documentId, documentType),
     delete: (documentId: string) => ipcRenderer.invoke("knowledge:delete", documentId),
     reindex: (documentId: string) => ipcRenderer.invoke("knowledge:reindex", documentId)

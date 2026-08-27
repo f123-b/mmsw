@@ -1367,7 +1367,7 @@ function registerIpc(): void {
   ipcMain.handle("knowledge:rename-base", (_event, knowledgeBaseId: string, name: string) => knowledgeRepository?.renameKnowledgeBase(knowledgeBaseId, name));
   ipcMain.handle("knowledge:delete-base", (_event, knowledgeBaseId: string) => { knowledgeRepository?.deleteKnowledgeBase(knowledgeBaseId); return true; });
   ipcMain.handle("knowledge:list-documents", (_event, knowledgeBaseId?: string) => knowledgeRepository?.listDocuments(knowledgeBaseId) ?? []);
-  ipcMain.handle("knowledge:ingest", async (_event, input: { knowledgeBaseId?: string; profileId?: string; projectId?: string; sourceRole?: import("@interview-copilot/shared").ProjectSourceRole; filename: string; mimeType: string; bytes: Uint8Array; documentType?: KnowledgeDocumentTypeOption }) => {
+  ipcMain.handle("knowledge:ingest", async (_event, input: { knowledgeBaseId?: string; profileId?: string; projectId?: string; sourceRole?: import("@interview-copilot/shared").ProjectSourceRole | "auto"; filename: string; mimeType: string; bytes: Uint8Array; documentType?: KnowledgeDocumentTypeOption }) => {
     if (!knowledgeRepository) throw new Error("Knowledge database is still initializing");
     const knowledgeBase = input.knowledgeBaseId ? knowledgeRepository.listKnowledgeBases().find((base) => base.id === input.knowledgeBaseId) : knowledgeRepository.ensureKnowledgeBase();
     if (!knowledgeBase) throw new Error("Knowledge base not found");
@@ -1384,8 +1384,8 @@ function registerIpc(): void {
       // which prevented automatic project assignment and left Project Library empty.
       const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, documentType, status: "ready" });
       if ((documentType === "project" || documentType === "technical-doc") && input.profileId && projectMemoryService) {
-        const assignment = projectMemoryService.assignDocument(input.profileId, saved.id, input.projectId);
-        if (assignment.status === "assigned" && input.sourceRole) projectMemoryService.assignSource({ profileId: input.profileId, projectId: assignment.projectId as string, sourceType: "document", sourceId: saved.id, relationship: input.sourceRole === "reference" ? "reference" : "primary", sourceRole: input.sourceRole, assignmentMethod: input.projectId ? "explicit" : "matched", confidence: assignment.confidence, verified: Boolean(input.projectId) });
+        const requestedRole = input.sourceRole && input.sourceRole !== "auto" ? input.sourceRole : undefined;
+        const assignment = projectMemoryService.assignDocument(input.profileId, saved.id, input.projectId, requestedRole);
         return { ...saved, projectAssignment: assignment, ...(assignment.status === "needs_assignment" ? { error: assignment.message } : {}) };
       }
       return saved;
@@ -1393,6 +1393,10 @@ function registerIpc(): void {
       const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, documentType, status: "error", error: String(error) });
       return saved;
     }
+  });
+  ipcMain.handle("knowledge:ingest-project-materials", async (_event, input: { profileId: string; projectId: string; knowledgeBaseId: string; files: import("@interview-copilot/shared").ProjectMaterialImportFile[] }) => {
+    if (!projectMemoryService) throw new Error("Project Memory is still initializing");
+    return projectMemoryService.importProjectMaterials(input);
   });
   ipcMain.handle("knowledge:delete", (_event, documentId: string) => { for (const assignment of projectMemoryRepository?.sourcesFor("document", documentId) ?? []) projectMemoryRepository?.unassignSource(assignment.projectId, "document", documentId); knowledgeRepository?.deleteDocument(documentId); return true; });
   ipcMain.handle("knowledge:update-type", (_event, documentId: string, documentType: KnowledgeDocumentType) => knowledgeRepository?.updateDocumentType(documentId, documentType));

@@ -19,6 +19,73 @@ describe("ProjectMemoryService project isolation", () => {
     } finally { database.close(); }
   });
 
+  it("imports a batch, assigns inferred roles, and rebuilds once after all files are ready", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const knowledge = new SqliteKnowledgeRepository(database);
+      const memories = new SqliteProjectMemoryRepository(database);
+      const analyses = new SqliteKnowledgeAnalysisRepository(database);
+      const base = knowledge.createKnowledgeBase("批量资料");
+      const profile = profiles.save({ name: "批量导入", language: "zh-CN", skills: [], knowledgeBaseIds: [base.id] });
+      const project = memories.createProject(profile.id, "FOC 批量项目");
+      const service = new ProjectMemoryService(profiles, knowledge, new SqliteInterviewHistoryRepository(database), memories, undefined, undefined, analyses);
+      const text = (value: string): Uint8Array => new TextEncoder().encode(value);
+      const report = await service.importProjectMaterials({ profileId: profile.id, projectId: project.id, knowledgeBaseId: base.id, files: [
+        { filename: "project-overview.md", mimeType: "text/markdown", bytes: text("# 项目说明\n项目背景：实现单轴 FOC 电机控制。\n技术栈：STM32F405、FreeRTOS。") },
+        { filename: "project-architecture.md", mimeType: "text/markdown", bytes: text("# 系统架构\n技术决策：选择 PWM 中心对齐；原因：稳定采样窗口。\n核心模块：电流环。") },
+        { filename: "project-technical-details.md", mimeType: "text/markdown", bytes: text("# 技术设计\n电流环频率：20 kHz\n速度环频率：1 kHz\nCAN 波特率：1 Mbps") },
+        { filename: "project-debug.md", mimeType: "text/markdown", bytes: text("# 问题排查\n问题：低速抖动。\n原因：采样窗口不稳定。\n解决：调整采样窗口。\n结果：运行稳定。") },
+        { filename: "project-results.md", mimeType: "text/markdown", bytes: text("# 测试结果\n性能指标：稳态误差 1%。\n限制：尚未完成正式 benchmark。") }
+      ] });
+      expect(report.summary).toMatchObject({ files: 5, assigned: 5, failed: 0 });
+      expect(report.rebuild.status).toBe("completed");
+      expect(report.imported.map((item) => item.sourceRole)).toEqual(["overview", "architecture", "architecture", "debug", "test"]);
+      expect(memories.listProjectSources(project.id).map((source) => source.sourceRole)).toEqual(expect.arrayContaining(["overview", "architecture", "debug", "test"]));
+      expect(analyses.list(profile.id).filter((run) => run.projectId === project.id)).toHaveLength(1);
+      expect(memories.listFacts(profile.id, project.id).length).toBeGreaterThan(0);
+    } finally { database.close(); }
+  });
+
+  it("keeps successful batch files when one archive parser fails", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const knowledge = new SqliteKnowledgeRepository(database);
+      const memories = new SqliteProjectMemoryRepository(database);
+      const analyses = new SqliteKnowledgeAnalysisRepository(database);
+      const base = knowledge.createKnowledgeBase("部分失败资料");
+      const profile = profiles.save({ name: "部分失败", language: "zh-CN", skills: [], knowledgeBaseIds: [base.id] });
+      const project = memories.createProject(profile.id, "部分失败项目");
+      const service = new ProjectMemoryService(profiles, knowledge, new SqliteInterviewHistoryRepository(database), memories, undefined, undefined, analyses);
+      const report = await service.importProjectMaterials({ profileId: profile.id, projectId: project.id, knowledgeBaseId: base.id, files: [
+        { filename: "project-overview.md", mimeType: "text/markdown", bytes: new TextEncoder().encode("# 项目说明\n项目背景：成功导入的项目。") },
+        { filename: "firmware.zip", mimeType: "application/zip", bytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04]) }
+      ] });
+      expect(report.summary).toMatchObject({ files: 2, assigned: 1, failed: 1 });
+      expect(report.rebuild.status).toBe("completed");
+      expect(report.imported.find((item) => item.filename === "project-overview.md")).toMatchObject({ status: "ready", assignmentStatus: "assigned" });
+      expect(report.imported.find((item) => item.filename === "firmware.zip")).toMatchObject({ status: "failed", assignmentStatus: "failed", sourceRole: "code" });
+      expect(analyses.list(profile.id).filter((run) => run.projectId === project.id)).toHaveLength(1);
+    } finally { database.close(); }
+  });
+
+  it("keeps an explicitly selected source role over filename inference", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const knowledge = new SqliteKnowledgeRepository(database);
+      const memories = new SqliteProjectMemoryRepository(database);
+      const base = knowledge.createKnowledgeBase("显式角色资料");
+      const profile = profiles.save({ name: "显式角色", language: "zh-CN", skills: [], knowledgeBaseIds: [base.id] });
+      const project = memories.createProject(profile.id, "显式角色项目");
+      const document = knowledge.saveDocument({ id: "explicit-role-doc", knowledgeBaseId: base.id, filename: "PROJECT_DEBUG.md", mimeType: "text/markdown", sha256: "explicit-role", text: "# 问题排查\n问题：采样异常。", sections: ["问题排查"], documentType: "project", status: "ready" });
+      const service = new ProjectMemoryService(profiles, knowledge, new SqliteInterviewHistoryRepository(database), memories);
+      expect(service.assignDocument(profile.id, document.id, project.id, "reference")).toMatchObject({ status: "assigned", projectId: project.id });
+      expect(memories.listProjectSources(project.id)[0]?.sourceRole).toBe("reference");
+    } finally { database.close(); }
+  });
+
   it("marks derived facts stale when a bound source is removed", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
@@ -165,7 +232,7 @@ describe("ProjectMemoryService project isolation", () => {
       await service.rebuildProject(espAssignment.projectId as string);
       expect(memories.getSnapshot(profile.id).projects.some((project) => project.id === focAssignment.projectId)).toBe(true);
       expect(memories.getSnapshot(profile.id).projects.some((project) => project.id === espAssignment.projectId)).toBe(true);
-      expect(memories.listProjectSources(focAssignment.projectId as string)[0]?.sourceRole).toBe("overview");
+      expect(memories.listProjectSources(focAssignment.projectId as string)[0]?.sourceRole).toBe("other");
     } finally {
       database.close();
     }

@@ -1,7 +1,8 @@
-import type { AnswerProvider, ProjectMemoryAnalysisInput, ProjectMemoryModel, ProjectMemorySource, ProjectMemorySnapshot, ProjectSourceRole, ProjectSourceAssignmentMethod } from "@interview-copilot/shared";
-import { analyzeCodeFile, extractResumeProjectSections, languageForFilename, parseMarkdownProjectDocument, ProjectAnalyzerAgent as ProjectAnalyzerAgentClass, resolveProjectAssignment } from "@interview-copilot/shared";
+import type { AnswerProvider, ProjectMemoryAnalysisInput, ProjectMemoryModel, ProjectMemorySource, ProjectMemorySnapshot, ProjectSourceRole, ProjectSourceAssignmentMethod, ProjectMaterialImportFile, ProjectMaterialImportReport } from "@interview-copilot/shared";
+import { analyzeCodeFile, chunkText, extractResumeProjectSections, inferProjectSourceRole, languageForFilename, parseMarkdownProjectDocument, ProjectAnalyzerAgent as ProjectAnalyzerAgentClass, resolveProjectAssignment } from "@interview-copilot/shared";
 import { createHash } from "node:crypto";
 import { SqliteInterviewHistoryRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectMemoryRepository } from "./database";
+import { normalizeDocumentBytes, parseDocument } from "./document-parsers";
 
 function projectSourceFromDocument(document: ReturnType<SqliteKnowledgeRepository["getDocument"]>, projectName: string, sourceRole?: ProjectSourceRole): ProjectMemorySource | undefined {
   if (!document || document.status !== "ready") return undefined;
@@ -56,17 +57,18 @@ export class ProjectMemoryService {
   }
 
   /** Binds a ready project document before analysis. Ambiguous input is never silently attached. */
-  assignDocument(profileId: string, documentId: string, explicitProjectId?: string): { status: "assigned" | "needs_assignment"; projectId?: string; confidence: number; message: string } {
+  assignDocument(profileId: string, documentId: string, explicitProjectId?: string, sourceRole?: ProjectSourceRole): { status: "assigned" | "needs_assignment"; projectId?: string; confidence: number; message: string } {
     const document = this.knowledge.getDocument(documentId);
     if (!document) throw new Error(`Knowledge document not found: ${documentId}`);
     if (document.documentType === "resume") return { status: "needs_assignment", confidence: 0, message: "RESUME_MUST_BE_SPLIT：整份 Resume 不能直接绑定为项目资料" };
     if (document.documentType !== "project" && document.documentType !== "technical-doc") return { status: "needs_assignment", confidence: 0, message: "PROJECT_SOURCE_TYPE_UNSUPPORTED：只有项目资料或明确绑定的技术文档可进入项目分析" };
-    const source: ProjectMemorySource = { id: document.id, kind: "project-document", sourceType: "document", title: document.filename, text: document.text, updatedAt: document.updatedAt };
+    const resolvedSourceRole = sourceRole ?? inferProjectSourceRole(document.filename, document.text);
+    const source: ProjectMemorySource = { id: document.id, kind: "project-document", sourceType: "document", sourceRole: resolvedSourceRole, title: document.filename, text: document.text, updatedAt: document.updatedAt };
     const projects = this.memories.listProjects(profileId);
     const assignment = resolveProjectAssignment(source, projects, explicitProjectId);
     const projectId = assignment.projectId;
     if (!projectId) return { status: "needs_assignment", confidence: assignment.confidence, message: "NEEDS_PROJECT_ASSIGNMENT：请选择该资料属于哪个项目" };
-    this.memories.assignSource({ projectId, sourceType: "document", sourceId: documentId, relationship: "primary", confidence: assignment.confidence, verified: Boolean(explicitProjectId), sourceRole: "overview", assignmentMethod: explicitProjectId ? "explicit" : "matched" });
+    this.memories.assignSource({ projectId, sourceType: "document", sourceId: documentId, relationship: resolvedSourceRole === "reference" ? "reference" : "primary", confidence: assignment.confidence, verified: Boolean(explicitProjectId), sourceRole: resolvedSourceRole, assignmentMethod: explicitProjectId ? "explicit" : "matched" });
     return { status: "assigned", projectId, confidence: assignment.confidence, message: "项目资料已绑定" };
   }
 
@@ -76,6 +78,73 @@ export class ProjectMemoryService {
     this.memories.assignSource({ projectId: input.projectId, sourceType: input.sourceType, sourceId: input.sourceId, relationship: input.relationship ?? (input.sourceRole === "reference" ? "reference" : "supporting"), sourceRole: input.sourceRole ?? "other", assignmentMethod: input.assignmentMethod ?? "explicit", confidence: input.confidence ?? 1, verified: input.verified ?? true });
   }
 
+  /**
+   * Imports a set of project materials without refreshing or rebuilding per
+   * file. Each file is isolated so one parser failure does not discard the
+   * successfully saved and assigned materials.
+   */
+  async importProjectMaterials(input: { profileId: string; projectId: string; knowledgeBaseId: string; files: ProjectMaterialImportFile[] }): Promise<ProjectMaterialImportReport> {
+    const profile = this.profiles.get(input.profileId);
+    if (!profile) throw new Error("PROFILE_NOT_FOUND");
+    const project = this.memories.getProject(input.projectId);
+    if (!project || project.profileId !== input.profileId) throw new Error("PROJECT_NOT_FOUND");
+    if (!this.knowledge.listKnowledgeBases().some((base) => base.id === input.knowledgeBaseId)) throw new Error("KNOWLEDGE_BASE_NOT_FOUND");
+
+    const imported: ProjectMaterialImportReport["imported"] = [];
+    for (const [index, file] of input.files.entries()) {
+      const documentId = `document-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+      let bytes: Uint8Array;
+      try {
+        bytes = normalizeDocumentBytes(file.bytes);
+      } catch (error) {
+        imported.push({ filename: file.filename, sourceRole: inferProjectSourceRole(file.filename), status: "failed", assignmentStatus: "failed", error: String(error) });
+        continue;
+      }
+      const requestedRole = file.sourceRole && file.sourceRole !== "auto" ? file.sourceRole : undefined;
+      let parsed: Awaited<ReturnType<typeof parseDocument>>;
+      try {
+        parsed = await parseDocument({ documentId, filename: file.filename, mimeType: file.mimeType || "application/octet-stream", bytes });
+      } catch (error) {
+        const sourceRole = requestedRole ?? inferProjectSourceRole(file.filename);
+        this.knowledge.saveDocument({ id: documentId, knowledgeBaseId: input.knowledgeBaseId, filename: file.filename, mimeType: file.mimeType || "application/octet-stream", sha256: createHash("sha256").update(bytes).digest("hex"), text: "", sections: [], documentType: "project", status: "error", error: String(error) });
+        imported.push({ documentId, filename: file.filename, sourceRole, status: "failed", assignmentStatus: "failed", error: String(error) });
+        continue;
+      }
+
+      const sourceRole = requestedRole ?? inferProjectSourceRole(parsed.filename, parsed.text);
+      const processing = this.knowledge.saveDocument({ id: parsed.documentId, ...parsed, knowledgeBaseId: input.knowledgeBaseId, documentType: "project", status: "processing" });
+      try {
+        const chunks = chunkText(parsed.text, { documentId: parsed.documentId, filename: parsed.filename, documentType: "project" });
+        this.knowledge.replaceChunks(processing.id, chunks);
+        this.knowledge.saveDocument({ id: processing.id, ...parsed, knowledgeBaseId: input.knowledgeBaseId, documentType: "project", status: "ready" });
+      } catch (error) {
+        this.knowledge.saveDocument({ id: processing.id, ...parsed, knowledgeBaseId: input.knowledgeBaseId, documentType: "project", status: "error", error: String(error) });
+        imported.push({ documentId: processing.id, filename: file.filename, sourceRole, status: "failed", assignmentStatus: "failed", error: String(error) });
+        continue;
+      }
+
+      try {
+        const assignment = this.assignDocument(input.profileId, processing.id, input.projectId, sourceRole);
+        if (assignment.status === "assigned") imported.push({ documentId: processing.id, filename: file.filename, sourceRole, status: "ready", assignmentStatus: "assigned" });
+        else imported.push({ documentId: processing.id, filename: file.filename, sourceRole, status: "ready", assignmentStatus: "needs_assignment", error: assignment.message });
+      } catch (error) {
+        imported.push({ documentId: processing.id, filename: file.filename, sourceRole, status: "ready", assignmentStatus: "failed", error: String(error) });
+      }
+    }
+
+    const assigned = imported.filter((item) => item.assignmentStatus === "assigned").length;
+    let rebuild: ProjectMaterialImportReport["rebuild"] = { status: "skipped" };
+    if (assigned > 0) {
+      try {
+        await this.rebuildProject(input.projectId);
+        rebuild = { status: "completed", ...(this.analysisRuns?.getProjectState(input.projectId)?.latestAnalysisId ? { analysisRunId: this.analysisRuns.getProjectState(input.projectId)?.latestAnalysisId } : {}) };
+      } catch (error) {
+        rebuild = { status: "failed", ...(this.analysisRuns?.getProjectState(input.projectId)?.latestAnalysisId ? { analysisRunId: this.analysisRuns.getProjectState(input.projectId)?.latestAnalysisId } : {}), error: String(error) };
+      }
+    }
+    return { projectId: input.projectId, imported, rebuild, summary: { files: input.files.length, assigned, failed: imported.filter((item) => item.status === "failed" || item.assignmentStatus !== "assigned").length } };
+  }
+
   private async ensureProjectAssignments(profileId: string): Promise<void> {
     const profile = this.profiles.get(profileId);
     if (!profile) throw new Error(`Profile not found: ${profileId}`);
@@ -83,7 +152,11 @@ export class ProjectMemoryService {
       if (this.memories.listProjectSources(project.id).length > 0) continue;
       for (const sourceId of project.sourceIds) {
         const documentId = sourceId.match(/^memory-document-(.+)$/)?.[1] ?? sourceId.match(/^memory-code-(.+?)-\d+$/)?.[1];
-        if (documentId && this.knowledge.getDocument(documentId)) this.memories.assignSource({ projectId: project.id, sourceType: "document", sourceId: documentId, relationship: "primary", sourceRole: "overview", assignmentMethod: "imported", confidence: project.name === "待确认项目" ? 0.4 : 0.7, verified: false });
+        const legacyDocument = documentId ? this.knowledge.getDocument(documentId) : undefined;
+        if (legacyDocument) {
+          const sourceRole = inferProjectSourceRole(legacyDocument.filename, legacyDocument.text);
+          this.memories.assignSource({ projectId: project.id, sourceType: "document", sourceId: documentId as string, relationship: sourceRole === "reference" ? "reference" : "primary", sourceRole, assignmentMethod: "imported", confidence: project.name === "待确认项目" ? 0.4 : 0.7, verified: false });
+        }
       }
     }
     const documents = this.knowledge.listDocuments().filter((document) => profile.knowledgeBaseIds.includes(document.knowledgeBaseId) && document.status === "ready" && document.documentType === "project");
