@@ -1019,6 +1019,28 @@ export function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const pendingInterviewIds = new Set<string>();
+    const cleanup = window.interviewCopilot.events.onHistoryChanged((event) => {
+      pendingInterviewIds.add(event.interviewId);
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = undefined;
+        const interviewIds = [...pendingInterviewIds];
+        pendingInterviewIds.clear();
+        void window.interviewCopilot.history.list().then(setHistoryRecords);
+        const selectedId = historyDetail?.interview.id;
+        if (!selectedId || !interviewIds.includes(selectedId)) return;
+        void Promise.all([window.interviewCopilot.history.get(selectedId), window.interviewCopilot.history.analyze(selectedId)]).then(([detail, metrics]) => {
+          if (detail) setHistoryDetail(detail as HistoryDetail);
+          if (metrics) setHistoryMetrics({ id: selectedId, ...metrics });
+        }).catch(() => undefined);
+      }, 140);
+    });
+    return () => { cleanup(); if (timer) clearTimeout(timer); };
+  }, [historyDetail?.interview.id]);
+
+  useEffect(() => {
     if (!profileId) {
       setProfileBuilderArtifact(undefined);
       setProjectMemory(undefined);

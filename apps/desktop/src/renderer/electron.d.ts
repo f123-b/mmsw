@@ -7,7 +7,7 @@ import type { RealtimeConnectOptions } from "../main/realtime-session";
 import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
-import type { TranscriptSnapshot } from "@interview-copilot/shared";
+import type { HistoryChangedEvent, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
@@ -219,6 +219,7 @@ declare global {
         onAudio(listener: (event: AudioSidecarEvent) => void): () => void;
         onAudioDiagnostic(listener: (message: string) => void): () => void;
         onSessionState(listener: (state: SessionState) => void): () => void;
+        onHistoryChanged(listener: (event: HistoryChangedEvent) => void): () => void;
         onOverlayMode(listener: (mode: OverlayMode) => void): () => void;
         onOverlayState(listener: (state: HUDState) => void): () => void;
         onOverlayLayout(listener: (layout: HUDLayout) => void): () => void;

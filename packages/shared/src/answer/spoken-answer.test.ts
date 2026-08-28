@@ -63,4 +63,18 @@ describe("spoken answer formatting and quality", () => {
     expect(result.issues).not.toContain("not-first-person");
     expect(result.score).toBeGreaterThanOrEqual(0.8);
   });
+
+  it("keeps generic troubleshooting independent from available project evidence", () => {
+    const question = "DMA 异常如何排查？";
+    const plan = new AnswerPlanner().plan({ question, currentProject: "FOC 电机控制", projectEvidence: ["项目里使用 DMA 搬运 ADC 数据"], interviewMode: "NORMAL" });
+    expect(plan.questionType).not.toBe("project_troubleshooting");
+    expect(plan.mustUseFirstPerson).toBe(false);
+    expect(plan.useCurrentProject).toBe(false);
+  });
+
+  it("removes replacement artifacts from the final spoken answer", () => {
+    const formatted = new SpokenAnswerFormatter().format("综上，DMA 很适合搬运数据。$1 仍然需要检查 ${capture} 和 $2。", "FAST");
+    expect(formatted).not.toMatch(/\$(?:\d+|\{[^}]+\})/);
+    expect(formatted).toContain("DMA");
+  });
 });

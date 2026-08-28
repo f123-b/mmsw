@@ -1,4 +1,5 @@
 import { normalizeTechnicalTerms } from "./terminology";
+import type { TerminologyCorrection } from "./terminology";
 export { buildVisionInput, type ScreenshotImage, type VisionInput } from "./vision";
 
 export const SESSION_STATES = [
@@ -252,6 +253,9 @@ export type QuestionStatus = "candidate" | "confirmed" | "answering" | "supersed
 export interface QuestionCandidate {
   id: string;
   text: string;
+  rawText?: string;
+  normalizedText?: string;
+  canonicalText?: string;
   confidence: QuestionConfidence;
   score: number;
   source: "rules" | "extractor";
@@ -272,6 +276,10 @@ export interface QuestionCandidate {
   codeContext?: boolean;
   anchorId?: string;
   canonicalQuestion?: string;
+  contextRelation?: "standalone" | "follow_up" | "continuation" | "repair";
+  inheritedTopic?: string;
+  topic?: string;
+  terminologyCorrections?: TerminologyCorrection[];
   /** Runtime turn/group metadata added after final ASR assembly. */
   utteranceId?: string;
   segmentIds?: string[];
@@ -515,7 +523,14 @@ export class QuestionDetector {
       triggerReason: analysis?.reason ?? classification.reason,
       shouldAnswer: analysis?.shouldAnswer,
       codeContext: analysis?.codeContext,
-      canonicalQuestion: analysis?.normalizedQuestion
+      canonicalQuestion: analysis?.canonicalText ?? analysis?.normalizedQuestion,
+      rawText: analysis?.rawText,
+      normalizedText: analysis?.normalizedText ?? analysis?.normalizedQuestion,
+      canonicalText: analysis?.canonicalText ?? analysis?.normalizedQuestion,
+      contextRelation: analysis?.contextRelation,
+      inheritedTopic: analysis?.inheritedTopic,
+      topic: analysis?.topic,
+      terminologyCorrections: analysis?.terminologyCorrections
     };
   }
 
@@ -559,6 +574,7 @@ export * from "./interview-memory";
 export * from "./interview/speech-act-classifier";
 export * from "./interview/context-anchor-store";
 export * from "./interview/context-anchor-resolver";
+export * from "./interview/topic-boundary-detector";
 export * from "./interview/turn-builder";
 export * from "./interview/question-group";
 export * from "./interview/answer-scheduler";

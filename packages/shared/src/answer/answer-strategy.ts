@@ -155,10 +155,10 @@ const STRATEGIES: Record<AnswerQuestionKind, Omit<AnswerStrategy, "id">> = {
   }
 };
 
-export function answerStrategyFor(kind: AnswerQuestionKind, question = "", hasProjectEvidence = false): AnswerStrategy {
+export function answerStrategyFor(kind: AnswerQuestionKind, question = "", _hasProjectEvidence = false): AnswerStrategy {
   const base = STRATEGIES[kind];
   const projectTroubleshooting = (kind === "embedded-debugging" || kind === "troubleshooting")
-    && (/项目|经历|负责|做过|我在|当时|实际/.test(question) || hasProjectEvidence);
+    && /项目|经历|负责|做过|我在|当时|实际/.test(question);
   if (projectTroubleshooting) {
     return {
       ...base,

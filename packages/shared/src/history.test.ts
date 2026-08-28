@@ -17,6 +17,18 @@ describe("interview history and metrics", () => {
     expect(metrics.answerRate).toBe(1);
     expect(metrics.averageFirstTokenMs).toBe(400);
   });
+
+  it("emits revisioned change events for live history synchronization", () => {
+    const store = new InterviewHistoryStore();
+    const events: Array<{ type: string; revision: number }> = [];
+    store.onChanged((event) => events.push({ type: event.type, revision: event.revision }));
+    const interview = store.createInterview({ profileId: "p1", startedAt: 1_000, status: "running", language: "zh-CN", automationMode: "MANUAL" }, 1_000);
+    const question = store.addQuestion({ interviewId: interview.id, text: "CAN 如何仲裁？", confidence: "high", source: "rules", detectedAt: 1_100, status: "confirmed" });
+    store.addAnswer({ questionId: question.id, text: "按位仲裁", model: "fast-v1", createdAt: 1_200 });
+    store.endInterview(interview.id, "ended", 1_300);
+    expect(events.map((event) => event.type)).toEqual(["state", "question", "answer", "state"]);
+    expect(events.map((event) => event.revision)).toEqual([1, 2, 3, 4]);
+  });
 });
 
 describe("recovery and updater policy", () => {

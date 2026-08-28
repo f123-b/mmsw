@@ -10,6 +10,7 @@ import {
   InterviewMemory,
   InterviewHistoryStore,
   normalizeTechnicalTerms,
+  normalizeTechnicalTermsWithCorrections,
   resolveContextualTerminology,
   ContextAnchorResolver,
   ContextAnchorStore,
@@ -1045,7 +1046,8 @@ export class InterviewCoordinator extends EventEmitter {
       this.recordRuntimeTrace("TRANSCRIPT_RECEIVED", { source: segment.source, final: segment.final, textLength: segment.text.length });
       this.emit("event", { type: "transcript", snapshot, segment });
       if (segment.final) {
-        this.history.addTranscript({ interviewId: this.activeInterviewId, source: segment.source, text: segment.text, startMs: segment.startMs, endMs: segment.endMs, final: true, confidence: segment.confidence });
+        const transcriptVariants = normalizeTechnicalTermsWithCorrections(rawSegment.text);
+        this.history.addTranscript({ interviewId: this.activeInterviewId, source: segment.source, text: segment.text, rawText: rawSegment.text, normalizedText: transcriptVariants.text, canonicalText: segment.text, terminologyCorrections: transcriptVariants.corrections, startMs: segment.startMs, endMs: segment.endMs, final: true, confidence: segment.confidence });
         this.recentTranscript.push(`${segment.source === "remote" ? "面试官" : "我"}：${segment.text}`);
         while (this.recentTranscript.length > 12) this.recentTranscript.shift();
         if (segment.source === "mic") {
@@ -1076,7 +1078,7 @@ export class InterviewCoordinator extends EventEmitter {
       // A provider final marks a stable ASR segment, not necessarily the end
       // of the interviewer's sentence. Keep assembling until a short adaptive
       // silence expires, then analyze the complete utterance exactly once.
-      const utterance = this.aggregator.push(segment, receivedAt);
+      const utterance = this.aggregator.push(segment, receivedAt, rawSegment.text);
       if (!utterance) return;
       this.clearQuestionFlushTimer();
       this.drainCompletedRemoteUtterances();
@@ -1129,7 +1131,7 @@ export class InterviewCoordinator extends EventEmitter {
       this.currentQuestionTrace = trace;
       this.pendingQuestionTrace = undefined;
       this.memory.recordQuestion(event.question.text, { questionId: event.question.id, parentQuestionId: event.question.parentQuestionId, rootQuestionId: event.question.rootQuestionId, groupId: event.question.groupId, relationType: event.question.relationType, createdAt: event.question.detectedAt });
-      this.anchorStore.recordConfirmedQuestion({ id: event.question.id, text: event.question.text, confidence: event.question.score, topic: this.memory.snapshot().currentTopic, createdAt: event.question.detectedAt });
+      this.anchorStore.recordConfirmedQuestion({ id: event.question.id, text: event.question.text, confidence: event.question.score, topic: event.question.topic, createdAt: event.question.detectedAt });
       if (this.activeInterviewId) {
         const stored = this.history.addQuestion({
           interviewId: this.activeInterviewId,
@@ -1138,6 +1140,13 @@ export class InterviewCoordinator extends EventEmitter {
           source: event.question.source,
           detectedAt: event.question.detectedAt,
           status: event.question.status,
+          rawTranscript: event.question.rawText,
+          normalizedQuestion: event.question.normalizedText,
+          canonicalQuestion: event.question.canonicalText ?? event.question.canonicalQuestion,
+          contextRelation: event.question.contextRelation,
+          inheritedTopic: event.question.inheritedTopic,
+          topic: event.question.topic,
+          terminologyCorrections: event.question.terminologyCorrections,
           ...(event.question.parentQuestionId ? { parentQuestionId: this.historyQuestionIds.get(event.question.parentQuestionId) } : {}),
           ...(event.question.rootQuestionId ? { rootQuestionId: this.historyQuestionIds.get(event.question.rootQuestionId) } : {})
         });
@@ -1335,6 +1344,13 @@ export class InterviewCoordinator extends EventEmitter {
     analysis = {
       ...analysis,
       text: canonicalQuestion,
+      rawText: utterance.rawText ?? utterance.text,
+      normalizedText: correctedText,
+      canonicalText: canonicalQuestion,
+      contextRelation: resolved.contextRelation,
+      inheritedTopic: resolved.inheritedTopic,
+      topic: resolved.topic,
+      terminologyCorrections: terminology.corrections,
       type: analysis.isQuestion
         ? speech.speechAct === "FOLLOW_UP" ? "follow_up" : analysis.type
         : "not_question",
@@ -1351,6 +1367,13 @@ export class InterviewCoordinator extends EventEmitter {
       analysis = {
         ...analysis,
         text: canonicalQuestion,
+        rawText: utterance.rawText ?? utterance.text,
+        normalizedText: correctedText,
+        canonicalText: canonicalQuestion,
+        contextRelation: resolved.contextRelation,
+        inheritedTopic: resolved.inheritedTopic,
+        topic: resolved.topic,
+        terminologyCorrections: terminology.corrections,
         type: analysis.isQuestion
           ? speech.speechAct === "FOLLOW_UP" ? "follow_up" : analysis.type
           : "not_question",
@@ -1383,7 +1406,7 @@ export class InterviewCoordinator extends EventEmitter {
       if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
       return;
     }
-    const observed = { ...utterance, text: decision.normalizedQuestion || canonicalQuestion };
+    const observed = { ...utterance, text: canonicalQuestion };
     const effectiveAnalysis = analysis.isQuestion
       ? analysis
       : {
@@ -1413,6 +1436,13 @@ export class InterviewCoordinator extends EventEmitter {
           ...event.question,
           text: canonicalQuestion,
           canonicalQuestion,
+          rawText: utterance.text,
+          normalizedText: correctedText,
+          canonicalText: canonicalQuestion,
+          contextRelation: resolved.contextRelation,
+          inheritedTopic: resolved.inheritedTopic,
+          topic: resolved.topic,
+          terminologyCorrections: terminology.corrections,
           utteranceId: utterance.id,
           segmentIds: [...utterance.segmentIds],
           turnId: turn.id,

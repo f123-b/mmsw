@@ -14,6 +14,8 @@ import {
   type QuestionRecord,
   type AnswerRecord,
   type TranscriptRecord,
+  type HistoryChangedEvent,
+  type TerminologyCorrection,
   type KnowledgeChunk,
   inferKnowledgeDocumentType,
   type KnowledgeDocumentType,
@@ -748,6 +750,19 @@ export class SqliteDatabase {
           ELSE 'skill'
         END,
         category = type;
+      `],
+      [27, `
+        ALTER TABLE transcripts ADD COLUMN raw_text TEXT;
+        ALTER TABLE transcripts ADD COLUMN normalized_text TEXT;
+        ALTER TABLE transcripts ADD COLUMN canonical_text TEXT;
+        ALTER TABLE transcripts ADD COLUMN terminology_corrections_json TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE questions ADD COLUMN raw_transcript TEXT;
+        ALTER TABLE questions ADD COLUMN normalized_question TEXT;
+        ALTER TABLE questions ADD COLUMN canonical_question TEXT;
+        ALTER TABLE questions ADD COLUMN context_relation TEXT;
+        ALTER TABLE questions ADD COLUMN inherited_topic TEXT;
+        ALTER TABLE questions ADD COLUMN topic TEXT;
+        ALTER TABLE questions ADD COLUMN terminology_corrections_json TEXT NOT NULL DEFAULT '[]';
       `],
     ];
     for (const [version, sql] of migrations) {
@@ -1861,12 +1876,15 @@ export class SqliteConversationRepository {
 }
 
 export class SqliteInterviewHistoryRepository {
-  constructor(private readonly database: SqliteDatabase) {}
+  private readonly revisions = new Map<string, number>();
+
+  constructor(private readonly database: SqliteDatabase, private readonly onChanged?: (event: HistoryChangedEvent) => void) {}
 
   createInterview(input: Omit<InterviewRecord, "id" | "createdAt">, now = Date.now()): InterviewRecord {
     const record = { ...input, id: id("interview", now), createdAt: now };
     this.database.run("INSERT INTO interviews(id, profile_id, project_id, job_target_id, started_at, ended_at, status, language, automation_mode, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.profileId, record.projectId ?? null, record.jobTargetId ?? null, record.startedAt, record.endedAt ?? null, record.status, record.language, record.automationMode, record.createdAt]);
     this.database.flushNow();
+    this.emitChanged(record.id, "state");
     return record;
   }
 
@@ -1875,34 +1893,43 @@ export class SqliteInterviewHistoryRepository {
     this.database.flushNow();
     const record = this.database.first<InterviewRecord>("SELECT id, profile_id AS profileId, project_id AS projectId, job_target_id AS jobTargetId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews WHERE id = ?", [interviewId]);
     if (!record) throw new Error(`Interview not found: ${interviewId}`);
+    this.emitChanged(interviewId, "state");
     return record;
   }
 
   addTranscript(input: Omit<TranscriptRecord, "id" | "createdAt">, now = Date.now()): TranscriptRecord | undefined {
     if (!input.final) return undefined;
     const record = { ...input, id: id("transcript", now), createdAt: now };
-    this.database.run("INSERT INTO transcripts(id, interview_id, source, text, start_ms, end_ms, final, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.interviewId, record.source, record.text, record.startMs, record.endMs, 1, record.confidence ?? null, record.createdAt]);
+    this.database.run("INSERT INTO transcripts(id, interview_id, source, text, raw_text, normalized_text, canonical_text, terminology_corrections_json, start_ms, end_ms, final, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.interviewId, record.source, record.text, record.rawText ?? null, record.normalizedText ?? null, record.canonicalText ?? null, JSON.stringify(record.terminologyCorrections ?? []), record.startMs, record.endMs, 1, record.confidence ?? null, record.createdAt]);
     this.database.flush();
+    this.emitChanged(record.interviewId, "transcript");
     return record;
   }
 
   addQuestion(input: Omit<QuestionRecord, "id">): QuestionRecord {
     const record = { ...input, id: id("question", input.detectedAt) };
-    this.database.run("INSERT INTO questions(id, interview_id, text, confidence, source, detected_at, status, parent_question_id, root_question_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.interviewId, record.text, record.confidence, record.source, record.detectedAt, record.status, record.parentQuestionId ?? null, record.rootQuestionId ?? null]);
+    this.database.run("INSERT INTO questions(id, interview_id, text, confidence, source, detected_at, status, parent_question_id, root_question_id, raw_transcript, normalized_question, canonical_question, context_relation, inherited_topic, topic, terminology_corrections_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.interviewId, record.text, record.confidence, record.source, record.detectedAt, record.status, record.parentQuestionId ?? null, record.rootQuestionId ?? null, record.rawTranscript ?? null, record.normalizedQuestion ?? null, record.canonicalQuestion ?? null, record.contextRelation ?? null, record.inheritedTopic ?? null, record.topic ?? null, JSON.stringify(record.terminologyCorrections ?? [])]);
     this.database.flush();
+    this.emitChanged(record.interviewId, "question");
     return record;
   }
 
   updateQuestionStatus(questionId: string, status: QuestionRecord["status"]): QuestionRecord | undefined {
     this.database.run("UPDATE questions SET status = ? WHERE id = ?", [status, questionId]);
     this.database.flushNow();
-    return this.database.first<QuestionRecord>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status, parent_question_id AS parentQuestionId, root_question_id AS rootQuestionId FROM questions WHERE id = ?", [questionId]);
+    const record = this.database.first<Record<string, unknown>>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status, parent_question_id AS parentQuestionId, root_question_id AS rootQuestionId, raw_transcript AS rawTranscript, normalized_question AS normalizedQuestion, canonical_question AS canonicalQuestion, context_relation AS contextRelation, inherited_topic AS inheritedTopic, topic, terminology_corrections_json AS terminologyCorrectionsJson FROM questions WHERE id = ?", [questionId]);
+    if (!record) return undefined;
+    const hydrated = this.hydrateQuestion(record);
+    this.emitChanged(hydrated.interviewId, "question");
+    return hydrated;
   }
 
   addAnswer(input: Omit<AnswerRecord, "id">): AnswerRecord {
     const record = { ...input, id: id("answer", input.createdAt) };
     this.database.run("INSERT INTO answers(id, question_id, text, model, mode, latency_first_token, latency_total, cancel_reason, started_at, first_token_at, finished_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.questionId, record.text, record.model, record.mode ?? null, record.latencyFirstToken ?? null, record.latencyTotal ?? null, record.cancelReason ?? null, record.startedAt ?? null, record.firstTokenAt ?? null, record.finishedAt ?? null, record.createdAt]);
     this.database.flushNow();
+    const interviewId = this.database.first<{ interviewId: string }>("SELECT q.interview_id AS interviewId FROM questions q WHERE q.id = ?", [record.questionId])?.interviewId;
+    if (interviewId) this.emitChanged(interviewId, "answer");
     return record;
   }
 
@@ -1928,10 +1955,40 @@ export class SqliteInterviewHistoryRepository {
   snapshot(interviewId: string): InterviewSnapshot {
     const interview = this.database.first<InterviewRecord>("SELECT id, profile_id AS profileId, project_id AS projectId, job_target_id AS jobTargetId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews WHERE id = ?", [interviewId]);
     if (!interview) throw new Error(`Interview not found: ${interviewId}`);
-    const transcripts = this.database.all<TranscriptRecord>("SELECT id, interview_id AS interviewId, source, text, start_ms AS startMs, end_ms AS endMs, final, confidence, created_at AS createdAt FROM transcripts WHERE interview_id = ? ORDER BY start_ms", [interviewId]);
-    const questions = this.database.all<QuestionRecord>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status, parent_question_id AS parentQuestionId, root_question_id AS rootQuestionId FROM questions WHERE interview_id = ? ORDER BY detected_at", [interviewId]);
+    const transcripts = this.database.all<Record<string, unknown>>("SELECT id, interview_id AS interviewId, source, text, raw_text AS rawText, normalized_text AS normalizedText, canonical_text AS canonicalText, terminology_corrections_json AS terminologyCorrectionsJson, start_ms AS startMs, end_ms AS endMs, final, confidence, created_at AS createdAt FROM transcripts WHERE interview_id = ? ORDER BY start_ms", [interviewId]).map((row) => this.hydrateTranscript(row));
+    const questions = this.database.all<Record<string, unknown>>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status, parent_question_id AS parentQuestionId, root_question_id AS rootQuestionId, raw_transcript AS rawTranscript, normalized_question AS normalizedQuestion, canonical_question AS canonicalQuestion, context_relation AS contextRelation, inherited_topic AS inheritedTopic, topic, terminology_corrections_json AS terminologyCorrectionsJson FROM questions WHERE interview_id = ? ORDER BY detected_at", [interviewId]).map((row) => this.hydrateQuestion(row));
     const answers = this.database.all<AnswerRecord>("SELECT a.id, a.question_id AS questionId, a.text, a.model, a.mode, a.latency_first_token AS latencyFirstToken, a.latency_total AS latencyTotal, a.cancel_reason AS cancelReason, a.started_at AS startedAt, a.first_token_at AS firstTokenAt, a.finished_at AS finishedAt, a.created_at AS createdAt FROM answers a JOIN questions q ON q.id = a.question_id WHERE q.interview_id = ? ORDER BY a.created_at", [interviewId]);
     return { interview, transcripts, questions, answers };
+  }
+
+  private emitChanged(interviewId: string, type: HistoryChangedEvent["type"]): void {
+    const revision = (this.revisions.get(interviewId) ?? 0) + 1;
+    this.revisions.set(interviewId, revision);
+    this.onChanged?.({ interviewId, revision, type });
+  }
+
+  private hydrateTranscript(row: Record<string, unknown>): TranscriptRecord {
+    return {
+      id: String(row.id), interviewId: String(row.interviewId), source: String(row.source) as TranscriptRecord["source"], text: String(row.text),
+      ...(row.rawText ? { rawText: String(row.rawText) } : {}), ...(row.normalizedText ? { normalizedText: String(row.normalizedText) } : {}), ...(row.canonicalText ? { canonicalText: String(row.canonicalText) } : {}),
+      terminologyCorrections: this.parseJson(row.terminologyCorrectionsJson), startMs: Number(row.startMs), endMs: Number(row.endMs), final: Boolean(row.final), ...(row.confidence !== null && row.confidence !== undefined ? { confidence: Number(row.confidence) } : {}), createdAt: Number(row.createdAt)
+    };
+  }
+
+  private hydrateQuestion(row: Record<string, unknown>): QuestionRecord {
+    return {
+      id: String(row.id), interviewId: String(row.interviewId), text: String(row.text), confidence: String(row.confidence) as QuestionRecord["confidence"], source: String(row.source) as QuestionRecord["source"], detectedAt: Number(row.detectedAt), status: String(row.status) as QuestionRecord["status"],
+      ...(row.parentQuestionId ? { parentQuestionId: String(row.parentQuestionId) } : {}), ...(row.rootQuestionId ? { rootQuestionId: String(row.rootQuestionId) } : {}), ...(row.rawTranscript ? { rawTranscript: String(row.rawTranscript) } : {}), ...(row.normalizedQuestion ? { normalizedQuestion: String(row.normalizedQuestion) } : {}), ...(row.canonicalQuestion ? { canonicalQuestion: String(row.canonicalQuestion) } : {}), ...(row.contextRelation ? { contextRelation: String(row.contextRelation) as QuestionRecord["contextRelation"] } : {}), ...(row.inheritedTopic ? { inheritedTopic: String(row.inheritedTopic) } : {}), ...(row.topic ? { topic: String(row.topic) } : {}), terminologyCorrections: this.parseJson(row.terminologyCorrectionsJson)
+    };
+  }
+
+  private parseJson(value: unknown): TerminologyCorrection[] {
+    if (typeof value !== "string" || !value) return [];
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((item): item is TerminologyCorrection => Boolean(item && typeof item === "object" && "raw" in item && "canonical" in item && "source" in item));
+    } catch { return []; }
   }
 }
 

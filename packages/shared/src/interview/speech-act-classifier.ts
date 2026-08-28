@@ -1,4 +1,5 @@
 import type { InterviewMemorySnapshot } from "../interview-memory";
+import { detectTopicBoundary, hasStandaloneTopicSubject } from "./topic-boundary-detector";
 
 export type InterviewSpeechAct =
   | "QUESTION"
@@ -93,6 +94,8 @@ function isFollowUp(text: string, context: SpeechActContext): boolean {
   const compact = text.replace(/[？?。！!\s]/g, "");
   const hasAnchor = Boolean(context.latestAnchor?.text || context.currentTopic || context.memory?.currentTopic);
   if (!hasAnchor) return false;
+  if (hasStandaloneTopicSubject(text)) return false;
+  if (context.latestAnchor?.text && detectTopicBoundary({ previousText: context.latestAnchor.text, previousTopic: context.currentTopic, currentText: text }).relation === "NEW_TOPIC") return false;
   if (ELLIPTICAL_FOLLOW_UP.test(text) || ELLIPTICAL_ANSWER_REQUEST.test(text) || TRAILING_ANSWER_REQUEST.test(text)) return true;
   const completeStandaloneForm = /(?:在哪|哪里|是什么|哪些|哪种|哪个|多少|几个|几路|上限|容量)/.test(text);
   const completeWhyHowFollowUp = /^(?:那|然后).*(?:为什么|为何|怎么|如何)/.test(text) && !completeStandaloneForm;

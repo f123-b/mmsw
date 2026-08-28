@@ -3,6 +3,7 @@ import type { QuestionAnalysis, QuestionDetectionType } from "../question";
 import { routeAnswerTask } from "./router";
 import type { AnswerTask, InterviewBrainDecision, QuestionEventInput } from "./types";
 import { normalizeTechnicalTerms } from "../terminology";
+import { hasStandaloneTopicSubject } from "../interview/topic-boundary-detector";
 
 const ELLIPTICAL_FOLLOW_UP = /^(好|好的|嗯|嗯嗯|那好|明白了)?[，,。！!、\s]*(说说|讲讲|展开说|具体说|继续(?:说说|讲讲|展开说)?|然后呢|还有吗|再说说|再讲讲|怎么说|为什么呢|怎么做呢)[。！？?！\s]*$/i;
 const CONTEXTUAL_FOLLOW_UP = /^(那|然后|还有|具体|如果|再|这个|它|这里|其中|为什么|怎么|如何)/;
@@ -46,19 +47,15 @@ export class InterviewBrain {
       return { isQuestion: false, type: "not_question", confidence: input.analysis?.confidence ?? 0, normalizedQuestion: text, reason: "meta-repair-prompt" };
     }
     if (ACK_ONLY.test(text)) return { isQuestion: false, type: "not_question", confidence: input.analysis?.confidence ?? 0, normalizedQuestion: text, reason: "standalone-acknowledgement" };
-    const implicitFollowUp = Boolean(topic && (ELLIPTICAL_FOLLOW_UP.test(tail) || CONTEXTUAL_FOLLOW_UP.test(tail) && tail.length <= 18));
+    const implicitFollowUp = Boolean(topic && !hasStandaloneTopicSubject(text) && (ELLIPTICAL_FOLLOW_UP.test(tail) || CONTEXTUAL_FOLLOW_UP.test(tail) && tail.length <= 18));
     const analysis = input.analysis;
     const isQuestion = implicitFollowUp || Boolean(analysis?.isQuestion);
     if (!isQuestion) return { isQuestion: false, type: "not_question", confidence: analysis?.confidence ?? 0, normalizedQuestion: text, reason: analysis?.reason ?? "not-question" };
     const type = implicitFollowUp ? "follow_up" : analysis?.type ?? "technical";
     const parent = implicitFollowUp ? parentQuestion(input.memory) : undefined;
-    const normalizedQuestion = implicitFollowUp && topic
-      ? parent && parent !== text
-        ? `围绕${topic}，针对“${parent}”追问：${tail}`
-        : `围绕${topic}，${tail}`
-      : analysis?.normalizedQuestion || text;
+    const normalizedQuestion = analysis?.normalizedQuestion || text;
     const answerTask = routeAnswerTask({ question: normalizedQuestion, type: inferType(normalizedQuestion, type), topic, context: memoryContext(input.memory, input.recentTranscript) });
-    return { isQuestion: true, type, confidence: Math.max(analysis?.confidence ?? 0, implicitFollowUp ? 0.86 : 0), normalizedQuestion, reason: implicitFollowUp ? parent ? "implicit-follow-up-with-parent" : "implicit-follow-up-with-topic" : analysis?.reason ?? "question-analysis", answerTask };
+    return { isQuestion: true, type, confidence: Math.max(analysis?.confidence ?? 0, implicitFollowUp ? 0.86 : 0), normalizedQuestion, reason: implicitFollowUp ? parent ? "implicit-follow-up-with-parent" : "implicit-follow-up-with-topic" : analysis?.reason ?? "question-analysis", contextRelation: analysis?.contextRelation ?? (implicitFollowUp ? "follow_up" : "standalone"), inheritedTopic: analysis?.inheritedTopic ?? (implicitFollowUp ? topic : undefined), answerTask };
   }
 }
 

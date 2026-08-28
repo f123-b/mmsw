@@ -9,7 +9,7 @@ import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { InterviewRuntimeDiagnostics, RuntimeTraceEvent } from "../main/runtime-diagnostics";
 import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
-import type { TranscriptSnapshot } from "@interview-copilot/shared";
+import type { HistoryChangedEvent, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { OverlayPreferences, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
@@ -245,6 +245,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, state: SessionState) => listener(state);
       ipcRenderer.on("session:state", handler);
       return () => ipcRenderer.removeListener("session:state", handler);
+    },
+    onHistoryChanged: (listener: (event: HistoryChangedEvent) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: HistoryChangedEvent) => listener(payload);
+      ipcRenderer.on("history:changed", handler);
+      return () => ipcRenderer.removeListener("history:changed", handler);
     },
     onOverlayMode: (listener: (mode: OverlayMode) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, mode: OverlayMode) => listener(mode);

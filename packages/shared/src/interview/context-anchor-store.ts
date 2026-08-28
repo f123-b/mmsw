@@ -36,6 +36,8 @@ export class ContextAnchorStore {
   private lastConfirmedQuestion?: ContextAnchor;
   private pendingCodeContext?: ContextAnchor;
   private currentTopic?: string;
+  private currentTopicExpiresAt = 0;
+  private currentTopicAnchorId?: string;
   private counter = 0;
 
   constructor(private readonly now: () => number = () => Date.now(), private readonly topicTtlMs = 7_000, private readonly codeTtlMs = 12_000) {}
@@ -46,6 +48,8 @@ export class ContextAnchorStore {
     this.lastConfirmedQuestion = undefined;
     this.pendingCodeContext = undefined;
     this.currentTopic = undefined;
+    this.currentTopicExpiresAt = 0;
+    this.currentTopicAnchorId = undefined;
   }
 
   addAnchor(input: { text: string; speechAct: ContextAnchorSpeechAct; confidence?: number; topic?: string; entities?: string[]; createdAt?: number; ttlMs?: number }): ContextAnchor {
@@ -65,7 +69,11 @@ export class ContextAnchorStore {
     this.values.push(anchor);
     while (this.values.length > 16) this.values.shift();
     this.latest = anchor;
-    if (anchor.topic) this.currentTopic = anchor.topic;
+    if (anchor.topic) {
+      this.currentTopic = anchor.topic;
+      this.currentTopicExpiresAt = anchor.expiresAt;
+      this.currentTopicAnchorId = anchor.id;
+    }
     if (anchor.speechAct === "CODE_CONTEXT") this.pendingCodeContext = anchor;
     return anchor;
   }
@@ -85,7 +93,19 @@ export class ContextAnchorStore {
   snapshot(at = this.now()): ContextAnchorSnapshot {
     const active = this.values.filter((anchor) => anchor.expiresAt > at);
     this.latest = this.latest && this.latest.expiresAt > at ? this.latest : active.at(-1);
+    this.lastConfirmedQuestion = this.lastConfirmedQuestion && this.lastConfirmedQuestion.expiresAt > at ? this.lastConfirmedQuestion : undefined;
     this.pendingCodeContext = this.pendingCodeContext && this.pendingCodeContext.expiresAt > at ? this.pendingCodeContext : undefined;
+    const activeTopicAnchor = [...active].reverse().find((anchor) => anchor.topic);
+    if (activeTopicAnchor && activeTopicAnchor.id !== this.currentTopicAnchorId) {
+      this.currentTopic = activeTopicAnchor.topic;
+      this.currentTopicExpiresAt = activeTopicAnchor.expiresAt;
+      this.currentTopicAnchorId = activeTopicAnchor.id;
+    }
+    if (!this.currentTopic || this.currentTopicExpiresAt <= at) {
+      this.currentTopic = undefined;
+      this.currentTopicExpiresAt = 0;
+      this.currentTopicAnchorId = undefined;
+    }
     return {
       ...(this.latest ? { latestAnchor: { ...this.latest } } : {}),
       ...(this.lastConfirmedQuestion ? { lastConfirmedQuestion: { ...this.lastConfirmedQuestion } } : {}),

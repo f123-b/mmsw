@@ -2004,7 +2004,7 @@ if (hasSingleInstanceLock) {
     broadcast("runtime:error", { code: "DATABASE_INIT_FAILED", message: "本地数据库初始化失败，当前会话不会保存到磁盘" });
     database = undefined;
   }
-  historyRepository = database ? new SqliteInterviewHistoryRepository(database) : undefined;
+  historyRepository = database ? new SqliteInterviewHistoryRepository(database, (event) => broadcast("history:changed", event)) : undefined;
   if (profileRepository && projectRepository && knowledgeRepository && historyRepository && profileBuilderRepository) {
     profileBuilderService = new ProfileBuilderService(
       profileRepository,
