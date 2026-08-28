@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AnswerAgent, classifyAnswerQuestion, ContextRouter, ModelRouter, PromptBuilder, StableAnswerStateMachine, type AnswerProvider } from "./answer";
+import { createEvidenceSnapshot } from "./answer/evidence-context";
 import { InterviewAnswerFormatter } from "./answer/interview-answer-formatter";
 import { StreamingAnswerSanitizer } from "./answer/streaming-answer-sanitizer";
 
@@ -112,6 +113,27 @@ describe("Answer routing and generation", () => {
     const context = new ContextRouter().route("为什么？", { recentTranscript: Array.from({ length: 20 }, (_, index) => `对话 ${index}`) });
     expect(context.recentTranscript.length).toBeLessThanOrEqual(12);
     expect(context.recentTranscript.at(-1)).toBe("对话 19");
+  });
+
+  it("uses the evidence snapshot as the authoritative planning context", () => {
+    const snapshot = createEvidenceSnapshot({
+      questionId: "q-locked",
+      currentProject: "锁定项目",
+      currentModule: "锁定模块",
+      currentTopic: "锁定主题",
+      projectEvidence: ["锁定证据"]
+    });
+    const context = new ContextRouter().route("这个项目怎么设计？", {
+      currentProject: "后来项目",
+      currentModule: "后来模块",
+      currentTopic: "后来主题",
+      projectEvidence: ["后来证据"],
+      evidenceSnapshot: snapshot
+    });
+    expect(context.currentProject).toBe("锁定项目");
+    expect(context.currentModule).toBe("锁定模块");
+    expect(context.currentTopic).toBe("锁定主题");
+    expect(context.projectEvidence).toEqual(["锁定证据"]);
   });
 
   it("repairs a low-quality grounded answer before finalizing", async () => {

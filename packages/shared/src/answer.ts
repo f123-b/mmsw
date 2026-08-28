@@ -9,6 +9,11 @@ import { normalizeTechnicalTerms } from "./terminology";
 import { PersonalAnswerValidator, QuestionAnalyzer } from "./knowledge/index";
 import type { FollowUpContext } from "./follow-up-context";
 import type { QuestionBankRouteHit } from "./question-bank-router";
+import { ClaimGate } from "./answer/claim-gate";
+import { createEvidenceSnapshot, type EvidenceSnapshot } from "./answer/evidence-context";
+
+export * from "./answer/claim-gate";
+export * from "./answer/evidence-context";
 
 export type AnswerMode = "FAST" | "NORMAL" | "DEEP";
 export { classifyAnswerQuestion } from "./answer/answer-strategy";
@@ -50,6 +55,8 @@ export interface AnswerContextInput {
   recentTranscript?: string[];
   interviewMemory?: InterviewMemorySnapshot;
   followUpContext?: FollowUpContext;
+  /** Evidence captured for this question; when present it is authoritative. */
+  evidenceSnapshot?: EvidenceSnapshot;
 }
 
 export interface ContextPack {
@@ -71,6 +78,7 @@ export interface ContextPack {
   recentTranscript: string[];
   interviewMemory?: InterviewMemorySnapshot;
   followUpContext?: FollowUpContext;
+  evidenceSnapshot?: EvidenceSnapshot;
 }
 
 function answerTokenBudget(mode: AnswerMode, kind: AnswerQuestionKind): number {
@@ -86,42 +94,44 @@ function relevance(question: string, skill: AnswerSkillContext): number {
 
 export class ContextRouter {
   route(question: string, input: AnswerContextInput = {}): ContextPack {
+    const snapshot = input.evidenceSnapshot;
     const skills = (input.skills ?? [])
       .map((skill) => ({ ...skill, relevance: skill.relevance ?? relevance(question, skill) }))
       .filter((skill) => (skill.relevance ?? 0) > 0)
       .sort((left, right) => (right.relevance ?? 0) - (left.relevance ?? 0))
       .slice(0, 3);
     let transcriptBudget = 2_400;
-    const recentTranscript = (input.recentTranscript ?? []).slice(-12).reverse().map((line) => line.slice(0, 500)).filter((line) => {
+    const recentTranscript = (snapshot?.recentTranscript ?? input.recentTranscript ?? []).slice(-12).reverse().map((line) => line.slice(0, 500)).filter((line) => {
       if (transcriptBudget <= 0) return false;
       transcriptBudget -= line.length;
       return true;
     }).reverse();
     return {
-      profileSummary: input.profileSummary,
-      jobDescriptionSummary: input.jobDescriptionSummary,
-      profileInstructions: input.profileInstructions,
+      profileSummary: snapshot?.profileSummary ?? input.profileSummary,
+      jobDescriptionSummary: snapshot?.jobDescriptionSummary ?? input.jobDescriptionSummary,
+      profileInstructions: snapshot?.profileInstructions ?? input.profileInstructions,
       expressionLevel: input.expressionLevel ?? "plain",
       explainAdvancedTerms: input.explainAdvancedTerms ?? true,
       skills,
-      experienceContext: (input.experienceContext ?? []).slice(0, 5),
-      personalMemoryEvidence: (input.personalMemoryEvidence ?? []).slice(0, 5),
-      retrievedKnowledge: (input.retrievedKnowledge ?? []).slice(0, 6),
+      experienceContext: (snapshot?.experienceContext ?? input.experienceContext ?? []).slice(0, 5),
+      personalMemoryEvidence: (snapshot?.personalMemoryEvidence ?? input.personalMemoryEvidence ?? []).slice(0, 5),
+      retrievedKnowledge: (snapshot?.retrievedKnowledge ?? input.retrievedKnowledge ?? []).slice(0, 6),
       preparedAnswer: input.preparedAnswer,
       questionBankMatches: (input.questionBankMatches ?? []).slice(0, 5),
-      currentProject: input.currentProject,
-      currentTopic: input.currentTopic,
-      currentModule: input.currentModule,
-      projectEvidence: (input.projectEvidence ?? input.personalMemoryEvidence ?? input.experienceContext ?? []).slice(0, 8),
+      currentProject: snapshot?.currentProject ?? input.currentProject,
+      currentTopic: snapshot?.currentTopic ?? input.currentTopic,
+      currentModule: snapshot?.currentModule ?? input.currentModule,
+      projectEvidence: (snapshot?.projectEvidence ?? input.projectEvidence ?? input.personalMemoryEvidence ?? input.experienceContext ?? []).slice(0, 8),
       recentTranscript,
-      interviewMemory: input.interviewMemory,
-      followUpContext: input.followUpContext
+      interviewMemory: snapshot?.interviewMemory ?? input.interviewMemory,
+      followUpContext: input.followUpContext,
+      evidenceSnapshot: snapshot
     };
   }
 }
 
 export interface PromptSection {
-  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "experience-context" | "retrieval-context" | "question-bank-context" | "recent-transcript" | "interview-memory" | "follow-up-context" | "conversation-history" | "question" | "output-format";
+  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "experience-context" | "evidence-context" | "retrieval-context" | "question-bank-context" | "recent-transcript" | "interview-memory" | "follow-up-context" | "conversation-history" | "question" | "output-format";
   content: string;
 }
 
@@ -148,6 +158,9 @@ export class PromptBuilder {
     if (experienceRequested && context.experienceContext.length > 0) sections.push({ name: "experience-context", content: `以下是真实经历素材。只使用与问题直接相关的内容，不能补写未出现的事实：\n${context.experienceContext.join("\n---\n")}` });
     if (personalContextRequested && context.projectEvidence.length > 0 && context.personalMemoryEvidence.length === 0 && context.experienceContext.length === 0) {
       sections.push({ name: "experience-context", content: `以下是已确认的项目证据。只使用与问题直接相关的事实，不能补写未出现的职责、指标或结果：\n${context.projectEvidence.join("\n---\n")}` });
+    }
+    if (personalContextRequested && context.evidenceSnapshot) {
+      sections.push({ name: "evidence-context", content: `证据快照已锁定：${context.evidenceSnapshot.id}（指纹 ${context.evidenceSnapshot.fingerprint}）。只能使用快照中的个人工程经验；PROJECT_SOURCE 只能解释实现，不能证明个人职责或指标。` });
     }
     if (context.retrievedKnowledge.length > 0) sections.push({ name: "retrieval-context", content: `资料分层规则：PROJECT_SOURCE 仅辅助实现说明；GLOBAL_REFERENCE 仅解释通用知识，不能形成项目事实或个人经历。\n${context.retrievedKnowledge.join("\n---\n")}` });
     if (context.questionBankMatches.length > 0) sections.push({ name: "question-bank-context", content: `以下是题库路由结果，仅用于选择已整理素材和判断题型；不要把题库内容当成个人经历证据：\n${context.questionBankMatches.map((hit) => `${hit.question.bankType}/${hit.question.category}（语义 ${Math.round(hit.semanticScore * 100)}%，优先级 ${hit.priority}%）：${hit.question.canonicalText}${hit.reasons.length ? ` [${hit.reasons.join(", ")}]` : ""}`).join("\n")}` });
@@ -297,7 +310,23 @@ export class AnswerAgent {
 
   async *stream(question: AnswerQuestion, mode: AnswerMode, contextInput: AnswerContextInput = {}, signal?: AbortSignal, options: AnswerGenerationOptions = {}): AsyncGenerator<AnswerGenerationEvent> {
     const routedQuestion = { ...question, text: normalizeTechnicalTerms(question.text) };
-    const context = this.contextRouter.route(routedQuestion.text, contextInput);
+    const routedContext = this.contextRouter.route(routedQuestion.text, contextInput);
+    const evidenceSnapshot = routedContext.evidenceSnapshot ?? createEvidenceSnapshot({
+      questionId: routedQuestion.id,
+      profileSummary: routedContext.profileSummary,
+      jobDescriptionSummary: routedContext.jobDescriptionSummary,
+      profileInstructions: routedContext.profileInstructions,
+      currentProject: routedContext.currentProject,
+      currentModule: routedContext.currentModule,
+      currentTopic: routedContext.currentTopic ?? routedContext.interviewMemory?.currentTopic,
+      personalMemoryEvidence: routedContext.personalMemoryEvidence,
+      experienceContext: routedContext.experienceContext,
+      projectEvidence: routedContext.projectEvidence,
+      retrievedKnowledge: routedContext.retrievedKnowledge,
+      recentTranscript: routedContext.recentTranscript,
+      interviewMemory: routedContext.interviewMemory
+    });
+    const context = { ...routedContext, evidenceSnapshot };
     const kind = classifyAnswerQuestion(routedQuestion.text, routedQuestion.kind);
     const plan = this.answerPlanner.plan({
       question: routedQuestion.text,
@@ -434,6 +463,22 @@ export class AnswerAgent {
         score: 0.75,
         issues: ["strict-grounding-fallback"],
         suggestions: ["补充并确认项目事实后，可生成更具体的第一人称回答"],
+        needsRepair: false
+      };
+    }
+    const claimGate = new ClaimGate().check({
+      question: routedQuestion.text,
+      answer: formattedText,
+      evidenceSnapshot,
+      requiresPersonalEvidence: options.strictPersonalGrounding === true && personalContextRequested
+    });
+    if (!claimGate.allowed) {
+      formattedText = claimGate.fallbackAnswer ?? STRICT_GROUNDING_FALLBACK;
+      quality = {
+        ...quality,
+        score: Math.min(quality.score, claimGate.score),
+        issues: [...new Set([...quality.issues, ...claimGate.issues, "claim-gate-blocked"])],
+        suggestions: [...new Set([...quality.suggestions, ...claimGate.suggestions])],
         needsRepair: false
       };
     }
