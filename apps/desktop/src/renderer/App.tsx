@@ -3,7 +3,7 @@ import type { JSX } from "react";
 import { create } from "zustand";
 import type { AudioDevices, AudioDrift, AudioSidecarEvent, ProbeResult, RealtimeServerMessage } from "@interview-copilot/protocol";
 import { QUESTION_BANK_BANK_LABELS, QUESTION_BANK_BANK_TYPES, QUESTION_BANK_TYPE_LABELS, QUESTION_BANK_TYPES, validateLlmModelConfiguration } from "@interview-copilot/shared";
-import { QWEN_REALTIME_ASR_MODEL, QWEN_REALTIME_ASR_URL, type AsrProviderType, type ChatAction, type ChatResponse, type ProjectAnalysisJob, type ProjectFact, type ProjectMaterialImportReport, type ProjectMemorySnapshot, type ProjectSourceRole, type QuestionBankBankType, type QuestionBankCoverageResult, type QuestionBankJobProfileRecord, type QuestionBankQuestionRecord, type QuestionBankSkillRecord, type QuestionBankType, type QuestionCandidate, type QuestionEvent, type SessionState, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { QWEN_REALTIME_ASR_MODEL, QWEN_REALTIME_ASR_URL, type AsrProviderType, type ChatAction, type ChatResponse, type ProjectAnalysisJob, type ProjectFact, type ProjectMaterialImportReport, type ProjectMemorySnapshot, type ProjectQuestionBankImportReport, type ProjectSourceRole, type QuestionBankBankType, type QuestionBankCoverageResult, type QuestionBankJobProfileRecord, type QuestionBankQuestionRecord, type QuestionBankSkillRecord, type QuestionBankType, type QuestionCandidate, type QuestionEvent, type SessionState, type TranscriptSnapshot } from "@interview-copilot/shared";
 import type { Profile } from "@interview-copilot/shared";
 import type { JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectMemoryStats, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, RetrievalRunRecord } from "../main/database";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
@@ -1285,6 +1285,24 @@ export function App(): JSX.Element {
       setProjectMemoryRunning(false);
     }
   };
+  const importProjectQuestionBank = async (projectId: string, file: File): Promise<ProjectQuestionBankImportReport | undefined> => {
+    if (!profileId) return undefined;
+    try {
+      const report = await window.interviewCopilot.knowledge.ingestProjectQuestionBank({
+        profileId,
+        projectId,
+        filename: file.name,
+        mimeType: file.type || "application/octet-stream",
+        bytes: new Uint8Array(await file.arrayBuffer())
+      });
+      await refreshProjectState(profileId);
+      store.setNotice(`项目题库已导入：识别 ${report.recognizedQuestions} 题，答案 ${report.importedAnswers} 条，已确认`);
+      return report;
+    } catch (error) {
+      store.setNotice(`项目题库导入失败：${userFacingError(error)}`);
+      return undefined;
+    }
+  };
   const createProjectMemory = async (input: { name: string; ownershipMode: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }) => {
     if (!profileId) return;
     const created = await window.interviewCopilot.projects.create({ ...input, profileId });
@@ -1583,7 +1601,7 @@ export function App(): JSX.Element {
   const specialPageContent = page === "knowledge"
     ? <KnowledgePage knowledgeBases={knowledgeBases} knowledgeBaseId={knowledgeBaseId} knowledgeDocuments={knowledgeDocuments} requestDialog={requestDialog} onSelectBase={setKnowledgeBaseId} onCreateBase={async (name) => { const created = await window.interviewCopilot.knowledge.createBase(name); if (created) { setKnowledgeBases((current) => [created, ...current]); setKnowledgeBaseId(created.id); setKnowledgeDocuments([]); } }} onRenameBase={async (id, name) => { const updated = await window.interviewCopilot.knowledge.renameBase(id, name); if (updated) setKnowledgeBases((current) => current.map((item) => item.id === updated.id ? updated : item)); }} onDeleteBase={async (id, name) => { const confirmed = await requestDialog({ kind: "confirm", title: `删除 ${name}？`, description: "删除后资料库和其中的文档会一起删除。", confirmLabel: "删除" }); if (confirmed === true) { await window.interviewCopilot.knowledge.deleteBase(id); const next = await window.interviewCopilot.knowledge.listBases(); const nextId = next[0]?.id ?? ""; setKnowledgeBases(next); setKnowledgeBaseId(nextId); setKnowledgeDocuments(nextId ? await window.interviewCopilot.knowledge.listDocuments(nextId) : []); } }} onUpload={uploadKnowledgeFile} onUpdateType={async (id, type) => { await window.interviewCopilot.knowledge.updateType(id, type); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onReindex={async (id) => { await window.interviewCopilot.knowledge.reindex(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onDeleteDocument={async (id) => { await window.interviewCopilot.knowledge.delete(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} />
     : page === "project-library"
-      ? <ProjectLibraryPage profileId={profileId} memory={projectMemory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] }} stats={projectMemoryStats} facts={projectFacts} staleFacts={staleProjectFacts} analysisRuns={knowledgeAnalysisRuns} analysisJobs={projectAnalysisJobs} rebuilding={projectMemoryRunning} selectedProjectId={selectedProjectId} onSelectProject={setSelectedProjectId} onImportProjectMaterials={importProjectMaterials} onCreateProject={createProjectMemory} onUpdateProject={updateProjectOwnership} onRebuild={(projectId) => void rebuildProjectMemory(projectId)} onCancelAnalysis={(projectId, jobId) => window.interviewCopilot.projectMemory.cancelAnalysis(projectId, jobId).then((job) => { if (job) setProjectAnalysisJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]); })} onRetryAnalysis={(projectId) => window.interviewCopilot.projectMemory.retryAnalysis(profileId, projectId).then((job) => { if (job) setProjectAnalysisJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]); })} onReviewFact={reviewProjectFact} onResolveConflict={resolveProjectConflict} onUnassignSource={unassignProjectSource} onAddResponsibility={addProjectResponsibility} agentMessages={chatMessages} agentSending={chatSending} agentProjectId={conversations.find((item) => item.id === activeConversationId)?.projectId} onSendAgent={sendProjectAgent} onRetryAgent={retryChatMessage} onOpenSettings={() => setPage("settings")} onApproveAgentAction={approveChatAction} />
+      ? <ProjectLibraryPage profileId={profileId} memory={projectMemory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] }} stats={projectMemoryStats} facts={projectFacts} staleFacts={staleProjectFacts} analysisRuns={knowledgeAnalysisRuns} analysisJobs={projectAnalysisJobs} rebuilding={projectMemoryRunning} selectedProjectId={selectedProjectId} onSelectProject={setSelectedProjectId} onImportProjectMaterials={importProjectMaterials} onImportProjectQuestionBank={importProjectQuestionBank} onCreateProject={createProjectMemory} onUpdateProject={updateProjectOwnership} onRebuild={(projectId) => void rebuildProjectMemory(projectId)} onCancelAnalysis={(projectId, jobId) => window.interviewCopilot.projectMemory.cancelAnalysis(projectId, jobId).then((job) => { if (job) setProjectAnalysisJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]); })} onRetryAnalysis={(projectId) => window.interviewCopilot.projectMemory.retryAnalysis(profileId, projectId).then((job) => { if (job) setProjectAnalysisJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]); })} onReviewFact={reviewProjectFact} onResolveConflict={resolveProjectConflict} onUnassignSource={unassignProjectSource} onAddResponsibility={addProjectResponsibility} agentMessages={chatMessages} agentSending={chatSending} agentProjectId={conversations.find((item) => item.id === activeConversationId)?.projectId} onSendAgent={sendProjectAgent} onRetryAgent={retryChatMessage} onOpenSettings={() => setPage("settings")} onApproveAgentAction={approveChatAction} />
       : page === "job-targets"
       ? <JobTargetsPage targets={jobTargets} onUploadJob={uploadJobDescription} onOpenProfile={() => setPage("profiles")} />
       : undefined;
