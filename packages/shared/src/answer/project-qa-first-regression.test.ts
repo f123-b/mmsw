@@ -120,8 +120,10 @@ describe("Project QA first real-interview regression", () => {
     let strongCorrect = 0;
     let directPlans = 0;
     let augmentedPlans = 0;
+    const routeDurations: number[] = [];
     for (let iteration = 0; iteration < repetitions; iteration += 1) {
       for (const testCase of cases) {
+        const routeStartedAt = performance.now();
         const project = qa({ id: "adc-qa", text: testCase.canonical, stale: testCase.stale, verified: !testCase.ai, answer: testCase.noAnswer ? "" : "PWM 中点触发 ADC，并通过 DMA 搬运采样数据。", variants: testCase.canonical === "ADC 怎么保证实时性？" ? ["PWM 和 ADC 怎么同步？"] : [] });
         const candidates = [
           project,
@@ -129,6 +131,7 @@ describe("Project QA first real-interview regression", () => {
           qa({ id: "global", text: testCase.fallback ? "采样时序怎么验证？" : "DMA 如何搬运采样数据？", projectId: null, answer: "DMA 由硬件完成数据搬运，减少 CPU 介入。", variants: ["DMA 怎么减少 CPU 开销？"] })
         ];
         const result = router.routeProjectQaFirst(testCase.text, candidates, { projectId });
+        routeDurations.push(performance.now() - routeStartedAt);
         const level = result.projectQa?.level ?? "none";
         if (level !== "none") projectHits += 1;
         if (level === "strong") {
@@ -143,7 +146,11 @@ describe("Project QA first real-interview regression", () => {
     }
     const totalMs = performance.now() - startedAt;
     const strongPrecision = strongPredictions === 0 ? 1 : strongCorrect / strongPredictions;
-    console.log("PROJECT_QA_FIRST_BENCHMARK", JSON.stringify({ samples, totalMs: Number(totalMs.toFixed(2)), avgMs: Number((totalMs / samples).toFixed(4)), projectQaHitRate: Number((projectHits / samples).toFixed(4)), projectQaStrongMatchPrecision: Number(strongPrecision.toFixed(4)), projectQaDirectAnswerRate: Number((directPlans / samples).toFixed(4)), projectQaAugmentedAnswerRate: Number((augmentedPlans / samples).toFixed(4)) }));
+    const percentile = (ratio: number): number => {
+      const sorted = [...routeDurations].sort((left, right) => left - right);
+      return Number((sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))] ?? 0).toFixed(4));
+    };
+    console.log("PROJECT_QA_FIRST_BENCHMARK", JSON.stringify({ samples, totalMs: Number(totalMs.toFixed(2)), avgMs: Number((totalMs / samples).toFixed(4)), projectQaP50Ms: percentile(.5), projectQaP95Ms: percentile(.95), projectQaHitRate: Number((projectHits / samples).toFixed(4)), projectQaStrongMatchPrecision: Number(strongPrecision.toFixed(4)), projectQaDirectAnswerRate: Number((directPlans / samples).toFixed(4)), projectQaAugmentedAnswerRate: Number((augmentedPlans / samples).toFixed(4)) }));
     expect(totalMs).toBeLessThan(5_000);
   });
 });

@@ -8,7 +8,7 @@ interface ProjectQuestionBankPanelProps {
   projectName: string;
   questionRevision?: string;
   onImport: (file: File) => Promise<ProjectQuestionBankImportReport | undefined>;
-  onGenerate: () => void | Promise<void>;
+  onGenerate: () => void | Promise<unknown>;
 }
 
 function preferredAnswer(question: QuestionBankQuestionRecord): string {
@@ -86,11 +86,18 @@ export function ProjectQuestionBankPanel(props: ProjectQuestionBankPanelProps): 
     await refresh();
   };
 
-  const toggleVerified = async (question: QuestionBankQuestionRecord): Promise<void> => {
+  const toggleQuestionVerified = async (question: QuestionBankQuestionRecord): Promise<void> => {
     const nextVerified = !question.verified;
     await window.interviewCopilot.questionBank.bulkUpdate([question.id], { verified: nextVerified });
-    for (const card of question.answerCards) await window.interviewCopilot.questionBank.saveAnswer({ id: card.id, questionId: question.id, mode: card.mode, content: card.content, codeContent: card.codeContent, keyPoints: card.keyPoints, complexity: card.complexity, limitations: card.limitations, sourceType: card.sourceType, verified: nextVerified, stale: card.stale, factIds: card.factIds });
-    setNotice(nextVerified ? "项目答案已确认" : "项目答案已取消确认");
+    setNotice(nextVerified ? "项目问题已确认；答案卡仍按各自状态处理" : "项目问题已取消确认");
+    await refresh();
+  };
+
+  const toggleAnswerCardVerified = async (question: QuestionBankQuestionRecord, cardId: string): Promise<void> => {
+    const card = question.answerCards.find((item) => item.id === cardId);
+    if (!card || card.stale) return;
+    await window.interviewCopilot.questionBank.saveAnswer({ id: card.id, questionId: question.id, mode: card.mode, content: card.content, codeContent: card.codeContent, keyPoints: card.keyPoints, complexity: card.complexity, limitations: card.limitations, sourceType: card.sourceType, verified: !card.verified, stale: false, factIds: card.factIds });
+    setNotice(card.verified ? "答案卡已取消确认" : "答案卡已确认");
     await refresh();
   };
 
@@ -133,22 +140,22 @@ export function ProjectQuestionBankPanel(props: ProjectQuestionBankPanelProps): 
   };
 
   const generateQuestions = async (): Promise<void> => {
-    await props.onGenerate();
-    setNotice("项目题库生成任务已提交");
+    const result = await props.onGenerate();
+    if (result) setNotice("项目题库已生成，答案卡待确认");
     await refresh();
   };
 
   return <section className="project-section project-question-bank-panel">
     <header className="project-section-header"><div><span className="project-eyebrow">PROJECT QA</span><h2>项目题库</h2><p>已确认的项目答案优先用于实时面试；AI 生成内容必须先确认。</p></div><div className="detail-actions"><label className="dark-pill upload-project-action">＋ 上传项目题库<input type="file" accept=".txt,.md,.pdf,.docx" disabled={importing} onChange={(event) => { const file = event.target.files?.[0]; if (file) void importFile(file); event.target.value = ""; }} /></label><button className="outline-pill" onClick={() => setManualOpen((value) => !value)}>＋ 手动新增问题</button><button className="outline-pill" onClick={() => void generateQuestions()}>AI 根据项目生成题库</button></div></header>
-    <div className="detail-metrics personal-memory-stats"><span>项目问题 <strong>{questions.length}</strong></span><span>已确认 <strong>{questions.filter((question) => question.verified && question.answerCards.some((card) => card.verified && !card.stale)).length}</strong></span><span>待确认 <strong>{questions.filter((question) => !question.verified || !question.answerCards.some((card) => card.verified && !card.stale)).length}</strong></span><span>当前项目 <strong>{props.projectName}</strong></span></div>
+    <div className="detail-metrics personal-memory-stats"><span>项目问题 <strong>{questions.length}</strong></span><span>已确认 <strong>{questions.filter((question) => question.verified && !question.stale && question.answerCards.some((card) => card.verified && !card.stale)).length}</strong></span><span>待确认 <strong>{questions.filter((question) => !question.verified || Boolean(question.stale) || !question.answerCards.some((card) => card.verified && !card.stale)).length}</strong></span><span>当前项目 <strong>{props.projectName}</strong></span></div>
     {manualOpen && <div className="detail-sheet project-qa-editor"><h3>新增项目标准答案</h3><label className="clean-field"><span>面试问题</span><input value={manualQuestion} onChange={(event) => setManualQuestion(event.target.value)} placeholder="例如：ADC 怎么保证实时性？" /></label><label className="clean-field"><span>标准答案</span><textarea value={manualAnswer} onChange={(event) => setManualAnswer(event.target.value)} rows={5} placeholder="写下你希望面试时直接改写和口述的答案。" /></label><button className="dark-pill" disabled={!manualQuestion.trim() || !manualAnswer.trim()} onClick={() => void saveManual()}>保存并确认</button></div>}
     <label className="project-question-search"><span>搜索项目问题</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索问题、相似问法或答案…" /></label>
     {notice && <p className="project-page-notice">{notice}</p>}
     {loading ? <ProjectQaLoading /> : visibleQuestions.length === 0 ? <div className="knowledge-empty"><strong>{search ? "没有匹配的项目问题" : "还没有项目题库"}</strong><span>上传项目题库、手动新增，或让 AI 根据当前项目生成待确认问题。</span></div> : <div className="project-qa-list">{visibleQuestions.map((question) => {
       const editing = editingId === question.id;
-      const stale = Boolean(question.stale || question.answerCards.some((card) => card.stale));
+      const stale = Boolean(question.stale);
       const ready = question.verified && question.answerCards.some((card) => card.verified && !card.stale) && !stale;
-      return <article className={`project-qa-card ${stale ? "is-stale" : ""}`} key={question.id}><div className="project-qa-card-heading"><span className="project-qa-index">Q</span>{editing ? <input value={questionDraft} onChange={(event) => setQuestionDraft(event.target.value)} /> : <h3>{question.canonicalText}</h3>}<span className={`project-qa-status ${ready ? "confirmed" : "pending"}`}>{stale ? "⚠ 资料已变化" : ready ? "已确认" : "AI生成 · 待确认"}</span></div>{editing ? <textarea value={answerDraft} onChange={(event) => setAnswerDraft(event.target.value)} rows={5} /> : <div className="project-qa-answer-cards">{question.answerCards.length > 0 ? question.answerCards.map((card) => <div className={`project-qa-answer-card ${card.stale ? "is-stale" : ""}`} key={card.id}><div><span>{card.mode} · {card.verified && !card.stale ? "已确认" : "待确认"}</span><p>{card.content}</p></div><button className="text-button" onClick={() => beginEdit(question, card.id)}>修改</button><button className="text-button danger-text" onClick={() => void deleteAnswerCard(question, card.id)}>删除</button></div>) : <p className="project-qa-answer">暂无答案，请编辑补充。</p>}</div>}<div className="project-qa-meta"><span>来源：{sourceLabel(question)}</span>{question.variants.length > 0 && <span>相似问法 {question.variants.length}</span>}{question.factIds?.length ? <span>关联事实 {question.factIds.length}</span> : null}</div>{question.variants.length > 0 && <div className="project-qa-variants"><span>相似问法：</span>{question.variants.map((variant) => <span className="project-qa-variant" key={variant}>{variant}<button aria-label={`删除相似问法：${variant}`} onClick={() => void removeVariant(question, variant)}>×</button></span>)}</div>}<div className="project-qa-actions">{editing ? <><button className="dark-pill" onClick={() => void saveEdit(question)}>保存</button><button className="text-button" onClick={() => { setEditingId(undefined); setEditingCardId(undefined); }}>取消</button></> : <><button className="text-button" onClick={() => beginEdit(question)}>修改</button><button className="text-button" onClick={() => void addVariant(question)}>增加相似问法</button><button className="text-button" onClick={() => void addAnswerCard(question)}>新增答案卡</button><button className="text-button" onClick={() => void toggleVerified(question)}>{ready ? "取消确认" : "确认"}</button><button className="text-button" onClick={() => void window.interviewCopilot.questionBank.bulkUpdate([question.id], { status: question.status === "active" ? "archived" : "active" }).then(refresh)}>{question.status === "active" ? "停用" : "启用"}</button><button className="text-button danger-text" onClick={() => { if (window.confirm("删除这条项目问题？")) void window.interviewCopilot.questionBank.deleteQuestion(question.id).then(refresh); }}>删除</button></>}</div></article>;
+      return <article className={`project-qa-card ${stale ? "is-stale" : ""}`} key={question.id}><div className="project-qa-card-heading"><span className="project-qa-index">Q</span>{editing ? <input value={questionDraft} onChange={(event) => setQuestionDraft(event.target.value)} /> : <h3>{question.canonicalText}</h3>}<span className={`project-qa-status ${ready ? "confirmed" : "pending"}`}>{stale ? "⚠ 资料已变化" : ready ? "已确认" : question.verified ? "答案待确认" : "问题待确认"}</span></div>{editing ? <textarea value={answerDraft} onChange={(event) => setAnswerDraft(event.target.value)} rows={5} /> : <div className="project-qa-answer-cards">{question.answerCards.length > 0 ? question.answerCards.map((card) => <div className={`project-qa-answer-card ${card.stale ? "is-stale" : ""}`} key={card.id}><div><span>{card.mode} · {card.stale ? "旧版本 · 已失效" : card.verified ? "已确认" : "待确认"}</span><p>{card.content}</p></div>{!card.stale && <button className="text-button" onClick={() => void toggleAnswerCardVerified(question, card.id)}>{card.verified ? "取消确认答案" : "确认答案"}</button>}<button className="text-button" onClick={() => beginEdit(question, card.id)}>修改</button><button className="text-button danger-text" onClick={() => void deleteAnswerCard(question, card.id)}>删除</button></div>) : <p className="project-qa-answer">暂无答案，请编辑补充。</p>}</div>}<div className="project-qa-meta"><span>来源：{sourceLabel(question)}</span>{question.variants.length > 0 && <span>相似问法 {question.variants.length}</span>}{question.factIds?.length ? <span>关联事实 {question.factIds.length}</span> : null}</div>{question.variants.length > 0 && <div className="project-qa-variants"><span>相似问法：</span>{question.variants.map((variant) => <span className="project-qa-variant" key={variant}>{variant}<button aria-label={`删除相似问法：${variant}`} onClick={() => void removeVariant(question, variant)}>×</button></span>)}</div>}<div className="project-qa-actions">{editing ? <><button className="dark-pill" onClick={() => void saveEdit(question)}>保存</button><button className="text-button" onClick={() => { setEditingId(undefined); setEditingCardId(undefined); }}>取消</button></> : <><button className="text-button" onClick={() => beginEdit(question)}>修改</button><button className="text-button" onClick={() => void addVariant(question)}>增加相似问法</button><button className="text-button" onClick={() => void addAnswerCard(question)}>新增答案卡</button><button className="text-button" onClick={() => void toggleQuestionVerified(question)}>{question.verified ? "取消确认问题" : "确认问题"}</button><button className="text-button" onClick={() => void window.interviewCopilot.questionBank.bulkUpdate([question.id], { status: question.status === "active" ? "archived" : "active" }).then(refresh)}>{question.status === "active" ? "停用" : "启用"}</button><button className="text-button danger-text" onClick={() => { if (window.confirm("删除这条项目问题？")) void window.interviewCopilot.questionBank.deleteQuestion(question.id).then(refresh); }}>删除</button></>}</div></article>;
     })}</div>}
   </section>;
 }

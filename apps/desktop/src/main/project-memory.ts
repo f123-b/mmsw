@@ -389,7 +389,9 @@ export class ProjectMemoryService {
       const snapshot = await new ProjectAnalyzerAgentClass(this.model, this.comprehensionModel, (event, fields) => { this.onTrace?.(event, fields); options.onTrace?.(event, fields); }, this.comprehensionEnabled).analyze(input, { cachedUnderstanding: cachedUnderstanding?.understanding, signal: options.signal });
       options.signal?.throwIfAborted?.();
       this.onTrace?.("PROJECT_PARSE_TRACE", { projectId, sourceCount: sources.length, factCount: snapshot.facts?.length ?? 0, moduleCount: snapshot.modules.length, problemCount: snapshot.problems.length, questionCount: snapshot.interviewQuestions.length, sourceIds: sources.map((source) => source.id) });
+      const factDependencyInvalidationStartedAt = performance.now();
       this.memories.replaceSnapshot(project.profileId, snapshot, Date.now(), project.id);
+      this.onTrace?.("PROJECT_FACT_DEPENDENCY_INVALIDATION", { projectId, durationMs: Number((performance.now() - factDependencyInvalidationStartedAt).toFixed(2)) });
       if (snapshot.understanding && !cachedUnderstanding && snapshot.understanding.status === "completed") {
         const latest = this.memories.getUnderstandingSnapshot(project.id, undefined, false);
         this.memories.saveUnderstandingSnapshot({ projectId: project.id, inputHash, version: (latest?.version ?? 0) + 1, understanding: snapshot.understanding, now: Date.now() });

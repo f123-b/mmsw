@@ -42,6 +42,13 @@ const projectQa = (level: ProjectQaRouteResult["level"], verified = true): Proje
 });
 
 describe("Project QA answer source planner", () => {
+  it("keeps a selected project as an anchor without routing a generic question to project QA", () => {
+    expect(planAnswerSource({ projectId: "foc", projectAnchorAvailable: true, projectQuestion: false }).mode).toBe("general_technical");
+    expect(planAnswerSource({ projectId: "foc", projectAnchorAvailable: true, projectQuestion: false })).toMatchObject({ projectAnchorAvailable: true, projectQuestionRequested: false, allowProjectKnowledge: false });
+  });
+  it("keeps identity questions personal without requesting project facts", () => {
+    expect(planAnswerSource({ projectId: "foc", projectAnchorAvailable: true, projectQuestion: false, personalQuestion: true })).toMatchObject({ mode: "personal_experience", projectQuestionRequested: false, allowProjectKnowledge: false });
+  });
   it("selects direct rewrite for verified exact/strong project QA", () => {
     const route = projectQa("strong");
     route.top = route.hits[0];

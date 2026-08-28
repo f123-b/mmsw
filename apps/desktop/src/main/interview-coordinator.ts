@@ -42,6 +42,7 @@ import {
   type InterviewTurn,
   type EvidenceSnapshot,
   type CandidateStatementEvidence,
+  type FollowUpContext,
   type VisionInput
 } from "@interview-copilot/shared";
 import type { AudioStartOptions } from "./audio-manager";
@@ -96,6 +97,7 @@ export interface InterviewStartOptions extends Omit<RealtimeConnectOptions, "aut
 export interface InterviewContextSelection {
   projectId?: string;
   jobTargetId?: string;
+  followUpContext?: FollowUpContext;
 }
 
 export interface InterviewHistoryPort {
@@ -717,7 +719,18 @@ export class InterviewCoordinator extends EventEmitter {
       const answerOperation = this.runtimeAnswers.get(operationId);
       if (answerOperation) answerOperation.state = "context_loading";
       this.recordRuntimeTrace("PROJECT_CONTEXT_STARTED", {}, { questionId: question.id, providerRequestId });
-      const providerContextResult = this.contextProvider(question, this.activeProfileId ?? "", [...frozenContext.recentTranscript], { projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId });
+      const isFollowUp = question.speechAct === "FOLLOW_UP" || question.detectionType === "follow_up" || question.category === "followup";
+      const followUpContext = isFollowUp
+        ? this.followUpContextResolver.resolve(
+          { id: question.id, parentQuestionId: question.parentQuestionId, rootQuestionId: question.rootQuestionId, text: question.text },
+          frozenContext.memory,
+          {
+            relatedProject: /项目|简历|经历|负责|做过|成果|业绩/.test(question.text) ? this.activeOptions?.projectId : undefined,
+            relatedTechnicalTopic: frozenContext.memory.currentTopic
+          }
+        )
+        : undefined;
+      const providerContextResult = this.contextProvider(question, this.activeProfileId ?? "", [...frozenContext.recentTranscript], { projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId, ...(followUpContext ? { followUpContext } : {}) });
       // Keep the default synchronous context path truly synchronous. This
       // removes an avoidable microtask from consecutive-question handling;
       // async profile/knowledge retrieval still remains cancellable below.
@@ -783,20 +796,9 @@ export class InterviewCoordinator extends EventEmitter {
       };
       if (answerOperation) answerOperation.state = "provider_pending";
       this.recordRuntimeTrace("PROJECT_CONTEXT_READY", {}, { questionId: question.id, providerRequestId });
-      const isFollowUp = question.speechAct === "FOLLOW_UP" || question.detectionType === "follow_up" || question.category === "followup";
       // A queued question must retain the topic and transcript that existed
       // when it was confirmed. Looking at global "latest" memory here caused
       // an older memory-leak question to inherit a later RS-485/RS-232 topic.
-      const followUpContext = isFollowUp
-        ? this.followUpContextResolver.resolve(
-          { id: question.id, parentQuestionId: question.parentQuestionId, rootQuestionId: question.rootQuestionId, text: question.text },
-          memorySnapshot,
-          {
-            relatedProject: /项目|简历|经历|负责|做过|成果|业绩/.test(question.text) ? this.activeOptions?.projectId : undefined,
-            relatedTechnicalTopic: memorySnapshot.currentTopic
-          }
-        )
-        : undefined;
       const preparedAnswer = lockedProviderContext.preparedAnswer;
       const answerKind = classifyAnswerQuestion(question.text, question.detectionType);
       const answerIntent = analyzeAnswerIntent({ question: question.text, kind: answerKind });

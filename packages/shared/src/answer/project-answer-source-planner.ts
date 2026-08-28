@@ -9,6 +9,8 @@ export type AnswerSourceMode =
 
 export interface AnswerSourcePlan {
   mode: AnswerSourceMode;
+  projectAnchorAvailable: boolean;
+  projectQuestionRequested: boolean;
   projectId?: string;
   qaMatch?: {
     questionId: string;
@@ -27,7 +29,9 @@ export interface AnswerSourcePlan {
 
 export interface AnswerSourcePlannerInput {
   projectId?: string;
+  projectAnchorAvailable?: boolean;
   projectQuestion?: boolean;
+  personalQuestion?: boolean;
   projectQa?: ProjectQaRouteResult;
   preparedAnswer?: {
     answerCardId?: string;
@@ -58,15 +62,20 @@ function qaMatchFor(hit: QuestionBankRouteHit, card: { id: string; verified: boo
 }
 
 export function planAnswerSource(input: AnswerSourcePlannerInput): AnswerSourcePlan {
+  const projectAnchorAvailable = input.projectAnchorAvailable ?? Boolean(input.projectId);
+  const projectQuestionRequested = Boolean(input.projectQuestion);
+  const personalQuestionRequested = Boolean(input.personalQuestion);
   const qa = input.projectQa?.top;
   const level = input.projectQa?.level ?? "none";
   const card = selectedAnswerCard(qa);
   const verifiedQa = Boolean(qa && card?.verified && qa.question.verified && !qa.question.stale);
   const qaMatch = qa && card ? qaMatchFor(qa, card) : undefined;
 
-  if (input.projectId && verifiedQa && (level === "exact" || level === "strong")) {
+  if (input.projectId && projectQuestionRequested && verifiedQa && (level === "exact" || level === "strong")) {
     return {
       mode: "project_qa_direct",
+      projectAnchorAvailable,
+      projectQuestionRequested,
       projectId: input.projectId,
       ...(qaMatch ? { qaMatch } : {}),
       qaMatchLevel: level,
@@ -78,9 +87,11 @@ export function planAnswerSource(input: AnswerSourcePlannerInput): AnswerSourceP
     };
   }
 
-  if (input.projectId && level === "partial" && qa && card && verifiedQa) {
+  if (input.projectId && projectQuestionRequested && level === "partial" && qa && card && verifiedQa) {
     return {
       mode: "project_qa_augmented",
+      projectAnchorAvailable,
+      projectQuestionRequested,
       projectId: input.projectId,
       ...(qaMatch ? { qaMatch } : {}),
       qaMatchLevel: level,
@@ -92,9 +103,11 @@ export function planAnswerSource(input: AnswerSourcePlannerInput): AnswerSourceP
     };
   }
 
-  if (input.projectId && input.projectQuestion) {
+  if (input.projectId && projectQuestionRequested) {
     return {
       mode: "project_knowledge_generated",
+      projectAnchorAvailable,
+      projectQuestionRequested,
       projectId: input.projectId,
       qaMatchLevel: level,
       preserveStoredAnswerFacts: false,
@@ -108,7 +121,8 @@ export function planAnswerSource(input: AnswerSourcePlannerInput): AnswerSourceP
   if (input.preparedAnswer?.verified && !input.preparedAnswer.stale && input.preparedAnswer.content.trim()) {
     return {
       mode: "general_technical",
-      ...(input.projectId ? { projectId: input.projectId } : {}),
+      projectAnchorAvailable,
+      projectQuestionRequested,
       qaMatchLevel: "none",
       preserveStoredAnswerFacts: true,
       allowProjectKnowledge: false,
@@ -119,8 +133,10 @@ export function planAnswerSource(input: AnswerSourcePlannerInput): AnswerSourceP
   }
 
   return {
-    mode: input.projectQuestion ? "personal_experience" : "general_technical",
-    ...(input.projectId ? { projectId: input.projectId } : {}),
+    mode: personalQuestionRequested || projectQuestionRequested ? "personal_experience" : "general_technical",
+    projectAnchorAvailable,
+    projectQuestionRequested,
+    ...(projectQuestionRequested && input.projectId ? { projectId: input.projectId } : {}),
     qaMatchLevel: level,
     preserveStoredAnswerFacts: false,
     allowProjectKnowledge: false,

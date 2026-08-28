@@ -1222,6 +1222,7 @@ export class SqliteProjectMemoryRepository {
     const previousAssignments = onlyProjectId ? this.sources.listProjectSources(onlyProjectId) : [];
     const persistedOwnership = new Map(this.database.all<{ id: string; ownershipMode: string | null; ownershipNote: string | null }>("SELECT id, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects WHERE profile_id = ?", [profileId]).map((row) => [row.id, row] as const));
     snapshot = { ...snapshot, projects: snapshot.projects.map((project) => { const existing = persistedOwnership.get(project.id); return { ...project, ownershipMode: normalizeProjectOwnershipMode(existing?.ownershipMode ?? project.ownershipMode), ...(existing?.ownershipNote ? { ownershipNote: existing.ownershipNote } : project.ownershipNote ? { ownershipNote: project.ownershipNote } : {}) }; }) };
+    const previousFacts = new Map(this.listFacts(profileId, onlyProjectId, { includeStale: true, includeRejected: true }).map((fact) => [fact.id, fact] as const));
     const previousFactVerification = new Map(this.database.all<{ id: string; verified: number }>(`SELECT id, verified FROM project_facts WHERE ${factScope}`, projectFilterParams).map((row) => [row.id, Number(row.verified) === 1] as const));
     const previousFactEmbeddings = new Map(this.database.all<{ id: string; embeddingJson: string | null; embeddingHash: string | null; embeddingModel: string | null; embeddingVersion: string | null; embeddingUpdatedAt: number | null }>(`SELECT id, embedding_json AS embeddingJson, embedding_hash AS embeddingHash, embedding_model AS embeddingModel, embedding_version AS embeddingVersion, embedding_updated_at AS embeddingUpdatedAt FROM project_facts WHERE ${factScope}`, projectFilterParams).map((row) => [row.id, row] as const));
     const questionDelete = onlyProjectId ? "DELETE FROM question_bank_questions WHERE scope = 'project' AND profile_id = ? AND source = 'generated' AND project_id = ?" : "DELETE FROM question_bank_questions WHERE scope = 'project' AND profile_id = ? AND source = 'generated'";
@@ -1230,13 +1231,11 @@ export class SqliteProjectMemoryRepository {
       this.database.run("DELETE FROM project_modules WHERE project_id = ?", [onlyProjectId]);
       this.database.run("DELETE FROM technical_points WHERE project_id = ?", [onlyProjectId]);
       this.database.run("DELETE FROM project_problems WHERE project_id = ?", [onlyProjectId]);
-      this.database.run("UPDATE project_facts SET stale = 1, updated_at = ? WHERE project_id = ? AND verified = 0 AND evidence_level NOT IN ('confirmed-user')", [now, onlyProjectId]);
     } else {
       // Keep all project rows and user-authored facts; reanalysis only refreshes derived records.
       this.database.run("DELETE FROM project_modules WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ?)", [profileId]);
       this.database.run("DELETE FROM technical_points WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ?)", [profileId]);
       this.database.run("DELETE FROM project_problems WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ?)", [profileId]);
-      this.database.run("UPDATE project_facts SET stale = 1, updated_at = ? WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ?) AND verified = 0 AND evidence_level NOT IN ('confirmed-user')", [now, profileId]);
     }
     for (const project of snapshot.projects) {
       this.database.run("INSERT INTO projects(id, name, profile_id, description, role, hardware_json, software_json, technology_stack_json, time, source_ids_json, confidence, ownership_mode, ownership_note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, profile_id=excluded.profile_id, description=excluded.description, role=excluded.role, hardware_json=excluded.hardware_json, software_json=excluded.software_json, technology_stack_json=excluded.technology_stack_json, time=excluded.time, source_ids_json=excluded.source_ids_json, confidence=excluded.confidence, ownership_mode=excluded.ownership_mode, ownership_note=excluded.ownership_note, updated_at=excluded.updated_at", [project.id, project.name, profileId, project.description, project.role, JSON.stringify(project.hardware), JSON.stringify(project.software), JSON.stringify(project.technologyStack), project.time ?? null, JSON.stringify(project.sourceIds), project.confidence, normalizeProjectOwnershipMode(project.ownershipMode), project.ownershipNote ?? null, now, now]);
@@ -1258,19 +1257,44 @@ export class SqliteProjectMemoryRepository {
       for (const item of evidence) this.database.run("INSERT OR IGNORE INTO project_fact_sources(fact_id, source_id, quote, locator, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)", [fact.id, item.sourceId, item.quote || null, item.locator ?? null, item.relation ?? "support", now]);
       this.database.run("UPDATE project_facts SET experience_relation = ?, value_json = ? WHERE id = ?", [fact.experienceRelation ?? inferExperienceRelation(fact), fact.value ? JSON.stringify(fact.value) : null, fact.id]);
     };
-    if (snapshot.facts?.length) for (const item of snapshot.facts) saveFact({ ...item, profileId, status: item.status ?? "active", createdAt: item.createdAt ?? now, updatedAt: now });
-    else {
+    const factsToSave: ProjectFact[] = [];
+    if (snapshot.facts?.length) {
+      for (const item of snapshot.facts) factsToSave.push({ ...item, profileId, status: item.status ?? "active", createdAt: item.createdAt ?? now, updatedAt: now });
+    } else {
       for (const project of snapshot.projects) {
-        saveFact({ id: `${project.id}-fact-background`, projectId: project.id, profileId, type: "background", title: "项目背景", content: project.description, confidence: project.confidence, verified: false, sourceIds: project.sourceIds, createdAt: now, updatedAt: now });
-        saveFact({ id: `${project.id}-fact-responsibility`, projectId: project.id, profileId, type: "responsibility", title: "个人职责", content: project.role, confidence: project.confidence, verified: false, sourceIds: project.sourceIds, createdAt: now, updatedAt: now });
-        if (project.technologyStack.length || project.hardware.length || project.software.length) saveFact({ id: `${project.id}-fact-technology`, projectId: project.id, profileId, type: "technology", title: "技术栈与平台", content: [`技术栈：${project.technologyStack.join("、")}`, `硬件：${project.hardware.join("、")}`, `软件：${project.software.join("、")}`].filter((item) => !item.endsWith("：")).join("\n"), confidence: project.confidence, verified: false, sourceIds: project.sourceIds, createdAt: now, updatedAt: now });
+        factsToSave.push({ id: `${project.id}-fact-background`, projectId: project.id, profileId, type: "background", title: "项目背景", content: project.description, confidence: project.confidence, verified: false, sourceIds: project.sourceIds, createdAt: now, updatedAt: now });
+        factsToSave.push({ id: `${project.id}-fact-responsibility`, projectId: project.id, profileId, type: "responsibility", title: "个人职责", content: project.role, confidence: project.confidence, verified: false, sourceIds: project.sourceIds, createdAt: now, updatedAt: now });
+        if (project.technologyStack.length || project.hardware.length || project.software.length) factsToSave.push({ id: `${project.id}-fact-technology`, projectId: project.id, profileId, type: "technology", title: "技术栈与平台", content: [`技术栈：${project.technologyStack.join("、")}`, `硬件：${project.hardware.join("、")}`, `软件：${project.software.join("、")}`].filter((item) => !item.endsWith("：")).join("\n"), confidence: project.confidence, verified: false, sourceIds: project.sourceIds, createdAt: now, updatedAt: now });
       }
-      for (const module of snapshot.modules) saveFact({ id: `${module.id}-fact`, projectId: module.projectId, profileId: projectById.get(module.projectId)?.profileId ?? profileId, type: "module", title: module.moduleName, content: module.description, confidence: projectById.get(module.projectId)?.confidence ?? 0.65, verified: false, sourceIds: module.sourceIds, createdAt: now, updatedAt: now });
-      for (const point of snapshot.technicalPoints) saveFact({ id: `${point.id}-fact`, projectId: point.projectId, profileId: projectById.get(point.projectId)?.profileId ?? profileId, type: "technology", title: point.topic, content: point.content, confidence: projectById.get(point.projectId)?.confidence ?? 0.65, verified: false, sourceIds: point.sourceIds, createdAt: now, updatedAt: now });
-      for (const problem of snapshot.problems) saveFact({ id: `${problem.id}-fact`, projectId: problem.projectId, profileId: projectById.get(problem.projectId)?.profileId ?? profileId, type: "challenge", title: problem.problem, content: [`原因：${problem.cause}`, `解决：${problem.solution}`, `结果：${problem.result}`].join("\n"), confidence: projectById.get(problem.projectId)?.confidence ?? 0.65, verified: false, sourceIds: problem.sourceIds, createdAt: now, updatedAt: now });
+      for (const module of snapshot.modules) factsToSave.push({ id: `${module.id}-fact`, projectId: module.projectId, profileId: projectById.get(module.projectId)?.profileId ?? profileId, type: "module", title: module.moduleName, content: module.description, confidence: projectById.get(module.projectId)?.confidence ?? 0.65, verified: false, sourceIds: module.sourceIds, createdAt: now, updatedAt: now });
+      for (const point of snapshot.technicalPoints) factsToSave.push({ id: `${point.id}-fact`, projectId: point.projectId, profileId: projectById.get(point.projectId)?.profileId ?? profileId, type: "technology", title: point.topic, content: point.content, confidence: projectById.get(point.projectId)?.confidence ?? 0.65, verified: false, sourceIds: point.sourceIds, createdAt: now, updatedAt: now });
+      for (const problem of snapshot.problems) factsToSave.push({ id: `${problem.id}-fact`, projectId: problem.projectId, profileId: projectById.get(problem.projectId)?.profileId ?? profileId, type: "challenge", title: problem.problem, content: [`原因：${problem.cause}`, `解决：${problem.solution}`, `结果：${problem.result}`].join("\n"), confidence: projectById.get(problem.projectId)?.confidence ?? 0.65, verified: false, sourceIds: problem.sourceIds, createdAt: now, updatedAt: now });
+    }
+    for (const fact of factsToSave) saveFact(fact);
+    const incomingFactIds = new Set(factsToSave.map((fact) => fact.id));
+    const changedFactIdsByProject = new Map<string, Set<string>>();
+    const markChanged = (fact: ProjectFact): void => {
+      const previous = previousFacts.get(fact.id);
+      if (fact.evidenceLevel === "confirmed-user" || fact.verified || previous?.evidenceLevel === "confirmed-user" || previous?.verified) return;
+      const ids = changedFactIdsByProject.get(fact.projectId) ?? new Set<string>();
+      ids.add(fact.id);
+      changedFactIdsByProject.set(fact.projectId, ids);
+    };
+    for (const fact of factsToSave) {
+      const before = previousFacts.get(fact.id);
+      const beforeValue = JSON.stringify({ key: before?.canonicalKey ?? null, type: before?.type ?? null, title: before?.title ?? null, content: before?.content ?? null, value: before?.value ?? null });
+      const afterValue = JSON.stringify({ key: fact.canonicalKey ?? null, type: fact.type, title: fact.title, content: fact.content, value: fact.value ?? null });
+      if (!before || beforeValue !== afterValue || Boolean(before.stale) !== Boolean(fact.stale)) markChanged(fact);
+    }
+    for (const [factId, before] of previousFacts) {
+      if (!incomingFactIds.has(factId) && !before.verified && before.evidenceLevel !== "confirmed-user") {
+        this.database.run("UPDATE project_facts SET stale = 1, updated_at = ? WHERE id = ?", [now, factId]);
+        markChanged(before);
+      }
     }
     for (const project of snapshot.projects) this.syncProjectSkillsForProject(project.id, now);
     const questionBank = new SqliteQuestionBankRepository(this.database);
+    for (const [projectId, factIds] of changedFactIdsByProject) questionBank.invalidateProjectQaDependencies(projectId, [...factIds], now);
     for (const question of snapshot.interviewQuestions) {
       const project = projectById.get(question.projectId);
       questionBank.saveQuestion({ id: question.id, canonicalText: question.question, type: "project", bankType: "project", category: "project", scope: "project", profileId, projectId: question.projectId, source: "generated", confidence: project?.confidence ?? 0.65, verified: false, variants: question.keywords, factIds: question.factIds });
@@ -2419,7 +2443,7 @@ export class SqliteQuestionBankRepository {
   saveAnswerCard(input: QuestionBankAnswerCardInput, now = Date.now()): QuestionBankAnswerCardRecord {
     const question = this.getQuestion(input.questionId);
     if (!question) throw new Error("QUESTION_BANK_QUESTION_NOT_FOUND: 题目不存在");
-    if (question.scope === "project" && input.sourceType === "generated" && !(input.factIds?.length || question.factIds?.length)) throw new Error("PROJECT_ANSWER_FACTS_REQUIRED: 项目答案必须关联 Project Facts");
+    if (question.scope === "project" && (input.sourceType === "generated" || input.sourceType === "ai-generated") && !(input.factIds?.length || question.factIds?.length)) throw new Error("PROJECT_ANSWER_FACTS_REQUIRED: 项目答案必须关联 Project Facts");
     const cardId = input.id ?? id("bank-answer", now);
     const current = input.id ? this.getAnswerCard(input.id) : undefined;
     this.database.run("INSERT INTO question_bank_answer_cards(id, question_id, mode, content, code_content, key_points_json, complexity, limitations, source_type, verified, stale, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET question_id=excluded.question_id, mode=excluded.mode, content=excluded.content, code_content=excluded.code_content, key_points_json=excluded.key_points_json, complexity=excluded.complexity, limitations=excluded.limitations, source_type=excluded.source_type, verified=excluded.verified, stale=excluded.stale, version=excluded.version, updated_at=excluded.updated_at", [cardId, input.questionId, input.mode ?? "standard", input.content.trim(), input.codeContent?.trim() || null, JSON.stringify(input.keyPoints ?? []), input.complexity?.trim() || null, input.limitations?.trim() || null, input.sourceType ?? current?.sourceType ?? "manual", input.verified ? 1 : 0, input.stale ?? current?.stale ?? false ? 1 : 0, input.version ?? (current?.version ?? 0) + 1, current?.createdAt ?? now, now]);
@@ -2516,7 +2540,11 @@ export class SqliteQuestionBankRepository {
   }
 
   routeQuestion(text: string, options: QuestionBankRouteQuery = {}): QuestionBankRouteResult {
-    const candidates = this.listQuestions({ status: options.includeArchived ? "all" : "active", scope: options.scope, profileId: options.profileId, projectId: options.projectId, jobProfileId: options.jobProfileId, limit: 5000 });
+    const candidates = this.listQuestions({ status: options.includeArchived ? "all" : "active", scope: options.scope, profileId: options.profileId, projectId: options.projectId, jobProfileId: options.jobProfileId, limit: 5000 })
+      // Project QA is opt-in at the caller boundary. Generic routing should
+      // never accidentally select a project answer merely because it shares
+      // a technical token with the current question.
+      .filter((question) => Boolean(options.projectId) || question.scope !== "project");
     const router = new QuestionBankRouter();
     if (options.projectId && !options.includeArchived) return router.routeProjectQaFirst(text, candidates, { ...options, projectId: options.projectId });
     return router.route(text, candidates, options);
@@ -2606,13 +2634,26 @@ export class SqliteQuestionBankRepository {
     return { projectId, filename, sourceRole: "question_bank", verified: true, ...result };
   }
 
-  markProjectQuestionBankStale(projectId: string, now = Date.now()): number {
-    const questionIds = this.database.all<{ id: string }>("SELECT id FROM question_bank_questions WHERE scope = 'project' AND project_id = ? AND status = 'active' AND stale = 0", [projectId]).map((row) => row.id);
+  invalidateProjectQaDependencies(projectId: string, factIds: string[], now = Date.now()): number {
+    const ids = [...new Set(factIds.filter(Boolean))];
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => "?").join(",");
+    const questionIds = this.database.all<{ id: string }>(`SELECT DISTINCT q.id FROM question_bank_questions q JOIN question_bank_question_facts qf ON qf.question_id = q.id WHERE q.scope = 'project' AND q.project_id = ? AND qf.fact_id IN (${placeholders})`, [projectId, ...ids]).map((row) => row.id);
     if (questionIds.length === 0) return 0;
-    this.database.run("UPDATE question_bank_questions SET stale = 1, updated_at = ? WHERE scope = 'project' AND project_id = ? AND status = 'active'", [now, projectId]);
-    this.database.run("UPDATE question_bank_answer_cards SET stale = 1, updated_at = ? WHERE question_id IN (SELECT id FROM question_bank_questions WHERE scope = 'project' AND project_id = ?)", [now, projectId]);
+    const questionPlaceholders = questionIds.map(() => "?").join(",");
+    this.database.run(`UPDATE question_bank_questions SET stale = 1, updated_at = ? WHERE id IN (${questionPlaceholders})`, [now, ...questionIds]);
+    this.database.run(`UPDATE question_bank_answer_cards SET stale = 1, updated_at = ? WHERE question_id IN (${questionPlaceholders})`, [now, ...questionIds]);
     this.database.flushNow();
     return questionIds.length;
+  }
+
+  /**
+   * Kept for integrations compiled against the previous API. Material
+   * imports no longer have enough information to invalidate a whole project;
+   * callers must pass changed fact IDs to invalidateProjectQaDependencies.
+   */
+  markProjectQuestionBankStale(_projectId: string, _now = Date.now()): number {
+    return 0;
   }
 
   private hydrateQuestion(row: QuestionBankQuestionRow): QuestionBankQuestionRecord {

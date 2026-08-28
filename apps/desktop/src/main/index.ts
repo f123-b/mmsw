@@ -1,5 +1,6 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, screen } from "electron";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import { version as osVersion } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
@@ -10,7 +11,7 @@ import { createScreenshotFixtureResult, ScreenshotManager } from "./screenshot-m
 import { createScreenshotRequestId, SCREENSHOT_PROMPT, ScreenshotOperationRegistry, ScreenshotTraceBuffer, withScreenshotTimeout, type ScreenshotTraceEvent, type ScreenshotTraceEventName } from "./screenshot-pipeline";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeAnswerIntent, analyzeInterview, AnswerAgent, AgentToolRegistry, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, AnswerAgent, AgentToolRegistry, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
@@ -251,6 +252,7 @@ let realtimeTranscriptSnapshots: Partial<Record<"mic" | "remote", TranscriptSnap
 let pendingTranscriptBroadcast: TranscriptSnapshot | undefined;
 let transcriptBroadcastTimer: NodeJS.Timeout | undefined;
 let questionBankAnswerGeneration: Promise<import("./database").QuestionBankAnswerGenerationResult> | undefined;
+let projectQaGeneration: Promise<ProjectQaGenerationResult> | undefined;
 const preloadPath = join(__dirname, "../preload/index.mjs");
 const rendererFile = join(__dirname, "../renderer/index.html");
 const visualSmokeRequested = process.argv.includes("--visual-smoke");
@@ -1043,6 +1045,22 @@ function projectKnowledgeChunks(profileId: string, projectId: string): ScopedKno
   return [...projectChunks, ...referenceChunks];
 }
 
+/** General technical retrieval excludes documents explicitly bound to any
+ * project. A selected project remains an anchor, never an implicit source. */
+function generalTechnicalKnowledgeChunks(profileId: string, knowledgeBaseIds: string[]): ScopedKnowledgeChunk[] {
+  if (!knowledgeRepository) return [];
+  const projectDocumentIds = new Set(
+    projectMemoryRepository?.listProjects(profileId).flatMap((project) => projectMemoryRepository?.listProjectDocumentIds(project.id) ?? []) ?? []
+  );
+  const referenceDocumentIds = new Set(projectMemoryRepository?.listReferenceDocumentIds(profileId) ?? []);
+  return knowledgeRepository.listChunks(knowledgeBaseIds)
+    .filter((chunk) => {
+      const documentId = chunk.metadata.documentId;
+      return !projectDocumentIds.has(documentId) && !referenceDocumentIds.has(documentId);
+    })
+    .map((chunk) => ({ ...chunk, metadata: { ...chunk.metadata, scope: "profile" as const } }));
+}
+
 function chatContext(profileId?: string, userMessage = "", projectId?: string): { text: string; intent: string; sources: string[] } {
   const profile = profileId ? profileRepository?.get(profileId) : profileRepository?.active();
   if (!profile) return { text: "当前没有可用 Profile。请明确告诉用户先创建 Profile。", intent: "general_technical", sources: [] };
@@ -1576,7 +1594,6 @@ function registerIpc(): void {
       if ((documentType === "project" || documentType === "technical-doc") && input.profileId && projectMemoryService) {
         const requestedRole = input.sourceRole && input.sourceRole !== "auto" ? input.sourceRole : undefined;
         const assignment = projectMemoryService.assignDocument(input.profileId, saved.id, input.projectId, requestedRole);
-        if (assignment.status === "assigned" && assignment.projectId) questionBankRepository?.markProjectQuestionBankStale(assignment.projectId);
         return { ...saved, projectAssignment: assignment, ...(assignment.status === "needs_assignment" ? { error: assignment.message } : {}) };
       }
       return saved;
@@ -1588,7 +1605,6 @@ function registerIpc(): void {
   ipcMain.handle("knowledge:ingest-project-materials", async (_event, input: { profileId: string; projectId: string; knowledgeBaseId: string; files: import("@interview-copilot/shared").ProjectMaterialImportFile[] }) => {
     if (!projectMemoryService) throw new Error("Project Memory is still initializing");
     const report = await projectMemoryService.importProjectMaterials(input);
-    if (report.summary.assigned > 0) questionBankRepository?.markProjectQuestionBankStale(input.projectId);
     return report;
   });
   ipcMain.handle("knowledge:ingest-project-question-bank", async (_event, input: { profileId: string; projectId: string; filename: string; mimeType: string; bytes: Uint8Array }) => {
@@ -1638,6 +1654,7 @@ function registerIpc(): void {
   ipcMain.handle("question-bank:save-job", (_event, input: Parameters<SqliteQuestionBankRepository["saveJobProfile"]>[0]) => questionBankRepository?.saveJobProfile(input));
   ipcMain.handle("question-bank:import-text", (_event, input: { text: string; filename?: string; includeProject?: boolean; includeBehavioral?: boolean }) => questionBankRepository?.importText(input.text, input.filename, { includeProject: input.includeProject, includeBehavioral: input.includeBehavioral }));
   ipcMain.handle("question-bank:generate-answers", (_event, input?: { questionIds?: string[]; onlyUnanswered?: boolean }) => generateQuestionBankAnswers(input));
+  ipcMain.handle("question-bank:generate-project-qa", (_event, projectId: string) => generateProjectQuestionBank(projectId));
   ipcMain.handle("question-bank:match", (_event, text: string) => questionBankRepository?.matchQuestion(text));
   ipcMain.handle("profile-builder:get", (_event, profileId: string) => profileBuilderService?.get(profileId));
   ipcMain.handle("profile-builder:rebuild", async (_event, profileId: string) => {
@@ -1837,6 +1854,63 @@ async function generateQuestionBankAnswers(input: { questionIds?: string[]; only
   try { return await task; } finally { questionBankAnswerGeneration = undefined; }
 }
 
+async function generateProjectQuestionBank(projectId: string): Promise<ProjectQaGenerationResult> {
+  if (projectQaGeneration) return projectQaGeneration;
+  const task = (async () => {
+    if (!questionBankRepository || !projectMemoryRepository) throw new Error("PROJECT_QA_NOT_READY: 项目题库仍在初始化");
+    const project = projectMemoryRepository.getProject(projectId);
+    if (!project) throw new Error("PROJECT_NOT_FOUND");
+    const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings;
+    if (!settings.apiKey) throw new Error("LLM_NOT_CONFIGURED: 请先配置 LLM API Key，再生成项目题库");
+    const snapshot = projectMemoryRepository.getSnapshot(project.profileId);
+    const facts = (snapshot.facts ?? []).filter((fact) => fact.projectId === projectId && !fact.stale && fact.status !== "rejected" && fact.title.trim() && fact.content.trim()).slice(0, 80);
+    if (facts.length === 0) throw new Error("PROJECT_QA_FACTS_EMPTY: 当前项目没有可用于生成题库的有效事实");
+    const understanding = snapshot.understandings?.find((item) => item.projectId === projectId) ?? (snapshot.understanding?.projectId === projectId ? snapshot.understanding : undefined);
+    const prompt = buildProjectQaGenerationPrompt({
+      projectName: project.name,
+      facts: facts.map((fact) => ({ id: fact.id, type: fact.type, title: fact.title, content: fact.content })),
+      understanding: understanding ? JSON.stringify(understanding) : undefined
+    });
+    let raw = "";
+    for await (const delta of answerProvider.stream({
+      model: taskModel(settings, "questionBankModel", "fastModel"),
+      maxOutputTokens: 2_400,
+      sections: [
+        { name: "system/base", content: "你是项目题库生成器。只能使用输入中的 Project Facts；不得访问远程资料，不得补写未提供的个人职责、主导权、独立完成、选型决定或指标。必须返回可解析的 JSON 数组。" },
+        { name: "question", content: prompt }
+      ]
+    })) raw += delta;
+    const candidates = parseProjectQaGeneration(raw, facts.map((fact) => fact.id));
+    let generated = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const candidate of candidates) {
+      try {
+        const digest = createHash("sha256").update(`${projectId}\n${candidate.question}`).digest("hex").slice(0, 20);
+        const questionId = `project-qa-ai-${digest}`;
+        const existing = questionBankRepository.getQuestion(questionId);
+        if (existing && !existing.stale) {
+          skipped += 1;
+          continue;
+        }
+        const question = questionBankRepository.saveQuestion({ id: questionId, canonicalText: candidate.question, type: "project", bankType: "project", category: "project", scope: "project", profileId: project.profileId, projectId, source: "ai-generated", confidence: 0.7, verified: false, stale: false, factIds: candidate.factIds });
+        const answerDigest = createHash("sha256").update(candidate.answer).digest("hex").slice(0, 12);
+        questionBankRepository.saveAnswerCard({ id: `${question.id}-answer-${answerDigest}`, questionId: question.id, content: candidate.answer, sourceType: "ai-generated", verified: false, stale: false, factIds: candidate.factIds });
+        generated += 1;
+      } catch (error) {
+        failed += 1;
+        appLogger?.warn("project question bank generation item failed", { projectId, error: String(error) });
+      }
+    }
+    if (candidates.length === 0) throw new Error("PROJECT_QA_GENERATION_EMPTY: 模型没有返回可保存的项目题目");
+    const result: ProjectQaGenerationResult = { requested: candidates.length, generated, skipped, failed, factCount: facts.length };
+    broadcast("question-bank:project-generation-progress", { status: "completed", projectId, ...result });
+    return result;
+  })();
+  projectQaGeneration = task;
+  try { return await task; } finally { projectQaGeneration = undefined; }
+}
+
 function stopWrittenTest(): void {
   writtenTestController?.stop();
   overlayManager?.exitWrittenTestMode();
@@ -1996,34 +2070,44 @@ if (hasSingleInstanceLock) {
     const normalizedQuestion = normalizeTechnicalTerms(question.text);
     const projectSnapshot = projectMemoryService?.get(profileId) ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] };
     const questionAnalysis = new QuestionAnalyzer().analyze(normalizedQuestion, projectSnapshot.projects.map((project) => project.name));
-    const knowledgeRoute = routeKnowledge(questionAnalysis);
     const detectedProjectId = questionAnalysis.project ? projectSnapshot.projects.find((project) => project.name.toLowerCase() === questionAnalysis.project?.toLowerCase())?.id : undefined;
     const targetProjectId = interviewContext?.projectId ?? detectedProjectId;
     const targetProject = targetProjectId ? projectSnapshot.projects.find((project) => project.id === targetProjectId) : undefined;
     const answerIntent = analyzeAnswerIntent(normalizedQuestion);
-    const useProjectContext = Boolean(interviewContext?.projectId)
-      || answerIntent.asksProjectImplementation
-      || Boolean(questionAnalysis.project)
-      || answerIntent.requiresPersonalOwnership && /项目|简历|经历/.test(normalizedQuestion);
+    const intentGateStartedAt = performance.now();
+    const projectIntent = analyzeProjectQuestionIntent({
+      question: normalizedQuestion,
+      targetProjectId,
+      answerIntent,
+      questionAnalysisType: questionAnalysis.type,
+      followUpContext: interviewContext?.followUpContext
+    });
+    const { projectAnchorAvailable, projectQuestionRequested } = projectIntent;
+    const knowledgeRoute = projectQuestionRequested ? routeKnowledge(questionAnalysis) : { useProjectMemory: false, useTechnicalKnowledge: true, reason: "technical-knowledge-first" };
+    const intentGateMs = performance.now() - intentGateStartedAt;
     const questionBankSkills = questionBankRepository?.listSkills() ?? [];
     const questionBankSkillIds = new Set(questionBankSkills.map((skill) => skill.id));
     const mentionedSkillIds = questionBankSkills
       .filter((skill) => [skill.normalizedName, ...skill.aliases.map((alias) => normalizeQuestionBankText(alias))].some((term) => term && normalizeQuestionBankText(normalizedQuestion).includes(term)))
       .map((skill) => skill.id);
     const profileSkillIds = (profile?.skills ?? []).map((skill) => skill.id).filter((skillId) => questionBankSkillIds.has(skillId));
+    const questionBankRouteStartedAt = performance.now();
     const questionBankRoute = questionBankRepository?.routeQuestion(normalizedQuestion, {
-      ...(useProjectContext || questionAnalysis.type === "behavioral" || questionAnalysis.type === "follow-up" ? {} : { scope: "global" as const }),
+      ...(projectQuestionRequested ? {} : { scope: "global" as const }),
       profileId,
-      ...(targetProjectId ? { projectId: targetProjectId } : {}),
+      ...(projectQuestionRequested && targetProjectId ? { projectId: targetProjectId } : {}),
       skillIds: [...new Set([...profileSkillIds, ...mentionedSkillIds])],
       limit: 5
     });
-    const projectQaRoute = questionBankRoute?.projectQa;
-    const earlyProjectQaDirect = Boolean(targetProjectId && projectQaRoute && (projectQaRoute.level === "exact" || projectQaRoute.level === "strong") && projectQaRoute.top?.question.verified && !projectQaRoute.top.question.stale && questionBankAnswerIsReady(projectQaRoute.top.question));
-    const targetUnderstanding = targetProjectId
+    const questionBankRouteMs = performance.now() - questionBankRouteStartedAt;
+    const projectQaRoute = projectQuestionRequested ? questionBankRoute?.projectQa : undefined;
+    const earlyProjectQaDirect = Boolean(projectQuestionRequested && targetProjectId && projectQaRoute && (projectQaRoute.level === "exact" || projectQaRoute.level === "strong") && projectQaRoute.top?.question.verified && !projectQaRoute.top.question.stale && questionBankAnswerIsReady(projectQaRoute.top.question));
+    const targetUnderstanding = projectQuestionRequested && targetProjectId
       ? projectSnapshot.understandings?.find((item) => item.projectId === targetProjectId) ?? (projectSnapshot.understanding?.projectId === targetProjectId ? projectSnapshot.understanding : undefined)
-      : projectSnapshot.understanding;
-    const understandingRetrieval = new ProjectComprehensionRetriever().search(normalizedQuestion, targetUnderstanding, 5);
+      : undefined;
+    const understandingRetrieval = projectQuestionRequested
+      ? new ProjectComprehensionRetriever().search(normalizedQuestion, targetUnderstanding, 5)
+      : { route: "general" as const, primaryRoute: "general" as const, secondaryRoutes: [], confidence: 0, hits: [] };
     const understandingContext = understandingRetrieval.hits.map((hit) => `项目理解（${hit.kind}，${hit.title}，证据 ${hit.evidenceRefs.join("、") || "unknown"}）：${hit.content}`).join("\n");
     const embeddingSettings = providerConfigStore?.get("embedding");
     const embeddingKey = embeddingSettings?.apiKey && embeddingSettings.model
@@ -2042,36 +2126,36 @@ if (hasSingleInstanceLock) {
           : Promise.resolve<number[] | undefined>(undefined);
     const chunks = earlyProjectQaDirect
       ? []
-      : targetProjectId && useProjectContext
+      : projectQuestionRequested && targetProjectId
         ? projectKnowledgeChunks(profileId, targetProjectId)
-        : (knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? []).map((chunk) => ({ ...chunk, metadata: { ...chunk.metadata, scope: "profile" as const } }));
+        : generalTechnicalKnowledgeChunks(profileId, profile?.knowledgeBaseIds ?? []);
     const retrievalOptions = { chunks, topK: 3, candidateK: 12, reranker: new KeywordReranker() };
     const keywordTiming: RetrievalTiming = {};
     // Start the lexical path before waiting for the shared query embedding so
     // the 100ms semantic budget never delays the safe fallback.
     const keywordRetrieval = new HybridKnowledgeRetriever({ ...retrievalOptions, timings: keywordTiming }).search(normalizedQuestion);
-    let factMatches = earlyProjectQaDirect ? [] : projectMemoryRepository?.searchFacts(profileId, normalizedQuestion, {
-      projectId: interviewContext?.projectId,
+    let factMatches = earlyProjectQaDirect || !projectQuestionRequested ? [] : projectMemoryRepository?.searchFacts(profileId, normalizedQuestion, {
+      projectId: targetProjectId,
       detectedProjectId,
       questionType: questionAnalysis.type,
       limit: 5,
       minScore: 0.18,
-      includeReferenceProject: Boolean(interviewContext?.projectId)
+      includeReferenceProject: projectAnchorAvailable
     }) ?? [];
     const embeddingBudget = await resolveEmbeddingWithinBudget(queryEmbeddingPromise, 100);
     const queryEmbedding = embeddingBudget.vector;
-    if (!earlyProjectQaDirect && queryEmbedding && projectMemoryRepository) {
+    if (!earlyProjectQaDirect && projectQuestionRequested && queryEmbedding && projectMemoryRepository) {
       factMatches = projectMemoryRepository.searchFacts(profileId, normalizedQuestion, {
-        projectId: interviewContext?.projectId,
+        projectId: targetProjectId,
         detectedProjectId,
         questionType: questionAnalysis.type,
         queryEmbedding,
         limit: 5,
         minScore: 0.18,
-        includeReferenceProject: Boolean(interviewContext?.projectId)
+        includeReferenceProject: projectAnchorAvailable
       });
     }
-    const relevantFactMatches = (useProjectContext || (factMatches[0]?.score ?? 0) >= 0.28) ? factMatches : [];
+    const relevantFactMatches = projectQuestionRequested ? factMatches : [];
     const eligibleFactMatches = relevantFactMatches.filter((hit) => isFactEligible(hit.fact));
     const formatFactExperience = (hit: (typeof eligibleFactMatches)[number]): string => {
       const perspective = targetProject ? resolveProjectAnswerPerspective(targetProject, hit.fact) : undefined;
@@ -2086,10 +2170,10 @@ if (hasSingleInstanceLock) {
           && (perspective ? perspective.voice === "first-person" : true);
       })
       .map(formatFactExperience);
-    const targetProjectFacts = targetProject
+    const targetProjectFacts = projectQuestionRequested && targetProject
       ? (projectSnapshot.facts ?? []).filter((fact) => fact.projectId === targetProject.id && isFactEligible(fact))
       : [];
-    const structuredProjectRetrieval = targetProject ? [
+    const structuredProjectRetrieval = projectQuestionRequested && targetProject ? [
       ...(targetProjectFacts.filter((fact) => fact.type === "parameter").slice(0, 8).length ? [`KEY_PARAMETERS（结构化配置值，优先于普通资料）：${targetProjectFacts.filter((fact) => fact.type === "parameter").slice(0, 8).map((fact) => `[${fact.canonicalKey ?? "parameter"}] ${fact.title}=${formatProjectFactValue(fact.value) || fact.content}`).join("；")}`] : []),
       ...(deriveProjectTechnicalDecisions(targetProjectFacts).slice(0, 5).length ? [`TECHNICAL_DECISIONS（仅已有 choice/reason/tradeoff）：${deriveProjectTechnicalDecisions(targetProjectFacts).slice(0, 5).map((decision) => `${decision.choice}${decision.reason ? `；原因：${decision.reason}` : ""}${decision.tradeoff ? `；取舍：${decision.tradeoff}` : ""}`).join("\n")}`] : []),
       ...(deriveProjectProblemChains(targetProjectFacts).slice(0, 4).length ? [`PROBLEM_CHAINS（由既有 challenge/cause/solution/result 派生）：${deriveProjectProblemChains(targetProjectFacts).slice(0, 4).map((chain) => `${chain.challenge?.content ?? "问题待补充"}；原因：${chain.cause?.content ?? "待补充"}；解决：${chain.solution?.content ?? "待补充"}；结果：${chain.result?.content ?? "待补充"}`).join("\n")}`] : [])
@@ -2121,7 +2205,9 @@ if (hasSingleInstanceLock) {
     const preparedAnswerContent = preparedCard ? `${preparedCard.content}${preparedCard.codeContent ? `\n代码：\n${preparedCard.codeContent}` : ""}${preparedCard.complexity ? `\n复杂度：${preparedCard.complexity}` : ""}${preparedCard.limitations ? `\n边界与限制：${preparedCard.limitations}` : ""}` : undefined;
     const sourcePlan = planAnswerSource({
       projectId: targetProjectId,
-      projectQuestion: Boolean(targetProjectId && useProjectContext),
+      projectAnchorAvailable,
+      projectQuestion: projectQuestionRequested,
+      personalQuestion: answerIntent.requiresPersonalIdentity || answerIntent.requiresPersonalOwnership || answerIntent.requiresPersonalMetric || answerIntent.requiresPersonalResult || answerIntent.asksBehavioralEpisode,
       projectQa: projectQaRoute,
       ...(preparedAnswerContent && preparedCard && questionBankMatch ? { preparedAnswer: { content: preparedAnswerContent, answerCardId: preparedCard.id, questionId: questionBankMatch.question.id, score: questionBankMatch.score, verified: preparedCard.verified, stale: preparedCard.stale } } : {})
     });
@@ -2143,6 +2229,15 @@ if (hasSingleInstanceLock) {
       retrieved = await new HybridKnowledgeRetriever({ ...retrievalOptions, embeddingProvider: { embed: () => queryEmbedding }, timings: embeddingTiming }).search(normalizedQuestion);
       retrievalDiagnostics = { ...retrievalDiagnostics, embeddingMs: cachedVector ? 0 : retrievalDiagnostics.embeddingMs, rerankMs: embeddingTiming.rerankMs ?? 0, totalRetrievalMs: embeddingTiming.totalRetrievalMs ?? retrievalDiagnostics.totalRetrievalMs };
     }
+    const retrievedKnowledge = sourcePlan.mode === "project_qa_direct" ? [] : [
+      ...(projectQuestionRequested && targetProject ? [`项目回答视角政策：${resolveProjectAnswerPerspective(targetProject, relevantFactMatches[0]?.fact ?? { type: "background", title: "项目", content: "", id: "", projectId: targetProject.id, confidence: 0, verified: false, sourceIds: [] }).instruction}`] : []),
+      ...(understandingContext ? [`PROJECT_UNDERSTANDING_ROUTE=${understandingRetrieval.route}\n${understandingContext}`] : []),
+      ...structuredProjectRetrieval,
+      ...(preparedAnswerContent && questionBankMatch?.question.scope !== "project" ? [`[GLOBAL_REFERENCE] ${preparedAnswerContent}`] : []),
+      ...jobContext,
+      ...retrieved.slice(0, 3).map((chunk) => `[${chunk.metadata.scope === "global-reference" ? "GLOBAL_REFERENCE" : chunk.metadata.scope === "project" ? "PROJECT_SOURCE" : "PROFILE_SOURCE"}] ${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`)
+    ];
+    const generalKnowledgeRetrievedCount = retrievedKnowledge.filter((item) => item.startsWith("[GLOBAL_REFERENCE]") || item.startsWith("[PROFILE_SOURCE]")).length;
     retrievalRepository?.record({
       profileId,
       query: normalizedQuestion,
@@ -2157,9 +2252,23 @@ if (hasSingleInstanceLock) {
         qaScore: sourcePlan.qaMatch?.score ?? null,
         qaExact: sourcePlan.qaMatch?.exact ?? false,
         qaVerified: sourcePlan.qaMatch?.verified ?? false,
-        projectFactCount: eligibleFactMatches.length,
+        projectAnchorAvailable,
+        projectQuestionRequested,
+        intentGateMs: Number(intentGateMs.toFixed(2)),
+        projectQaRouteMs: projectQuestionRequested ? Number(questionBankRouteMs.toFixed(2)) : 0,
+        generalQaRouteMs: projectQuestionRequested ? 0 : Number(questionBankRouteMs.toFixed(2)),
+        projectQaCandidateCount: projectQaRoute?.hits.length ?? 0,
+        projectQaSelectedQuestionId: sourcePlan.qaMatch?.questionId ?? null,
+        projectQaMatchBaseScore: projectQuestionRequested ? projectQaRoute?.top?.baseScore ?? projectQaRoute?.top?.semanticScore ?? null : null,
+        projectQaAnswerSupportScore: projectQuestionRequested ? projectQaRoute?.top?.answerSupportScore ?? null : null,
+        projectQaAnchorBoost: projectQuestionRequested ? projectQaRoute?.top?.anchorBoost ?? 0 : 0,
+        projectQaIntentMatched: projectQuestionRequested ? projectQaRoute?.top?.intentMatched ?? false : false,
+        projectQaFallbackReason: projectQuestionRequested && projectQaRoute?.level === "none" ? "no-safe-project-match" : null,
+        projectFactCount: projectQuestionRequested ? eligibleFactMatches.length : 0,
         projectDocumentChunkCount: retrieved.filter((hit) => hit.metadata.scope === "project").length,
-        generalKnowledgeUsed: sourcePlan.allowGeneralKnowledge,
+        generalKnowledgeAllowed: sourcePlan.allowGeneralKnowledge,
+        generalKnowledgeRetrievedCount,
+        generalKnowledgeInjected: generalKnowledgeRetrievedCount > 0,
         answerRewriteUsed: sourcePlan.answerRewriteUsed,
         claimGateDecision: "pending",
         blockedClaimCount: 0
@@ -2188,14 +2297,7 @@ if (hasSingleInstanceLock) {
       questionBankMatches: questionBankRoute?.hits ?? [],
       answerSourcePlan: sourcePlan,
       projectQaEvidence,
-      retrievedKnowledge: sourcePlan.mode === "project_qa_direct" ? [] : [
-        ...(targetProject ? [`项目回答视角政策：${resolveProjectAnswerPerspective(targetProject, relevantFactMatches[0]?.fact ?? { type: "background", title: "项目", content: "", id: "", projectId: targetProject.id, confidence: 0, verified: false, sourceIds: [] }).instruction}`] : []),
-        ...(understandingContext ? [`PROJECT_UNDERSTANDING_ROUTE=${understandingRetrieval.route}\n${understandingContext}`] : []),
-        ...structuredProjectRetrieval,
-        ...(preparedAnswerContent && questionBankMatch?.question.scope !== "project" ? [`[GLOBAL_REFERENCE] ${preparedAnswerContent}`] : []),
-        ...jobContext,
-        ...retrieved.slice(0, 3).map((chunk) => `[${chunk.metadata.scope === "global-reference" ? "GLOBAL_REFERENCE" : chunk.metadata.scope === "project" ? "PROJECT_SOURCE" : "PROFILE_SOURCE"}] ${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`)
-      ],
+      retrievedKnowledge,
       recentTranscript: recentTranscript.slice(-8)
     };
   };

@@ -98,4 +98,44 @@ describe("QuestionBankRouter", () => {
     expect(result.level).toBe("partial");
     expect(result.top?.matchLevel).toBe("partial");
   });
+
+  it("does not turn one shared ADC token into a partial match", () => {
+    const result = new QuestionBankRouter().routeProjectFirst("ADC 校准误差怎么处理？", [question({
+      id: "adc-realtime",
+      canonicalText: "ADC 怎么保证实时性？",
+      scope: "project",
+      bankType: "project",
+      projectId: "foc",
+      verified: true,
+      answerCards: [{ id: "card", questionId: "adc-realtime", mode: "standard", content: "PWM 中点触发 ADC，并通过 DMA 搬运。", keyPoints: [], sourceType: "imported", verified: true, stale: false, version: 1, createdAt: 1, updatedAt: 1 }]
+    })], "foc");
+    expect(result.level).toBe("none");
+  });
+
+  it("allows a bounded DMA anchor boost for a compatible troubleshooting question", () => {
+    const result = new QuestionBankRouter().routeProjectFirst("DMA 数据覆盖怎么排查？", [question({
+      id: "dma-cost",
+      canonicalText: "DMA 怎么减少 CPU 开销？",
+      scope: "project",
+      bankType: "project",
+      projectId: "foc",
+      verified: true,
+      answerCards: [{ id: "card", questionId: "dma-cost", mode: "standard", content: "使用 DMA 减少 CPU 搬运开销。", keyPoints: [], sourceType: "imported", verified: true, stale: false, version: 1, createdAt: 1, updatedAt: 1 }]
+    })], "foc");
+    expect(result.level).toBe("partial");
+    expect(result.top).toMatchObject({ technicalAnchorMatched: true, anchorBoost: 0.16, intentMatched: true });
+  });
+
+  it("does not reuse CAN arbitration for a termination-resistor question", () => {
+    const result = new QuestionBankRouter().routeProjectFirst("CAN 总线终端电阻为什么是 120 欧？", [question({
+      id: "can-arbitration",
+      canonicalText: "CAN 怎么仲裁？",
+      scope: "project",
+      bankType: "project",
+      projectId: "foc",
+      verified: true,
+      answerCards: [{ id: "card", questionId: "can-arbitration", mode: "standard", content: "CAN 通过显性位和隐性位完成仲裁。", keyPoints: [], sourceType: "imported", verified: true, stale: false, version: 1, createdAt: 1, updatedAt: 1 }]
+    })], "foc");
+    expect(result.level).toBe("none");
+  });
 });

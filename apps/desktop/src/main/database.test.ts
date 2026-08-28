@@ -304,7 +304,7 @@ describe("SQLite persistence", () => {
     } finally { database.close(); }
   });
 
-  it("imports trusted project QA into the existing question-bank schema and stales it on material changes", async () => {
+  it("imports trusted project QA into the existing question-bank schema without blanket invalidation", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
       const profiles = new SqliteProfileRepository(database);
@@ -321,9 +321,49 @@ describe("SQLite persistence", () => {
       expect(saved).toMatchObject({ scope: "project", projectId: project.id, bankType: "project", source: "imported", verified: true, stale: false });
       expect(saved?.answerCards[0]).toMatchObject({ sourceType: "imported", verified: true, stale: false });
 
-      expect(questionBank.markProjectQuestionBankStale(project.id, 100)).toBe(1);
-      expect(questionBank.getQuestion(saved?.id ?? "")).toMatchObject({ stale: true });
-      expect(questionBank.getQuestion(saved?.id ?? "")?.answerCards[0]).toMatchObject({ stale: true });
+      expect(questionBank.markProjectQuestionBankStale(project.id, 100)).toBe(0);
+      expect(questionBank.getQuestion(saved?.id ?? "")).toMatchObject({ stale: false });
+      expect(questionBank.getQuestion(saved?.id ?? "")?.answerCards[0]).toMatchObject({ stale: false });
+    } finally { database.close(); }
+  });
+
+  it("invalidates only project QA that depends on changed facts", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profile = new SqliteProfileRepository(database).save({ name: "事实依赖", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const memory = new SqliteProjectMemoryRepository(database);
+      const project = memory.createProject(profile.id, "FOC");
+      const pwmFact = memory.addCandidateFact({ id: "fact-pwm-frequency", projectId: project.id, profileId: profile.id, type: "parameter", title: "PWM 频率", content: "10kHz", confidence: 1, verified: false, sourceIds: ["doc-pwm"], evidence: [{ sourceId: "doc-pwm", quote: "PWM 频率 10kHz" }] });
+      const canFact = memory.addCandidateFact({ id: "fact-can-arbitration", projectId: project.id, profileId: profile.id, type: "technology", title: "CAN 仲裁", content: "显性位优先", confidence: 1, verified: false, sourceIds: ["doc-can"], evidence: [{ sourceId: "doc-can", quote: "CAN 使用显性位仲裁" }] });
+      const questionBank = new SqliteQuestionBankRepository(database);
+      const pwmQuestion = questionBank.saveQuestion({ id: "qa-pwm", canonicalText: "PWM 频率是多少？", type: "project", bankType: "project", category: "project", scope: "project", profileId: profile.id, projectId: project.id, source: "imported", verified: true, factIds: [pwmFact.id] });
+      questionBank.saveAnswerCard({ id: "qa-pwm-card", questionId: pwmQuestion.id, content: "10kHz", sourceType: "imported", verified: true, factIds: [pwmFact.id] });
+      const canQuestion = questionBank.saveQuestion({ id: "qa-can", canonicalText: "CAN 怎么仲裁？", type: "project", bankType: "project", category: "project", scope: "project", profileId: profile.id, projectId: project.id, source: "imported", verified: true, factIds: [canFact.id] });
+      questionBank.saveAnswerCard({ id: "qa-can-card", questionId: canQuestion.id, content: "显性位优先。", sourceType: "imported", verified: true, factIds: [canFact.id] });
+      const unrelatedQuestion = questionBank.saveQuestion({ id: "qa-unrelated", canonicalText: "ADC 怎么保证实时性？", type: "project", bankType: "project", category: "project", scope: "project", profileId: profile.id, projectId: project.id, source: "manual", verified: true });
+      questionBank.saveAnswerCard({ id: "qa-unrelated-card", questionId: unrelatedQuestion.id, content: "PWM 中点采样。", sourceType: "manual", verified: true });
+
+      expect(questionBank.invalidateProjectQaDependencies(project.id, [pwmFact.id], 100)).toBe(1);
+      expect(questionBank.getQuestion(pwmQuestion.id)).toMatchObject({ stale: true });
+      expect(questionBank.getQuestion(pwmQuestion.id)?.answerCards[0]).toMatchObject({ stale: true });
+      expect(questionBank.getQuestion(canQuestion.id)).toMatchObject({ stale: false });
+      expect(questionBank.getQuestion(unrelatedQuestion.id)).toMatchObject({ stale: false });
+    } finally { database.close(); }
+  });
+
+  it("keeps question verification independent from answer-card verification", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const questionBank = new SqliteQuestionBankRepository(database);
+      const question = questionBank.saveQuestion({ id: "qa-independent", canonicalText: "项目如何验证采样？", type: "project", bankType: "project", scope: "project", projectId: "project-independent", source: "ai-generated", verified: false });
+      questionBank.saveAnswerCard({ id: "qa-independent-a", questionId: question.id, content: "答案 A，待单独确认。", sourceType: "manual", verified: false });
+      questionBank.saveAnswerCard({ id: "qa-independent-b", questionId: question.id, content: "答案 B，待单独确认。", sourceType: "manual", verified: false });
+      questionBank.bulkUpdate([question.id], { verified: true });
+      questionBank.saveAnswerCard({ id: "qa-independent-a", questionId: question.id, content: "答案 A，已由候选人核对。", sourceType: "manual", verified: true });
+      const saved = questionBank.getQuestion(question.id);
+      expect(saved).toMatchObject({ verified: true });
+      expect(saved?.answerCards.find((card) => card.id === "qa-independent-a")).toMatchObject({ verified: true });
+      expect(saved?.answerCards.find((card) => card.id === "qa-independent-b")).toMatchObject({ verified: false });
     } finally { database.close(); }
   });
 

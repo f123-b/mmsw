@@ -43,6 +43,8 @@ describe("Answer routing and generation", () => {
     const context = new ContextRouter().route("FOC 项目的 ADC 如何保证实时性？", {
       answerSourcePlan: {
         mode: "project_qa_direct",
+        projectAnchorAvailable: true,
+        projectQuestionRequested: true,
         projectId: "foc",
         qaMatchLevel: "strong",
         preserveStoredAnswerFacts: true,
@@ -63,6 +65,13 @@ describe("Answer routing and generation", () => {
     expect(sections.find((section) => section.name === "project-qa-context")?.content).toContain("PWM 中点触发 ADC");
   });
 
+  it("allows safe first-person project wording but blocks unsupported ownership wording", () => {
+    const context = new ContextRouter().route("这个系统为什么用 MQTT？", { projectEvidence: ["系统使用 MQTT 传输状态"] });
+    const prompt = new PromptBuilder().build({ id: "safe-project", text: "这个系统为什么用 MQTT？" }, "NORMAL", context).map((section) => section.content).join("\n");
+    expect(prompt).toContain("我这个项目里用的是 X");
+    expect(prompt).toContain("不能改写成“我设计了 X”");
+  });
+
   it("runs project QA through the final claim gate and exposes source telemetry", async () => {
     const stored = "项目中使用 PWM 中点触发 ADC，并通过 DMA 搬运采样数据。";
     const provider: AnswerProvider = { stream: async function* () { yield stored; } };
@@ -71,7 +80,7 @@ describe("Answer routing and generation", () => {
       { id: "project-qa-answer", text: "ADC 怎么保证实时性？" },
       "NORMAL",
       {
-        answerSourcePlan: { mode: "project_qa_direct", projectId: "foc", qaMatchLevel: "exact", preserveStoredAnswerFacts: true, allowProjectKnowledge: false, allowGeneralKnowledge: false, allowSessionEvidence: true, answerRewriteUsed: true },
+        answerSourcePlan: { mode: "project_qa_direct", projectAnchorAvailable: true, projectQuestionRequested: true, projectId: "foc", qaMatchLevel: "exact", preserveStoredAnswerFacts: true, allowProjectKnowledge: false, allowGeneralKnowledge: false, allowSessionEvidence: true, answerRewriteUsed: true },
         preparedAnswer: { content: stored, score: 1, verified: true },
         projectQaEvidence: [stored]
       },
