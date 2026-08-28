@@ -53,6 +53,7 @@ export interface ProjectComprehensionAgentOptions {
   enabled?: boolean;
   now?: () => number;
   repositoryAdapter?: ProjectRepositoryAdapter;
+  signal?: AbortSignal;
 }
 
 export interface ProjectComprehensionResult {
@@ -123,13 +124,14 @@ function compactModelInput(input: ProjectComprehensionInput, repoMap: ProjectRep
     purpose,
     ...(state ? { plannerState: state } : {}),
     ...(state?.semanticGraph ? { semanticGraph: { ...state.semanticGraph, nodes: state.semanticGraph.nodes.slice(0, 160), edges: state.semanticGraph.edges.slice(0, 240), symbols: state.semanticGraph.symbols.slice(0, 160), dataObjects: state.semanticGraph.dataObjects.slice(0, 120), evidence: [] } } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
   };
 }
 
 function initialCoverage(): ProjectUnderstandingCoverage { return { purpose: 0, architecture: 0, mainFlow: 0, coreComponents: 0, parameters: 0, decisions: 0, problems: 0, tests: 0 }; }
 
-function plannerInput(state: ProjectComprehensionState, now: () => number, deadline: number, projectName?: string): ProjectComprehensionPlannerInput {
-  return { ...state, projectName, currentUnderstandingSummary: state.candidateComponents.length ? `已识别组件：${state.candidateComponents.slice(0, 8).map((item) => item.name).join("、")}` : undefined, toolBudgetRemaining: Math.max(0, state.budget.maxToolCalls - state.budget.toolCalls), timeBudgetRemaining: Math.max(0, deadline - now()) };
+function plannerInput(state: ProjectComprehensionState, now: () => number, deadline: number, projectName?: string, signal?: AbortSignal): ProjectComprehensionPlannerInput {
+  return { ...state, projectName, ...(signal ? { signal } : {}), currentUnderstandingSummary: state.candidateComponents.length ? `已识别组件：${state.candidateComponents.slice(0, 8).map((item) => item.name).join("、")}` : undefined, toolBudgetRemaining: Math.max(0, state.budget.maxToolCalls - state.budget.toolCalls), timeBudgetRemaining: Math.max(0, deadline - now()) };
 }
 
 function updateState(state: ProjectComprehensionState, understanding: ProjectUnderstanding, observation: ProjectExplorerObservation, decision?: ProjectAgentDecision): ProjectComprehensionState {
@@ -168,7 +170,22 @@ export class ProjectComprehensionAgent {
   async comprehend(input: ProjectComprehensionInput, cachedUnderstanding?: ProjectUnderstanding): Promise<ProjectComprehensionResult> {
     const now = this.options.now ?? Date.now;
     const startedAt = now();
-    const limits = projectExplorerLimits(input.options);
+    this.options.signal?.throwIfAborted?.();
+    const requestedLimits = projectExplorerLimits(input.options);
+    const repositoryFileCount = input.sources.reduce((count, source) => count + (source.repositoryFiles?.length ?? 0), 0);
+    // A repository can contain hundreds of persisted files, but comprehension
+    // must remain a bounded, responsive background operation. The complete
+    // archive is still available through repositoryFiles/RepoMap; only the
+    // semantic evidence set is capped for the final graph build.
+    const limits = repositoryFileCount > 20
+      ? {
+          ...requestedLimits,
+          maxFilesRead: Math.min(requestedLimits.maxFilesRead, 8),
+          maxInputChars: Math.min(requestedLimits.maxInputChars, 32_000),
+          maxFileChars: Math.min(requestedLimits.maxFileChars, 4_000),
+          maxFileLines: Math.min(requestedLimits.maxFileLines, 160)
+        }
+      : requestedLimits;
     if (cachedUnderstanding && cachedUnderstanding.projectId === input.projectId && cachedUnderstanding.schemaVersion === PROJECT_COMPREHENSION_SCHEMA_VERSION && cachedUnderstanding.status === "completed") {
       this.options.trace?.("PROJECT_COMPREHENSION_COMPLETED", { projectId: input.projectId, cached: true, elapsedMs: elapsed(now, startedAt) });
       return { understanding: cachedUnderstanding, repoMap: emptyRepoMap(input.projectId, input), observations: [], cached: true };
@@ -193,20 +210,28 @@ export class ProjectComprehensionAgent {
     let inputChars = 0;
     let modelTurns = 0;
     let modelFailed = false;
+    // Building the semantic graph is intentionally CPU-bound. Large source
+    // archives still get a fresh final build, while planner previews are
+    // sampled so repeated intermediate builds cannot monopolize the UI loop.
+    const previewCadence = input.sources.some((source) => source.kind === "repository" && (source.repositoryFiles?.length ?? 0) > 20) ? 8 : 1;
     let state: ProjectComprehensionState = { repoMap, observations: [], hypotheses: [], confirmedConcepts: [], candidateComponents: [], candidateRelationships: [], candidateFlows: [], candidateParameters: [], candidateDecisions: [], candidateProblems: [], unknowns: [], coverage: initialCoverage(), budget: { maxToolCalls: limits.maxToolCalls, maxFilesRead: limits.maxFilesRead, maxModelTurns: limits.maxModelTurns, maxInputChars: limits.maxInputChars, toolCalls, modelTurns, inputChars }, filesRead: [] };
     while (toolCalls < limits.maxToolCalls && filesRead.size < limits.maxFilesRead && now() <= deadline) {
+      this.options.signal?.throwIfAborted?.();
+      await new Promise<void>((resolve) => setImmediate(resolve));
       const context = { repoMap, observations, filesRead, toolCalls, modelTurns };
       let action: ProjectExplorationAction;
       let decision: ProjectAgentDecision | undefined;
       if (llmPlanner && !modelFailed && modelTurns < limits.maxModelTurns) {
         modelTurns += 1;
         try {
-          decision = await llmPlanner.plan(plannerInput(state, now, deadline, input.projectName));
+          this.options.signal?.throwIfAborted?.();
+          decision = await llmPlanner.plan(plannerInput(state, now, deadline, input.projectName, this.options.signal));
           const validation = validateAgentDecision(decision, repoMap, { toolCalls, maxToolCalls: limits.maxToolCalls, filesRead: filesRead.size, maxFilesRead: limits.maxFilesRead });
           if (!validation.valid) throw new Error(`PROJECT_AGENT_DECISION_REJECTED:${validation.reason}`);
           action = decisionToAction(decision);
           this.options.trace?.("PROJECT_AGENT_DECISION", { projectId: input.projectId, action: decision.action, target: decision.target, query: decision.query, priority: decision.priority, reasonCode: decision.reason.slice(0, 100) });
         } catch (error) {
+          if (this.options.signal?.aborted) throw error;
           modelFailed = true;
           builder.enableDomainFallback();
           this.options.trace?.("PROJECT_COMPREHENSION_FAILED", { projectId: input.projectId, stage: "planner", error: error instanceof Error ? error.message : String(error) });
@@ -221,8 +246,13 @@ export class ProjectComprehensionAgent {
       for (const file of observation.files ?? []) { if (!filesRead.has(file.path)) { filesRead.add(file.path); inputChars += file.text.length; } }
       observations.push(observation);
       builder.update(observation);
-      const preview = builder.build(analysisInput, repoMap, { toolCalls, filesRead: filesRead.size, modelTurns, elapsedMs: elapsed(now, startedAt), stages: statusStages("exploring") });
-      state = updateState({ ...state, budget: { ...state.budget, toolCalls, modelTurns, inputChars }, filesRead: [...filesRead] }, preview, observation, decision);
+      const nextState = { ...state, budget: { ...state.budget, toolCalls, modelTurns, inputChars }, filesRead: [...filesRead] };
+      if (toolCalls % previewCadence === 0 || inputChars >= limits.maxInputChars || filesRead.size >= limits.maxFilesRead) {
+        const preview = builder.build(analysisInput, repoMap, { toolCalls, filesRead: filesRead.size, modelTurns, elapsedMs: elapsed(now, startedAt), stages: statusStages("exploring") });
+        state = updateState(nextState, preview, observation, decision);
+      } else {
+        state = { ...nextState, observations: [...nextState.observations, observation] };
+      }
       this.options.trace?.("PROJECT_TOOL_CALL", { projectId: input.projectId, tool: action.type, durationMs: elapsed(now, actionStarted), filesRead: filesRead.size, toolCalls, modelTurns });
       if (decision?.hypothesisId || ["searchText", "findDefinitions", "findReferences", "findCallers", "findCallees"].includes(action.type)) this.options.trace?.("PROJECT_HYPOTHESIS_CREATED", { projectId: input.projectId, hypothesisId: decision?.hypothesisId, query: "query" in action ? action.query : "symbol" in action ? action.symbol : undefined, candidateCount: observation.matches?.length ?? 0 });
       if ((decision?.action === "verifyClaim" || decision?.hypothesisId) && (observation.matches?.length ?? 0) > 0) this.options.trace?.("PROJECT_HYPOTHESIS_VERIFIED", { projectId: input.projectId, hypothesisId: decision.hypothesisId, evidenceFound: true });
@@ -234,14 +264,17 @@ export class ProjectComprehensionAgent {
     if (this.options.model && modelTurns < limits.maxModelTurns && now() <= deadline) {
       modelTurns += 1;
       try {
-        const output = await this.options.model.generate(compactModelInput(input, repoMap, observations, plannerInput(state, now, deadline, input.projectName), "synthesize"));
+        this.options.signal?.throwIfAborted?.();
+        const output = await this.options.model.generate(compactModelInput(input, repoMap, observations, plannerInput(state, now, deadline, input.projectName, this.options.signal), "synthesize"));
         understanding = mergeModelOutput(understanding, output);
       } catch (error) {
+        if (this.options.signal?.aborted) throw error;
         builder.enableDomainFallback();
         understanding = builder.build(analysisInput, repoMap, trace);
         this.options.trace?.("PROJECT_COMPREHENSION_FAILED", { projectId: input.projectId, stage: "synthesis-model", error: error instanceof Error ? error.message : String(error) });
       }
     }
+    this.options.signal?.throwIfAborted?.();
     const grounded = (this.options.grounding ?? new ProjectGroundingService()).ground({ ...understanding, status: "grounding" });
     understanding = { ...grounded.understanding, schemaVersion: PROJECT_COMPREHENSION_SCHEMA_VERSION, trace: { ...grounded.understanding.trace, toolCalls, filesRead: filesRead.size, modelTurns, elapsedMs: elapsed(now, startedAt), stages: statusStages("completed") } };
     for (const parameter of understanding.parameters) this.options.trace?.("PROJECT_VERSION_RESOLVED", { projectId: input.projectId, semanticKey: parameter.semanticKey, status: parameter.versionStatus, value: parameter.value });

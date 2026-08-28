@@ -2,6 +2,16 @@ import { describe, expect, it } from "vitest";
 import { SqliteDatabase, SqliteInterviewHistoryRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteQuestionBankRepository } from "./database";
 import { ProjectMemoryService } from "./project-memory";
 
+async function waitForProjectAnalysis(service: ProjectMemoryService, projectId: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const job = service.getProjectAnalysisJob(projectId);
+    if (job && ["completed", "failed", "cancelled"].includes(job.status)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("project analysis did not finish in test timeout");
+}
+
 describe("ProjectMemoryService project isolation", () => {
   it("does not auto-create a project on the real upload path", async () => {
     const database = await SqliteDatabase.open(":memory:");
@@ -19,7 +29,7 @@ describe("ProjectMemoryService project isolation", () => {
     } finally { database.close(); }
   });
 
-  it("imports a batch, assigns inferred roles, and rebuilds once after all files are ready", async () => {
+  it("imports a batch, assigns inferred roles, and queues one rebuild after all files are ready", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
       const profiles = new SqliteProfileRepository(database);
@@ -40,7 +50,9 @@ describe("ProjectMemoryService project isolation", () => {
         { filename: "project-results.md", mimeType: "text/markdown", bytes: text("# 测试结果\n性能指标：稳态误差 1%。\n限制：尚未完成正式 benchmark。") }
       ] });
       expect(report.summary).toMatchObject({ files: 5, assigned: 5, failed: 0 });
-      expect(report.rebuild.status).toBe("completed");
+      expect(report.rebuild.status).toBe("queued");
+      expect(report.analysisJob?.status).toMatch(/queued|mapping|exploring|synthesizing|grounding|completed/);
+      await waitForProjectAnalysis(service, project.id);
       expect(report.imported.map((item) => item.sourceRole)).toEqual(["overview", "architecture", "architecture", "debug", "test"]);
       expect(memories.listProjectSources(project.id).map((source) => source.sourceRole)).toEqual(expect.arrayContaining(["overview", "architecture", "debug", "test"]));
       expect(analyses.list(profile.id).filter((run) => run.projectId === project.id)).toHaveLength(1);
@@ -67,7 +79,8 @@ describe("ProjectMemoryService project isolation", () => {
         { filename: "firmware.zip", mimeType: "application/zip", bytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04]) }
       ] });
       expect(report.summary).toMatchObject({ files: 2, assigned: 1, failed: 1 });
-      expect(report.rebuild.status).toBe("completed");
+      expect(report.rebuild.status).toBe("queued");
+      await waitForProjectAnalysis(service, project.id);
       expect(report.imported.find((item) => item.filename === "project-overview.md")).toMatchObject({ status: "ready", assignmentStatus: "assigned" });
       expect(report.imported.find((item) => item.filename === "firmware.zip")).toMatchObject({ status: "failed", assignmentStatus: "failed", sourceRole: "code" });
       expect(analyses.list(profile.id).filter((run) => run.projectId === project.id)).toHaveLength(1);
@@ -87,6 +100,39 @@ describe("ProjectMemoryService project isolation", () => {
       const service = new ProjectMemoryService(profiles, knowledge, new SqliteInterviewHistoryRepository(database), memories);
       expect(service.assignDocument(profile.id, document.id, project.id, "reference")).toMatchObject({ status: "assigned", projectId: project.id });
       expect(memories.listProjectSources(project.id)[0]?.sourceRole).toBe("reference");
+    } finally { database.close(); }
+  });
+
+  it("cancels an active analysis job through the propagated abort signal", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const knowledge = new SqliteKnowledgeRepository(database);
+      const memories = new SqliteProjectMemoryRepository(database);
+      const base = knowledge.createKnowledgeBase("取消分析资料");
+      const profile = profiles.save({ name: "取消分析", language: "zh-CN", skills: [], knowledgeBaseIds: [base.id] });
+      const project = memories.createProject(profile.id, "取消分析项目");
+      const document = knowledge.saveDocument({ id: "cancel-analysis-doc", knowledgeBaseId: base.id, filename: "README.md", mimeType: "text/markdown", sha256: "cancel-analysis", text: "# 项目说明\n一个需要取消的项目。", sections: ["项目说明"], documentType: "project", status: "ready" });
+      memories.assignSource({ projectId: project.id, sourceType: "document", sourceId: document.id, relationship: "primary", sourceRole: "overview", assignmentMethod: "explicit", confidence: 1, verified: true });
+      const service = new ProjectMemoryService(
+        profiles,
+        knowledge,
+        new SqliteInterviewHistoryRepository(database),
+        memories,
+        undefined,
+        undefined,
+        undefined,
+        async (_profileId, _projectId, signal) => new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("PROJECT_ANALYSIS_CANCELLED")), { once: true });
+        }),
+        undefined,
+        undefined,
+        false
+      );
+      const job = service.queueProjectAnalysis(profile.id, project.id);
+      service.cancelProjectAnalysis(project.id, job.id);
+      await waitForProjectAnalysis(service, project.id);
+      expect(service.getProjectAnalysisJob(project.id)).toMatchObject({ id: job.id, status: "cancelled", errorCode: "PROJECT_ANALYSIS_CANCELLED", cancelRequested: true });
     } finally { database.close(); }
   });
 

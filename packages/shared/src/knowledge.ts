@@ -1,4 +1,5 @@
 import { normalizeTechnicalTerms } from "./terminology";
+import type { RepositoryManifest, RepositorySkippedFile, RepositorySourceFile } from "./knowledge/types";
 
 export const KNOWLEDGE_DOCUMENT_TYPES = ["resume", "project", "interview-question", "skill", "job-description", "technical-doc", "other"] as const;
 export type KnowledgeDocumentType = typeof KNOWLEDGE_DOCUMENT_TYPES[number];
@@ -40,6 +41,9 @@ export interface DocumentMetadata {
   sourceRole?: string;
   relationship?: string;
   sourceId?: string;
+  repositoryPath?: string;
+  language?: string;
+  kind?: string;
 }
 
 export interface ParsedDocument {
@@ -49,7 +53,9 @@ export interface ParsedDocument {
   sha256: string;
   text: string;
   sections: string[];
-  repositoryFiles?: Array<{ path: string; text: string; size: number }>;
+  repositoryFiles?: RepositorySourceFile[];
+  repositoryManifest?: RepositoryManifest;
+  repositorySkippedFiles?: RepositorySkippedFile[];
 }
 
 export interface KnowledgeChunk {
@@ -94,8 +100,16 @@ export function chunkText(text: string, metadata: DocumentMetadata, options: Chu
   return chunks;
 }
 
+export interface DocumentParserResult {
+  text: string;
+  sections?: string[];
+  repositoryFiles?: RepositorySourceFile[];
+  repositoryManifest?: RepositoryManifest;
+  repositorySkippedFiles?: RepositorySkippedFile[];
+}
+
 export interface DocumentParser {
-  parse(input: { filename: string; mimeType: string; bytes: Uint8Array }): Promise<{ text: string; sections?: string[]; repositoryFiles?: Array<{ path: string; text: string; size?: number }> }>;
+  parse(input: { filename: string; mimeType: string; bytes: Uint8Array; sha256?: string }): Promise<DocumentParserResult>;
 }
 
 export class DocumentParserRegistry implements DocumentParser {
@@ -106,7 +120,7 @@ export class DocumentParserRegistry implements DocumentParser {
     return this;
   }
 
-  async parse(input: { filename: string; mimeType: string; bytes: Uint8Array }): Promise<{ text: string; sections?: string[]; repositoryFiles?: Array<{ path: string; text: string; size?: number }> }> {
+  async parse(input: { filename: string; mimeType: string; bytes: Uint8Array; sha256?: string }): Promise<DocumentParserResult> {
     const parser = this.parsers.get(input.mimeType) ?? this.parsers.get("*");
     if (!parser) throw new Error(`No document parser registered for ${input.mimeType}`);
     return parser.parse(input);
@@ -129,7 +143,7 @@ export class DocumentMemoryCache {
     const cached = this.values.get(input.sha256);
     if (cached) return cached;
     const parsed = await parser.parse(input);
-    const document = { ...input, text: parsed.text, sections: parsed.sections ?? [], ...(parsed.repositoryFiles ? { repositoryFiles: parsed.repositoryFiles.map((file) => ({ ...file, size: file.size ?? file.text.length })) } : {}) };
+    const document: ParsedDocument = { ...input, sha256: input.sha256, text: parsed.text, sections: parsed.sections ?? [], ...(parsed.repositoryFiles ? { repositoryFiles: parsed.repositoryFiles.map((file) => ({ ...file, size: file.size ?? file.text.length })) } : {}), ...(parsed.repositoryManifest ? { repositoryManifest: parsed.repositoryManifest } : {}), ...(parsed.repositorySkippedFiles ? { repositorySkippedFiles: parsed.repositorySkippedFiles } : {}) };
     this.values.set(input.sha256, document);
     return document;
   }

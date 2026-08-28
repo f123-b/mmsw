@@ -13,11 +13,11 @@ import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session
 import { analyzeInterview, AnswerAgent, AgentToolRegistry, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
-import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
+import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
 import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type OverlayPreferences, type ProviderSection } from "./settings-store";
 import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnection } from "./provider-preflight";
 import { discoverProviderModels } from "./model-catalog";
-import { parseDocument } from "./document-parsers";
+import { isZipBytes, normalizeDocumentBytes, parseDocument } from "./document-parsers";
 import { SafeLogger } from "./logger";
 import { buildConversationHistory } from "./chat-context";
 import { chatFailureText, classifyChatError, PROJECT_AGENT_TIMEOUT_MS } from "../shared/chat-errors";
@@ -26,6 +26,7 @@ import { MiddleMouseShortcutManager, middleMouseHelperCandidates, shouldHandleMi
 import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-service-manager";
 import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
 import { createProjectComprehensionModel, createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
+import { parseRepositoryArchiveInWorker } from "./repository-import-worker-client";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
 import { deriveProjectProblemChains, deriveProjectTechnicalDecisions, formatProjectFactValue, isFactEligible, isFactReviewRequired, normalizeProjectOwnershipMode, resolveProjectAnswerPerspective } from "@interview-copilot/shared";
 import type { ChatAction, ChatCancelReason, ChatResponse } from "@interview-copilot/shared";
@@ -226,6 +227,7 @@ let questionBankRepository: SqliteQuestionBankRepository | undefined;
 let retrievalRepository: SqliteRetrievalRepository | undefined;
 let jobTargetRepository: SqliteJobTargetRepository | undefined;
 let knowledgeAnalysisRepository: SqliteKnowledgeAnalysisRepository | undefined;
+let projectAnalysisJobRepository: SqliteProjectAnalysisJobRepository | undefined;
 let historyRepository: SqliteInterviewHistoryRepository | undefined;
 let projectRepository: SqliteProjectRepository | undefined;
 let projectMemoryRepository: SqliteProjectMemoryRepository | undefined;
@@ -273,6 +275,7 @@ const shutdownController = new ShutdownController([
   { name: "finalize-realtime", run: async () => { if (!interviewCoordinator?.running) await realtimeSession.finalize?.(1_000); } },
   { name: "disconnect-realtime", run: () => realtimeSession.disconnect() },
   { name: "stop-local-asr-service", run: () => localAsrServiceManager.stop() },
+  { name: "cancel-project-analysis", run: () => projectMemoryService?.cancelAllAnalysisJobs() },
   { name: "flush-database", run: () => database?.flushNow() },
   { name: "close-database", run: () => database?.close() },
   { name: "destroy-overlay", run: () => overlayManager?.destroy() },
@@ -1551,8 +1554,12 @@ function registerIpc(): void {
     if (!knowledgeRepository) throw new Error("Knowledge database is still initializing");
     const knowledgeBase = input.knowledgeBaseId ? knowledgeRepository.listKnowledgeBases().find((base) => base.id === input.knowledgeBaseId) : knowledgeRepository.ensureKnowledgeBase();
     if (!knowledgeBase) throw new Error("Knowledge base not found");
-    const parsed = await parseDocument({ documentId: `document-${Date.now()}`, filename: input.filename, mimeType: input.mimeType, bytes: input.bytes });
-    const isRepositoryArchive = parsed.mimeType === "application/zip" || /\.zip$/i.test(parsed.filename);
+    const documentId = `document-${Date.now()}`;
+    const bytes = normalizeDocumentBytes(input.bytes);
+    const isRepositoryArchive = /^application\/(?:x-)?zip$/i.test(input.mimeType || "") || /\.zip$/i.test(input.filename) || isZipBytes(bytes);
+    const parsed = isRepositoryArchive
+      ? await parseRepositoryArchiveInWorker({ documentId, filename: input.filename, bytes, onProgress: (progress) => appLogger?.info("KNOWLEDGE_ARCHIVE_PROGRESS", { filename: input.filename, ...progress }) })
+      : await parseDocument({ documentId, filename: input.filename, mimeType: input.mimeType, bytes });
     const requestedType = input.documentType && input.documentType !== "auto" ? input.documentType : undefined;
     const documentType = requestedType && !(isRepositoryArchive && requestedType === "other") ? requestedType : inferKnowledgeDocumentType(parsed.filename, parsed.text);
     const document = knowledgeRepository.saveDocument({ id: parsed.documentId, ...parsed, knowledgeBaseId: knowledgeBase.id, documentType, status: "processing" });
@@ -1637,6 +1644,10 @@ function registerIpc(): void {
   ipcMain.handle("project-memory:completeness", (_event, profileId: string, projectId: string) => projectMemoryRepository?.getProjectCompleteness(profileId, projectId));
   ipcMain.handle("project-memory:analysis-runs", (_event, profileId: string) => knowledgeAnalysisRepository?.list(profileId) ?? []);
   ipcMain.handle("project-memory:state", (_event, projectId: string) => knowledgeAnalysisRepository?.getProjectState(projectId));
+  ipcMain.handle("project-memory:analysis-job", (_event, projectId: string) => projectMemoryService?.getProjectAnalysisJob(projectId));
+  ipcMain.handle("project-memory:analysis-jobs", (_event, profileId: string) => projectMemoryService?.listProjectAnalysisJobs(profileId) ?? []);
+  ipcMain.handle("project-memory:cancel-analysis", (_event, projectId: string, jobId?: string) => projectMemoryService?.cancelProjectAnalysis(projectId, jobId));
+  ipcMain.handle("project-memory:retry-analysis", (_event, profileId: string, projectId: string) => projectMemoryService?.retryProjectAnalysis(profileId, projectId));
   ipcMain.handle("project-memory:assign-source", (_event, input: Parameters<NonNullable<typeof projectMemoryService>["assignSource"]>[0]) => { projectMemoryService?.assignSource(input); return true; });
   ipcMain.handle("project-memory:unassign-source", (_event, projectId: string, sourceType: import("@interview-copilot/shared").ProjectSourceType, sourceId: string) => { projectMemoryRepository?.unassignSource(projectId, sourceType, sourceId); return true; });
   ipcMain.handle("project-memory:assign-document", (_event, profileId: string, documentId: string, projectId?: string) => projectMemoryService?.assignDocument(profileId, documentId, projectId));
@@ -1648,7 +1659,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("project-memory:rebuild-project", async (_event, projectId: string) => {
     if (!projectMemoryService) throw new Error("Project Memory is still initializing");
-    return projectMemoryService.rebuildProject(projectId);
+    const project = projectMemoryRepository?.getProject(projectId);
+    if (!project) throw new Error("PROJECT_NOT_FOUND");
+    return projectMemoryService.queueProjectAnalysis(project.profileId, projectId);
   });
   ipcMain.handle("history:list", () => historyRepository?.listInterviews() ?? []);
   ipcMain.handle("history:get", (_event, interviewId: string) => historyRepository?.snapshot(interviewId));
@@ -1878,6 +1891,9 @@ if (hasSingleInstanceLock) {
     retrievalRepository = new SqliteRetrievalRepository(database);
     jobTargetRepository = new SqliteJobTargetRepository(database);
     knowledgeAnalysisRepository = new SqliteKnowledgeAnalysisRepository(database);
+    projectAnalysisJobRepository = new SqliteProjectAnalysisJobRepository(database);
+    const interruptedAnalysisJobs = projectAnalysisJobRepository.recoverInterrupted();
+    if (interruptedAnalysisJobs > 0) appLogger.info("PROJECT_ANALYSIS_INTERRUPTED_RECOVERED", { count: interruptedAnalysisJobs });
     projectRepository = new SqliteProjectRepository(database);
     projectMemoryRepository = new SqliteProjectMemoryRepository(database);
     profileBuilderRepository = new SqliteProfileBuilderRepository(database);
@@ -1919,15 +1935,18 @@ if (hasSingleInstanceLock) {
       { generate: (input) => { const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings; return createProjectMemoryModel(answerProvider, { ...settings, model: taskModel(settings, "projectAnalyzerModel", "normalModel") }).generate(input); } },
       (profileId) => broadcast("project-memory:updated", { profileId, stats: projectMemoryRepository?.stats(profileId) }),
       knowledgeAnalysisRepository,
-      async (profileId, projectId) => {
+      async (profileId, projectId, signal) => {
         const settings = providerConfigStore?.get("embedding");
         if (!settings?.apiKey || !settings.model || !projectMemoryRepository) return;
         const embeddingProvider = new OpenAICompatibleEmbeddingProvider(settings);
-        const result = await projectMemoryRepository.embedFacts(profileId, (text) => embeddingProvider.embed(text), { projectId, model: settings.model, version: "project-facts-v1", concurrency: 4 });
+        const result = await projectMemoryRepository.embedFacts(profileId, (text, embeddingSignal) => embeddingProvider.embed(text, embeddingSignal), { projectId, model: settings.model, version: "project-facts-v1", concurrency: 4, signal });
         if (result.failed > 0) appLogger?.warn("PROJECT_MEMORY_EMBEDDING_PARTIAL", { profileId, ...result });
       },
       (event, fields) => appLogger?.info(event, fields),
-      { generate: (input) => { const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings; return createProjectComprehensionModel(answerProvider, { ...settings, model: taskModel(settings, "projectAnalyzerModel", "normalModel") }).generate(input); } }
+      { generate: (input) => { const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings; return createProjectComprehensionModel(answerProvider, { ...settings, model: taskModel(settings, "projectAnalyzerModel", "normalModel") }).generate(input); } },
+      true,
+      projectAnalysisJobRepository,
+      (job) => broadcast("project-memory:analysis-job", job)
     );
   }
   const resumeChunkCache = new Map<string, { source: string; chunks: ReturnType<typeof chunkText> }>();

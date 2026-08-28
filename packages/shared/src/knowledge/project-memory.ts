@@ -198,12 +198,14 @@ export class ProjectMemoryAgent {
   constructor(private readonly model?: ProjectMemoryModel) {}
 
   async build(input: ProjectMemoryAnalysisInput): Promise<ProjectMemorySnapshot> {
+    input.signal?.throwIfAborted?.();
     const fallback = buildDeterministicProjectMemory(input);
     if (!this.model || input.sources.length === 0) return fallback;
     try {
       const raw = await this.model.generate(input);
       return mergeSnapshots(fallback, parseCandidateFacts(raw, input), input);
-    } catch {
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
       return fallback;
     }
   }

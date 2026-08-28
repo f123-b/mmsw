@@ -462,6 +462,7 @@ export interface ProjectComprehensionModelInput {
   purpose?: "plan" | "synthesize";
   plannerState?: ProjectComprehensionPlannerInput;
   semanticGraph?: ProjectSemanticGraph;
+  signal?: AbortSignal;
 }
 
 export interface ProjectComprehensionModel {
@@ -521,6 +522,7 @@ export interface ProjectComprehensionState {
 
 export type ProjectComprehensionPlannerInput = Pick<ProjectComprehensionState, "repoMap" | "observations" | "hypotheses" | "confirmedConcepts" | "unknowns" | "coverage" | "budget" | "filesRead" | "semanticGraph"> & {
   projectName?: string;
+  signal?: AbortSignal;
   currentUnderstandingSummary?: string;
   toolBudgetRemaining: number;
   timeBudgetRemaining: number;

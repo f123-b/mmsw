@@ -4,6 +4,15 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   main: {
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve(__dirname, "src/main/index.ts"),
+          "repository-import-worker": resolve(__dirname, "src/main/repository-import-worker.ts")
+        },
+        output: { entryFileNames: "[name].js" }
+      }
+    },
     plugins: [externalizeDepsPlugin({
       exclude: ["@interview-copilot/protocol", "@interview-copilot/shared"]
     })]

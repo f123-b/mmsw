@@ -20,18 +20,19 @@ export class ProjectAnalyzerAgent implements ProjectAnalyzer {
     this.comprehensionEnabled = comprehensionEnabled;
   }
 
-  async analyze(input: ProjectMemoryAnalysisInput, options: { cachedUnderstanding?: ProjectUnderstanding } = {}): Promise<ProjectMemorySnapshot> {
+  async analyze(input: ProjectMemoryAnalysisInput, options: { cachedUnderstanding?: ProjectUnderstanding; signal?: AbortSignal } = {}): Promise<ProjectMemorySnapshot> {
     let understanding: ProjectUnderstanding | undefined;
     if (this.comprehensionEnabled && input.sources.length > 0) {
       const projectId = input.projectId ?? `project-${(input.projectName ?? "unknown").toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-").slice(0, 50)}`;
       try {
-        const result = await new ProjectComprehensionAgent({ model: this.comprehensionModel, trace: this.comprehensionTrace }).comprehend({ ...input, projectId, projectName: input.projectName ?? "待确认项目" }, options.cachedUnderstanding);
+        const result = await new ProjectComprehensionAgent({ model: this.comprehensionModel, trace: this.comprehensionTrace, signal: options.signal }).comprehend({ ...input, projectId, projectName: input.projectName ?? "待确认项目", signal: options.signal }, options.cachedUnderstanding);
         understanding = result.understanding;
       } catch (error) {
+        if (options.signal?.aborted || (error instanceof Error && error.message === "PROJECT_ANALYSIS_CANCELLED")) throw error;
         this.comprehensionTrace?.("PROJECT_COMPREHENSION_FAILED", { projectId, stage: "agent", error: error instanceof Error ? error.message : String(error) });
       }
     }
-    const snapshot = await this.agent.build(input);
+    const snapshot = await this.agent.build({ ...input, ...(options.signal ? { signal: options.signal } : {}) });
     return understanding ? { ...snapshot, understanding } : snapshot;
   }
 }

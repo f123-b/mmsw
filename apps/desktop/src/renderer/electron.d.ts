@@ -11,7 +11,7 @@ import type { TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
-import type { ChatAction, KnowledgeDocumentType, Profile, ProfileInput, ProjectFact, ProjectMaterialImportReport, ProjectMemorySnapshot, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
+import type { ChatAction, KnowledgeDocumentType, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectMemorySnapshot, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, OverlayPreferences, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectAnalysisState, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
@@ -133,7 +133,11 @@ declare global {
         unassignSource(projectId: string, sourceType: string, sourceId: string): Promise<boolean>;
         assignDocument(profileId: string, documentId: string, projectId?: string): Promise<unknown>;
         rebuild(profileId: string): Promise<ProjectMemorySnapshot>;
-        rebuildProject(projectId: string): Promise<ProjectMemorySnapshot>;
+        rebuildProject(projectId: string): Promise<ProjectAnalysisJob>;
+        analysisJob(projectId: string): Promise<ProjectAnalysisJob | undefined>;
+        analysisJobs(profileId: string): Promise<ProjectAnalysisJob[]>;
+        cancelAnalysis(projectId: string, jobId?: string): Promise<ProjectAnalysisJob | undefined>;
+        retryAnalysis(profileId: string, projectId: string): Promise<ProjectAnalysisJob | undefined>;
       };
       jobTargets: {
         list(profileId: string): Promise<JobTargetRecord[]>;
@@ -238,6 +242,7 @@ declare global {
         onChatError(listener: (event: unknown) => void): () => void;
         onChatCancelled(listener: (event: unknown) => void): () => void;
         onProfileBuilderUpdated(listener: (event: ProfileBuilderArtifactRecord) => void): () => void;
+        onProjectAnalysisJob(listener: (event: ProjectAnalysisJob) => void): () => void;
         onQuestionBankAnswerGenerationProgress(listener: (event: { status: "started" | "running" | "completed"; total: number; completed: number; generated: number; skipped: number; failed: number; questionId?: string; error?: string }) => void): () => void;
       };
     };

@@ -132,6 +132,7 @@ export class ProjectLLMExplorationPlanner implements ProjectLLMPlanner {
       observations: compact.observations,
       purpose: "plan",
       plannerState: compact,
+      ...(input.signal ? { signal: input.signal } : {}),
     }), this.options.timeoutMs ?? 60_000);
     const decision = decisionFromObject(parseObject(output));
     if (!decision) throw new Error("PROJECT_PLANNER_INVALID_DECISION");

@@ -66,7 +66,11 @@ import {
   normalizeProjectOwnershipMode,
   type ProjectOwnershipMode,
   type ProjectUnderstanding,
-  type ProjectUnderstandingSnapshotRecord
+  type ProjectUnderstandingSnapshotRecord,
+  type ProjectAnalysisJob,
+  type RepositoryManifest,
+  type RepositorySourceFile,
+  type RepositorySkippedFile
 } from "@interview-copilot/shared";
 import type { ChatCancelReason, ChatMessageStatus, ChatResponse, ChatStreamTelemetry } from "@interview-copilot/shared";
 
@@ -157,12 +161,12 @@ export class SqliteDatabase {
     this.diagnostics = { ...this.diagnostics, pendingFlush: true };
   }
 
-  flush(): void {
+  flush(delayMs = 500): void {
     if (this.filePath === ":memory:" || !this.dirty || this.flushTimer) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = undefined;
       this.flushNow();
-    }, 500);
+    }, delayMs);
     this.flushTimer.unref?.();
   }
 
@@ -660,6 +664,48 @@ export class SqliteDatabase {
         CREATE INDEX IF NOT EXISTS project_understanding_project_idx ON project_understanding_snapshots(project_id, updated_at DESC);
         CREATE INDEX IF NOT EXISTS project_understanding_input_idx ON project_understanding_snapshots(project_id, input_hash, updated_at DESC);
       `],
+      [25, `
+        CREATE TABLE IF NOT EXISTS repository_source_files (
+          document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+          path TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          language TEXT,
+          size INTEGER NOT NULL,
+          sha256 TEXT,
+          text TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(document_id, path)
+        );
+        CREATE INDEX IF NOT EXISTS repository_source_files_document_idx ON repository_source_files(document_id, path);
+        CREATE TABLE IF NOT EXISTS repository_manifests (
+          document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+          manifest_json TEXT NOT NULL,
+          skipped_files_json TEXT NOT NULL DEFAULT '[]',
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS project_analysis_jobs (
+          id TEXT PRIMARY KEY,
+          profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          status TEXT NOT NULL,
+          stage TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          started_at INTEGER,
+          updated_at INTEGER NOT NULL,
+          finished_at INTEGER,
+          progress REAL NOT NULL DEFAULT 0,
+          files_total INTEGER NOT NULL DEFAULT 0,
+          files_explored INTEGER NOT NULL DEFAULT 0,
+          tool_calls INTEGER NOT NULL DEFAULT 0,
+          model_turns INTEGER NOT NULL DEFAULT 0,
+          error_code TEXT,
+          error_message TEXT,
+          cancel_requested INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS project_analysis_jobs_project_idx ON project_analysis_jobs(project_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS project_analysis_jobs_profile_idx ON project_analysis_jobs(profile_id, updated_at DESC);
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -998,7 +1044,8 @@ export class SqliteProjectMemoryRepository {
       const document = assignment.sourceType === "document" || assignment.sourceType === "repository"
         ? this.database.first<Record<string, unknown>>("SELECT filename, document_type AS documentType, status, text, updated_at AS updatedAt FROM documents WHERE id = ?", [assignment.sourceId])
         : undefined;
-      return { ...assignment, title: String(document?.filename ?? assignment.sourceId), ...(document?.documentType ? { documentType: String(document.documentType) } : {}), ...(document?.status ? { status: String(document.status) } : {}), ...(document?.text ? { text: String(document.text).slice(0, 20_000) } : {}), updatedAt: Number(document?.updatedAt ?? assignment.updatedAt) };
+      const repositoryFileCount = assignment.sourceType === "repository" ? Number(this.database.first<{ count: number }>("SELECT COUNT(*) AS count FROM repository_source_files WHERE document_id = ?", [assignment.sourceId])?.count ?? 0) : 0;
+      return { ...assignment, title: String(document?.filename ?? assignment.sourceId), ...(document?.documentType ? { documentType: String(document.documentType) } : {}), ...(document?.status ? { status: String(document.status) } : {}), ...(document?.text ? { text: String(document.text).slice(0, 20_000) } : {}), ...(assignment.sourceType === "repository" ? { repositoryFileCount } : {}), updatedAt: Number(document?.updatedAt ?? assignment.updatedAt) };
     });
   }
   createProject(profileId: string, name: string, now = Date.now(), ownershipMode: ProjectOwnershipMode = "personal", ownershipNote?: string): { id: string; name: string; profileId: string; aliases: string[]; sourceIds: string[]; ownershipMode: ProjectOwnershipMode; ownershipNote?: string } {
@@ -1432,7 +1479,7 @@ export class SqliteProjectMemoryRepository {
     return this.getFact(factId);
   }
 
-  async embedFacts(profileId: string, embed: (text: string) => Promise<number[]>, options: { projectId?: string; model?: string; version?: string; concurrency?: number } = {}): Promise<{ embedded: number; reused: number; failed: number }> {
+  async embedFacts(profileId: string, embed: (text: string, signal?: AbortSignal) => Promise<number[]>, options: { projectId?: string; model?: string; version?: string; concurrency?: number; signal?: AbortSignal } = {}): Promise<{ embedded: number; reused: number; failed: number }> {
     const facts = this.listFacts(profileId, options.projectId).filter((fact) => fact.status === "active");
     const concurrency = Math.max(1, Math.min(8, Math.floor(options.concurrency ?? 4)));
     let embedded = 0;
@@ -1446,12 +1493,15 @@ export class SqliteProjectMemoryRepository {
       return true;
     });
     for (let index = 0; index < pending.length; index += concurrency) {
+      options.signal?.throwIfAborted?.();
       await Promise.all(pending.slice(index, index + concurrency).map(async (fact) => {
         try {
-          const vector = await embed(`${fact.title}\n${fact.content}`);
+          options.signal?.throwIfAborted?.();
+          const vector = await embed(`${fact.title}\n${fact.content}`, options.signal);
           if (this.setFactEmbedding(fact.id, vector, options)) embedded += 1;
           else failed += 1;
-        } catch {
+        } catch (error) {
+          if (options.signal?.aborted) throw error;
           failed += 1;
         }
       }));
@@ -1538,6 +1588,42 @@ export class SqliteKnowledgeAnalysisRepository {
   getProjectState(projectId: string): ProjectAnalysisState | undefined {
     const row = this.database.first<Record<string, unknown>>("SELECT project_id AS projectId, latest_analysis_id AS latestAnalysisId, last_successful_analysis_id AS lastSuccessfulAnalysisId, status, snapshot_version AS snapshotVersion, updated_at AS updatedAt FROM project_analysis_state WHERE project_id = ?", [projectId]);
     return row ? { projectId: String(row.projectId), ...(row.latestAnalysisId ? { latestAnalysisId: String(row.latestAnalysisId) } : {}), ...(row.lastSuccessfulAnalysisId ? { lastSuccessfulAnalysisId: String(row.lastSuccessfulAnalysisId) } : {}), status: String(row.status) as ProjectAnalysisState["status"], snapshotVersion: Number(row.snapshotVersion), updatedAt: Number(row.updatedAt) } : undefined;
+  }
+}
+
+export class SqliteProjectAnalysisJobRepository {
+  constructor(private readonly database: SqliteDatabase) {}
+
+  save(job: ProjectAnalysisJob): ProjectAnalysisJob {
+    this.database.run("INSERT INTO project_analysis_jobs(id, profile_id, project_id, status, stage, created_at, started_at, updated_at, finished_at, progress, files_total, files_explored, tool_calls, model_turns, error_code, error_message, cancel_requested) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, stage=excluded.stage, started_at=excluded.started_at, updated_at=excluded.updated_at, finished_at=excluded.finished_at, progress=excluded.progress, files_total=excluded.files_total, files_explored=excluded.files_explored, tool_calls=excluded.tool_calls, model_turns=excluded.model_turns, error_code=excluded.error_code, error_message=excluded.error_message, cancel_requested=excluded.cancel_requested", [job.id, job.profileId, job.projectId, job.status, job.stage, job.createdAt, job.startedAt ?? null, job.updatedAt, job.finishedAt ?? null, job.progress, job.filesTotal, job.filesExplored, job.toolCalls, job.modelTurns, job.errorCode ?? null, job.errorMessage ?? null, job.cancelRequested ? 1 : 0]);
+    this.database.flush();
+    return this.get(job.id) as ProjectAnalysisJob;
+  }
+
+  get(jobId: string): ProjectAnalysisJob | undefined {
+    const row = this.database.first<Record<string, unknown>>("SELECT id, profile_id AS profileId, project_id AS projectId, status, stage, created_at AS createdAt, started_at AS startedAt, updated_at AS updatedAt, finished_at AS finishedAt, progress, files_total AS filesTotal, files_explored AS filesExplored, tool_calls AS toolCalls, model_turns AS modelTurns, error_code AS errorCode, error_message AS errorMessage, cancel_requested AS cancelRequested FROM project_analysis_jobs WHERE id = ?", [jobId]);
+    return row ? this.hydrate(row) : undefined;
+  }
+
+  latestForProject(projectId: string): ProjectAnalysisJob | undefined {
+    const row = this.database.first<Record<string, unknown>>("SELECT id, profile_id AS profileId, project_id AS projectId, status, stage, created_at AS createdAt, started_at AS startedAt, updated_at AS updatedAt, finished_at AS finishedAt, progress, files_total AS filesTotal, files_explored AS filesExplored, tool_calls AS toolCalls, model_turns AS modelTurns, error_code AS errorCode, error_message AS errorMessage, cancel_requested AS cancelRequested FROM project_analysis_jobs WHERE project_id = ? ORDER BY updated_at DESC LIMIT 1", [projectId]);
+    return row ? this.hydrate(row) : undefined;
+  }
+
+  list(profileId: string): ProjectAnalysisJob[] {
+    return this.database.all<Record<string, unknown>>("SELECT id, profile_id AS profileId, project_id AS projectId, status, stage, created_at AS createdAt, started_at AS startedAt, updated_at AS updatedAt, finished_at AS finishedAt, progress, files_total AS filesTotal, files_explored AS filesExplored, tool_calls AS toolCalls, model_turns AS modelTurns, error_code AS errorCode, error_message AS errorMessage, cancel_requested AS cancelRequested FROM project_analysis_jobs WHERE profile_id = ? ORDER BY updated_at DESC", [profileId]).map((row) => this.hydrate(row));
+  }
+
+  recoverInterrupted(now = Date.now()): number {
+    const result = this.database.all<Record<string, unknown>>("SELECT id FROM project_analysis_jobs WHERE status IN ('queued', 'mapping', 'exploring', 'synthesizing', 'grounding')");
+    if (result.length === 0) return 0;
+    this.database.run("UPDATE project_analysis_jobs SET status='failed', stage='failed', error_code='PROJECT_ANALYSIS_INTERRUPTED', error_message='应用重启时分析尚未完成，可重新分析', finished_at=?, updated_at=? WHERE status IN ('queued', 'mapping', 'exploring', 'synthesizing', 'grounding')", [now, now]);
+    this.database.flushNow();
+    return result.length;
+  }
+
+  private hydrate(row: Record<string, unknown>): ProjectAnalysisJob {
+    return { id: String(row.id), profileId: String(row.profileId), projectId: String(row.projectId), status: String(row.status) as ProjectAnalysisJob["status"], stage: String(row.stage) as ProjectAnalysisJob["stage"], createdAt: Number(row.createdAt), ...(row.startedAt ? { startedAt: Number(row.startedAt) } : {}), updatedAt: Number(row.updatedAt), ...(row.finishedAt ? { finishedAt: Number(row.finishedAt) } : {}), progress: Number(row.progress ?? 0), filesTotal: Number(row.filesTotal ?? 0), filesExplored: Number(row.filesExplored ?? 0), toolCalls: Number(row.toolCalls ?? 0), modelTurns: Number(row.modelTurns ?? 0), ...(row.errorCode ? { errorCode: String(row.errorCode) } : {}), ...(row.errorMessage ? { errorMessage: String(row.errorMessage) } : {}), cancelRequested: Number(row.cancelRequested) === 1 };
   }
 }
 
@@ -1778,7 +1864,7 @@ export class SqliteInterviewHistoryRepository {
 }
 
 export interface KnowledgeBaseRecord { id: string; name: string; createdAt: number; updatedAt: number; }
-export interface KnowledgeDocumentRecord { id: string; knowledgeBaseId: string; filename: string; mimeType: string; sha256: string; text: string; sections: string[]; documentType: KnowledgeDocumentType; status: "processing" | "ready" | "error"; error?: string; createdAt: number; updatedAt: number; }
+export interface KnowledgeDocumentRecord { id: string; knowledgeBaseId: string; filename: string; mimeType: string; sha256: string; text: string; sections: string[]; documentType: KnowledgeDocumentType; status: "processing" | "ready" | "error"; error?: string; createdAt: number; updatedAt: number; repositoryFiles?: RepositorySourceFile[]; repositoryManifest?: RepositoryManifest; repositorySkippedFiles?: RepositorySkippedFile[]; }
 
 export class SqliteKnowledgeRepository {
   constructor(private readonly database: SqliteDatabase) {}
@@ -1812,7 +1898,15 @@ export class SqliteKnowledgeRepository {
   listDocuments(knowledgeBaseId?: string): KnowledgeDocumentRecord[] {
     const sql = "SELECT id, knowledge_base_id AS knowledgeBaseId, filename, mime_type AS mimeType, sha256, text, sections_json AS sectionsJson, document_type AS documentType, status, error, created_at AS createdAt, updated_at AS updatedAt FROM documents";
     const rows = knowledgeBaseId ? this.database.all<Record<string, unknown>>(`${sql} WHERE knowledge_base_id = ? ORDER BY updated_at DESC`, [knowledgeBaseId]) : this.database.all<Record<string, unknown>>(`${sql} ORDER BY updated_at DESC`);
-    return rows.map((row) => this.hydrateDocument(row));
+    return rows.map((row) => this.hydrateDocument(row, false));
+  }
+
+  findDocumentBySha256(sha256: string, knowledgeBaseId?: string): KnowledgeDocumentRecord | undefined {
+    const sql = "SELECT id, knowledge_base_id AS knowledgeBaseId, filename, mime_type AS mimeType, sha256, text, sections_json AS sectionsJson, document_type AS documentType, status, error, created_at AS createdAt, updated_at AS updatedAt FROM documents WHERE sha256 = ?";
+    const row = knowledgeBaseId
+      ? this.database.first<Record<string, unknown>>(`${sql} AND knowledge_base_id = ? ORDER BY updated_at DESC LIMIT 1`, [sha256, knowledgeBaseId])
+      : this.database.first<Record<string, unknown>>(`${sql} ORDER BY updated_at DESC LIMIT 1`, [sha256]);
+    return row ? this.hydrateDocument(row) : undefined;
   }
 
   /** Backfill categories for documents created before document classification existed. */
@@ -1829,8 +1923,9 @@ export class SqliteKnowledgeRepository {
     this.database.flushNow();
   }
 
-  getDocument(documentId: string): KnowledgeDocumentRecord | undefined {
-    return this.listDocuments().find((document) => document.id === documentId);
+  getDocument(documentId: string, options: { includeRepositoryFiles?: boolean } = {}): KnowledgeDocumentRecord | undefined {
+    const row = this.database.first<Record<string, unknown>>("SELECT id, knowledge_base_id AS knowledgeBaseId, filename, mime_type AS mimeType, sha256, text, sections_json AS sectionsJson, document_type AS documentType, status, error, created_at AS createdAt, updated_at AS updatedAt FROM documents WHERE id = ?", [documentId]);
+    return row ? this.hydrateDocument(row, options.includeRepositoryFiles !== false) : undefined;
   }
 
   deleteDocument(documentId: string): void {
@@ -1838,11 +1933,66 @@ export class SqliteKnowledgeRepository {
     this.database.flushNow();
   }
 
-  saveDocument(document: { id: string; knowledgeBaseId: string; filename: string; mimeType: string; sha256: string; text: string; sections: string[]; documentType?: KnowledgeDocumentType; status: "processing" | "ready" | "error"; error?: string }, now = Date.now()): KnowledgeDocumentRecord {
+  saveDocument(document: { id: string; knowledgeBaseId: string; filename: string; mimeType: string; sha256: string; text: string; sections: string[]; documentType?: KnowledgeDocumentType; status: "processing" | "ready" | "error"; error?: string; repositoryFiles?: RepositorySourceFile[]; repositoryManifest?: RepositoryManifest; repositorySkippedFiles?: RepositorySkippedFile[] }, now = Date.now(), options: { includeRepositoryFiles?: boolean } = {}): KnowledgeDocumentRecord {
     const documentType = document.documentType ?? "other";
     this.database.run("INSERT INTO documents(id, knowledge_base_id, filename, mime_type, sha256, text, sections_json, document_type, status, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET filename=excluded.filename, mime_type=excluded.mime_type, sha256=excluded.sha256, text=excluded.text, sections_json=excluded.sections_json, document_type=excluded.document_type, status=excluded.status, error=excluded.error, updated_at=excluded.updated_at", [document.id, document.knowledgeBaseId, document.filename, document.mimeType, document.sha256, document.text, JSON.stringify(document.sections), documentType, document.status, document.error ?? null, now, now]);
     this.database.flushNow();
-    return this.listDocuments(document.knowledgeBaseId).find((item) => item.id === document.id) as KnowledgeDocumentRecord;
+    if (document.repositoryFiles || document.repositoryManifest) this.replaceRepositoryFiles(document.id, document.repositoryFiles ?? [], document.repositoryManifest, document.repositorySkippedFiles ?? [], now);
+    return this.getDocument(document.id, options) as KnowledgeDocumentRecord;
+  }
+
+  async saveDocumentAsync(document: { id: string; knowledgeBaseId: string; filename: string; mimeType: string; sha256: string; text: string; sections: string[]; documentType?: KnowledgeDocumentType; status: "processing" | "ready" | "error"; error?: string; repositoryFiles?: RepositorySourceFile[]; repositoryManifest?: RepositoryManifest; repositorySkippedFiles?: RepositorySkippedFile[] }, now = Date.now(), options: { includeRepositoryFiles?: boolean; flushDelayMs?: number } = {}): Promise<KnowledgeDocumentRecord> {
+    const documentType = document.documentType ?? "other";
+    this.database.run("INSERT INTO documents(id, knowledge_base_id, filename, mime_type, sha256, text, sections_json, document_type, status, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET filename=excluded.filename, mime_type=excluded.mime_type, sha256=excluded.sha256, text=excluded.text, sections_json=excluded.sections_json, document_type=excluded.document_type, status=excluded.status, error=excluded.error, updated_at=excluded.updated_at", [document.id, document.knowledgeBaseId, document.filename, document.mimeType, document.sha256, document.text, JSON.stringify(document.sections), documentType, document.status, document.error ?? null, now, now]);
+    if (document.repositoryFiles || document.repositoryManifest) await this.replaceRepositoryFilesAsync(document.id, document.repositoryFiles ?? [], document.repositoryManifest, document.repositorySkippedFiles ?? [], now, options.flushDelayMs ?? 10_000);
+    else this.database.flush(options.flushDelayMs ?? 500);
+    return this.getDocument(document.id, options) as KnowledgeDocumentRecord;
+  }
+
+  replaceRepositoryFiles(documentId: string, files: RepositorySourceFile[], manifest?: RepositoryManifest, skippedFiles: RepositorySkippedFile[] = [], now = Date.now()): void {
+    this.database.run("BEGIN");
+    try {
+      this.database.run("DELETE FROM repository_source_files WHERE document_id = ?", [documentId]);
+      for (const file of files) this.database.run("INSERT INTO repository_source_files(document_id, path, kind, language, size, sha256, text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [documentId, file.path, file.kind, file.language ?? null, file.size, file.sha256 ?? null, file.text, now, now]);
+      if (manifest) this.database.run("INSERT INTO repository_manifests(document_id, manifest_json, skipped_files_json, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(document_id) DO UPDATE SET manifest_json=excluded.manifest_json, skipped_files_json=excluded.skipped_files_json, updated_at=excluded.updated_at", [documentId, JSON.stringify(manifest), JSON.stringify(skippedFiles), now]);
+      else this.database.run("DELETE FROM repository_manifests WHERE document_id = ?", [documentId]);
+      this.database.run("COMMIT");
+      this.database.flushNow();
+    } catch (error) {
+      this.database.run("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async replaceRepositoryFilesAsync(documentId: string, files: RepositorySourceFile[], manifest?: RepositoryManifest, skippedFiles: RepositorySkippedFile[] = [], now = Date.now(), flushDelayMs = 10_000): Promise<void> {
+    this.database.run("BEGIN");
+    try {
+      this.database.run("DELETE FROM repository_source_files WHERE document_id = ?", [documentId]);
+      for (const [index, file] of files.entries()) {
+        this.database.run("INSERT INTO repository_source_files(document_id, path, kind, language, size, sha256, text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [documentId, file.path, file.kind, file.language ?? null, file.size, file.sha256 ?? null, file.text, now, now]);
+        if (index > 0 && index % 4 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      if (manifest) this.database.run("INSERT INTO repository_manifests(document_id, manifest_json, skipped_files_json, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(document_id) DO UPDATE SET manifest_json=excluded.manifest_json, skipped_files_json=excluded.skipped_files_json, updated_at=excluded.updated_at", [documentId, JSON.stringify(manifest), JSON.stringify(skippedFiles), now]);
+      else this.database.run("DELETE FROM repository_manifests WHERE document_id = ?", [documentId]);
+      this.database.run("COMMIT");
+      this.database.flush(flushDelayMs);
+    } catch (error) {
+      this.database.run("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listRepositoryFiles(documentId: string, options: { limit?: number; offset?: number } = {}): RepositorySourceFile[] {
+    const limit = options.limit === undefined ? undefined : Math.max(1, Math.floor(options.limit));
+    const offset = Math.max(0, Math.floor(options.offset ?? 0));
+    const sql = "SELECT document_id AS documentId, path, kind, language, size, sha256, text FROM repository_source_files WHERE document_id = ? ORDER BY path";
+    const rows = limit === undefined ? this.database.all<Record<string, unknown>>(sql, [documentId]) : this.database.all<Record<string, unknown>>(`${sql} LIMIT ? OFFSET ?`, [documentId, limit, offset]);
+    return rows.map((row) => ({ documentId: String(row.documentId), path: String(row.path), kind: String(row.kind) as RepositorySourceFile["kind"], ...(row.language ? { language: String(row.language) } : {}), size: Number(row.size), ...(row.sha256 ? { sha256: String(row.sha256) } : {}), text: String(row.text) }));
+  }
+
+  getRepositoryManifest(documentId: string): { manifest?: RepositoryManifest; skippedFiles: RepositorySkippedFile[] } {
+    const row = this.database.first<Record<string, unknown>>("SELECT manifest_json AS manifestJson, skipped_files_json AS skippedFilesJson FROM repository_manifests WHERE document_id = ?", [documentId]);
+    return { ...(row?.manifestJson ? { manifest: JSON.parse(String(row.manifestJson)) as RepositoryManifest } : {}), skippedFiles: row?.skippedFilesJson ? JSON.parse(String(row.skippedFilesJson)) as RepositorySkippedFile[] : [] };
   }
 
   updateDocumentType(documentId: string, documentType: KnowledgeDocumentType, now = Date.now()): KnowledgeDocumentRecord | undefined {
@@ -1876,6 +2026,22 @@ export class SqliteKnowledgeRepository {
     return this.database.all<{ id: string; text: string; metadataJson: string; embeddingJson: string | null }>(`SELECT c.id, c.text, c.metadata_json AS metadataJson, c.embedding_json AS embeddingJson FROM knowledge_chunks c JOIN documents d ON d.id = c.document_id WHERE d.knowledge_base_id IN (${placeholders}) AND d.status = 'ready'`, knowledgeBaseIds).map((row) => ({ id: row.id, text: row.text, metadata: JSON.parse(row.metadataJson), ...(row.embeddingJson ? { embedding: JSON.parse(row.embeddingJson) as number[] } : {}) }));
   }
 
+  async replaceChunksAsync(documentId: string, chunks: KnowledgeChunk[], now = Date.now(), flushDelayMs = 10_000): Promise<void> {
+    this.database.run("BEGIN");
+    try {
+      this.database.run("DELETE FROM knowledge_chunks WHERE document_id = ?", [documentId]);
+      for (const [index, chunk] of chunks.entries()) {
+        this.database.run("INSERT INTO knowledge_chunks(id, document_id, text, metadata_json, embedding_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", [chunk.id, documentId, chunk.text, JSON.stringify(chunk.metadata), chunk.embedding ? JSON.stringify(chunk.embedding) : null, now]);
+        if (index > 0 && index % 32 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      this.database.run("COMMIT");
+      this.database.flush(flushDelayMs);
+    } catch (error) {
+      this.database.run("ROLLBACK");
+      throw error;
+    }
+  }
+
   /** Return ready chunks for an explicit document allow-list. */
   listChunksByDocumentIds(documentIds: string[] = []): KnowledgeChunk[] {
     const ids = [...new Set(documentIds.filter(Boolean))];
@@ -1887,8 +2053,14 @@ export class SqliteKnowledgeRepository {
     });
   }
 
-  private hydrateDocument(row: Record<string, unknown>): KnowledgeDocumentRecord {
-    return { id: String(row.id), knowledgeBaseId: String(row.knowledgeBaseId), filename: String(row.filename), mimeType: String(row.mimeType), sha256: String(row.sha256), text: String(row.text), sections: JSON.parse(String(row.sectionsJson)) as string[], documentType: String(row.documentType || "other") as KnowledgeDocumentType, status: row.status as KnowledgeDocumentRecord["status"], ...(row.error ? { error: String(row.error) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
+  private hydrateDocument(row: Record<string, unknown>, includeRepositoryFiles = true): KnowledgeDocumentRecord {
+    if (!includeRepositoryFiles) {
+      const repository = this.getRepositoryManifest(String(row.id));
+      return { id: String(row.id), knowledgeBaseId: String(row.knowledgeBaseId), filename: String(row.filename), mimeType: String(row.mimeType), sha256: String(row.sha256), text: String(row.text), sections: JSON.parse(String(row.sectionsJson)) as string[], documentType: String(row.documentType || "other") as KnowledgeDocumentType, status: row.status as KnowledgeDocumentRecord["status"], ...(row.error ? { error: String(row.error) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt), ...(repository.manifest ? { repositoryManifest: repository.manifest } : {}), ...(repository.skippedFiles.length > 0 ? { repositorySkippedFiles: repository.skippedFiles } : {}) };
+    }
+    const repositoryFiles = this.listRepositoryFiles(String(row.id));
+    const repository = this.getRepositoryManifest(String(row.id));
+    return { id: String(row.id), knowledgeBaseId: String(row.knowledgeBaseId), filename: String(row.filename), mimeType: String(row.mimeType), sha256: String(row.sha256), text: String(row.text), sections: JSON.parse(String(row.sectionsJson)) as string[], documentType: String(row.documentType || "other") as KnowledgeDocumentType, status: row.status as KnowledgeDocumentRecord["status"], ...(row.error ? { error: String(row.error) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt), ...(repositoryFiles.length > 0 ? { repositoryFiles } : {}), ...(repository.manifest ? { repositoryManifest: repository.manifest } : {}), ...(repository.skippedFiles.length > 0 ? { repositorySkippedFiles: repository.skippedFiles } : {}) };
   }
 }
 

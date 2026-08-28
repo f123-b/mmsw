@@ -9,6 +9,39 @@ export type ProjectSourceAssignmentMethod = "explicit" | "matched" | "manual" | 
 
 export type ProjectOwnershipMode = "personal" | "team" | "partial" | "reference";
 
+export type RepositorySourceFileKind = "source" | "header" | "config" | "test" | "document" | "other";
+
+export interface RepositorySourceFile {
+  documentId?: string;
+  path: string;
+  kind: RepositorySourceFileKind;
+  language?: string;
+  size: number;
+  sha256?: string;
+  text: string;
+}
+
+export interface RepositorySkippedFile {
+  path: string;
+  reason: string;
+}
+
+export interface RepositoryManifest {
+  archiveName: string;
+  rootName?: string;
+  archiveSha256: string;
+  fileCount: number;
+  eligibleFileCount: number;
+  skippedFileCount: number;
+  totalSourceBytes: number;
+  languages: string[];
+  directories: string[];
+  configFiles: string[];
+  testFiles: string[];
+  documentFiles: string[];
+  importedAt: number;
+}
+
 export type ProjectExperienceRelation = "project" | "designed" | "implemented" | "integrated" | "configured" | "used" | "debugged" | "measured" | "observed";
 
 export type ProjectFactValue =
@@ -45,7 +78,9 @@ export interface ProjectMemorySource {
   locator?: string;
   updatedAt?: number;
   /** Optional materialized entries from a trusted archive reader. */
-  repositoryFiles?: Array<{ path: string; text: string; size?: number }>;
+  repositoryFiles?: RepositorySourceFile[];
+  repositoryManifest?: RepositoryManifest;
+  repositorySkippedFiles?: RepositorySkippedFile[];
   repositoryHistory?: Array<{ hash?: string; subject: string; path?: string; date?: string; changedPaths?: string[] }>;
 }
 
@@ -230,6 +265,7 @@ export interface ProjectMemoryAnalysisInput {
   profileId?: string;
   projectId?: string;
   projectName?: string;
+  signal?: AbortSignal;
   sources: ProjectMemorySource[];
 }
 

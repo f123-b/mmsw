@@ -17,15 +17,17 @@ describe("document parsers", () => {
     expect(document.text).not.toContain("secret");
   });
 
-  it("imports a GitHub-style source archive and keeps file boundaries", async () => {
+  it("imports a GitHub-style source archive and keeps persisted file boundaries", async () => {
     const zip = new JSZip();
     zip.file("foc2-codex-foc-studio-submit-main/README.md", "FOC motor controller");
     zip.file("foc2-codex-foc-studio-submit-main/src/controller.c", "void current_loop(void) {}");
     const bytes = await zip.generateAsync({ type: "uint8array" });
     const document = await parseDocument({ documentId: "repo-1", filename: "foc2-codex-foc-studio-submit.zip", mimeType: "application/x-zip", bytes: bytes.buffer });
-    expect(document.text).toContain("文件：foc2-codex-foc-studio-submit-main/README.md");
-    expect(document.text).toContain("文件：foc2-codex-foc-studio-submit-main/src/controller.c");
-    expect(document.sections).toContain("foc2-codex-foc-studio-submit-main/src/controller.c");
+    expect(document.text).not.toContain("void current_loop");
+    expect(document.repositoryManifest).toMatchObject({ rootName: "foc2-codex-foc-studio-submit-main", eligibleFileCount: 2 });
+    expect(document.repositoryFiles?.map((file) => file.path)).toEqual(["README.md", "src/controller.c"]);
+    expect(document.repositoryFiles?.find((file) => file.path === "src/controller.c")?.text).toContain("void current_loop");
+    expect(document.sections).toContain("src/controller.c");
   });
 
   it("falls back to ZIP signature when Electron sends an unknown MIME or serialized bytes", async () => {
@@ -35,6 +37,6 @@ describe("document parsers", () => {
     const serialized = Object.fromEntries(Array.from(bytes, (value, index) => [String(index), value]));
     const document = await parseDocument({ documentId: "repo-2", filename: "download", mimeType: "application/x-zip", bytes: serialized });
     expect(document.mimeType).toBe("application/zip");
-    expect(document.text).toContain("repository readme");
+    expect(document.repositoryFiles?.[0]?.text).toContain("repository readme");
   });
 });

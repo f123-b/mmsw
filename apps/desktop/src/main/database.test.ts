@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository } from "./database";
+import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository } from "./database";
 import type { ProjectUnderstanding } from "@interview-copilot/shared";
 
 describe("SQLite persistence", () => {
@@ -206,7 +206,7 @@ describe("SQLite persistence", () => {
   it("applies migration 23 ownership and technical memory semantics", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(24);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(25);
       expect(database.all<{ name: string }>("PRAGMA table_info(projects)").map((row) => row.name)).toEqual(expect.arrayContaining(["ownership_mode", "ownership_note"]));
       expect(database.all<{ name: string }>("PRAGMA table_info(project_facts)").map((row) => row.name)).toEqual(expect.arrayContaining(["experience_relation", "value_json"]));
       new SqliteProfileRepository(database).save({ id: "profile-v4", name: "V4", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
@@ -219,6 +219,45 @@ describe("SQLite persistence", () => {
       expect(parameter).toMatchObject({ type: "parameter", canonicalKey: "communication.can.bitrate", experienceRelation: "configured", value: { kind: "scalar", value: 500_000, unit: "bit/s" } });
       const repaired = memory.repairProjectTechnicalSemantics(created.id);
       expect(repaired.find((fact) => fact.id === "v4-parameter")?.value).toMatchObject({ kind: "scalar", value: 500_000, unit: "bit/s" });
+    } finally { database.close(); }
+  });
+
+  it("round-trips repository files in dedicated tables without putting source text in documents", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const knowledge = new SqliteKnowledgeRepository(database);
+      const base = knowledge.createKnowledgeBase("源码");
+      knowledge.saveDocument({
+        id: "repo-roundtrip",
+        knowledgeBaseId: base.id,
+        filename: "foc2.zip",
+        mimeType: "application/zip",
+        sha256: "archive-sha",
+        text: "Repository archive: foc2.zip\nFiles: 2",
+        sections: ["Core/main.c"],
+        documentType: "project",
+        status: "ready",
+        repositoryFiles: [
+          { documentId: "repo-roundtrip", path: "Core/main.c", kind: "source", language: "C", size: 25, sha256: "file-sha", text: "void foc_control(void) {}" },
+          { documentId: "repo-roundtrip", path: "Core/main.h", kind: "header", language: "C", size: 18, sha256: "header-sha", text: "void foc_control(void);" }
+        ],
+        repositoryManifest: { archiveName: "foc2.zip", archiveSha256: "archive-sha", fileCount: 2, eligibleFileCount: 2, skippedFileCount: 0, totalSourceBytes: 43, languages: ["C"], directories: ["Core"], configFiles: [], testFiles: [], documentFiles: [], importedAt: 1 },
+        repositorySkippedFiles: [{ path: "image.bin", reason: "binary-content" }]
+      });
+      expect(knowledge.listDocuments(base.id)[0]?.repositoryFiles).toBeUndefined();
+      const loaded = knowledge.getDocument("repo-roundtrip");
+      expect(loaded).toMatchObject({ text: "Repository archive: foc2.zip\nFiles: 2", repositoryManifest: { archiveSha256: "archive-sha" } });
+      expect(loaded?.repositoryFiles).toEqual(expect.arrayContaining([expect.objectContaining({ path: "Core/main.c", text: "void foc_control(void) {}" })]));
+      expect(knowledge.findDocumentBySha256("archive-sha", base.id)?.id).toBe("repo-roundtrip");
+
+      const profiles = new SqliteProfileRepository(database);
+      const profile = profiles.save({ name: "源码任务", language: "zh-CN", skills: [], knowledgeBaseIds: [base.id] });
+      const project = new SqliteProjectMemoryRepository(database).createProject(profile.id, "FOC");
+      const jobs = new SqliteProjectAnalysisJobRepository(database);
+      jobs.save({ id: "job-roundtrip", profileId: profile.id, projectId: project.id, status: "queued", stage: "queued", createdAt: 1, updatedAt: 1, progress: 0, filesTotal: 2, filesExplored: 0, toolCalls: 0, modelTurns: 0, cancelRequested: false });
+      expect(jobs.get("job-roundtrip")).toMatchObject({ projectId: project.id, status: "queued", filesTotal: 2 });
+      expect(jobs.recoverInterrupted(2)).toBe(1);
+      expect(jobs.get("job-roundtrip")).toMatchObject({ status: "failed", errorCode: "PROJECT_ANALYSIS_INTERRUPTED" });
     } finally { database.close(); }
   });
 
@@ -275,7 +314,7 @@ describe("SQLite persistence", () => {
       first.close();
       const second = await SqliteDatabase.open(filePath);
       try {
-        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(24);
+        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(25);
         const repaired = new SqliteProjectMemoryRepository(second);
         repaired.repairProjectTechnicalSemantics("project-migration");
         expect(repaired.listFacts(profile.id, "project-migration", { includeStale: true, includeRejected: true })).toHaveLength(2);
@@ -314,7 +353,7 @@ describe("SQLite persistence", () => {
       expect(memory.getUnderstandingSnapshot(project.id, "hash-a")?.understanding.summary).toContain("可缓存");
       expect(memory.getSnapshot(profile.id).understandings?.[0]?.projectId).toBe(project.id);
       expect(memory.getUnderstandingSnapshot(project.id, "different-hash")).toBeUndefined();
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(24);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(25);
     } finally { database.close(); }
   });
 

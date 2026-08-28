@@ -14,7 +14,7 @@ import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { OverlayPreferences, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
-import type { ChatAction, Profile, ProfileInput, ProjectFact, ProjectMaterialImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
+import type { ChatAction, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
 import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
@@ -148,7 +148,11 @@ const api = {
     unassignSource: (projectId: string, sourceType: string, sourceId: string) => ipcRenderer.invoke("project-memory:unassign-source", projectId, sourceType, sourceId),
     assignDocument: (profileId: string, documentId: string, projectId?: string) => ipcRenderer.invoke("project-memory:assign-document", profileId, documentId, projectId),
     rebuild: (profileId: string) => ipcRenderer.invoke("project-memory:rebuild", profileId),
-    rebuildProject: (projectId: string) => ipcRenderer.invoke("project-memory:rebuild-project", projectId)
+    rebuildProject: (projectId: string): Promise<ProjectAnalysisJob> => ipcRenderer.invoke("project-memory:rebuild-project", projectId),
+    analysisJob: (projectId: string): Promise<ProjectAnalysisJob | undefined> => ipcRenderer.invoke("project-memory:analysis-job", projectId),
+    analysisJobs: (profileId: string): Promise<ProjectAnalysisJob[]> => ipcRenderer.invoke("project-memory:analysis-jobs", profileId),
+    cancelAnalysis: (projectId: string, jobId?: string): Promise<ProjectAnalysisJob | undefined> => ipcRenderer.invoke("project-memory:cancel-analysis", projectId, jobId),
+    retryAnalysis: (profileId: string, projectId: string): Promise<ProjectAnalysisJob | undefined> => ipcRenderer.invoke("project-memory:retry-analysis", profileId, projectId)
   },
   jobTargets: {
     list: (profileId: string): Promise<JobTargetRecord[]> => ipcRenderer.invoke("job-targets:list", profileId)
@@ -385,6 +389,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, payload: ProfileBuilderArtifactRecord) => listener(payload);
       ipcRenderer.on("profile-builder:updated", handler);
       return () => ipcRenderer.removeListener("profile-builder:updated", handler);
+    },
+    onProjectAnalysisJob: (listener: (event: ProjectAnalysisJob) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: ProjectAnalysisJob) => listener(payload);
+      ipcRenderer.on("project-memory:analysis-job", handler);
+      return () => ipcRenderer.removeListener("project-memory:analysis-job", handler);
     },
     onQuestionBankAnswerGenerationProgress: (listener: (event: { status: "started" | "running" | "completed"; total: number; completed: number; generated: number; skipped: number; failed: number; questionId?: string; error?: string }) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, payload: { status: "started" | "running" | "completed"; total: number; completed: number; generated: number; skipped: number; failed: number; questionId?: string; error?: string }) => listener(payload);

@@ -3,7 +3,7 @@ import type { ProjectExplorer, ProjectExplorerLimits, ProjectFileReadResult, Pro
 import { ProjectSemanticGraphBuilder, type ProjectSemanticFile } from "./semantic-graph";
 
 export const DEFAULT_PROJECT_EXCLUDED_PATTERNS = ["node_modules", "vendor", "build", "dist", "target", ".git", "generated", "third_party", "__pycache__", ".venv"];
-export const DEFAULT_PROJECT_ALLOWED_TEXT_EXTENSIONS = ["c", "h", "cc", "cpp", "cxx", "hpp", "py", "rs", "ts", "tsx", "js", "jsx", "java", "go", "lua", "json", "yaml", "yml", "toml", "md", "markdown", "txt", "cmake", "sh", "bat", "ps1", "ini", "cfg", "conf"];
+export const DEFAULT_PROJECT_ALLOWED_TEXT_EXTENSIONS = ["c", "h", "cc", "cpp", "cxx", "hpp", "s", "ld", "ioc", "py", "rs", "ts", "tsx", "js", "jsx", "mjs", "java", "go", "lua", "json", "yaml", "yml", "toml", "md", "markdown", "txt", "cmake", "sh", "bat", "ps1", "ini", "cfg", "conf"];
 
 const DEFAULT_LIMITS: ProjectExplorerLimits = {
   maxToolCalls: 50,
@@ -17,7 +17,7 @@ const DEFAULT_LIMITS: ProjectExplorerLimits = {
 };
 
 const languageByExtension: Record<string, string> = {
-  c: "C", h: "C", cc: "C++", cpp: "C++", cxx: "C++", hpp: "C++", py: "Python", rs: "Rust", ts: "TypeScript", tsx: "TypeScript", js: "JavaScript", jsx: "JavaScript", java: "Java", go: "Go", lua: "Lua", json: "JSON", yaml: "YAML", yml: "YAML", toml: "TOML", md: "Markdown", markdown: "Markdown", cmake: "CMake", sh: "Shell", bat: "Batch", ps1: "PowerShell" 
+  c: "C", h: "C", cc: "C++", cpp: "C++", cxx: "C++", hpp: "C++", s: "Assembly", ld: "Linker Script", ioc: "STM32CubeMX", py: "Python", rs: "Rust", ts: "TypeScript", tsx: "TypeScript", js: "JavaScript", jsx: "JavaScript", mjs: "JavaScript", java: "Java", go: "Go", lua: "Lua", json: "JSON", yaml: "YAML", yml: "YAML", toml: "TOML", md: "Markdown", markdown: "Markdown", cmake: "CMake", sh: "Shell", bat: "Batch", ps1: "PowerShell", ini: "INI", cfg: "Config", conf: "Config"
 };
 
 function extension(path: string): string {
@@ -57,7 +57,7 @@ function classifyPath(path: string): ProjectRepoEntryKind {
   if (isExcluded(normalized)) return "generated";
   if (/(^|\/)(test|tests|spec|specs|__tests__)(\/|$)|\.(test|spec)\.[^.]+$/.test(normalized)) return "test";
   if (/(^|\/)(readme|docs?|documentation)(\/|$)|\.(md|markdown)$/.test(normalized)) return "document";
-  if (/(^|\/)(cmakelists\.txt|makefile|meson\.build|cargo\.toml|package\.json|package-lock\.json|pyproject\.toml|requirements\.txt|config|configs?)(\/|$)|\.(json|ya?ml|toml|ini|cfg|conf|cmake)$/.test(normalized)) return "config";
+  if (/(^|\/)(cmakelists\.txt|makefile|meson\.build|cargo\.toml|package\.json|package-lock\.json|pyproject\.toml|requirements\.txt|config|configs?)(\/|$)|\.(json|ya?ml|toml|ini|cfg|conf|cmake|ioc|ld)$/.test(normalized)) return "config";
   if (Object.prototype.hasOwnProperty.call(languageByExtension, extension(normalized)) || /(^|\/)(src|include|lib|app|core)(\/|$)/.test(normalized)) return "source";
   return "other";
 }
@@ -167,13 +167,16 @@ export class SourceProjectExplorer implements ProjectRepositoryAdapter {
   constructor(sources: ProjectMemorySource[], limits: Partial<ProjectExplorerLimits> = {}) {
     this.files = sourceFiles(sources);
     this.limits = { ...DEFAULT_LIMITS, ...limits };
-    this.symbolIndex = buildProjectSymbolIndex(this.files);
+    // Large archives are explored through bounded readFile/search actions.
+    // Building a full semantic index here would scan every stored source file
+    // synchronously before the agent has selected its investigation scope.
+    this.symbolIndex = this.files.length > 80 ? buildProjectSymbolIndex([]) : buildProjectSymbolIndex(this.files);
     this.history = sources.flatMap((source) => source.repositoryHistory ?? []).map((entry) => ({ ...entry }));
   }
 
   listTree(options: { prefix?: string; limit?: number } = {}): ProjectTreeEntry[] {
     const prefix = options.prefix ? normalizePath(options.prefix).replace(/\/$/, "") : "";
-    const entries = this.files.filter((file) => !prefix || file.path === prefix || file.path.startsWith(`${prefix}/`)).map((file) => ({ ...file, directory: file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "" }));
+    const entries = this.files.filter((file) => !prefix || file.path === prefix || file.path.startsWith(`${prefix}/`)).map((file) => ({ path: file.path, sourceId: file.sourceId, kind: file.kind, language: file.language, size: file.size, directory: file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "" }));
     return entries.slice(0, Math.min(options.limit ?? 500, 500));
   }
 
