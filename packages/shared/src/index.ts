@@ -351,6 +351,11 @@ function scoreFromAnalysis(analysis: QuestionAnalysis): { score: number; confide
 
 function isDeferredShortFollowUp(candidate: QuestionCandidate): boolean {
   if (candidate.speechAct !== "FOLLOW_UP") return false;
+  // Canonical follow-ups now carry an explicit relation. They are already
+  // complete utterances, so the extra trailing-fragment hold would delay them
+  // and make short canonical questions look incomplete to callers that flush
+  // on the normal debounce boundary.
+  if (candidate.contextRelation === "follow_up" || candidate.contextRelation === "continuation") return false;
   return normalizeQuestionText(candidate.text).length <= 8;
 }
 
@@ -457,12 +462,15 @@ export class QuestionDetector {
   private confirmCandidate(candidate: QuestionCandidate, observedAtMs: number): QuestionEvent[] {
     const dedupeScore = this.confirmed.reduce((maximum, previous) => {
       if (observedAtMs - previous.detectedAt >= this.dedupeWindowMs) return maximum;
-      // Brain-normalized follow-ups deliberately contain the parent question
-      // (“围绕…针对…追问：…”). Containment is useful for ASR revisions, but
-      // must not collapse a real follow-up into its parent turn.
+      // Structured follow-up metadata is authoritative here. Containment is
+      // useful for ASR revisions, but must not collapse a real follow-up into
+      // its parent turn. Keep the legacy text marker for older callers that
+      // still provide Brain-normalized candidates.
       const parentContextFollowUp = candidate.speechAct === "FOLLOW_UP"
         && candidate.fingerprint !== previous.fingerprint
-        && /(?:围绕|追问：|追问:)/.test(candidate.text);
+        && (candidate.contextRelation === "follow_up"
+          || candidate.contextRelation === "continuation"
+          || /(?:围绕|追问：|追问:)/.test(candidate.text));
       if (parentContextFollowUp) return maximum;
       return Math.max(maximum, previous.fingerprint && candidate.fingerprint && previous.fingerprint === candidate.fingerprint ? 1 : questionSimilarity(previous.text, candidate.text));
     }, 0);
@@ -529,7 +537,7 @@ export class QuestionDetector {
       rawText: analysis?.rawText,
       normalizedText: analysis?.normalizedText ?? analysis?.normalizedQuestion,
       canonicalText: analysis?.canonicalText ?? analysis?.normalizedQuestion,
-      contextRelation: analysis?.contextRelation,
+      contextRelation: analysis?.contextRelation ?? (analysis?.speechAct === "FOLLOW_UP" ? "follow_up" : undefined),
       inheritedTopic: analysis?.inheritedTopic,
       topic: analysis?.topic,
       semanticFrame: analysis?.semanticFrame ?? classifyQuestionSemanticFrame(analysis?.normalizedQuestion ?? text, analysis?.type),
