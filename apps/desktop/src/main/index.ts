@@ -10,7 +10,7 @@ import { createScreenshotFixtureResult, ScreenshotManager } from "./screenshot-m
 import { createScreenshotRequestId, SCREENSHOT_PROMPT, ScreenshotOperationRegistry, ScreenshotTraceBuffer, withScreenshotTimeout, type ScreenshotTraceEvent, type ScreenshotTraceEventName } from "./screenshot-pipeline";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeInterview, AnswerAgent, AgentToolRegistry, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeAnswerIntent, analyzeInterview, AnswerAgent, AgentToolRegistry, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
@@ -1988,7 +1988,11 @@ if (hasSingleInstanceLock) {
     const detectedProjectId = questionAnalysis.project ? projectSnapshot.projects.find((project) => project.name.toLowerCase() === questionAnalysis.project?.toLowerCase())?.id : undefined;
     const targetProjectId = interviewContext?.projectId ?? detectedProjectId;
     const targetProject = targetProjectId ? projectSnapshot.projects.find((project) => project.id === targetProjectId) : undefined;
-    const useProjectContext = Boolean(interviewContext?.projectId) || knowledgeRoute.useProjectMemory;
+    const answerIntent = analyzeAnswerIntent(normalizedQuestion);
+    const useProjectContext = Boolean(interviewContext?.projectId)
+      || answerIntent.asksProjectImplementation
+      || Boolean(questionAnalysis.project)
+      || answerIntent.requiresPersonalOwnership && /项目|简历|经历/.test(normalizedQuestion);
     const targetUnderstanding = targetProjectId
       ? projectSnapshot.understandings?.find((item) => item.projectId === targetProjectId) ?? (projectSnapshot.understanding?.projectId === targetProjectId ? projectSnapshot.understanding : undefined)
       : projectSnapshot.understanding;
@@ -2037,8 +2041,20 @@ if (hasSingleInstanceLock) {
       });
     }
     const relevantFactMatches = (useProjectContext || (factMatches[0]?.score ?? 0) >= 0.28) ? factMatches : [];
-    const trustedFactExperience = relevantFactMatches.filter((hit) => isFactEligible(hit.fact))
-      .map((hit) => { const perspective = targetProject ? resolveProjectAnswerPerspective(targetProject, hit.fact) : undefined; return `结构化项目事实（${hit.fact.type}，证据级别 ${hit.fact.evidenceLevel ?? "pending"}，归属 ${hit.fact.ownership ?? "unknown"}，经验 ${perspective?.relation ?? hit.fact.experienceRelation ?? "project"}，${perspective?.voice ?? "project"}，来源 ${hit.fact.sourceIds.join("、")}，键 ${hit.fact.canonicalKey ?? "none"}）：\n${hit.fact.title}\n${hit.fact.type === "parameter" ? formatProjectFactValue(hit.fact.value) || hit.fact.content : hit.fact.content}`; });
+    const eligibleFactMatches = relevantFactMatches.filter((hit) => isFactEligible(hit.fact));
+    const formatFactExperience = (hit: (typeof eligibleFactMatches)[number]): string => {
+      const perspective = targetProject ? resolveProjectAnswerPerspective(targetProject, hit.fact) : undefined;
+      return `结构化项目事实（${hit.fact.type}，证据级别 ${hit.fact.evidenceLevel ?? "pending"}，归属 ${hit.fact.ownership ?? "unknown"}，经验 ${perspective?.relation ?? hit.fact.experienceRelation ?? "project"}，${perspective?.voice ?? "project"}，来源 ${hit.fact.sourceIds.join("、")}，键 ${hit.fact.canonicalKey ?? "none"}）：\n${hit.fact.title}\n${hit.fact.type === "parameter" ? formatProjectFactValue(hit.fact.value) || hit.fact.content : hit.fact.content}`;
+    };
+    const trustedFactExperience = eligibleFactMatches.map(formatFactExperience);
+    const trustedPersonalProjectFacts = eligibleFactMatches
+      .filter((hit) => {
+        const perspective = targetProject ? resolveProjectAnswerPerspective(targetProject, hit.fact) : undefined;
+        return hit.fact.ownership === "self"
+          && (hit.fact.evidenceLevel === "confirmed-user" || hit.fact.verified)
+          && (perspective ? perspective.voice === "first-person" : true);
+      })
+      .map(formatFactExperience);
     const targetProjectFacts = targetProject
       ? (projectSnapshot.facts ?? []).filter((fact) => fact.projectId === targetProject.id && isFactEligible(fact))
       : [];
@@ -2062,10 +2078,8 @@ if (hasSingleInstanceLock) {
       }
     }
     const resumeExperience = new HybridRetriever().search(normalizedQuestion, resumeChunks, { topK: 2, candidateK: 8 }).map((hit) => `Resume（相关经历）：${hit.text}`);
-    const experience = useProjectContext
-      ? trustedFactExperience.slice(0, 6)
-      : [...artifactExperience, ...resumeExperience].slice(0, 6);
-    const personalEvidence = useProjectContext ? trustedFactExperience.slice(0, 6) : [];
+    const experience = [...trustedPersonalProjectFacts, ...artifactExperience, ...resumeExperience].slice(0, 6);
+    const personalEvidence = [...trustedPersonalProjectFacts, ...artifactExperience, ...resumeExperience].slice(0, 6);
     const questionBankSkills = questionBankRepository?.listSkills() ?? [];
     const questionBankSkillIds = new Set(questionBankSkills.map((skill) => skill.id));
     const mentionedSkillIds = questionBankSkills
@@ -2124,6 +2138,9 @@ if (hasSingleInstanceLock) {
       skills: (profile?.skills ?? []).map((skill) => ({ id: skill.id, name: skill.name, content: `${skill.description}\n${skill.content}` })),
       experienceContext: experience,
       personalMemoryEvidence: personalEvidence,
+      projectEvidence: trustedFactExperience.slice(0, 8),
+      verifiedResumeEvidence: [...artifactExperience, ...resumeExperience].slice(0, 6),
+      verifiedPersonalProjectFacts: trustedPersonalProjectFacts.slice(0, 6),
       preparedAnswer: preparedCard && questionBankMatch ? { content: preparedCard.content, score: questionBankMatch.score, verified: preparedCard.verified, source: "question-bank" } : undefined,
       questionBankMatches: questionBankRoute?.hits ?? [],
       retrievedKnowledge: [

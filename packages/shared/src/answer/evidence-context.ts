@@ -1,6 +1,7 @@
 import type { InterviewMemorySnapshot } from "../interview-memory";
+import type { CandidateStatementEvidence } from "./session-evidence";
 
-export type EvidenceSource = "personal" | "project" | "retrieval" | "profile" | "job";
+export type EvidenceSource = "personal" | "project" | "retrieval" | "profile" | "job" | "candidate_statement";
 export type EvidenceTrust = "personal" | "project" | "reference";
 
 export interface EvidenceItem {
@@ -28,9 +29,13 @@ export interface EvidenceSnapshotInput {
   personalMemoryEvidence?: readonly string[];
   experienceContext?: readonly string[];
   projectEvidence?: readonly string[];
+  verifiedResumeEvidence?: readonly string[];
+  verifiedPersonalProjectFacts?: readonly string[];
   retrievedKnowledge?: readonly string[];
   recentTranscript?: readonly string[];
   interviewMemory?: InterviewMemorySnapshot;
+  sessionEvidence?: readonly CandidateStatementEvidence[];
+  candidateStatements?: readonly CandidateStatementEvidence[];
 }
 
 export interface EvidenceSnapshot {
@@ -49,9 +54,13 @@ export interface EvidenceSnapshot {
   personalMemoryEvidence: string[];
   experienceContext: string[];
   projectEvidence: string[];
+  verifiedResumeEvidence?: string[];
+  verifiedPersonalProjectFacts?: string[];
   retrievedKnowledge: string[];
   recentTranscript: string[];
   interviewMemory?: InterviewMemorySnapshot;
+  sessionEvidence?: CandidateStatementEvidence[];
+  candidateStatements?: CandidateStatementEvidence[];
   items: EvidenceItem[];
   fingerprint: string;
 }
@@ -88,8 +97,12 @@ function cloneSnapshot(snapshot: EvidenceSnapshot): EvidenceSnapshot {
     personalMemoryEvidence: [...snapshot.personalMemoryEvidence],
     experienceContext: [...snapshot.experienceContext],
     projectEvidence: [...snapshot.projectEvidence],
+    verifiedResumeEvidence: [...(snapshot.verifiedResumeEvidence ?? [])],
+    verifiedPersonalProjectFacts: [...(snapshot.verifiedPersonalProjectFacts ?? [])],
     retrievedKnowledge: [...snapshot.retrievedKnowledge],
     recentTranscript: [...snapshot.recentTranscript],
+    sessionEvidence: (snapshot.sessionEvidence ?? []).map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) })),
+    candidateStatements: (snapshot.candidateStatements ?? []).map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) })),
     items: snapshot.items.map((item) => ({ ...item })),
     ...(snapshot.interviewMemory ? { interviewMemory: cloneMemory(snapshot.interviewMemory) } : {})
   };
@@ -100,8 +113,16 @@ export function createEvidenceSnapshot(input: EvidenceSnapshotInput): EvidenceSn
   const personalMemoryEvidence = clean(input.personalMemoryEvidence, 12);
   const experienceContext = clean(input.experienceContext, 12);
   const projectEvidence = clean(input.projectEvidence ?? input.personalMemoryEvidence ?? input.experienceContext, 20);
+  const verifiedResumeEvidence = clean(input.verifiedResumeEvidence, 12);
+  const verifiedPersonalProjectFacts = clean(input.verifiedPersonalProjectFacts, 12);
   const retrievedKnowledge = clean(input.retrievedKnowledge, 20);
   const recentTranscript = clean(input.recentTranscript, 12);
+  const statementMap = new Map<string, CandidateStatementEvidence>();
+  [...(input.sessionEvidence ?? []), ...(input.candidateStatements ?? [])].forEach((item) => {
+    if (!statementMap.has(item.id)) statementMap.set(item.id, { ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) });
+  });
+  const sessionEvidence = [...statementMap.values()].slice(-24);
+  const candidateStatements = sessionEvidence.map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) }));
   const items: EvidenceItem[] = [];
   const add = (values: string[], source: EvidenceSource, trust: EvidenceTrust, verified: boolean): void => {
     values.forEach((text, index) => items.push({ id: `${source}-${index}`, text, source, trust, verified, ...(input.projectId ? { projectId: input.projectId } : {}) }));
@@ -110,10 +131,13 @@ export function createEvidenceSnapshot(input: EvidenceSnapshotInput): EvidenceSn
   if (input.jobDescriptionSummary?.trim()) add([input.jobDescriptionSummary], "job", "reference", true);
   add(personalMemoryEvidence, "personal", "personal", true);
   add(experienceContext, "personal", "personal", true);
+  add(verifiedResumeEvidence, "profile", "personal", true);
+  add(verifiedPersonalProjectFacts, "personal", "personal", true);
   add(projectEvidence, "project", "project", true);
   add(retrievedKnowledge, "retrieval", "reference", false);
+  sessionEvidence.forEach((item) => items.push({ ...item, sourceId: item.sessionId }));
   const capturedAt = input.capturedAt ?? Date.now();
-  const fingerprint = hash(JSON.stringify({ questionId: input.questionId, profileId: input.profileId, projectId: input.projectId, jobTargetId: input.jobTargetId, profileSummary: input.profileSummary, jobDescriptionSummary: input.jobDescriptionSummary, profileInstructions: input.profileInstructions, currentProject: input.currentProject, currentModule: input.currentModule, currentTopic: input.currentTopic, personalMemoryEvidence, experienceContext, projectEvidence, retrievedKnowledge, recentTranscript }));
+  const fingerprint = hash(JSON.stringify({ questionId: input.questionId, profileId: input.profileId, projectId: input.projectId, jobTargetId: input.jobTargetId, profileSummary: input.profileSummary, jobDescriptionSummary: input.jobDescriptionSummary, profileInstructions: input.profileInstructions, currentProject: input.currentProject, currentModule: input.currentModule, currentTopic: input.currentTopic, personalMemoryEvidence, experienceContext, verifiedResumeEvidence, verifiedPersonalProjectFacts, projectEvidence, retrievedKnowledge, recentTranscript, sessionEvidence }));
   return {
     id: `evidence-snapshot-${input.questionId}-${fingerprint}`,
     questionId: input.questionId,
@@ -130,8 +154,12 @@ export function createEvidenceSnapshot(input: EvidenceSnapshotInput): EvidenceSn
     personalMemoryEvidence,
     experienceContext,
     projectEvidence,
+    verifiedResumeEvidence,
+    verifiedPersonalProjectFacts,
     retrievedKnowledge,
     recentTranscript,
+    sessionEvidence,
+    candidateStatements,
     ...(input.interviewMemory ? { interviewMemory: cloneMemory(input.interviewMemory) } : {}),
     items,
     fingerprint

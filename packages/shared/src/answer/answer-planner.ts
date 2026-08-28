@@ -3,6 +3,7 @@ import type { AnswerMode } from "../answer";
 import { AnswerLengthController, type AnswerLengthPolicy } from "./answer-length-controller";
 import { answerStrategyFor, classifyAnswerQuestion, type AnswerEvidenceRequirement, type AnswerPlanQuestionType, type AnswerQuestionKind, type AnswerStrategy } from "./answer-strategy";
 import type { QuestionBankRouteHit } from "../question-bank-router";
+import { analyzeAnswerIntent, requiresPersonalClaimEvidence, type AnswerIntent } from "./answer-intent";
 
 export interface AnswerPlannerInput {
   question: string;
@@ -31,6 +32,7 @@ export interface AnswerPlan {
   useCurrentProject: boolean;
   complexity: "low" | "medium" | "high";
   strategy: AnswerStrategy;
+  intent: AnswerIntent;
   length: AnswerLengthPolicy;
   questionBankContext: QuestionBankRouteHit[];
   reason: string;
@@ -58,16 +60,27 @@ export class AnswerPlanner {
     const question = input.question.trim();
     const kind = input.questionType ?? classifyAnswerQuestion(question);
     const hasProjectEvidence = (input.projectEvidence?.length ?? 0) > 0;
-    const strategy = answerStrategyFor(kind, question, hasProjectEvidence);
+    const intent = analyzeAnswerIntent({ question, kind });
+    const baseStrategy = answerStrategyFor(kind, question, hasProjectEvidence);
+    const strategy = intent.asksProjectImplementation && !requiresPersonalClaimEvidence(intent)
+      ? {
+        ...baseStrategy,
+        mustUseFirstPerson: false,
+        requiredEvidence: ["technical_fact"] as const,
+        openingGuidance: "先直接回答实现方式，再说明关键原理和验证方法。",
+        spokenGuidance: "可以结合项目技术事实，但不要把项目实现说成候选人本人负责。"
+      }
+      : baseStrategy;
     const complexity = complexityFor(question, kind, input.followUpContext);
     const answerMode = input.interviewMode ?? "NORMAL";
     const length = this.lengthController.policy(answerMode, kind, complexity);
-    const useCurrentProject = strategy.useCurrentProject && Boolean(input.currentProject || input.followUpContext?.relatedProject || hasProjectEvidence);
+    const useCurrentProject = strategy.useCurrentProject && intent.allowsProjectEvidence && Boolean(input.currentProject || input.followUpContext?.relatedProject || hasProjectEvidence);
     const firstPerson = strategy.mustUseFirstPerson || (useCurrentProject && hasProjectEvidence);
     const reason = [
       `kind=${kind}`,
       `strategy=${strategy.id}`,
       `complexity=${complexity}`,
+      `personal-claim=${requiresPersonalClaimEvidence(intent) ? "required" : "not-required"}`,
       useCurrentProject ? "project-context=enabled" : "project-context=disabled",
       hasProjectEvidence ? "evidence=available" : "evidence=missing",
       input.questionBankContext?.length ? `question-bank=${input.questionBankContext.length}` : "question-bank=none"
@@ -85,6 +98,7 @@ export class AnswerPlanner {
       useCurrentProject,
       complexity,
       strategy,
+      intent,
       length,
       questionBankContext: (input.questionBankContext ?? []).slice(0, 5),
       reason

@@ -11,9 +11,13 @@ import type { FollowUpContext } from "./follow-up-context";
 import type { QuestionBankRouteHit } from "./question-bank-router";
 import { ClaimGate } from "./answer/claim-gate";
 import { createEvidenceSnapshot, type EvidenceSnapshot } from "./answer/evidence-context";
+import { analyzeAnswerIntent, requiresPersonalClaimEvidence } from "./answer/answer-intent";
+import type { CandidateStatementEvidence } from "./answer/session-evidence";
 
 export * from "./answer/claim-gate";
 export * from "./answer/evidence-context";
+export * from "./answer/answer-intent";
+export * from "./answer/session-evidence";
 
 export type AnswerMode = "FAST" | "NORMAL" | "DEEP";
 export { classifyAnswerQuestion } from "./answer/answer-strategy";
@@ -52,9 +56,13 @@ export interface AnswerContextInput {
   currentTopic?: string;
   currentModule?: string;
   projectEvidence?: string[];
+  verifiedResumeEvidence?: string[];
+  verifiedPersonalProjectFacts?: string[];
   recentTranscript?: string[];
   interviewMemory?: InterviewMemorySnapshot;
   followUpContext?: FollowUpContext;
+  sessionEvidence?: CandidateStatementEvidence[];
+  candidateStatements?: CandidateStatementEvidence[];
   /** Evidence captured for this question; when present it is authoritative. */
   evidenceSnapshot?: EvidenceSnapshot;
 }
@@ -75,10 +83,14 @@ export interface ContextPack {
   currentTopic?: string;
   currentModule?: string;
   projectEvidence: string[];
+  verifiedResumeEvidence: string[];
+  verifiedPersonalProjectFacts: string[];
   recentTranscript: string[];
   interviewMemory?: InterviewMemorySnapshot;
   followUpContext?: FollowUpContext;
   evidenceSnapshot?: EvidenceSnapshot;
+  sessionEvidence: CandidateStatementEvidence[];
+  candidateStatements: CandidateStatementEvidence[];
 }
 
 function answerTokenBudget(mode: AnswerMode, kind: AnswerQuestionKind): number {
@@ -95,6 +107,9 @@ function relevance(question: string, skill: AnswerSkillContext): number {
 export class ContextRouter {
   route(question: string, input: AnswerContextInput = {}): ContextPack {
     const snapshot = input.evidenceSnapshot;
+    const routedSessionEvidence = snapshot
+      ? (snapshot.sessionEvidence ?? snapshot.candidateStatements ?? [])
+      : [...(input.sessionEvidence ?? []), ...(input.candidateStatements ?? [])];
     const skills = (input.skills ?? [])
       .map((skill) => ({ ...skill, relevance: skill.relevance ?? relevance(question, skill) }))
       .filter((skill) => (skill.relevance ?? 0) > 0)
@@ -122,10 +137,14 @@ export class ContextRouter {
       currentTopic: snapshot?.currentTopic ?? input.currentTopic,
       currentModule: snapshot?.currentModule ?? input.currentModule,
       projectEvidence: (snapshot?.projectEvidence ?? input.projectEvidence ?? input.personalMemoryEvidence ?? input.experienceContext ?? []).slice(0, 8),
+      verifiedResumeEvidence: (snapshot?.verifiedResumeEvidence ?? input.verifiedResumeEvidence ?? []).slice(0, 5),
+      verifiedPersonalProjectFacts: (snapshot?.verifiedPersonalProjectFacts ?? input.verifiedPersonalProjectFacts ?? []).slice(0, 8),
       recentTranscript,
       interviewMemory: snapshot?.interviewMemory ?? input.interviewMemory,
       followUpContext: input.followUpContext,
-      evidenceSnapshot: snapshot
+      evidenceSnapshot: snapshot,
+      sessionEvidence: routedSessionEvidence.map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) })),
+      candidateStatements: routedSessionEvidence.map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) }))
     };
   }
 }
@@ -139,10 +158,11 @@ export class PromptBuilder {
   build(question: AnswerQuestion, mode: AnswerMode, context: ContextPack, plan?: AnswerPlan): PromptSection[] {
     const kind = plan?.kind ?? classifyAnswerQuestion(question.text, question.kind);
     const selectedStrategy = plan?.strategy ?? answerStrategyFor(kind, question.text, context.projectEvidence.length > 0);
-    const personalContextRequested = selectedStrategy.mustUseFirstPerson || selectedStrategy.useCurrentProject || ["project", "behavioral"].includes(kind)
-      || /项目|简历|经历|负责|做过|成果|业绩|实际|结合(?:你的|自己|个人).*(?:项目|经验)|你的经验|你在项目中/.test(question.text);
+    const intent = plan?.intent ?? analyzeAnswerIntent({ question: question.text, kind });
+    const personalClaimRequested = requiresPersonalClaimEvidence(intent) || intent.asksBehavioralEpisode;
+    const projectContextRequested = intent.asksProjectImplementation || intent.allowsProjectEvidence;
     const sections: PromptSection[] = [
-      { name: "system/base", content: `你是实时面试辅助。先判断题型，再按题型回答。回答必须真实、直接、便于候选人马上口述；第一句必须回应面试官当前问题，不能输出“面试策略”或“面试官一般喜欢”。不要输出“题库参考答案”“Resume”“岗位要求”“结构化项目事实”等资料标签，也不要评价面试官。嵌入式问题要使用标准专业术语，并根据上下文区分 Cortex-M、ARM32、ARM64、RTOS、Embedded Linux 等语境，不能把不同平台的概念混为一谈。只有问题明确要求个人经历时才使用项目经历，严禁虚构用户经历。上下文中的 [PROJECT_SOURCE] 只能辅助解释当前项目的实现细节，[GLOBAL_REFERENCE] 只能解释通用概念，二者都不能证明“我负责了什么”或项目指标；第一人称项目经历只能来自有证据的个人工程经验。${personalContextRequested ? "当前是个人经历问题：你现在要以候选人本人第一人称回答，优先使用个人工程经验；资料中没有的内容必须明确说没有证据。" : "当前不是个人经历问题：不要为了个性化而虚构候选人经历。"}` },
+      { name: "system/base", content: `你是实时面试辅助。先判断题型，再按题型回答。回答必须真实、直接、便于候选人马上口述；第一句必须回应面试官当前问题，不能输出“面试策略”或“面试官一般喜欢”。不要输出“题库参考答案”“Resume”“岗位要求”“结构化项目事实”等资料标签，也不要评价面试官。嵌入式问题要使用标准专业术语，并根据上下文区分 Cortex-M、ARM32、ARM64、RTOS、Embedded Linux 等语境，不能把不同平台的概念混为一谈。项目资料只能增强项目实现说明，不能决定通用技术题是否可回答；[PROJECT_SOURCE] 不能自动证明个人职责或指标，[GLOBAL_REFERENCE] 只能解释通用概念；第一人称个人事实只能来自已确认的个人或当前面试陈述。${personalClaimRequested ? "当前需要个人经历表达：可以使用可追溯的个人素材；没有确认的身份、职责、指标或结果必须弱化或明确说明。" : intent.asksProjectImplementation ? "当前问题关注项目实现：可以讲项目技术事实和通用工程方法，但不要把项目实现自动说成候选人本人负责。" : "当前不是个人经历问题：直接回答技术问题，不要为了个性化而虚构候选人经历。"}` },
       { name: "interview-style", content: `题型：${plan?.questionType ?? kind}。回答模式：${mode}。回答策略：${selectedStrategy.openingGuidance}${selectedStrategy.spokenGuidance}${new SpokenAnswerFormatter().instructions(mode, kind, plan)}` }
     ];
     const expressionInstruction = context.expressionLevel === "expert"
@@ -151,16 +171,17 @@ export class PromptBuilder {
         ? "使用常见技术词汇；遇到不常见术语，用一句短解释说明它是什么。"
         : "优先使用简单、口语化的中文。必须使用专业词时，紧接一句通俗解释，不连续堆叠缩写。";
     sections.push({ name: "interview-style", content: `表达难度：${context.expressionLevel}。${expressionInstruction}${context.explainAdvancedTerms ? " 首次出现较难术语时，用括号或短句解释。" : " 不额外展开术语定义。"}` });
-    const experienceRequested = personalContextRequested;
-    if (personalContextRequested && (context.profileSummary || context.jobDescriptionSummary || context.profileInstructions)) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary, context.profileInstructions ? `候选人回答偏好：${context.profileInstructions}` : ""].filter(Boolean).join("\n") });
+    const experienceRequested = personalClaimRequested;
+    if (personalClaimRequested && (context.profileSummary || context.jobDescriptionSummary || context.profileInstructions)) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary, context.profileInstructions ? `候选人回答偏好：${context.profileInstructions}` : ""].filter(Boolean).join("\n") });
     if (context.skills.length > 0) sections.push({ name: "skill-context", content: context.skills.map((skill) => `${skill.name}: ${skill.content}`).join("\n") });
-    if (personalContextRequested && context.personalMemoryEvidence.length > 0) sections.push({ name: "experience-context", content: `以下是优先级最高的个人工程经验。必须用第一人称，只使用其中有证据的内容；没有记录的内容明确说资料不足：\n${context.personalMemoryEvidence.join("\n---\n")}` });
+    if (personalClaimRequested && context.sessionEvidence.length > 0) sections.push({ name: "experience-context", content: `当前面试中候选人已经明确说过的事实（来源为 candidate_asserted，只能承接为候选人当前声称过的内容，不能擅自升级为已验证结果）：\n${context.sessionEvidence.map((item) => item.text).join("\n---\n")}` });
+    if (personalClaimRequested && context.personalMemoryEvidence.length > 0) sections.push({ name: "experience-context", content: `以下是优先级最高的个人工程经验。必须用第一人称，只使用其中有证据的内容；没有记录的内容明确说资料不足：\n${context.personalMemoryEvidence.join("\n---\n")}` });
     if (experienceRequested && context.experienceContext.length > 0) sections.push({ name: "experience-context", content: `以下是真实经历素材。只使用与问题直接相关的内容，不能补写未出现的事实：\n${context.experienceContext.join("\n---\n")}` });
-    if (personalContextRequested && context.projectEvidence.length > 0 && context.personalMemoryEvidence.length === 0 && context.experienceContext.length === 0) {
-      sections.push({ name: "experience-context", content: `以下是已确认的项目证据。只使用与问题直接相关的事实，不能补写未出现的职责、指标或结果：\n${context.projectEvidence.join("\n---\n")}` });
+    if (projectContextRequested && context.projectEvidence.length > 0) {
+      sections.push({ name: "experience-context", content: `以下是已确认的项目技术证据。它只能支持项目实现说明，不能自动证明候选人的个人职责、指标或结果：\n${context.projectEvidence.join("\n---\n")}` });
     }
-    if (personalContextRequested && context.evidenceSnapshot) {
-      sections.push({ name: "evidence-context", content: `证据快照已锁定：${context.evidenceSnapshot.id}（指纹 ${context.evidenceSnapshot.fingerprint}）。只能使用快照中的个人工程经验；PROJECT_SOURCE 只能解释实现，不能证明个人职责或指标。` });
+    if ((personalClaimRequested || projectContextRequested) && context.evidenceSnapshot) {
+      sections.push({ name: "evidence-context", content: `证据快照已锁定：${context.evidenceSnapshot.id}（指纹 ${context.evidenceSnapshot.fingerprint}）。候选人当前面试陈述可证明“候选人声称过”，PROJECT_SOURCE 只能解释实现，不能自动证明个人职责或指标。` });
     }
     if (context.retrievedKnowledge.length > 0) sections.push({ name: "retrieval-context", content: `资料分层规则：PROJECT_SOURCE 仅辅助实现说明；GLOBAL_REFERENCE 仅解释通用知识，不能形成项目事实或个人经历。\n${context.retrievedKnowledge.join("\n---\n")}` });
     if (context.questionBankMatches.length > 0) sections.push({ name: "question-bank-context", content: `以下是题库路由结果，仅用于选择已整理素材和判断题型；不要把题库内容当成个人经历证据：\n${context.questionBankMatches.map((hit) => `${hit.question.bankType}/${hit.question.category}（语义 ${Math.round(hit.semanticScore * 100)}%，优先级 ${hit.priority}%）：${hit.question.canonicalText}${hit.reasons.length ? ` [${hit.reasons.join(", ")}]` : ""}`).join("\n")}` });
@@ -283,17 +304,6 @@ export interface AnswerGenerationOptions {
   strictPersonalGrounding?: boolean;
 }
 
-const STRICT_GROUNDING_ISSUES = new Set([
-  "QUALITY_UNGROUNDED_CLAIM",
-  "missing-personal-evidence",
-  "unsupported-technical-claim",
-  "claim-evidence-unsupported",
-  "claim-evidence-conflicting",
-  "possibly-invented-experience"
-]);
-
-const STRICT_GROUNDING_FALLBACK = "这部分在当前已确认的项目资料中没有足够证据，我不能把推测说成实际经历。如果只回答通用方法，我会先复现现象并记录数据，再按信号、时序和任务链路逐层定位，修复后用同一工况回归验证。";
-
 export class AnswerAgent {
   constructor(
     private readonly providers: Partial<Record<ModelRoute, AnswerProvider>>,
@@ -322,9 +332,13 @@ export class AnswerAgent {
       personalMemoryEvidence: routedContext.personalMemoryEvidence,
       experienceContext: routedContext.experienceContext,
       projectEvidence: routedContext.projectEvidence,
+      verifiedResumeEvidence: routedContext.verifiedResumeEvidence,
+      verifiedPersonalProjectFacts: routedContext.verifiedPersonalProjectFacts,
       retrievedKnowledge: routedContext.retrievedKnowledge,
       recentTranscript: routedContext.recentTranscript,
-      interviewMemory: routedContext.interviewMemory
+      interviewMemory: routedContext.interviewMemory,
+      sessionEvidence: routedContext.sessionEvidence,
+      candidateStatements: routedContext.candidateStatements
     });
     const context = { ...routedContext, evidenceSnapshot };
     const kind = classifyAnswerQuestion(routedQuestion.text, routedQuestion.kind);
@@ -342,6 +356,7 @@ export class AnswerAgent {
       questionBankContext: context.questionBankMatches,
       interviewMode: mode
     });
+    const intent = plan.intent;
     let selection = this.modelRouter.select(routedQuestion.text, mode, options.hasScreenshot ?? false, options.modelOverride);
     if (options.preferFastRoute && kind !== "code" && !(options.hasScreenshot ?? false)) {
       const fastSelection = this.modelRouter.select(routedQuestion.text, "FAST", false, options.modelOverride);
@@ -376,11 +391,11 @@ export class AnswerAgent {
     }
     const completedText = options.directDisplay && provider.complete ? sanitizeStreamingAnswer(text) : sanitizer.finalize();
     let formattedText = options.formatAnswer === false ? completedText.trim() : this.formatter.format(completedText, mode, kind, plan);
-    const personalContextRequested = ["project", "behavioral"].includes(kind)
-      || /项目|简历|经历|负责|做过|成果|业绩|实际|结合(?:你的|自己|个人).*(?:项目|经验)|你的经验|你在项目中/.test(routedQuestion.text);
+    const personalClaimRequested = requiresPersonalClaimEvidence(intent) || intent.asksBehavioralEpisode;
+    const projectContextRequested = intent.asksProjectImplementation || intent.allowsProjectEvidence;
     const explicitlyProvidedExperience = context.personalMemoryEvidence.length > 0 || context.experienceContext.length > 0 || context.projectEvidence.length > 0;
     const groundingText = [
-      ...(personalContextRequested || explicitlyProvidedExperience ? [context.profileSummary, context.jobDescriptionSummary, ...context.personalMemoryEvidence, ...context.experienceContext, ...context.projectEvidence] : []),
+      ...(personalClaimRequested || projectContextRequested || explicitlyProvidedExperience ? [context.profileSummary, context.jobDescriptionSummary, ...context.sessionEvidence.map((item) => item.text), ...context.personalMemoryEvidence, ...context.experienceContext, ...context.verifiedResumeEvidence, ...context.verifiedPersonalProjectFacts, ...context.projectEvidence] : []),
       ...context.skills.map((skill) => skill.content),
       ...context.retrievedKnowledge
     ].filter(Boolean).join("\n");
@@ -396,12 +411,19 @@ export class AnswerAgent {
         suggestions: [...new Set([...result.suggestions, ...spoken.suggestions])],
         needsRepair: result.needsRepair || spoken.needsRepair
       };
-      if (personalContextRequested && (context.personalMemoryEvidence.length > 0 || kind === "project" || kind === "behavioral")) {
+      const personalEvidence = [
+        ...context.sessionEvidence.map((item) => item.text),
+        ...context.personalMemoryEvidence,
+        ...context.experienceContext,
+        ...context.verifiedResumeEvidence,
+        ...context.verifiedPersonalProjectFacts
+      ];
+      if (personalClaimRequested && personalEvidence.length > 0) {
         const validation = personalAnswerValidator.validate({
           question: routedQuestion.text,
           answer,
           analysis: personalQuestionAnalysis,
-          evidence: context.personalMemoryEvidence.length > 0 ? context.personalMemoryEvidence : context.experienceContext.length > 0 ? context.experienceContext : context.projectEvidence
+          evidence: personalEvidence
         });
         result = {
           ...result,
@@ -432,7 +454,7 @@ export class AnswerAgent {
         `检测到的质量问题：${quality.issues.length > 0 ? quality.issues.join("、") : "未命名问题"}`,
         `修改建议：${quality.suggestions.length > 0 ? quality.suggestions.join("；") : "直接回答问题并保持信息完整"}`,
         `可使用的 grounding evidence（只能使用这些事实）：\n${groundingText || "无；不得新增任何个人经历、数字、芯片型号、职责或结果"}`,
-        kind === "project" || kind === "behavioral"
+        personalClaimRequested
           ? "个人经历必须使用候选人第一人称；证据中没有的内容明确说资料不足，不能补写。"
           : "不要强行添加项目经历；保留技术结论、完整代码和必要解释。",
         "修正后重新检查：第一句回应原始问题，删除无证据的个人断言，不要输出修正过程或资料标签。"
@@ -457,27 +479,18 @@ export class AnswerAgent {
         quality = repairedQuality;
       }
     }
-    if (options.strictPersonalGrounding && personalContextRequested && quality.issues.some((issue) => STRICT_GROUNDING_ISSUES.has(issue))) {
-      formattedText = STRICT_GROUNDING_FALLBACK;
-      quality = {
-        score: 0.75,
-        issues: ["strict-grounding-fallback"],
-        suggestions: ["补充并确认项目事实后，可生成更具体的第一人称回答"],
-        needsRepair: false
-      };
-    }
     const claimGate = new ClaimGate().check({
       question: routedQuestion.text,
       answer: formattedText,
       evidenceSnapshot,
-      requiresPersonalEvidence: options.strictPersonalGrounding === true && personalContextRequested
+      intent
     });
-    if (!claimGate.allowed) {
-      formattedText = claimGate.fallbackAnswer ?? STRICT_GROUNDING_FALLBACK;
+    if (claimGate.decision !== "allow") {
+      formattedText = claimGate.rewrittenAnswer ?? claimGate.fallbackAnswer ?? formattedText;
       quality = {
         ...quality,
         score: Math.min(quality.score, claimGate.score),
-        issues: [...new Set([...quality.issues, ...claimGate.issues, "claim-gate-blocked"])],
+        issues: [...new Set([...quality.issues, ...claimGate.issues, `claim-gate-${claimGate.decision}`])],
         suggestions: [...new Set([...quality.suggestions, ...claimGate.suggestions])],
         needsRepair: false
       };

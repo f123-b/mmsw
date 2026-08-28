@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import type { ClientControlMessage, RealtimeServerMessage, TranscriptSegment } from "@interview-copilot/protocol";
 import {
   AnswerAgent,
+  analyzeAnswerIntent,
   classifyAnswerQuestion,
   FollowUpContextResolver,
   InterviewBrain,
@@ -16,6 +17,8 @@ import {
   QuestionGroupManager,
   TurnBuilder,
   ContextLock,
+  SessionEvidenceStore,
+  requiresPersonalClaimEvidence,
   SpeechActClassifier,
   shouldHardRejectSpeechAct,
   QuestionTrace,
@@ -38,6 +41,7 @@ import {
   type TranscriptUtterance,
   type InterviewTurn,
   type EvidenceSnapshot,
+  type CandidateStatementEvidence,
   type VisionInput
 } from "@interview-copilot/shared";
 import type { AudioStartOptions } from "./audio-manager";
@@ -180,6 +184,7 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly questionGroups = new QuestionGroupManager(this.turnBuilder);
   private readonly answerScheduler = new AnswerScheduler();
   private readonly contextLock = new ContextLock();
+  private readonly sessionEvidence = new SessionEvidenceStore();
   private readonly turns = new Map<string, InterviewTurn>();
   private readonly contextProvider: (question: QuestionCandidate, profileId: string, recentTranscript: string[], context?: InterviewContextSelection) => AnswerContextInput | Promise<AnswerContextInput>;
   private defaultAutomationMode: "MANUAL" | "AUTO";
@@ -211,6 +216,7 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly answerContextSnapshots = new Map<string, {
     recentTranscript: string[];
     memory: ReturnType<InterviewMemory["snapshot"]>;
+    sessionEvidence: CandidateStatementEvidence[];
     trace?: QuestionTrace;
   }>();
   private activeAnswerQuestion: QuestionCandidate | undefined;
@@ -455,6 +461,7 @@ export class InterviewCoordinator extends EventEmitter {
       this.questionGroups.reset();
       this.answerScheduler.reset();
       this.contextLock.clear();
+      this.sessionEvidence.reset();
       this.turns.clear();
       this.anchorStore.reset();
       this.memory.reset();
@@ -572,6 +579,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.questionGroups.reset();
     this.answerScheduler.reset();
     this.contextLock.clear();
+    this.sessionEvidence.reset();
     this.turns.clear();
     this.anchorStore.reset();
     this.memory.reset();
@@ -652,6 +660,7 @@ export class InterviewCoordinator extends EventEmitter {
     const frozenContext = this.answerContextSnapshots.get(question.id) ?? {
       recentTranscript: [...this.recentTranscript],
       memory: this.memory.snapshot(),
+      sessionEvidence: this.sessionEvidence.snapshot(),
       ...(this.currentQuestion?.id === question.id && this.currentQuestionTrace ? { trace: this.currentQuestionTrace } : {})
     };
     this.answerContextSnapshots.set(question.id, frozenContext);
@@ -742,9 +751,13 @@ export class InterviewCoordinator extends EventEmitter {
         personalMemoryEvidence: providerContext.personalMemoryEvidence,
         experienceContext: providerContext.experienceContext,
         projectEvidence: providerContext.projectEvidence,
+        verifiedResumeEvidence: providerContext.verifiedResumeEvidence,
+        verifiedPersonalProjectFacts: providerContext.verifiedPersonalProjectFacts,
         retrievedKnowledge: providerContext.retrievedKnowledge,
         recentTranscript: frozenContext.recentTranscript,
-        interviewMemory: memorySnapshot
+        interviewMemory: memorySnapshot,
+        sessionEvidence: frozenContext.sessionEvidence,
+        candidateStatements: frozenContext.sessionEvidence
       });
       const lockedProviderContext: AnswerContextInput = {
         ...providerContext,
@@ -759,6 +772,8 @@ export class InterviewCoordinator extends EventEmitter {
         retrievedKnowledge: evidenceSnapshot.retrievedKnowledge,
         recentTranscript: evidenceSnapshot.recentTranscript,
         interviewMemory: evidenceSnapshot.interviewMemory,
+        sessionEvidence: evidenceSnapshot.sessionEvidence,
+        candidateStatements: evidenceSnapshot.candidateStatements,
         evidenceSnapshot
       };
       if (answerOperation) answerOperation.state = "provider_pending";
@@ -779,10 +794,13 @@ export class InterviewCoordinator extends EventEmitter {
         : undefined;
       const preparedAnswer = lockedProviderContext.preparedAnswer;
       const answerKind = classifyAnswerQuestion(question.text, question.detectionType);
+      const answerIntent = analyzeAnswerIntent({ question: question.text, kind: answerKind });
       const personalThreadText = `${followUpContext?.rootQuestion ?? ""}\n${followUpContext?.parentQuestion ?? ""}`;
       const isProjectQuestion = ["project", "behavioral"].includes(answerKind) || /项目|简历|经历|负责|做过|成果|业绩|你做的|你的实现|你的方案|在这个结构下/.test(question.text);
-      const requiresPersonalGrounding = isProjectQuestion || (isFollowUp && (/项目|简历|经历|负责|做过|成果|业绩/.test(personalThreadText) || (lockedProviderContext.personalMemoryEvidence?.length ?? 0) > 0));
-      if (preparedAnswer && preparedAnswer.verified && preparedAnswer.score >= 0.88 && !streamOptions.hasScreenshot && !isProjectQuestion) {
+      const requiresPersonalGrounding = requiresPersonalClaimEvidence(answerIntent)
+        || answerIntent.asksBehavioralEpisode
+        || (isFollowUp && (/项目|简历|经历|负责|做过|成果|业绩/.test(personalThreadText) || (lockedProviderContext.sessionEvidence?.length ?? 0) > 0));
+      if (preparedAnswer && preparedAnswer.verified && preparedAnswer.score >= 0.88 && !streamOptions.hasScreenshot && !isProjectQuestion && !answerIntent.requiresPersonalIdentity && !requiresPersonalGrounding) {
         this.emitDiagnostic("QUESTION_BANK_DIRECT_HIT");
         const answerId = `question-bank-answer-${question.id}-${startedAt}`;
         const finishedAt = this.now();
@@ -1021,6 +1039,15 @@ export class InterviewCoordinator extends EventEmitter {
         this.history.addTranscript({ interviewId: this.activeInterviewId, source: segment.source, text: segment.text, startMs: segment.startMs, endMs: segment.endMs, final: true, confidence: segment.confidence });
         this.recentTranscript.push(`${segment.source === "remote" ? "面试官" : "我"}：${segment.text}`);
         while (this.recentTranscript.length > 12) this.recentTranscript.shift();
+        if (segment.source === "mic") {
+          this.sessionEvidence.recordCandidateStatement({
+            sessionId: this.activeInterviewId,
+            questionId: this.activeAnswerQuestion?.id ?? this.currentQuestion?.id,
+            text: segment.text,
+            createdAt: receivedAt,
+            confidence: segment.confidence
+          });
+        }
       }
       // A candidate answer marks a hard turn boundary for the remote
       // aggregator. Flush and analyze the remote turn before starting the

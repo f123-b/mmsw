@@ -41,4 +41,27 @@ describe("EvidenceSnapshot and ContextLock", () => {
     expect(lock.has("q1")).toBe(false);
     expect(lock.has("q3")).toBe(true);
   });
+
+  it("keeps verified personal sources and candidate statements in the locked snapshot", () => {
+    const snapshot = createEvidenceSnapshot({
+      questionId: "q-personal",
+      verifiedResumeEvidence: ["简历：负责语音识别模块"],
+      verifiedPersonalProjectFacts: ["我负责模型部署"],
+      sessionEvidence: [{
+        id: "candidate-1",
+        text: "我的准确率是98%",
+        source: "candidate_statement",
+        trust: "personal",
+        verified: true,
+        sessionId: "s1",
+        extractedClaims: [{ claim: "我的准确率是98%", provenance: "personal_metric", risk: "high" }],
+        createdAt: 1,
+        confidence: 0.9,
+        verification: "candidate_asserted"
+      }]
+    });
+    expect(snapshot.verifiedResumeEvidence).toEqual(["简历：负责语音识别模块"]);
+    expect(snapshot.verifiedPersonalProjectFacts).toEqual(["我负责模型部署"]);
+    expect(snapshot.items.find((item) => item.source === "candidate_statement")).toMatchObject({ trust: "personal", verified: true, sourceId: "s1" });
+  });
 });

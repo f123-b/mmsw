@@ -50,9 +50,9 @@ describe("InterviewCoordinator software E2E", () => {
     for (let index = 0; index < 12; index += 1) await Promise.resolve();
     expect(messages).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "answer_start" }),
-      expect.objectContaining({ type: "answer_end", text: expect.stringContaining("没有足够证据") })
+      expect.objectContaining({ type: "answer_end", text: expect.stringContaining("核心回答") })
     ]));
-    expect(messages.some((message) => (message as { type?: string }).type === "answer_delta")).toBe(false);
+    expect(messages.some((message) => (message as { type?: string }).type === "answer_delta")).toBe(true);
     await coordinator.stop();
     expect(coordinator.running).toBe(false);
     expect(interviewId).toMatch(/^interview-/);
@@ -101,6 +101,30 @@ describe("InterviewCoordinator software E2E", () => {
     expect(traces.at(-1)).toEqual(expect.objectContaining({ answerSource: "question-bank" }));
     expect(traces.at(-1)?.llmRequestAt).toBeUndefined();
     expect(traces.at(-1)?.firstTokenAt).toBeUndefined();
+    await coordinator.stop();
+  });
+
+  it("carries candidate statements into the next personal follow-up", async () => {
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    let prompt = "";
+    const provider: AnswerProvider = { stream: async function* (request) {
+      prompt = request.sections.map((section) => section.content).join("\n");
+      yield "可以沿着采样数据、标注口径和验证集继续说明。";
+    } };
+    const coordinator = new InterviewCoordinator({
+      audio,
+      realtime,
+      session: new SessionStateMachine(),
+      answerAgent: new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" })),
+      contextProvider: () => ({}),
+      now: () => 1_000
+    });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
+    realtime.emit("transcript", {}, { id: "candidate-1", source: "mic", text: "我的语音识别准确率大约98%。", startMs: 0, endMs: 800, final: true, confidence: 0.95 });
+    await coordinator.answerQuestionText("这个98%是怎么做到的？");
+    expect(prompt).toContain("我的语音识别准确率大约98%");
+    expect(prompt).toContain("candidate_asserted");
     await coordinator.stop();
   });
 

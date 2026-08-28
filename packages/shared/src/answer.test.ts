@@ -177,7 +177,7 @@ describe("Answer routing and generation", () => {
     expect(events.at(-1)).toMatchObject({ type: "answer_end", text: "首先，直接返回这一版。" });
   });
 
-  it("blocks unsupported project details even when a repair still invents facts", async () => {
+  it("rewrites unsupported project details even when a repair still invents facts", async () => {
     let calls = 0;
     const unsafeProvider: AnswerProvider = {
       stream: async function* () { calls += 1; yield "我主导了STM32项目，把延迟降低了50%。"; },
@@ -195,10 +195,23 @@ describe("Answer routing and generation", () => {
     expect(events.map((event) => event.type)).toEqual(["answer_start", "answer_end"]);
     expect(events.at(-1)).toMatchObject({
       type: "answer_end",
-      text: expect.stringContaining("没有足够证据"),
-      quality: { issues: ["strict-grounding-fallback"], needsRepair: false }
+      text: expect.not.stringContaining("没有足够证据"),
+      quality: { needsRepair: false }
     });
-    expect((events.at(-1) as { text: string }).text).not.toContain("STM32");
+    expect((events.at(-1) as { text: string }).text).not.toContain("50%");
+    expect((events.at(-1) as { quality: { issues: string[] } }).quality.issues).toContain("claim-gate-rewrite");
+  });
+
+  it("answers project implementation questions with generic knowledge when project evidence is empty", async () => {
+    const technicalProvider: AnswerProvider = { stream: async function* () { yield "可以让高级定时器在中心对齐 PWM 的中点触发 ADC，再用 DMA 搬运采样数据，减少中断抖动。"; } };
+    let final = "";
+    for await (const event of new AnswerAgent({ normal: technicalProvider }, new ModelRouter({ normal: "test-model" })).stream(
+      { id: "q-generic-project", text: "FOC 项目中的 ADC 如何保证实时性？" },
+      "NORMAL",
+      {}
+    )) if (event.type === "answer_end") final = event.text;
+    expect(final).toContain("ADC");
+    expect(final).not.toContain("当前资料");
   });
 
   it("sanitizes safe presentation noise without rewriting technical content", () => {

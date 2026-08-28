@@ -45,7 +45,7 @@ export function classifyAnswerQuestion(text: string, hint?: string): AnswerQuest
   if (/区别|对比|比较|优缺点|取舍|权衡|为什么不用|选型|差异/.test(normalized)) return "comparison";
   if (/低速抖动|IIC.*卡死|HardFault|DMA.*异常|CAN.*丢帧|丢帧|数据异常/.test(normalized)) return "embedded-debugging";
   if (/排查|定位|故障|报错|异常|线上问题|怎么解决|如何解决|怎么验证|监控|告警/.test(normalized)) return "troubleshooting";
-  if (/团队|冲突|压力|困难|失败|沟通|协作|领导|决策|优势|缺点|成长/.test(normalized) && /你|我|经历|遇到|如何/.test(normalized)) return "behavioral";
+  if (/团队|冲突|压力|困难|失败|沟通|协作|领导|决策|优势|缺点|成长|资源有限|高目标|高压力|自主学习|案例/.test(normalized) && /你|我|经历|遇到|如何|分享/.test(normalized)) return "behavioral";
   if (/项目|负责|主导|经历|做过|落地|交付|简历|成果|业绩|为什么.*设计|怎么.*实现|遇到什么问题|怎么解决|具体实现/.test(normalized)) return "project";
   if (/上一题|刚才|继续|具体一点|展开|那如果|然后|还有/.test(normalized) && normalized.length < 34) return "follow-up";
   if (/具体一点|什么意思|没听清|再说一遍|能展开|详细一点|指的是|怎么理解/.test(normalized)) return "clarification";
