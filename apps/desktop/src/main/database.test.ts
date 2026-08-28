@@ -304,6 +304,54 @@ describe("SQLite persistence", () => {
     } finally { database.close(); }
   });
 
+  it("imports trusted project QA into the existing question-bank schema and stales it on material changes", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const profile = profiles.save({ name: "项目 QA", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const project = new SqliteProjectMemoryRepository(database).createProject(profile.id, "FOC");
+      const questionBank = new SqliteQuestionBankRepository(database);
+      const report = questionBank.importProjectText(profile.id, project.id, "问题：ADC 怎么保证实时性？\n答案：PWM 中点触发 ADC，并通过 DMA 搬运。", "foc-questions.md");
+
+      expect(report).toMatchObject({ projectId: project.id, sourceRole: "question_bank", verified: true, recognizedQuestions: 1, importedAnswers: 1 });
+      expect(questionBank.listQuestions({ scope: "project", projectId: project.id, exactProject: true, status: "all" })).toHaveLength(1);
+      expect(questionBank.listQuestions({ scope: "project", projectId: "another-project", exactProject: true, status: "all" })).toHaveLength(0);
+      expect(questionBank.listQuestions({ status: "all" })).toHaveLength(1);
+      const saved = questionBank.listQuestions({ scope: "project", projectId: project.id, exactProject: true, status: "all" })[0];
+      expect(saved).toMatchObject({ scope: "project", projectId: project.id, bankType: "project", source: "imported", verified: true, stale: false });
+      expect(saved?.answerCards[0]).toMatchObject({ sourceType: "imported", verified: true, stale: false });
+
+      expect(questionBank.markProjectQuestionBankStale(project.id, 100)).toBe(1);
+      expect(questionBank.getQuestion(saved?.id ?? "")).toMatchObject({ stale: true });
+      expect(questionBank.getQuestion(saved?.id ?? "")?.answerCards[0]).toMatchObject({ stale: true });
+    } finally { database.close(); }
+  });
+
+  it("uses the unified question bank for project snapshots without legacy question writes", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const profile = profiles.save({ name: "统一题库", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const memory = new SqliteProjectMemoryRepository(database);
+      const project = memory.createProject(profile.id, "统一项目");
+      const projectSnapshot = memory.getSnapshot(profile.id).projects[0];
+      expect(projectSnapshot).toBeDefined();
+      memory.replaceSnapshot(profile.id, {
+        projects: [projectSnapshot!],
+        modules: [],
+        technicalPoints: [],
+        problems: [],
+        interviewQuestions: [{ id: "unified-project-question", projectId: project.id, question: "项目如何验证采样时序？", answerPoints: ["用示波器核对触发点"], keywords: ["采样时序"], sourceIds: [], factIds: ["unified-fact"] }],
+        facts: [{ id: "unified-fact", projectId: project.id, profileId: profile.id, type: "technology", title: "采样时序", content: "用示波器核对触发点", confidence: 1, verified: false, sourceIds: [] }]
+      }, 10, project.id);
+
+      const loaded = memory.getSnapshot(profile.id);
+      expect(loaded.interviewQuestions).toMatchObject([{ id: "unified-project-question", question: "项目如何验证采样时序？" }]);
+      expect(new SqliteQuestionBankRepository(database).getQuestion("unified-project-question")).toMatchObject({ scope: "project", projectId: project.id, source: "generated" });
+      expect(database.first<{ count: number }>("SELECT COUNT(*) AS count FROM interview_questions")?.count).toBe(0);
+    } finally { database.close(); }
+  });
+
   it("repairs legacy trust defaults when migration 21 is applied", async () => {
     const directory = await mkdtemp(join(tmpdir(), "interview-copilot-migration-"));
     const filePath = join(directory, "legacy.sqlite");

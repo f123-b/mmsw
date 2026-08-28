@@ -63,4 +63,39 @@ describe("QuestionBankRouter", () => {
 
     expect(result.top?.reasons).toContain("follow-up-relation");
   });
+
+  it("routes exact and variant project QA before any global record", () => {
+    const projectQuestion = question({
+      id: "foc-qa",
+      canonicalText: "ADC 怎么保证实时性？",
+      bankType: "project",
+      scope: "project",
+      projectId: "foc",
+      verified: true,
+      variants: ["PWM 和 ADC 怎么同步？"],
+      answerCards: [{ id: "foc-card", questionId: "foc-qa", mode: "standard", content: "PWM 中点触发 ADC，并通过 DMA 搬运。", keyPoints: [], sourceType: "imported", verified: true, stale: false, version: 1, createdAt: 1, updatedAt: 1 }]
+    });
+    const globalQuestion = question({ id: "global-qa", canonicalText: "ADC 怎么保证实时性？", verified: true });
+    const result = new QuestionBankRouter().routeProjectQaFirst("你这里 PWM 跟 ADC 到底是怎么同步的？", [globalQuestion, projectQuestion], { projectId: "foc" });
+
+    expect(result.stage).toBe("project");
+    expect(result.matchLevel).toBe("strong");
+    expect(result.top?.question.id).toBe("foc-qa");
+    expect(result.top?.exact).toBe(false);
+  });
+
+  it("keeps a related project QA as partial instead of treating it as direct", () => {
+    const result = new QuestionBankRouter().routeProjectFirst("采样时序怎么验证？", [question({
+      id: "adc",
+      canonicalText: "ADC 怎么采样？",
+      scope: "project",
+      bankType: "project",
+      projectId: "foc",
+      verified: true,
+      answerCards: [{ id: "adc-card", questionId: "adc", mode: "standard", content: "PWM 中点触发 ADC，DMA 搬运。", keyPoints: [], sourceType: "imported", verified: true, stale: false, version: 1, createdAt: 1, updatedAt: 1 }]
+    })], "foc");
+
+    expect(result.level).toBe("partial");
+    expect(result.top?.matchLevel).toBe("partial");
+  });
 });

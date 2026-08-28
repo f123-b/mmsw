@@ -187,6 +187,7 @@ export class ProjectMemoryService {
     if (document.documentType === "resume") return { status: "needs_assignment", confidence: 0, message: "RESUME_MUST_BE_SPLIT：整份 Resume 不能直接绑定为项目资料" };
     if (document.documentType !== "project" && document.documentType !== "technical-doc") return { status: "needs_assignment", confidence: 0, message: "PROJECT_SOURCE_TYPE_UNSUPPORTED：只有项目资料或明确绑定的技术文档可进入项目分析" };
     const resolvedSourceRole = sourceRole ?? inferProjectSourceRole(document.filename, document.text);
+    if (resolvedSourceRole === "question_bank") throw new Error("PROJECT_QA_USE_DEDICATED_IMPORT: 请使用“上传项目题库”入口");
     const isRepository = Boolean(document.repositoryFiles?.length || document.mimeType === "application/zip" || /\.zip$/i.test(document.filename));
     const source: ProjectMemorySource = { id: document.id, kind: isRepository ? "repository" : "project-document", sourceType: isRepository ? "repository" : "document", sourceRole: resolvedSourceRole, title: document.filename, text: document.text, ...(isRepository ? { repositoryFiles: document.repositoryFiles, repositoryManifest: document.repositoryManifest, repositorySkippedFiles: document.repositorySkippedFiles } : {}), updatedAt: document.updatedAt };
     const projects = this.memories.listProjects(profileId);
@@ -227,6 +228,10 @@ export class ProjectMemoryService {
         continue;
       }
       const requestedRole = file.sourceRole && file.sourceRole !== "auto" ? file.sourceRole : undefined;
+      if (requestedRole === "question_bank") {
+        imported.push({ filename: file.filename, sourceRole: "question_bank", status: "failed", assignmentStatus: "failed", error: "PROJECT_QA_USE_DEDICATED_IMPORT: 请使用“上传项目题库”入口" });
+        continue;
+      }
       const isRepositoryArchive = /^application\/(?:x-)?zip$/i.test(file.mimeType || "") || /\.zip$/i.test(file.filename) || isZipBytes(bytes);
       const sha256 = createHash("sha256").update(bytes).digest("hex");
       const duplicate = isRepositoryArchive ? this.knowledge.findDocumentBySha256(sha256, input.knowledgeBaseId) : undefined;
@@ -260,6 +265,10 @@ export class ProjectMemoryService {
       }
 
       const sourceRole = requestedRole ?? inferProjectSourceRole(parsed.filename, parsed.text);
+      if (sourceRole === "question_bank") {
+        imported.push({ filename: file.filename, sourceRole, status: "failed", assignmentStatus: "failed", error: "PROJECT_QA_USE_DEDICATED_IMPORT: 请使用“上传项目题库”入口" });
+        continue;
+      }
       if (parsed.repositoryManifest) {
         repositoryReport = { ...parsed.repositoryManifest, documentId: parsed.documentId };
         this.onTrace?.("PROJECT_REPOSITORY_INDEXED", { documentId: parsed.documentId, fileCount: parsed.repositoryManifest.eligibleFileCount, skippedFileCount: parsed.repositoryManifest.skippedFileCount, totalSourceBytes: parsed.repositoryManifest.totalSourceBytes });

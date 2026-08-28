@@ -158,8 +158,8 @@ export function inferQuestionBankBankType(input: { scope?: QuestionBankScope; ty
   return "custom";
 }
 
-const QUESTION_LINE_PREFIX = /^\s*(?:(?:q\s*\d*|question|问题|题目)\s*[:：]|(?:\d+\s*[\.、）)]|[（(]\s*\d+\s*[）)]|[一二三四五六七八九十百]+\s*[、.）)]|[-•]\s+))\s*/i;
-const ANSWER_LINE_PREFIX = /^\s*(?:a\s*\d*|answer|答案|参考答案)\s*[:：]\s*/i;
+const QUESTION_LINE_PREFIX = /^\s*(?:(?:q\s*\d*|question|问题|题目|问)\s*(?:[:：]|[-—])|(?:\d+\s*[\.、）)]|[（(]\s*\d+\s*[）)]|[一二三四五六七八九十百]+\s*[、.）)]|[-•]\s+))\s*/i;
+const ANSWER_LINE_PREFIX = /^\s*(?:a\s*\d*|answer|答案|参考答案|回答|答)\s*(?:[:：]|[-—])\s*/i;
 const QUESTION_HINTS = /[?？]|什么|如何|怎么|怎样|为什么|为何|是否|能否|哪个|哪些|区别|优缺点|介绍|说说|讲讲|解释|说明|原理|流程|作用|用途|机制|场景|实现|配置|排查|定位|解决|用过|了解|吗|呢|多少|包含|手撕|写一个|判断|反转|复杂度/i;
 
 function isLikelyQuestion(text: string): boolean {
@@ -236,7 +236,15 @@ export function parseQuestionBankText(text: string): ParsedQuestionBankEntry[] {
     if (collectingAnswer && current) {
       current.answerLines.push(line);
     } else if (current && !isSectionHeading(line) && !QUESTION_LINE_PREFIX.test(line)) {
-      current.question = `${current.question} ${line}`;
+      // Numbered banks commonly omit the “A:” label and put the answer on
+      // the next line. Keep the parser useful for that format without
+      // changing the handling of multi-line question labels.
+      if (current.answerLines.length === 0 && current.question.length >= 8) {
+        collectingAnswer = true;
+        current.answerLines.push(line);
+      } else {
+        current.question = `${current.question} ${line}`;
+      }
     } else if (!current && isLikelyQuestion(line)) {
       current = { question: line, answerLines: [], sourceLine: index + 1 };
     }

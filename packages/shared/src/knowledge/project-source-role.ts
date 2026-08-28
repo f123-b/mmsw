@@ -11,6 +11,8 @@ export function inferProjectSourceRole(filename: string, optionalContent = ""): 
   const normalizedStem = stem.replace(/[\s_-]+/g, "");
   const content = optionalContent.toLowerCase();
 
+  if (/(?:question|qa|q&a|interview[-_ ]?(?:questions?|qa|bank)|题库|面试题|标准答案|问答)/i.test(stem)) return "question_bank";
+
   const exact = new Map<string, ProjectSourceRole>([
     ["projectoverview", "overview"],
     ["readme", "overview"],
@@ -54,6 +56,7 @@ export function inferProjectSourceRole(filename: string, optionalContent = ""): 
   if (/(?:^|\n)\s*#{0,6}\s*(?:测试结果|测试报告|性能指标|benchmark|test results?)(?=\s|$)/im.test(content)) return "test";
   if (/(?:^|\n)\s*#{0,6}\s*(?:系统架构|架构设计|技术设计|system design|architecture)(?=\s|$)/im.test(content)) return "architecture";
   if (/(?:^|\n)\s*#{0,6}\s*(?:项目说明|项目概览|项目背景|project overview|summary)(?=\s|$)/im.test(content)) return "overview";
+  if (/(?:^|\n)\s*#{0,6}\s*(?:项目题库|面试题库|question bank|interview questions|qa)(?=\s|$)/im.test(content)) return "question_bank";
 
   return "other";
 }

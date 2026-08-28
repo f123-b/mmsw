@@ -75,6 +75,7 @@ import {
   type ProjectUnderstanding,
   type ProjectUnderstandingSnapshotRecord,
   type ProjectAnalysisJob,
+  type ProjectQuestionBankImportReport,
   type RepositoryManifest,
   type RepositorySourceFile,
   type RepositorySkippedFile
@@ -362,6 +363,8 @@ export class SqliteDatabase {
           result TEXT NOT NULL,
           source_ids_json TEXT NOT NULL DEFAULT '[]'
         );
+        -- Deprecated compatibility projection. Runtime question writes use
+        -- question_bank_*; migration 10 copied existing rows forward.
         CREATE TABLE IF NOT EXISTS interview_questions (
           id TEXT PRIMARY KEY,
           project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -1196,7 +1199,15 @@ export class SqliteProjectMemoryRepository {
     const modules = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, module_name AS moduleName, description, file_path AS filePath, source_ids_json AS sourceIdsJson FROM project_modules WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), moduleName: String(row.moduleName), description: String(row.description), ...(row.filePath ? { filePath: String(row.filePath) } : {}), sourceIds: jsonArray(row.sourceIdsJson) }));
     const technicalPoints = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, topic, content, importance, source_ids_json AS sourceIdsJson FROM technical_points WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), topic: String(row.topic), content: String(row.content), importance: String(row.importance) as ProjectTechnicalPoint["importance"], sourceIds: jsonArray(row.sourceIdsJson) }));
     const problems = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, problem, cause, solution, result, source_ids_json AS sourceIdsJson FROM project_problems WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), problem: String(row.problem), cause: String(row.cause), solution: String(row.solution), result: String(row.result), sourceIds: jsonArray(row.sourceIdsJson) }));
-    const interviewQuestions = this.database.all<Record<string, unknown>>(`SELECT id, project_id AS projectId, question, answer_points_json AS answerPointsJson, keywords_json AS keywordsJson, source_ids_json AS sourceIdsJson FROM interview_questions WHERE project_id IN (${placeholders})`, projectIds).map((row) => ({ id: String(row.id), projectId: String(row.projectId), question: String(row.question), answerPoints: jsonArray(row.answerPointsJson), keywords: jsonArray(row.keywordsJson), sourceIds: jsonArray(row.sourceIdsJson), factIds: this.database.all<{ factId: string }>("SELECT fact_id AS factId FROM question_bank_question_facts WHERE question_id = ?", [String(row.id)]).map((item) => item.factId), stale: Number(this.database.first<{ stale: number }>("SELECT stale FROM question_bank_questions WHERE id = ?", [String(row.id)])?.stale ?? 0) === 1 }));
+    const questionBank = new SqliteQuestionBankRepository(this.database);
+    // The old interview_questions table is intentionally read only through
+    // migration compatibility. The unified Question Bank is authoritative.
+    const interviewQuestions = this.database.all<{ id: string; projectId: string }>(`SELECT id, project_id AS projectId FROM question_bank_questions WHERE scope = 'project' AND status = 'active' AND project_id IN (${placeholders}) ORDER BY updated_at DESC`, projectIds).flatMap((row) => {
+      const question = questionBank.getQuestion(String(row.id));
+      if (!question) return [];
+      const answerPoints = question.answerCards.flatMap((card) => card.keyPoints.length > 0 ? card.keyPoints : card.content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)).slice(0, 20);
+      return [{ id: question.id, projectId: String(row.projectId), question: question.canonicalText, answerPoints, keywords: question.variants, sourceIds: question.factIds ?? [], factIds: question.factIds, stale: Boolean(question.stale) }];
+    });
     const facts = this.listFacts(profileId);
     const understandings = projectIds.flatMap((projectId) => {
       const record = this.getUnderstandingSnapshot(projectId);
@@ -1219,14 +1230,12 @@ export class SqliteProjectMemoryRepository {
       this.database.run("DELETE FROM project_modules WHERE project_id = ?", [onlyProjectId]);
       this.database.run("DELETE FROM technical_points WHERE project_id = ?", [onlyProjectId]);
       this.database.run("DELETE FROM project_problems WHERE project_id = ?", [onlyProjectId]);
-      this.database.run("DELETE FROM interview_questions WHERE project_id = ?", [onlyProjectId]);
       this.database.run("UPDATE project_facts SET stale = 1, updated_at = ? WHERE project_id = ? AND verified = 0 AND evidence_level NOT IN ('confirmed-user')", [now, onlyProjectId]);
     } else {
       // Keep all project rows and user-authored facts; reanalysis only refreshes derived records.
       this.database.run("DELETE FROM project_modules WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ?)", [profileId]);
       this.database.run("DELETE FROM technical_points WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ?)", [profileId]);
       this.database.run("DELETE FROM project_problems WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ?)", [profileId]);
-      this.database.run("DELETE FROM interview_questions WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ?)", [profileId]);
       this.database.run("UPDATE project_facts SET stale = 1, updated_at = ? WHERE project_id IN (SELECT id FROM projects WHERE profile_id = ?) AND verified = 0 AND evidence_level NOT IN ('confirmed-user')", [now, profileId]);
     }
     for (const project of snapshot.projects) {
@@ -1235,7 +1244,6 @@ export class SqliteProjectMemoryRepository {
     for (const module of snapshot.modules) this.database.run("INSERT INTO project_modules(id, project_id, module_name, description, file_path, source_ids_json) VALUES (?, ?, ?, ?, ?, ?)", [module.id, module.projectId, module.moduleName, module.description, module.filePath ?? null, JSON.stringify(module.sourceIds)]);
     for (const point of snapshot.technicalPoints) this.database.run("INSERT INTO technical_points(id, project_id, topic, content, importance, source_ids_json) VALUES (?, ?, ?, ?, ?, ?)", [point.id, point.projectId, point.topic, point.content, point.importance, JSON.stringify(point.sourceIds)]);
     for (const problem of snapshot.problems) this.database.run("INSERT INTO project_problems(id, project_id, problem, cause, solution, result, source_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?)", [problem.id, problem.projectId, problem.problem, problem.cause, problem.solution, problem.result, JSON.stringify(problem.sourceIds)]);
-    for (const question of snapshot.interviewQuestions) this.database.run("INSERT INTO interview_questions(id, project_id, question, answer_points_json, keywords_json, source_ids_json) VALUES (?, ?, ?, ?, ?, ?)", [question.id, question.projectId, question.question, JSON.stringify(question.answerPoints), JSON.stringify(question.keywords), JSON.stringify(question.sourceIds)]);
     const projectById = new Map(snapshot.projects.map((project) => [project.id, project]));
     const saveFact = (fact: ProjectFact): void => {
       fact = withFactSemantics(fact);
@@ -2194,6 +2202,10 @@ export interface QuestionBankImportResult {
 export interface QuestionBankImportOptions {
   includeProject?: boolean;
   includeBehavioral?: boolean;
+  profileId?: string;
+  projectId?: string;
+  source?: QuestionBankSourceType;
+  verifyImported?: boolean;
 }
 
 export interface QuestionBankListOptions {
@@ -2208,6 +2220,8 @@ export interface QuestionBankListOptions {
   jobProfileId?: string;
   skillId?: string;
   status?: "active" | "archived" | "all";
+  /** When filtering project QA, do not include profile/global records. */
+  exactProject?: boolean;
   sort?: "updated" | "name" | "difficulty" | "verified" | "mastery";
   limit?: number;
   offset?: number;
@@ -2268,7 +2282,7 @@ export class SqliteQuestionBankRepository {
     if (options.category?.trim()) { clauses.push("category = ?"); params.push(options.category.trim()); }
     if (options.scope) { clauses.push("scope = ?"); params.push(options.scope); }
     if (options.profileId) { clauses.push("(profile_id = ? OR profile_id IS NULL)"); params.push(options.profileId); }
-    if (options.projectId) { clauses.push("(project_id = ? OR project_id IS NULL)"); params.push(options.projectId); }
+    if (options.projectId) { clauses.push(options.exactProject || options.scope === "project" ? "project_id = ?" : "(project_id = ? OR project_id IS NULL)"); params.push(options.projectId); }
     if (options.moduleId) { clauses.push("module_id = ?"); params.push(options.moduleId); }
     if (options.jobProfileId) { clauses.push("(job_profile_id = ? OR job_profile_id IS NULL)"); params.push(options.jobProfileId); }
     if (options.skillId) { clauses.push("EXISTS (SELECT 1 FROM question_bank_question_skills qs WHERE qs.question_id = question_bank_questions.id AND qs.skill_id = ?)"); params.push(options.skillId); }
@@ -2294,7 +2308,7 @@ export class SqliteQuestionBankRepository {
     if (options.category?.trim()) { clauses.push("category = ?"); params.push(options.category.trim()); }
     if (options.scope) { clauses.push("scope = ?"); params.push(options.scope); }
     if (options.profileId) { clauses.push("(profile_id = ? OR profile_id IS NULL)"); params.push(options.profileId); }
-    if (options.projectId) { clauses.push("(project_id = ? OR project_id IS NULL)"); params.push(options.projectId); }
+    if (options.projectId) { clauses.push(options.exactProject || options.scope === "project" ? "project_id = ?" : "(project_id = ? OR project_id IS NULL)"); params.push(options.projectId); }
     if (options.moduleId) { clauses.push("module_id = ?"); params.push(options.moduleId); }
     if (options.jobProfileId) { clauses.push("(job_profile_id = ? OR job_profile_id IS NULL)"); params.push(options.jobProfileId); }
     if (options.skillId) { clauses.push("EXISTS (SELECT 1 FROM question_bank_question_skills qs WHERE qs.question_id = question_bank_questions.id AND qs.skill_id = ?)"); params.push(options.skillId); }
@@ -2503,7 +2517,9 @@ export class SqliteQuestionBankRepository {
 
   routeQuestion(text: string, options: QuestionBankRouteQuery = {}): QuestionBankRouteResult {
     const candidates = this.listQuestions({ status: options.includeArchived ? "all" : "active", scope: options.scope, profileId: options.profileId, projectId: options.projectId, jobProfileId: options.jobProfileId, limit: 5000 });
-    return new QuestionBankRouter().route(text, candidates, options);
+    const router = new QuestionBankRouter();
+    if (options.projectId && !options.includeArchived) return router.routeProjectQaFirst(text, candidates, { ...options, projectId: options.projectId });
+    return router.route(text, candidates, options);
   }
 
   matchQuestion(text: string, options: { threshold?: number; scope?: QuestionBankScope; profileId?: string; projectId?: string; jobProfileId?: string } = {}): QuestionBankMatch | undefined {
@@ -2515,6 +2531,9 @@ export class SqliteQuestionBankRepository {
   importText(text: string, filename = "题库导入", options: QuestionBankImportOptions = {}): QuestionBankImportResult {
     const includeProject = options.includeProject ?? false;
     const includeBehavioral = options.includeBehavioral ?? true;
+    const projectImport = Boolean(options.projectId);
+    const importedSource = options.source ?? "imported";
+    const verifyImported = options.verifyImported ?? projectImport;
     let recognizedQuestions = 0;
     let importedQuestions = 0;
     let importedAnswers = 0;
@@ -2523,7 +2542,10 @@ export class SqliteQuestionBankRepository {
     let duplicatesMerged = 0;
     let failedQuestions = 0;
     const ids: string[] = [];
-    const existingByNormalized = new Map(this.listQuestions({ limit: 5000 }).map((question) => [question.normalizedText, question]));
+    const existingQuestions = projectImport
+      ? this.listQuestions({ status: "all", scope: "project", projectId: options.projectId, exactProject: true, limit: 5000 })
+      : this.listQuestions({ limit: 5000 });
+    const existingByNormalized = new Map(existingQuestions.map((question) => [question.normalizedText, question]));
 
     const saveEntry = (question: string, type: QuestionBankType, answer = "", variants: string[] = []): void => {
       const canonicalText = question.trim();
@@ -2536,20 +2558,20 @@ export class SqliteQuestionBankRepository {
         const existing = existingByNormalized.get(normalizedText);
         if (existing) {
           const mergedVariants = [...new Set([...existing.variants, ...variants, canonicalText].filter((item) => normalizeQuestionBankText(item) !== existing.normalizedText))];
-          if (mergedVariants.length !== existing.variants.length) {
-            const updated = this.saveQuestion({ id: existing.id, canonicalText: existing.canonicalText, type: existing.type, difficulty: existing.difficulty, jobRole: existing.jobRole, variants: mergedVariants, source: existing.source });
+          if (mergedVariants.length !== existing.variants.length || projectImport) {
+            const updated = this.saveQuestion({ id: existing.id, canonicalText: existing.canonicalText, type: projectImport ? type : existing.type, bankType: projectImport ? "project" : existing.bankType, category: projectImport ? "project" : existing.category, scope: projectImport ? "project" : existing.scope, profileId: projectImport ? options.profileId : existing.profileId, projectId: projectImport ? options.projectId : existing.projectId, difficulty: existing.difficulty, jobRole: existing.jobRole, variants: mergedVariants, source: projectImport ? importedSource : existing.source, verified: projectImport ? true : existing.verified, stale: projectImport ? false : existing.stale });
             existingByNormalized.set(normalizedText, updated);
           }
-          if (answer && !existing.answerCards.some((card) => card.content.trim())) this.saveAnswerCard({ questionId: existing.id, content: answer, sourceType: "imported", verified: false });
+          if (answer && !existing.answerCards.some((card) => card.content.trim() === answer.trim() && !card.stale)) this.saveAnswerCard({ questionId: existing.id, content: answer, sourceType: importedSource, verified: verifyImported, stale: false });
           ids.push(existing.id);
           duplicatesMerged += 1;
           return;
         }
-        const record = this.saveQuestion({ canonicalText, type, variants, source: "imported" });
+        const record = this.saveQuestion({ canonicalText, type, bankType: projectImport ? "project" : undefined, category: projectImport ? "project" : undefined, scope: projectImport ? "project" : undefined, profileId: options.profileId, projectId: options.projectId, variants, source: importedSource, verified: verifyImported, stale: false });
         existingByNormalized.set(record.normalizedText, record);
         ids.push(record.id);
         importedQuestions += 1;
-        if (answer) { this.saveAnswerCard({ questionId: record.id, content: answer, sourceType: "imported", verified: false }); importedAnswers += 1; }
+        if (answer) { this.saveAnswerCard({ questionId: record.id, content: answer, sourceType: importedSource, verified: verifyImported, stale: false }); importedAnswers += 1; }
       } catch {
         failedQuestions += 1;
       }
@@ -2575,6 +2597,22 @@ export class SqliteQuestionBankRepository {
     }
     for (const entry of parseQuestionBankText(text)) saveEntry(entry.question, entry.type, entry.answer);
     return { recognizedQuestions, importedQuestions, importedAnswers, filteredProjectQuestions, filteredBehavioralQuestions, duplicatesMerged, failedQuestions, ids: [...new Set(ids)] };
+  }
+
+  importProjectText(profileId: string, projectId: string, text: string, filename = "项目题库导入"): ProjectQuestionBankImportReport {
+    const project = this.database.first<{ profileId: string }>("SELECT profile_id AS profileId FROM projects WHERE id = ?", [projectId]);
+    if (!project || project.profileId !== profileId) throw new Error("PROJECT_QA_SCOPE_INVALID: 项目不属于当前档案");
+    const result = this.importText(text, filename, { includeProject: true, includeBehavioral: true, profileId, projectId, source: "imported", verifyImported: true });
+    return { projectId, filename, sourceRole: "question_bank", verified: true, ...result };
+  }
+
+  markProjectQuestionBankStale(projectId: string, now = Date.now()): number {
+    const questionIds = this.database.all<{ id: string }>("SELECT id FROM question_bank_questions WHERE scope = 'project' AND project_id = ? AND status = 'active' AND stale = 0", [projectId]).map((row) => row.id);
+    if (questionIds.length === 0) return 0;
+    this.database.run("UPDATE question_bank_questions SET stale = 1, updated_at = ? WHERE scope = 'project' AND project_id = ? AND status = 'active'", [now, projectId]);
+    this.database.run("UPDATE question_bank_answer_cards SET stale = 1, updated_at = ? WHERE question_id IN (SELECT id FROM question_bank_questions WHERE scope = 'project' AND project_id = ?)", [now, projectId]);
+    this.database.flushNow();
+    return questionIds.length;
   }
 
   private hydrateQuestion(row: QuestionBankQuestionRow): QuestionBankQuestionRecord {

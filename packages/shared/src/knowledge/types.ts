@@ -4,7 +4,7 @@ export type ProjectMemorySourceKind = "resume" | "resume-section" | "project-doc
 
 export type ProjectSourceType = "document" | "repository" | "resume_section" | "user_fact" | "interview_note";
 export type ProjectSourceRelationship = "primary" | "supporting" | "reference";
-export type ProjectSourceRole = "overview" | "code" | "resume" | "responsibility" | "debug" | "test" | "architecture" | "reference" | "other";
+export type ProjectSourceRole = "overview" | "code" | "resume" | "responsibility" | "debug" | "test" | "architecture" | "question_bank" | "reference" | "other";
 export type ProjectSourceAssignmentMethod = "explicit" | "matched" | "manual" | "imported";
 
 export type ProjectOwnershipMode = "personal" | "team" | "partial" | "reference";
