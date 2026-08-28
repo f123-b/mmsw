@@ -105,7 +105,8 @@ export type {
   QuestionBankType
 } from "./question-bank";
 export { QuestionBankRouter } from "./question-bank-router";
-export type { QuestionBankRouteHit, QuestionBankRouteOptions, QuestionBankRouteResult } from "./question-bank-router";
+export { DEFAULT_PROJECT_QA_ROUTING_POLICY, questionBankAnswerIsReady } from "./question-bank-router";
+export type { ProjectQaMatchLevel, ProjectQaRouteResult, ProjectQaRoutingPolicy, QuestionBankRouteHit, QuestionBankRouteOptions, QuestionBankRouteResult } from "./question-bank-router";
 export type { QuestionCategory, QuestionClassification } from "./question-classifier";
 
 export interface TranscriptSnapshot {
@@ -530,6 +531,8 @@ export class QuestionDetector {
 }
 
 export * from "./answer";
+export { createAnswerSourcePlan, planAnswerSource } from "./answer/project-answer-source-planner";
+export type { AnswerSourceMode, AnswerSourcePlan, AnswerSourcePlannerInput } from "./answer/project-answer-source-planner";
 export * from "./chat";
 export * from "./chat-response";
 export * from "./question-bank-coverage";

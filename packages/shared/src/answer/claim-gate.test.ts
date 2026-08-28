@@ -80,4 +80,18 @@ describe("ClaimGate", () => {
     expect(["rewrite", "partial"]).toContain(result.decision);
     expect(result.blockedClaims.some((claim) => claim.provenance === "personal_ownership")).toBe(true);
   });
+
+  it("accepts a confirmed imported project QA answer as rewrite evidence", () => {
+    const result = new ClaimGate().check({
+      question: "FOC 项目如何保证 ADC 实时性？",
+      answer: "项目中使用 PWM 中点触发 ADC，并通过 DMA 搬运采样数据。",
+      evidenceSnapshot: createEvidenceSnapshot({
+        questionId: "project-qa-direct",
+        projectId: "foc",
+        projectQaEvidence: ["项目中使用 PWM 中点触发 ADC，并通过 DMA 搬运采样数据。"]
+      })
+    });
+    expect(result.allowed).toBe(true);
+    expect(result.decision).toBe("allow");
+  });
 });

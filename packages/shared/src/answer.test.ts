@@ -39,6 +39,48 @@ describe("Answer routing and generation", () => {
     expect(prompt).toContain("首次出现较难术语");
   });
 
+  it("gives direct project QA a dedicated rewrite context and removes ordinary retrieval", () => {
+    const context = new ContextRouter().route("FOC 项目的 ADC 如何保证实时性？", {
+      answerSourcePlan: {
+        mode: "project_qa_direct",
+        projectId: "foc",
+        qaMatchLevel: "strong",
+        preserveStoredAnswerFacts: true,
+        allowProjectKnowledge: false,
+        allowGeneralKnowledge: false,
+        allowSessionEvidence: true,
+        answerRewriteUsed: true
+      },
+      preparedAnswer: { content: "PWM 中点触发 ADC，并通过 DMA 搬运。", score: 0.92, verified: true, source: "project-question-bank" },
+      projectQaEvidence: ["PWM 中点触发 ADC，并通过 DMA 搬运。"],
+      projectEvidence: ["不应进入 direct prompt 的项目资料"],
+      retrievedKnowledge: ["不应进入 direct prompt 的普通检索"]
+    });
+    const sections = new PromptBuilder().build({ id: "project-qa", text: "FOC 项目的 ADC 如何保证实时性？" }, "NORMAL", context);
+    expect(context.projectEvidence).toEqual([]);
+    expect(context.retrievedKnowledge).toEqual([]);
+    expect(sections.find((section) => section.name === "project-qa-context")?.content).toContain("保留原答案中的事实");
+    expect(sections.find((section) => section.name === "project-qa-context")?.content).toContain("PWM 中点触发 ADC");
+  });
+
+  it("runs project QA through the final claim gate and exposes source telemetry", async () => {
+    const stored = "项目中使用 PWM 中点触发 ADC，并通过 DMA 搬运采样数据。";
+    const provider: AnswerProvider = { stream: async function* () { yield stored; } };
+    let ended: unknown;
+    for await (const event of new AnswerAgent({ normal: provider }, new ModelRouter({ normal: "test-model" })).stream(
+      { id: "project-qa-answer", text: "ADC 怎么保证实时性？" },
+      "NORMAL",
+      {
+        answerSourcePlan: { mode: "project_qa_direct", projectId: "foc", qaMatchLevel: "exact", preserveStoredAnswerFacts: true, allowProjectKnowledge: false, allowGeneralKnowledge: false, allowSessionEvidence: true, answerRewriteUsed: true },
+        preparedAnswer: { content: stored, score: 1, verified: true },
+        projectQaEvidence: [stored]
+      },
+      undefined,
+      { directDisplay: true, emitDeltas: false, allowQualityRepair: false, formatAnswer: false }
+    )) if (event.type === "answer_end") ended = event;
+    expect(ended).toMatchObject({ type: "answer_end", text: stored, quality: { claimGateDecision: "allow", blockedClaimCount: 0, answerSourceMode: "project_qa_direct", qaMatchLevel: "exact" } });
+  });
+
   it("passes a structured answer plan into the provider prompt", async () => {
     let prompt = "";
     const planningProvider: AnswerProvider = {

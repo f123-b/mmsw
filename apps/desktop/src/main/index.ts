@@ -10,7 +10,7 @@ import { createScreenshotFixtureResult, ScreenshotManager } from "./screenshot-m
 import { createScreenshotRequestId, SCREENSHOT_PROMPT, ScreenshotOperationRegistry, ScreenshotTraceBuffer, withScreenshotTimeout, type ScreenshotTraceEvent, type ScreenshotTraceEventName } from "./screenshot-pipeline";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeAnswerIntent, analyzeInterview, AnswerAgent, AgentToolRegistry, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeAnswerIntent, analyzeInterview, AnswerAgent, AgentToolRegistry, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
@@ -28,7 +28,7 @@ import { createProfileBuilderModel, ProfileBuilderService } from "./profile-buil
 import { createProjectComprehensionModel, createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { parseRepositoryArchiveInWorker } from "./repository-import-worker-client";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
-import { deriveProjectProblemChains, deriveProjectTechnicalDecisions, formatProjectFactValue, isFactEligible, isFactReviewRequired, normalizeProjectOwnershipMode, resolveProjectAnswerPerspective } from "@interview-copilot/shared";
+import { deriveProjectProblemChains, deriveProjectTechnicalDecisions, formatProjectFactValue, inferProjectSourceRole, isFactEligible, isFactReviewRequired, normalizeProjectOwnershipMode, resolveProjectAnswerPerspective } from "@interview-copilot/shared";
 import type { ChatAction, ChatCancelReason, ChatResponse } from "@interview-copilot/shared";
 import type { QuestionBankBulkPatch, QuestionBankListOptions } from "./database";
 
@@ -1551,6 +1551,7 @@ function registerIpc(): void {
   ipcMain.handle("knowledge:delete-base", (_event, knowledgeBaseId: string) => { knowledgeRepository?.deleteKnowledgeBase(knowledgeBaseId); return true; });
   ipcMain.handle("knowledge:list-documents", (_event, knowledgeBaseId?: string) => knowledgeRepository?.listDocuments(knowledgeBaseId) ?? []);
   ipcMain.handle("knowledge:ingest", async (_event, input: { knowledgeBaseId?: string; profileId?: string; projectId?: string; sourceRole?: import("@interview-copilot/shared").ProjectSourceRole | "auto"; filename: string; mimeType: string; bytes: Uint8Array; documentType?: KnowledgeDocumentTypeOption }) => {
+    if (input.sourceRole === "question_bank") throw new Error("PROJECT_QA_USE_DEDICATED_IMPORT: 请使用“上传项目题库”入口");
     if (!knowledgeRepository) throw new Error("Knowledge database is still initializing");
     const knowledgeBase = input.knowledgeBaseId ? knowledgeRepository.listKnowledgeBases().find((base) => base.id === input.knowledgeBaseId) : knowledgeRepository.ensureKnowledgeBase();
     if (!knowledgeBase) throw new Error("Knowledge base not found");
@@ -1560,6 +1561,8 @@ function registerIpc(): void {
     const parsed = isRepositoryArchive
       ? await parseRepositoryArchiveInWorker({ documentId, filename: input.filename, bytes, onProgress: (progress) => appLogger?.info("KNOWLEDGE_ARCHIVE_PROGRESS", { filename: input.filename, ...progress }) })
       : await parseDocument({ documentId, filename: input.filename, mimeType: input.mimeType, bytes });
+    const inferredProjectRole = input.sourceRole && input.sourceRole !== "auto" ? input.sourceRole : inferProjectSourceRole(parsed.filename, parsed.text);
+    if (input.projectId && inferredProjectRole === "question_bank") throw new Error("PROJECT_QA_USE_DEDICATED_IMPORT: 请使用“上传项目题库”入口");
     const requestedType = input.documentType && input.documentType !== "auto" ? input.documentType : undefined;
     const documentType = requestedType && !(isRepositoryArchive && requestedType === "other") ? requestedType : inferKnowledgeDocumentType(parsed.filename, parsed.text);
     const document = knowledgeRepository.saveDocument({ id: parsed.documentId, ...parsed, knowledgeBaseId: knowledgeBase.id, documentType, status: "processing" });
@@ -1573,6 +1576,7 @@ function registerIpc(): void {
       if ((documentType === "project" || documentType === "technical-doc") && input.profileId && projectMemoryService) {
         const requestedRole = input.sourceRole && input.sourceRole !== "auto" ? input.sourceRole : undefined;
         const assignment = projectMemoryService.assignDocument(input.profileId, saved.id, input.projectId, requestedRole);
+        if (assignment.status === "assigned" && assignment.projectId) questionBankRepository?.markProjectQuestionBankStale(assignment.projectId);
         return { ...saved, projectAssignment: assignment, ...(assignment.status === "needs_assignment" ? { error: assignment.message } : {}) };
       }
       return saved;
@@ -1583,7 +1587,15 @@ function registerIpc(): void {
   });
   ipcMain.handle("knowledge:ingest-project-materials", async (_event, input: { profileId: string; projectId: string; knowledgeBaseId: string; files: import("@interview-copilot/shared").ProjectMaterialImportFile[] }) => {
     if (!projectMemoryService) throw new Error("Project Memory is still initializing");
-    return projectMemoryService.importProjectMaterials(input);
+    const report = await projectMemoryService.importProjectMaterials(input);
+    if (report.summary.assigned > 0) questionBankRepository?.markProjectQuestionBankStale(input.projectId);
+    return report;
+  });
+  ipcMain.handle("knowledge:ingest-project-question-bank", async (_event, input: { profileId: string; projectId: string; filename: string; mimeType: string; bytes: Uint8Array }) => {
+    if (!questionBankRepository) throw new Error("Question Bank is still initializing");
+    const bytes = normalizeDocumentBytes(input.bytes);
+    const parsed = await parseDocument({ documentId: `project-qa-${Date.now()}`, filename: input.filename, mimeType: input.mimeType, bytes });
+    return questionBankRepository.importProjectText(input.profileId, input.projectId, parsed.text, input.filename);
   });
   ipcMain.handle("knowledge:delete", (_event, documentId: string) => { for (const assignment of projectMemoryRepository?.sourcesFor("document", documentId) ?? []) projectMemoryRepository?.unassignSource(assignment.projectId, "document", documentId); knowledgeRepository?.deleteDocument(documentId); return true; });
   ipcMain.handle("knowledge:update-type", (_event, documentId: string, documentType: KnowledgeDocumentType) => knowledgeRepository?.updateDocumentType(documentId, documentType));
@@ -1993,6 +2005,21 @@ if (hasSingleInstanceLock) {
       || answerIntent.asksProjectImplementation
       || Boolean(questionAnalysis.project)
       || answerIntent.requiresPersonalOwnership && /项目|简历|经历/.test(normalizedQuestion);
+    const questionBankSkills = questionBankRepository?.listSkills() ?? [];
+    const questionBankSkillIds = new Set(questionBankSkills.map((skill) => skill.id));
+    const mentionedSkillIds = questionBankSkills
+      .filter((skill) => [skill.normalizedName, ...skill.aliases.map((alias) => normalizeQuestionBankText(alias))].some((term) => term && normalizeQuestionBankText(normalizedQuestion).includes(term)))
+      .map((skill) => skill.id);
+    const profileSkillIds = (profile?.skills ?? []).map((skill) => skill.id).filter((skillId) => questionBankSkillIds.has(skillId));
+    const questionBankRoute = questionBankRepository?.routeQuestion(normalizedQuestion, {
+      ...(useProjectContext || questionAnalysis.type === "behavioral" || questionAnalysis.type === "follow-up" ? {} : { scope: "global" as const }),
+      profileId,
+      ...(targetProjectId ? { projectId: targetProjectId } : {}),
+      skillIds: [...new Set([...profileSkillIds, ...mentionedSkillIds])],
+      limit: 5
+    });
+    const projectQaRoute = questionBankRoute?.projectQa;
+    const earlyProjectQaDirect = Boolean(targetProjectId && projectQaRoute && (projectQaRoute.level === "exact" || projectQaRoute.level === "strong") && projectQaRoute.top?.question.verified && !projectQaRoute.top.question.stale && questionBankAnswerIsReady(projectQaRoute.top.question));
     const targetUnderstanding = targetProjectId
       ? projectSnapshot.understandings?.find((item) => item.projectId === targetProjectId) ?? (projectSnapshot.understanding?.projectId === targetProjectId ? projectSnapshot.understanding : undefined)
       : projectSnapshot.understanding;
@@ -2003,23 +2030,27 @@ if (hasSingleInstanceLock) {
       ? `${embeddingSettings.baseUrl}|${embeddingSettings.model}|${normalizedQuestion.toLowerCase()}`
       : undefined;
     const cachedVector = embeddingKey ? embeddingCache.get(embeddingKey) : undefined;
-    const queryEmbeddingPromise = cachedVector
-      ? Promise.resolve<number[] | undefined>(cachedVector)
-      : embeddingSettings?.apiKey && embeddingSettings.model
-        ? new OpenAICompatibleEmbeddingProvider(embeddingSettings).embed(normalizedQuestion).then((vector) => {
-          if (embeddingKey) rememberEmbedding(embeddingKey, vector);
-          return vector;
-        }).catch(() => undefined)
-        : Promise.resolve<number[] | undefined>(undefined);
-    const chunks = targetProjectId && useProjectContext
-      ? projectKnowledgeChunks(profileId, targetProjectId)
-      : (knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? []).map((chunk) => ({ ...chunk, metadata: { ...chunk.metadata, scope: "profile" as const } }));
+    const queryEmbeddingPromise = earlyProjectQaDirect
+      ? Promise.resolve<number[] | undefined>(undefined)
+      : cachedVector
+        ? Promise.resolve<number[] | undefined>(cachedVector)
+        : embeddingSettings?.apiKey && embeddingSettings.model
+          ? new OpenAICompatibleEmbeddingProvider(embeddingSettings).embed(normalizedQuestion).then((vector) => {
+            if (embeddingKey) rememberEmbedding(embeddingKey, vector);
+            return vector;
+          }).catch(() => undefined)
+          : Promise.resolve<number[] | undefined>(undefined);
+    const chunks = earlyProjectQaDirect
+      ? []
+      : targetProjectId && useProjectContext
+        ? projectKnowledgeChunks(profileId, targetProjectId)
+        : (knowledgeRepository?.listChunks(profile?.knowledgeBaseIds ?? []) ?? []).map((chunk) => ({ ...chunk, metadata: { ...chunk.metadata, scope: "profile" as const } }));
     const retrievalOptions = { chunks, topK: 3, candidateK: 12, reranker: new KeywordReranker() };
     const keywordTiming: RetrievalTiming = {};
     // Start the lexical path before waiting for the shared query embedding so
     // the 100ms semantic budget never delays the safe fallback.
     const keywordRetrieval = new HybridKnowledgeRetriever({ ...retrievalOptions, timings: keywordTiming }).search(normalizedQuestion);
-    let factMatches = projectMemoryRepository?.searchFacts(profileId, normalizedQuestion, {
+    let factMatches = earlyProjectQaDirect ? [] : projectMemoryRepository?.searchFacts(profileId, normalizedQuestion, {
       projectId: interviewContext?.projectId,
       detectedProjectId,
       questionType: questionAnalysis.type,
@@ -2029,7 +2060,7 @@ if (hasSingleInstanceLock) {
     }) ?? [];
     const embeddingBudget = await resolveEmbeddingWithinBudget(queryEmbeddingPromise, 100);
     const queryEmbedding = embeddingBudget.vector;
-    if (queryEmbedding && projectMemoryRepository) {
+    if (!earlyProjectQaDirect && queryEmbedding && projectMemoryRepository) {
       factMatches = projectMemoryRepository.searchFacts(profileId, normalizedQuestion, {
         projectId: interviewContext?.projectId,
         detectedProjectId,
@@ -2080,19 +2111,6 @@ if (hasSingleInstanceLock) {
     const resumeExperience = new HybridRetriever().search(normalizedQuestion, resumeChunks, { topK: 2, candidateK: 8 }).map((hit) => `Resume（相关经历）：${hit.text}`);
     const experience = [...trustedPersonalProjectFacts, ...artifactExperience, ...resumeExperience].slice(0, 6);
     const personalEvidence = [...trustedPersonalProjectFacts, ...artifactExperience, ...resumeExperience].slice(0, 6);
-    const questionBankSkills = questionBankRepository?.listSkills() ?? [];
-    const questionBankSkillIds = new Set(questionBankSkills.map((skill) => skill.id));
-    const mentionedSkillIds = questionBankSkills
-      .filter((skill) => [skill.normalizedName, ...skill.aliases.map((alias) => normalizeQuestionBankText(alias))].some((term) => term && normalizeQuestionBankText(normalizedQuestion).includes(term)))
-      .map((skill) => skill.id);
-    const profileSkillIds = (profile?.skills ?? []).map((skill) => skill.id).filter((skillId) => questionBankSkillIds.has(skillId));
-    const questionBankRoute = questionBankRepository?.routeQuestion(normalizedQuestion, {
-      ...(useProjectContext || questionAnalysis.type === "behavioral" || questionAnalysis.type === "follow-up" ? {} : { scope: "global" as const }),
-      profileId,
-      ...(targetProjectId ? { projectId: targetProjectId } : {}),
-      skillIds: [...new Set([...profileSkillIds, ...mentionedSkillIds])],
-      limit: 5
-    });
     const questionBankMatch = questionBankRoute?.top;
     const candidateCard = questionBankMatch?.question.answerCards.find((card) => card.verified && !card.stale)
       ?? questionBankMatch?.question.answerCards.find((card) => questionBankMatch.question.type === "code" ? card.mode === "code" : card.mode === "standard")
@@ -2100,7 +2118,16 @@ if (hasSingleInstanceLock) {
     const preparedCard = candidateCard && (questionBankMatch?.question.scope !== "project" || candidateCard.verified)
       ? candidateCard
       : undefined;
-    const preparedAnswer = preparedCard ? `题库参考答案（匹配度 ${Math.round((questionBankMatch?.score ?? 0) * 100)}%，仅作为已整理素材，不替代当前问题判断）：\n${preparedCard.content}${preparedCard.codeContent ? `\n代码：\n${preparedCard.codeContent}` : ""}${preparedCard.complexity ? `\n复杂度：${preparedCard.complexity}` : ""}${preparedCard.limitations ? `\n边界与限制：${preparedCard.limitations}` : ""}` : undefined;
+    const preparedAnswerContent = preparedCard ? `${preparedCard.content}${preparedCard.codeContent ? `\n代码：\n${preparedCard.codeContent}` : ""}${preparedCard.complexity ? `\n复杂度：${preparedCard.complexity}` : ""}${preparedCard.limitations ? `\n边界与限制：${preparedCard.limitations}` : ""}` : undefined;
+    const sourcePlan = planAnswerSource({
+      projectId: targetProjectId,
+      projectQuestion: Boolean(targetProjectId && useProjectContext),
+      projectQa: projectQaRoute,
+      ...(preparedAnswerContent && preparedCard && questionBankMatch ? { preparedAnswer: { content: preparedAnswerContent, answerCardId: preparedCard.id, questionId: questionBankMatch.question.id, score: questionBankMatch.score, verified: preparedCard.verified, stale: preparedCard.stale } } : {})
+    });
+    const projectQaEvidence = (sourcePlan.mode === "project_qa_direct" || sourcePlan.mode === "project_qa_augmented") && preparedAnswerContent && preparedCard?.verified && questionBankMatch?.question.verified && !questionBankMatch.question.stale
+      ? [preparedAnswerContent]
+      : [];
     const jobMatches = jobTargetRepository?.searchRequirements(profileId, normalizedQuestion, 4, interviewContext?.jobTargetId) ?? [];
     const jobContext = jobMatches.map((hit) => `岗位要求（${hit.requirement.importance}，匹配度 ${Math.round(hit.score * 100)}%）：${hit.requirement.requirement}`);
     let retrieved = await keywordRetrieval;
@@ -2120,36 +2147,54 @@ if (hasSingleInstanceLock) {
       profileId,
       query: normalizedQuestion,
       route: knowledgeRoute.reason,
-      metadata: retrievalDiagnostics,
+      metadata: {
+        ...retrievalDiagnostics,
+        answerSourceMode: sourcePlan.mode,
+        projectId: targetProjectId ?? null,
+        qaMatchLevel: sourcePlan.qaMatchLevel,
+        qaQuestionId: sourcePlan.qaMatch?.questionId ?? null,
+        qaAnswerCardId: sourcePlan.qaMatch?.answerCardId ?? null,
+        qaScore: sourcePlan.qaMatch?.score ?? null,
+        qaExact: sourcePlan.qaMatch?.exact ?? false,
+        qaVerified: sourcePlan.qaMatch?.verified ?? false,
+        projectFactCount: eligibleFactMatches.length,
+        projectDocumentChunkCount: retrieved.filter((hit) => hit.metadata.scope === "project").length,
+        generalKnowledgeUsed: sourcePlan.allowGeneralKnowledge,
+        answerRewriteUsed: sourcePlan.answerRewriteUsed,
+        claimGateDecision: "pending",
+        blockedClaimCount: 0
+      },
       hits: [
         ...understandingRetrieval.hits.map((hit) => ({ resultType: "project-understanding" as const, resultId: hit.id, score: Math.min(1, hit.score / 12), verified: hit.evidenceRefs.length > 0, preview: `${hit.title}: ${hit.content}`, metadata: { projectId: targetProjectId ?? null, kind: hit.kind, route: understandingRetrieval.route, evidenceRefs: hit.evidenceRefs } })),
-        ...(questionBankMatch ? [{ resultType: "question" as const, resultId: questionBankMatch.question.id, score: questionBankMatch.score, verified: questionBankMatch.question.verified, preview: questionBankMatch.question.canonicalText, metadata: { scope: questionBankMatch.question.scope, type: questionBankMatch.question.type, bankType: questionBankMatch.question.bankType, category: questionBankMatch.question.category, priority: questionBankMatch.priority, reasons: questionBankMatch.reasons } }] : []),
+        ...(questionBankMatch ? [{ resultType: "question" as const, resultId: questionBankMatch.question.id, score: questionBankMatch.score, verified: questionBankMatch.question.verified, preview: questionBankMatch.question.canonicalText, metadata: { scope: questionBankMatch.question.scope, type: questionBankMatch.question.type, bankType: questionBankMatch.question.bankType, category: questionBankMatch.question.category, priority: questionBankMatch.priority, matchLevel: questionBankMatch.matchLevel ?? questionBankRoute?.matchLevel ?? "none", stage: questionBankRoute?.stage ?? "legacy", reasons: questionBankMatch.reasons } }] : []),
         ...factMatches.map((hit) => ({ resultType: "project-fact" as const, resultId: hit.fact.id, score: hit.finalScore, verified: hit.fact.verified, preview: `${hit.fact.title}: ${hit.fact.content}`, metadata: { projectId: hit.fact.projectId, type: hit.fact.type, evidenceLevel: hit.fact.evidenceLevel ?? "pending", ownership: hit.fact.ownership ?? "unknown", eligible: isFactEligible(hit.fact), stale: Boolean(hit.fact.stale), conflictStatus: hit.fact.conflictStatus ?? "confirmed", lexicalScore: hit.lexicalScore, vectorScore: hit.vectorScore, typeScore: hit.typeScore, projectScore: hit.projectScore, verifiedBoost: hit.verifiedBoost, reason: hit.reason } })),
         ...jobMatches.map((hit) => ({ resultType: "job-requirement" as const, resultId: hit.requirement.id, score: hit.score, verified: hit.requirement.verified, preview: hit.requirement.requirement, metadata: { category: hit.requirement.category, importance: hit.requirement.importance } })),
         ...retrieved.slice(0, 3).map((hit) => ({ resultType: "document-chunk" as const, resultId: hit.id, score: hit.score, preview: hit.text, metadata: { ...(hit.metadata as unknown as Record<string, unknown>), scope: hit.metadata.scope ?? (targetProjectId ? "project" : "profile"), projectId: hit.metadata.projectId ?? targetProjectId ?? null, sourceRole: hit.metadata.sourceRole ?? null, relationship: hit.metadata.relationship ?? null, sourceId: hit.metadata.sourceId ?? hit.metadata.documentId, documentId: hit.metadata.documentId } }))
       ]
     });
     return {
-      profileSummary: profile?.resume?.summary,
-      jobDescriptionSummary: profile?.jobDescription?.summary,
-      profileInstructions: profile?.instructions,
+      profileSummary: earlyProjectQaDirect ? undefined : profile?.resume?.summary,
+      jobDescriptionSummary: earlyProjectQaDirect ? undefined : profile?.jobDescription?.summary,
+      profileInstructions: earlyProjectQaDirect ? undefined : profile?.instructions,
       expressionLevel: profile?.expressionLevel ?? "plain",
       explainAdvancedTerms: profile?.explainAdvancedTerms ?? true,
-      skills: (profile?.skills ?? []).map((skill) => ({ id: skill.id, name: skill.name, content: `${skill.description}\n${skill.content}` })),
-      experienceContext: experience,
-      personalMemoryEvidence: personalEvidence,
-      projectEvidence: trustedFactExperience.slice(0, 8),
-      verifiedResumeEvidence: [...artifactExperience, ...resumeExperience].slice(0, 6),
-      verifiedPersonalProjectFacts: trustedPersonalProjectFacts.slice(0, 6),
-      preparedAnswer: preparedCard && questionBankMatch ? { content: preparedCard.content, score: questionBankMatch.score, verified: preparedCard.verified, source: "question-bank" } : undefined,
+      skills: earlyProjectQaDirect ? [] : (profile?.skills ?? []).map((skill) => ({ id: skill.id, name: skill.name, content: `${skill.description}\n${skill.content}` })),
+      experienceContext: earlyProjectQaDirect ? [] : experience,
+      personalMemoryEvidence: earlyProjectQaDirect ? [] : personalEvidence,
+      projectEvidence: earlyProjectQaDirect ? [] : trustedFactExperience.slice(0, 8),
+      verifiedResumeEvidence: earlyProjectQaDirect ? [] : [...artifactExperience, ...resumeExperience].slice(0, 6),
+      verifiedPersonalProjectFacts: earlyProjectQaDirect ? [] : trustedPersonalProjectFacts.slice(0, 6),
+      preparedAnswer: preparedCard && questionBankMatch && preparedAnswerContent ? { content: preparedAnswerContent, score: questionBankMatch.score, verified: preparedCard.verified, source: questionBankMatch.question.scope === "project" ? "project-question-bank" : "question-bank", answerCardId: preparedCard.id, questionId: questionBankMatch.question.id, stale: preparedCard.stale } : undefined,
       questionBankMatches: questionBankRoute?.hits ?? [],
-      retrievedKnowledge: [
+      answerSourcePlan: sourcePlan,
+      projectQaEvidence,
+      retrievedKnowledge: sourcePlan.mode === "project_qa_direct" ? [] : [
         ...(targetProject ? [`项目回答视角政策：${resolveProjectAnswerPerspective(targetProject, relevantFactMatches[0]?.fact ?? { type: "background", title: "项目", content: "", id: "", projectId: targetProject.id, confidence: 0, verified: false, sourceIds: [] }).instruction}`] : []),
         ...(understandingContext ? [`PROJECT_UNDERSTANDING_ROUTE=${understandingRetrieval.route}\n${understandingContext}`] : []),
         ...structuredProjectRetrieval,
-        ...(preparedAnswer ? [preparedAnswer] : []),
+        ...(preparedAnswerContent && questionBankMatch?.question.scope !== "project" ? [`[GLOBAL_REFERENCE] ${preparedAnswerContent}`] : []),
         ...jobContext,
-        ...retrieved.slice(0, preparedAnswer ? 2 : 3).map((chunk) => `[${chunk.metadata.scope === "global-reference" ? "GLOBAL_REFERENCE" : chunk.metadata.scope === "project" ? "PROJECT_SOURCE" : "PROFILE_SOURCE"}] ${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`)
+        ...retrieved.slice(0, 3).map((chunk) => `[${chunk.metadata.scope === "global-reference" ? "GLOBAL_REFERENCE" : chunk.metadata.scope === "project" ? "PROJECT_SOURCE" : "PROFILE_SOURCE"}] ${chunk.metadata.filename}${chunk.metadata.documentType ? ` [${chunk.metadata.documentType}]` : ""}: ${chunk.text}`)
       ],
       recentTranscript: recentTranscript.slice(-8)
     };

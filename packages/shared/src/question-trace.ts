@@ -28,7 +28,11 @@ export interface QuestionTraceInput {
   projectId?: string;
   jobTargetId?: string;
   retrievalRoute?: string;
-  answerSource?: "llm" | "question-bank" | "project-memory" | "other";
+  answerSource?: "llm" | "question-bank" | "project-qa" | "project-memory" | "other";
+  answerSourceMode?: string;
+  qaMatchLevel?: string;
+  claimGateDecision?: "allow" | "rewrite" | "partial" | "abstain";
+  blockedClaimCount?: number;
   llmRequestAt?: number;
   answerFinishedAt?: number;
 }

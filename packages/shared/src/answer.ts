@@ -9,6 +9,7 @@ import { normalizeTechnicalTerms } from "./terminology";
 import { PersonalAnswerValidator, QuestionAnalyzer } from "./knowledge/index";
 import type { FollowUpContext } from "./follow-up-context";
 import type { QuestionBankRouteHit } from "./question-bank-router";
+import { planAnswerSource, type AnswerSourcePlan } from "./answer/project-answer-source-planner";
 import { ClaimGate } from "./answer/claim-gate";
 import { createEvidenceSnapshot, type EvidenceSnapshot } from "./answer/evidence-context";
 import { analyzeAnswerIntent, requiresPersonalClaimEvidence } from "./answer/answer-intent";
@@ -40,6 +41,16 @@ export interface AnswerSkillContext {
   relevance?: number;
 }
 
+export interface PreparedAnswer {
+  content: string;
+  score: number;
+  verified: boolean;
+  source?: string;
+  answerCardId?: string;
+  questionId?: string;
+  stale?: boolean;
+}
+
 export interface AnswerContextInput {
   profileSummary?: string;
   jobDescriptionSummary?: string;
@@ -50,8 +61,10 @@ export interface AnswerContextInput {
   experienceContext?: string[];
   personalMemoryEvidence?: string[];
   retrievedKnowledge?: string[];
-  preparedAnswer?: { content: string; score: number; verified: boolean; source?: string };
+  preparedAnswer?: PreparedAnswer;
   questionBankMatches?: QuestionBankRouteHit[];
+  answerSourcePlan?: AnswerSourcePlan;
+  projectQaEvidence?: string[];
   currentProject?: string;
   currentTopic?: string;
   currentModule?: string;
@@ -77,8 +90,10 @@ export interface ContextPack {
   experienceContext: string[];
   personalMemoryEvidence: string[];
   retrievedKnowledge: string[];
-  preparedAnswer?: { content: string; score: number; verified: boolean; source?: string };
+  preparedAnswer?: PreparedAnswer;
   questionBankMatches: QuestionBankRouteHit[];
+  answerSourcePlan?: AnswerSourcePlan;
+  projectQaEvidence: string[];
   currentProject?: string;
   currentTopic?: string;
   currentModule?: string;
@@ -107,6 +122,9 @@ function relevance(question: string, skill: AnswerSkillContext): number {
 export class ContextRouter {
   route(question: string, input: AnswerContextInput = {}): ContextPack {
     const snapshot = input.evidenceSnapshot;
+    const answerSourcePlan = snapshot?.answerSourcePlan ?? input.answerSourcePlan;
+    const projectQaEvidence = snapshot?.projectQaEvidence ?? input.projectQaEvidence ?? [];
+    const directProjectQa = answerSourcePlan?.mode === "project_qa_direct";
     const routedSessionEvidence = snapshot
       ? (snapshot.sessionEvidence ?? snapshot.candidateStatements ?? [])
       : [...(input.sessionEvidence ?? []), ...(input.candidateStatements ?? [])];
@@ -130,13 +148,15 @@ export class ContextRouter {
       skills,
       experienceContext: (snapshot?.experienceContext ?? input.experienceContext ?? []).slice(0, 5),
       personalMemoryEvidence: (snapshot?.personalMemoryEvidence ?? input.personalMemoryEvidence ?? []).slice(0, 5),
-      retrievedKnowledge: (snapshot?.retrievedKnowledge ?? input.retrievedKnowledge ?? []).slice(0, 6),
+      retrievedKnowledge: directProjectQa ? [] : (snapshot?.retrievedKnowledge ?? input.retrievedKnowledge ?? []).slice(0, 6),
       preparedAnswer: input.preparedAnswer,
       questionBankMatches: (input.questionBankMatches ?? []).slice(0, 5),
+      ...(answerSourcePlan ? { answerSourcePlan } : {}),
+      projectQaEvidence: projectQaEvidence.slice(0, 8),
       currentProject: snapshot?.currentProject ?? input.currentProject,
       currentTopic: snapshot?.currentTopic ?? input.currentTopic,
       currentModule: snapshot?.currentModule ?? input.currentModule,
-      projectEvidence: (snapshot?.projectEvidence ?? input.projectEvidence ?? input.personalMemoryEvidence ?? input.experienceContext ?? []).slice(0, 8),
+      projectEvidence: directProjectQa ? [] : (snapshot?.projectEvidence ?? input.projectEvidence ?? input.personalMemoryEvidence ?? input.experienceContext ?? []).slice(0, 8),
       verifiedResumeEvidence: (snapshot?.verifiedResumeEvidence ?? input.verifiedResumeEvidence ?? []).slice(0, 5),
       verifiedPersonalProjectFacts: (snapshot?.verifiedPersonalProjectFacts ?? input.verifiedPersonalProjectFacts ?? []).slice(0, 8),
       recentTranscript,
@@ -150,7 +170,7 @@ export class ContextRouter {
 }
 
 export interface PromptSection {
-  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "experience-context" | "evidence-context" | "retrieval-context" | "question-bank-context" | "recent-transcript" | "interview-memory" | "follow-up-context" | "conversation-history" | "question" | "output-format";
+  name: "system/base" | "interview-style" | "project-qa-context" | "profile-context" | "skill-context" | "experience-context" | "evidence-context" | "retrieval-context" | "question-bank-context" | "recent-transcript" | "interview-memory" | "follow-up-context" | "conversation-history" | "question" | "output-format";
   content: string;
 }
 
@@ -161,8 +181,9 @@ export class PromptBuilder {
     const intent = plan?.intent ?? analyzeAnswerIntent({ question: question.text, kind });
     const personalClaimRequested = requiresPersonalClaimEvidence(intent) || intent.asksBehavioralEpisode;
     const projectContextRequested = intent.asksProjectImplementation || intent.allowsProjectEvidence;
+    const sourceMode = context.answerSourcePlan?.mode;
     const sections: PromptSection[] = [
-      { name: "system/base", content: `你是实时面试辅助。先判断题型，再按题型回答。回答必须真实、直接、便于候选人马上口述；第一句必须回应面试官当前问题，不能输出“面试策略”或“面试官一般喜欢”。不要输出“题库参考答案”“Resume”“岗位要求”“结构化项目事实”等资料标签，也不要评价面试官。嵌入式问题要使用标准专业术语，并根据上下文区分 Cortex-M、ARM32、ARM64、RTOS、Embedded Linux 等语境，不能把不同平台的概念混为一谈。项目资料只能增强项目实现说明，不能决定通用技术题是否可回答；[PROJECT_SOURCE] 不能自动证明个人职责或指标，[GLOBAL_REFERENCE] 只能解释通用概念；第一人称个人事实只能来自已确认的个人或当前面试陈述。${personalClaimRequested ? "当前需要个人经历表达：可以使用可追溯的个人素材；没有确认的身份、职责、指标或结果必须弱化或明确说明。" : intent.asksProjectImplementation ? "当前问题关注项目实现：可以讲项目技术事实和通用工程方法，但不要把项目实现自动说成候选人本人负责。" : "当前不是个人经历问题：直接回答技术问题，不要为了个性化而虚构候选人经历。"}` },
+      { name: "system/base", content: `你是实时面试辅助。先判断题型，再按题型回答。回答必须真实、直接、便于候选人马上口述；第一句必须回应面试官当前问题，不能输出“面试策略”或“面试官一般喜欢”。不要输出“题库参考答案”“Resume”“岗位要求”“结构化项目事实”等资料标签，也不要评价面试官。嵌入式问题要使用标准专业术语，并根据上下文区分 Cortex-M、ARM32、ARM64、RTOS、Embedded Linux 等语境，不能把不同平台的概念混为一谈。项目资料只能增强项目实现说明，不能决定通用技术题是否可回答；[PROJECT_SOURCE] 不能自动证明个人职责或指标，[GLOBAL_REFERENCE] 只能解释通用概念；第一人称个人事实只能来自已确认的个人或当前面试陈述。${sourceMode ? `当前回答源模式：${sourceMode}。` : ""}${personalClaimRequested ? "当前需要个人经历表达：可以使用可追溯的个人素材；没有确认的身份、职责、指标或结果必须弱化或明确说明。" : intent.asksProjectImplementation ? "当前问题关注项目实现：可以讲项目技术事实和通用工程方法，但不要把项目实现自动说成候选人本人负责。" : "当前不是个人经历问题：直接回答技术问题，不要为了个性化而虚构候选人经历。"}` },
       { name: "interview-style", content: `题型：${plan?.questionType ?? kind}。回答模式：${mode}。回答策略：${selectedStrategy.openingGuidance}${selectedStrategy.spokenGuidance}${new SpokenAnswerFormatter().instructions(mode, kind, plan)}` }
     ];
     const expressionInstruction = context.expressionLevel === "expert"
@@ -171,20 +192,25 @@ export class PromptBuilder {
         ? "使用常见技术词汇；遇到不常见术语，用一句短解释说明它是什么。"
         : "优先使用简单、口语化的中文。必须使用专业词时，紧接一句通俗解释，不连续堆叠缩写。";
     sections.push({ name: "interview-style", content: `表达难度：${context.expressionLevel}。${expressionInstruction}${context.explainAdvancedTerms ? " 首次出现较难术语时，用括号或短句解释。" : " 不额外展开术语定义。"}` });
+    if ((sourceMode === "project_qa_direct" || sourceMode === "project_qa_augmented") && context.preparedAnswer?.content.trim()) {
+      const direct = sourceMode === "project_qa_direct";
+      sections.push({ name: "project-qa-context", content: `${direct ? "这是当前项目已确认的标准答案。以它为事实底稿，只做口语化改写和必要的当前问题对齐；保留原答案中的事实、技术选择、数字和边界，不要新增项目事实。" : "这是当前项目的相似标准答案。优先复用其中已确认的事实，再结合项目资料补足当前问题；不能把未确认内容写成候选人亲自负责。"}\n${context.preparedAnswer.content}` });
+    }
     const experienceRequested = personalClaimRequested;
     if (personalClaimRequested && (context.profileSummary || context.jobDescriptionSummary || context.profileInstructions)) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary, context.profileInstructions ? `候选人回答偏好：${context.profileInstructions}` : ""].filter(Boolean).join("\n") });
     if (context.skills.length > 0) sections.push({ name: "skill-context", content: context.skills.map((skill) => `${skill.name}: ${skill.content}`).join("\n") });
     if (personalClaimRequested && context.sessionEvidence.length > 0) sections.push({ name: "experience-context", content: `当前面试中候选人已经明确说过的事实（来源为 candidate_asserted，只能承接为候选人当前声称过的内容，不能擅自升级为已验证结果）：\n${context.sessionEvidence.map((item) => item.text).join("\n---\n")}` });
     if (personalClaimRequested && context.personalMemoryEvidence.length > 0) sections.push({ name: "experience-context", content: `以下是优先级最高的个人工程经验。必须用第一人称，只使用其中有证据的内容；没有记录的内容明确说资料不足：\n${context.personalMemoryEvidence.join("\n---\n")}` });
     if (experienceRequested && context.experienceContext.length > 0) sections.push({ name: "experience-context", content: `以下是真实经历素材。只使用与问题直接相关的内容，不能补写未出现的事实：\n${context.experienceContext.join("\n---\n")}` });
-    if (projectContextRequested && context.projectEvidence.length > 0) {
+    const projectKnowledgeSource = sourceMode === "project_qa_augmented" || sourceMode === "project_knowledge_generated";
+    if ((projectContextRequested || projectKnowledgeSource) && context.projectEvidence.length > 0) {
       sections.push({ name: "experience-context", content: `以下是已确认的项目技术证据。它只能支持项目实现说明，不能自动证明候选人的个人职责、指标或结果：\n${context.projectEvidence.join("\n---\n")}` });
     }
     if ((personalClaimRequested || projectContextRequested) && context.evidenceSnapshot) {
       sections.push({ name: "evidence-context", content: `证据快照已锁定：${context.evidenceSnapshot.id}（指纹 ${context.evidenceSnapshot.fingerprint}）。候选人当前面试陈述可证明“候选人声称过”，PROJECT_SOURCE 只能解释实现，不能自动证明个人职责或指标。` });
     }
     if (context.retrievedKnowledge.length > 0) sections.push({ name: "retrieval-context", content: `资料分层规则：PROJECT_SOURCE 仅辅助实现说明；GLOBAL_REFERENCE 仅解释通用知识，不能形成项目事实或个人经历。\n${context.retrievedKnowledge.join("\n---\n")}` });
-    if (context.questionBankMatches.length > 0) sections.push({ name: "question-bank-context", content: `以下是题库路由结果，仅用于选择已整理素材和判断题型；不要把题库内容当成个人经历证据：\n${context.questionBankMatches.map((hit) => `${hit.question.bankType}/${hit.question.category}（语义 ${Math.round(hit.semanticScore * 100)}%，优先级 ${hit.priority}%）：${hit.question.canonicalText}${hit.reasons.length ? ` [${hit.reasons.join(", ")}]` : ""}`).join("\n")}` });
+    if (context.questionBankMatches.length > 0 && sourceMode !== "project_qa_direct") sections.push({ name: "question-bank-context", content: `以下是题库路由结果，仅用于选择已整理素材和判断题型；不要把题库内容当成个人经历证据：\n${context.questionBankMatches.map((hit) => `${hit.question.bankType}/${hit.question.category}（语义 ${Math.round(hit.semanticScore * 100)}%，优先级 ${hit.priority}%）：${hit.question.canonicalText}${hit.reasons.length ? ` [${hit.reasons.join(", ")}]` : ""}`).join("\n")}` });
     if (context.followUpContext) {
       const followUp = context.followUpContext;
       sections.push({ name: "follow-up-context", content: [
@@ -335,6 +361,8 @@ export class AnswerAgent {
       verifiedResumeEvidence: routedContext.verifiedResumeEvidence,
       verifiedPersonalProjectFacts: routedContext.verifiedPersonalProjectFacts,
       retrievedKnowledge: routedContext.retrievedKnowledge,
+      answerSourcePlan: routedContext.answerSourcePlan,
+      projectQaEvidence: routedContext.projectQaEvidence,
       recentTranscript: routedContext.recentTranscript,
       interviewMemory: routedContext.interviewMemory,
       sessionEvidence: routedContext.sessionEvidence,
@@ -395,7 +423,7 @@ export class AnswerAgent {
     const projectContextRequested = intent.asksProjectImplementation || intent.allowsProjectEvidence;
     const explicitlyProvidedExperience = context.personalMemoryEvidence.length > 0 || context.experienceContext.length > 0 || context.projectEvidence.length > 0;
     const groundingText = [
-      ...(personalClaimRequested || projectContextRequested || explicitlyProvidedExperience ? [context.profileSummary, context.jobDescriptionSummary, ...context.sessionEvidence.map((item) => item.text), ...context.personalMemoryEvidence, ...context.experienceContext, ...context.verifiedResumeEvidence, ...context.verifiedPersonalProjectFacts, ...context.projectEvidence] : []),
+      ...(personalClaimRequested || projectContextRequested || explicitlyProvidedExperience || context.projectQaEvidence.length > 0 ? [context.profileSummary, context.jobDescriptionSummary, ...context.sessionEvidence.map((item) => item.text), ...context.personalMemoryEvidence, ...context.experienceContext, ...context.verifiedResumeEvidence, ...context.verifiedPersonalProjectFacts, ...context.projectQaEvidence, ...context.projectEvidence] : []),
       ...context.skills.map((skill) => skill.content),
       ...context.retrievedKnowledge
     ].filter(Boolean).join("\n");
@@ -403,7 +431,7 @@ export class AnswerAgent {
     const personalQuestionAnalysis = new QuestionAnalyzer().analyze(routedQuestion.text);
     const evaluateQuality = (answer: string): AnswerQualityResult => {
       let result = this.qualityChecker.check({ question: routedQuestion.text, answer, mode, kind, groundingText });
-      const spoken = this.spokenQualityChecker.check({ question: routedQuestion.text, answer, mode, kind, plan, projectEvidence: context.projectEvidence, groundingText });
+      const spoken = this.spokenQualityChecker.check({ question: routedQuestion.text, answer, mode, kind, plan, projectEvidence: [...context.projectEvidence, ...context.projectQaEvidence], groundingText });
       result = {
         ...result,
         score: Math.min(result.score, spoken.score),
@@ -416,7 +444,8 @@ export class AnswerAgent {
         ...context.personalMemoryEvidence,
         ...context.experienceContext,
         ...context.verifiedResumeEvidence,
-        ...context.verifiedPersonalProjectFacts
+        ...context.verifiedPersonalProjectFacts,
+        ...context.projectQaEvidence
       ];
       if (personalClaimRequested && personalEvidence.length > 0) {
         const validation = personalAnswerValidator.validate({
@@ -495,6 +524,12 @@ export class AnswerAgent {
         needsRepair: false
       };
     }
+    quality = {
+      ...quality,
+      claimGateDecision: claimGate.decision,
+      blockedClaimCount: claimGate.blockedClaims.length,
+      ...(context.answerSourcePlan ? { answerSourceMode: context.answerSourcePlan.mode, qaMatchLevel: context.answerSourcePlan.qaMatchLevel } : {})
+    };
     yield { type: "answer_end", answerId, text: formattedText, quality };
   }
 }

@@ -6,6 +6,10 @@ export interface AnswerQualityResult {
   issues: string[];
   suggestions: string[];
   needsRepair: boolean;
+  claimGateDecision?: "allow" | "rewrite" | "partial" | "abstain";
+  blockedClaimCount?: number;
+  answerSourceMode?: string;
+  qaMatchLevel?: string;
 }
 
 export interface AnswerQualityInput {

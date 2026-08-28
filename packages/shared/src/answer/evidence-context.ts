@@ -1,7 +1,8 @@
 import type { InterviewMemorySnapshot } from "../interview-memory";
 import type { CandidateStatementEvidence } from "./session-evidence";
+import type { AnswerSourcePlan } from "./project-answer-source-planner";
 
-export type EvidenceSource = "personal" | "project" | "retrieval" | "profile" | "job" | "candidate_statement";
+export type EvidenceSource = "personal" | "project" | "project_qa" | "retrieval" | "profile" | "job" | "candidate_statement";
 export type EvidenceTrust = "personal" | "project" | "reference";
 
 export interface EvidenceItem {
@@ -32,6 +33,8 @@ export interface EvidenceSnapshotInput {
   verifiedResumeEvidence?: readonly string[];
   verifiedPersonalProjectFacts?: readonly string[];
   retrievedKnowledge?: readonly string[];
+  answerSourcePlan?: AnswerSourcePlan;
+  projectQaEvidence?: readonly string[];
   recentTranscript?: readonly string[];
   interviewMemory?: InterviewMemorySnapshot;
   sessionEvidence?: readonly CandidateStatementEvidence[];
@@ -57,6 +60,8 @@ export interface EvidenceSnapshot {
   verifiedResumeEvidence?: string[];
   verifiedPersonalProjectFacts?: string[];
   retrievedKnowledge: string[];
+  answerSourcePlan?: AnswerSourcePlan;
+  projectQaEvidence: string[];
   recentTranscript: string[];
   interviewMemory?: InterviewMemorySnapshot;
   sessionEvidence?: CandidateStatementEvidence[];
@@ -100,6 +105,8 @@ function cloneSnapshot(snapshot: EvidenceSnapshot): EvidenceSnapshot {
     verifiedResumeEvidence: [...(snapshot.verifiedResumeEvidence ?? [])],
     verifiedPersonalProjectFacts: [...(snapshot.verifiedPersonalProjectFacts ?? [])],
     retrievedKnowledge: [...snapshot.retrievedKnowledge],
+    ...(snapshot.answerSourcePlan ? { answerSourcePlan: { ...snapshot.answerSourcePlan, ...(snapshot.answerSourcePlan.qaMatch ? { qaMatch: { ...snapshot.answerSourcePlan.qaMatch } } : {}) } } : {}),
+    projectQaEvidence: [...snapshot.projectQaEvidence],
     recentTranscript: [...snapshot.recentTranscript],
     sessionEvidence: (snapshot.sessionEvidence ?? []).map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) })),
     candidateStatements: (snapshot.candidateStatements ?? []).map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) })),
@@ -116,6 +123,7 @@ export function createEvidenceSnapshot(input: EvidenceSnapshotInput): EvidenceSn
   const verifiedResumeEvidence = clean(input.verifiedResumeEvidence, 12);
   const verifiedPersonalProjectFacts = clean(input.verifiedPersonalProjectFacts, 12);
   const retrievedKnowledge = clean(input.retrievedKnowledge, 20);
+  const projectQaEvidence = clean(input.projectQaEvidence, 8);
   const recentTranscript = clean(input.recentTranscript, 12);
   const statementMap = new Map<string, CandidateStatementEvidence>();
   [...(input.sessionEvidence ?? []), ...(input.candidateStatements ?? [])].forEach((item) => {
@@ -133,11 +141,12 @@ export function createEvidenceSnapshot(input: EvidenceSnapshotInput): EvidenceSn
   add(experienceContext, "personal", "personal", true);
   add(verifiedResumeEvidence, "profile", "personal", true);
   add(verifiedPersonalProjectFacts, "personal", "personal", true);
+  add(projectQaEvidence, "project_qa", "personal", true);
   add(projectEvidence, "project", "project", true);
   add(retrievedKnowledge, "retrieval", "reference", false);
   sessionEvidence.forEach((item) => items.push({ ...item, sourceId: item.sessionId }));
   const capturedAt = input.capturedAt ?? Date.now();
-  const fingerprint = hash(JSON.stringify({ questionId: input.questionId, profileId: input.profileId, projectId: input.projectId, jobTargetId: input.jobTargetId, profileSummary: input.profileSummary, jobDescriptionSummary: input.jobDescriptionSummary, profileInstructions: input.profileInstructions, currentProject: input.currentProject, currentModule: input.currentModule, currentTopic: input.currentTopic, personalMemoryEvidence, experienceContext, verifiedResumeEvidence, verifiedPersonalProjectFacts, projectEvidence, retrievedKnowledge, recentTranscript, sessionEvidence }));
+  const fingerprint = hash(JSON.stringify({ questionId: input.questionId, profileId: input.profileId, projectId: input.projectId, jobTargetId: input.jobTargetId, profileSummary: input.profileSummary, jobDescriptionSummary: input.jobDescriptionSummary, profileInstructions: input.profileInstructions, currentProject: input.currentProject, currentModule: input.currentModule, currentTopic: input.currentTopic, answerSourcePlan: input.answerSourcePlan, projectQaEvidence, personalMemoryEvidence, experienceContext, verifiedResumeEvidence, verifiedPersonalProjectFacts, projectEvidence, retrievedKnowledge, recentTranscript, sessionEvidence }));
   return {
     id: `evidence-snapshot-${input.questionId}-${fingerprint}`,
     questionId: input.questionId,
@@ -157,6 +166,8 @@ export function createEvidenceSnapshot(input: EvidenceSnapshotInput): EvidenceSn
     verifiedResumeEvidence,
     verifiedPersonalProjectFacts,
     retrievedKnowledge,
+    ...(input.answerSourcePlan ? { answerSourcePlan: { ...input.answerSourcePlan, ...(input.answerSourcePlan.qaMatch ? { qaMatch: { ...input.answerSourcePlan.qaMatch } } : {}) } } : {}),
+    projectQaEvidence,
     recentTranscript,
     sessionEvidence,
     candidateStatements,

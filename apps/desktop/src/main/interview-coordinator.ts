@@ -737,6 +737,7 @@ export class InterviewCoordinator extends EventEmitter {
         return;
       }
       const memorySnapshot = frozenContext.memory;
+      const projectQaDirect = providerContext.answerSourcePlan?.mode === "project_qa_direct";
       const evidenceSnapshot: EvidenceSnapshot = this.contextLock.lock({
         questionId: question.id,
         profileId: this.activeProfileId,
@@ -750,10 +751,12 @@ export class InterviewCoordinator extends EventEmitter {
         currentTopic: providerContext.currentTopic ?? frozenContext.memory.currentTopic,
         personalMemoryEvidence: providerContext.personalMemoryEvidence,
         experienceContext: providerContext.experienceContext,
-        projectEvidence: providerContext.projectEvidence,
+        projectEvidence: projectQaDirect ? [] : providerContext.projectEvidence,
         verifiedResumeEvidence: providerContext.verifiedResumeEvidence,
         verifiedPersonalProjectFacts: providerContext.verifiedPersonalProjectFacts,
-        retrievedKnowledge: providerContext.retrievedKnowledge,
+        retrievedKnowledge: projectQaDirect ? [] : providerContext.retrievedKnowledge,
+        answerSourcePlan: providerContext.answerSourcePlan,
+        projectQaEvidence: providerContext.projectQaEvidence,
         recentTranscript: frozenContext.recentTranscript,
         interviewMemory: memorySnapshot,
         sessionEvidence: frozenContext.sessionEvidence,
@@ -774,6 +777,8 @@ export class InterviewCoordinator extends EventEmitter {
         interviewMemory: evidenceSnapshot.interviewMemory,
         sessionEvidence: evidenceSnapshot.sessionEvidence,
         candidateStatements: evidenceSnapshot.candidateStatements,
+        answerSourcePlan: evidenceSnapshot.answerSourcePlan,
+        projectQaEvidence: evidenceSnapshot.projectQaEvidence,
         evidenceSnapshot
       };
       if (answerOperation) answerOperation.state = "provider_pending";
@@ -800,7 +805,9 @@ export class InterviewCoordinator extends EventEmitter {
       const requiresPersonalGrounding = requiresPersonalClaimEvidence(answerIntent)
         || answerIntent.asksBehavioralEpisode
         || (isFollowUp && (/项目|简历|经历|负责|做过|成果|业绩/.test(personalThreadText) || (lockedProviderContext.sessionEvidence?.length ?? 0) > 0));
-      if (preparedAnswer && preparedAnswer.verified && preparedAnswer.score >= 0.88 && !streamOptions.hasScreenshot && !isProjectQuestion && !answerIntent.requiresPersonalIdentity && !requiresPersonalGrounding) {
+      const projectQaMode = lockedProviderContext.answerSourcePlan?.mode;
+      const requiresClaimValidation = requiresPersonalGrounding || projectQaMode === "project_qa_direct" || projectQaMode === "project_qa_augmented";
+      if (preparedAnswer && preparedAnswer.verified && preparedAnswer.score >= 0.88 && !streamOptions.hasScreenshot && !isProjectQuestion && !answerIntent.requiresPersonalIdentity && !requiresClaimValidation) {
         this.emitDiagnostic("QUESTION_BANK_DIRECT_HIT");
         const answerId = `question-bank-answer-${question.id}-${startedAt}`;
         const finishedAt = this.now();
@@ -843,7 +850,7 @@ export class InterviewCoordinator extends EventEmitter {
         return;
       }
       const context = { ...lockedProviderContext, recentTranscript: lockedProviderContext.recentTranscript ?? [...frozenContext.recentTranscript], interviewMemory: lockedProviderContext.interviewMemory ?? memorySnapshot, ...(followUpContext ? { followUpContext } : {}) };
-      answerTrace?.update({ answerSource: "llm" }).mark("llmRequestStarted", this.now());
+      answerTrace?.update({ answerSource: projectQaMode ? "project-qa" : "llm", ...(projectQaMode ? { answerSourceMode: projectQaMode, qaMatchLevel: lockedProviderContext.answerSourcePlan?.qaMatchLevel } : {}) }).mark("llmRequestStarted", this.now());
       this.recordRuntimeTrace("PROVIDER_STREAM_REQUESTED", {}, { questionId: question.id, providerRequestId });
       if (streamOptions.screenshotRequestId) {
         this.recordScreenshotTrace("VISION_PROVIDER_REQUEST_STARTED", streamOptions.screenshotRequestId, { providerRequestId, status: "provider_pending", messageShape: "multimodal" });
@@ -858,10 +865,9 @@ export class InterviewCoordinator extends EventEmitter {
         ...streamOptions,
         // Project answers are buffered until claim/evidence validation has
         // passed. Generic technical answers can still stream immediately.
-        directDisplay: requiresPersonalGrounding,
-        emitDeltas: !requiresPersonalGrounding,
-        allowQualityRepair: requiresPersonalGrounding,
-        strictPersonalGrounding: requiresPersonalGrounding,
+        directDisplay: requiresClaimValidation,
+        emitDeltas: !requiresClaimValidation,
+        allowQualityRepair: requiresClaimValidation,
         formatAnswer: true,
         maxRetries: 1,
         preferFastRoute: this.activeOptions?.automationMode === "AUTO" && !streamOptions.hasScreenshot,
@@ -931,6 +937,7 @@ export class InterviewCoordinator extends EventEmitter {
           this.recordRuntimeTrace("PROVIDER_STREAM_COMPLETED", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
           if (streamOptions.screenshotRequestId) this.recordScreenshotTrace("VISION_RESPONSE_COMPLETED", streamOptions.screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "completed" });
           answerTrace?.mark("answerEnded", finishedAt);
+          if (event.quality) answerTrace?.update({ answerSourceMode: event.quality.answerSourceMode, qaMatchLevel: event.quality.qaMatchLevel, claimGateDecision: event.quality.claimGateDecision, blockedClaimCount: event.quality.blockedClaimCount });
           if (event.quality?.issues.includes("QUALITY_UNGROUNDED_CLAIM")) this.emitDiagnostic("QUALITY_UNGROUNDED_CLAIM");
           if (event.quality?.issues.includes("strict-grounding-fallback")) this.emitDiagnostic("STRICT_GROUNDING_FALLBACK");
           const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;

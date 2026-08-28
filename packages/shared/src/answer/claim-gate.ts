@@ -67,7 +67,8 @@ function personalEvidence(input: ClaimGateInput): string[] {
     ...(snapshot?.personalMemoryEvidence ?? []),
     ...(snapshot?.experienceContext ?? []),
     ...(snapshot?.verifiedResumeEvidence ?? []),
-    ...(snapshot?.verifiedPersonalProjectFacts ?? [])
+    ...(snapshot?.verifiedPersonalProjectFacts ?? []),
+    ...(snapshot?.projectQaEvidence ?? [])
   ]);
 }
 
