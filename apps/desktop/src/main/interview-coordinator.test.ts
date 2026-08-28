@@ -318,7 +318,11 @@ describe("InterviewCoordinator software E2E", () => {
     const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
     const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, history, now: () => clock });
     const messages: Array<{ type: string; reason?: string }> = [];
-    coordinator.on("event", (event: { type: string; message?: { type: string; reason?: string } }) => { if (event.type === "realtime_message" && event.message) messages.push(event.message); });
+    const questionEvents: Array<{ type: string; question?: { id: string; groupId?: string; relationType?: string } }> = [];
+    coordinator.on("event", (event: { type: string; message?: { type: string; reason?: string }; event?: { type: string; question?: { id: string; groupId?: string; relationType?: string } } }) => {
+      if (event.type === "realtime_message" && event.message) messages.push(event.message);
+      if (event.type === "question" && event.event) questionEvents.push(event.event);
+    });
     await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "AUTO", answerMode: "NORMAL" });
     realtime.emit("transcript", {}, { id: "q1", source: "remote", text: "为什么要分层？", startMs: 0, endMs: 900, final: true });
     clock = 1_600;
@@ -332,6 +336,10 @@ describe("InterviewCoordinator software E2E", () => {
     releaseFirst();
     for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
     expect(messages.filter((message) => message.type === "answer_end")).toHaveLength(2);
+    const confirmed = questionEvents.filter((event) => event.type === "question_confirmed");
+    expect(confirmed).toHaveLength(2);
+    expect(confirmed[1]?.question?.groupId).toBe(confirmed[0]?.question?.groupId);
+    expect(confirmed[1]?.question?.relationType).toBe("FOLLOW_UP");
     const snapshot = history.snapshot(coordinator.interviewId!);
     expect(snapshot.answers.map((answer) => answer.text)).toEqual(["第一题答案完成", "第二题答案"]);
     expect(snapshot.questions.every((question) => question.status === "answered")).toBe(true);

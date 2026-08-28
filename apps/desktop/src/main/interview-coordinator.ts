@@ -12,6 +12,9 @@ import {
   resolveContextualTerminology,
   ContextAnchorResolver,
   ContextAnchorStore,
+  AnswerScheduler,
+  QuestionGroupManager,
+  TurnBuilder,
   SpeechActClassifier,
   shouldHardRejectSpeechAct,
   QuestionTrace,
@@ -32,6 +35,7 @@ import {
   type SessionState,
   type TranscriptRecord,
   type TranscriptUtterance,
+  type InterviewTurn,
   type VisionInput
 } from "@interview-copilot/shared";
 import type { AudioStartOptions } from "./audio-manager";
@@ -170,6 +174,10 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly speechActClassifier = new SpeechActClassifier();
   private readonly anchorResolver = new ContextAnchorResolver();
   private readonly anchorStore: ContextAnchorStore;
+  private readonly turnBuilder = new TurnBuilder();
+  private readonly questionGroups = new QuestionGroupManager(this.turnBuilder);
+  private readonly answerScheduler = new AnswerScheduler();
+  private readonly turns = new Map<string, InterviewTurn>();
   private readonly contextProvider: (question: QuestionCandidate, profileId: string, recentTranscript: string[], context?: InterviewContextSelection) => AnswerContextInput | Promise<AnswerContextInput>;
   private defaultAutomationMode: "MANUAL" | "AUTO";
   private activeInterviewId: string | undefined;
@@ -441,6 +449,9 @@ export class InterviewCoordinator extends EventEmitter {
       this.activeOptions = { ...startOptions, automationMode };
       this.activeProfileId = startOptions.profileId;
       this.detector.reset();
+      this.questionGroups.reset();
+      this.answerScheduler.reset();
+      this.turns.clear();
       this.anchorStore.reset();
       this.memory.reset();
       this.clearAnswerTrigger();
@@ -554,6 +565,9 @@ export class InterviewCoordinator extends EventEmitter {
     this.clearRuntimeTimers();
     this.finalQuestionQueue = undefined;
     this.detector.reset();
+    this.questionGroups.reset();
+    this.answerScheduler.reset();
+    this.turns.clear();
     this.anchorStore.reset();
     this.memory.reset();
     this.historyQuestionIds.clear();
@@ -636,12 +650,23 @@ export class InterviewCoordinator extends EventEmitter {
       ...(this.currentQuestion?.id === question.id && this.currentQuestionTrace ? { trace: this.currentQuestionTrace } : {})
     };
     this.answerContextSnapshots.set(question.id, frozenContext);
-    if (this.answerController) {
+    const schedulerDecision = this.answerScheduler.request({
+      id: question.id,
+      text: question.text,
+      ...(question.groupId ? { groupId: question.groupId } : {}),
+      ...(question.relationType ? { relationType: question.relationType } : {})
+    }, {
+      now: this.now(),
+      ...(question.groupId ? { groupId: question.groupId } : {}),
+      ...(question.relationType ? { relationType: question.relationType } : {})
+    });
+    if (schedulerDecision.action !== "start") {
       const alreadyQueued = this.answerQueue.some((queued) => queued.id === question.id);
-      if (!alreadyQueued && this.activeAnswerQuestion?.id !== question.id) {
+      if (!alreadyQueued && schedulerDecision.action !== "ignore" && this.activeAnswerQuestion?.id !== question.id) {
         this.answerQueue.push(question);
         this.markQuestionState(question, "queued");
-        this.recordRuntimeTrace("QUESTION_QUEUED", {}, { questionId: question.id, reasonCode: "serial-answer-policy" });
+        this.questionGroups.mark(question.id, "queued");
+        this.recordRuntimeTrace("QUESTION_QUEUED", { schedulerAction: schedulerDecision.action }, { questionId: question.id, reasonCode: schedulerDecision.reason });
         this.emitDiagnostic(`ANSWER_QUEUED: ${question.id} (${this.answerQueue.length})`);
       }
       return;
@@ -659,6 +684,7 @@ export class InterviewCoordinator extends EventEmitter {
     const answerTrace = frozenContext.trace;
     this.activeQuestionTrace = answerTrace;
     this.detector.markAnswering(question.id);
+    this.questionGroups.mark(question.id, "answering");
     this.markQuestionStateById(question.id, "answering");
     this.options.history?.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "answering");
     const controller = this.runtimeAbortControllers.create(operationId);
@@ -737,6 +763,7 @@ export class InterviewCoordinator extends EventEmitter {
         this.answerFirstTokenAt = finishedAt;
         this.emitRealtimeMessage({ type: "answer_start", answerId, questionId: question.id, mode, model: "question-bank" });
         const preparedText = normalizeTechnicalTerms(preparedAnswer.content);
+        this.answerScheduler.markVisibleOutput(preparedText);
         const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
         this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: preparedText, model: "question-bank", mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
         if (answerOperation) answerOperation.state = "committed";
@@ -746,6 +773,7 @@ export class InterviewCoordinator extends EventEmitter {
         this.emitQuestionTrace(answerTrace);
         this.memory.recordAnswer(preparedText, { question: question.text, createdAt: finishedAt });
         this.detector.markAnswered(question.id);
+        this.questionGroups.mark(question.id, "answered");
         this.markQuestionStateById(question.id, "answered");
         this.markQuestionStateById(question.id, "finished");
         this.recordRuntimeTrace("QUESTION_FINISHED", {}, { questionId: question.id, answerId, providerRequestId, reasonCode: "answer-committed" });
@@ -807,6 +835,7 @@ export class InterviewCoordinator extends EventEmitter {
           this.emitRealtimeMessage({ type: "answer_start", answerId: event.answerId, questionId: event.questionId, mode: event.mode, model: event.model });
         } else if (event.type === "answer_delta") {
           this.accumulatedAnswerText += event.delta;
+          this.answerScheduler.observeOutput(event.delta);
           const firstTokenAt = this.answerFirstTokenAt ?? this.now();
           const firstToken = this.answerFirstTokenAt === undefined;
           this.answerFirstTokenAt = firstTokenAt;
@@ -856,6 +885,7 @@ export class InterviewCoordinator extends EventEmitter {
           this.emitQuestionTrace(answerTrace);
           this.memory.recordAnswer(answerText, { question: question.text, createdAt: finishedAt });
           this.detector.markAnswered(question.id);
+          this.questionGroups.mark(question.id, "answered");
           this.markQuestionStateById(question.id, "answered");
           this.markQuestionStateById(question.id, "finished");
           this.recordRuntimeTrace("QUESTION_FINISHED", {}, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "answer-committed" });
@@ -915,6 +945,7 @@ export class InterviewCoordinator extends EventEmitter {
         if (this.activeAnswerQuestion?.id === question.id) this.activeAnswerQuestion = undefined;
         if (this.activeQuestionTrace === answerTrace) this.activeQuestionTrace = undefined;
         this.answerContextSnapshots.delete(question.id);
+        this.answerScheduler.complete(question.id, { activateNext: false });
         const next = this.answerQueue.shift();
         if (next && this.running) this.launchAnswer(next);
       }
@@ -1001,8 +1032,20 @@ export class InterviewCoordinator extends EventEmitter {
         this.recordRuntimeTrace("QUESTION_DETECTED", { textLength: inputEvent.question.text.length }, { questionId: inputEvent.question.id });
       }
     }
-    const event = this.linkQuestionThread(inputEvent);
+    let event = this.linkQuestionThread(inputEvent);
     if (event.type === "question_confirmed" || event.type === "question_superseded") {
+      const turn = event.question.turnId
+        ? this.turns.get(event.question.turnId)
+        : event.question.utteranceId
+          ? this.turns.get(event.question.utteranceId)
+          : undefined;
+      const groupResult = this.questionGroups.add({
+        turn: turn ?? this.turnBuilder.build({ id: event.question.turnId ?? event.question.utteranceId, text: event.question.text, receivedAt: event.question.detectedAt }),
+        question: event.question,
+        now: this.now(),
+        ...(event.type === "question_superseded" ? { relationType: "ASR_REVISION" as const } : {})
+      });
+      event = { ...event, question: groupResult.item.question };
       this.markQuestionState(event.question, "confirmed");
       this.recordRuntimeTrace("QUESTION_CONFIRMED", { textLength: event.question.text.length }, { questionId: event.question.id, reasonCode: event.type });
       this.currentQuestion = event.question;
@@ -1029,10 +1072,21 @@ export class InterviewCoordinator extends EventEmitter {
       }
       if (event.type === "question_superseded") {
         const previousId = this.historyQuestionIds.get(event.previousQuestionId);
-        if (previousId) this.history.updateQuestionStatus?.(previousId, "superseded");
-        this.detector.markSuperseded(event.previousQuestionId);
-        this.markQuestionStateById(event.previousQuestionId, "cancelled");
-        this.recordRuntimeTrace("QUESTION_CANCELLED", {}, { questionId: event.previousQuestionId, reasonCode: "superseded" });
+        const relationIsRevision = event.question.relationType === "ASR_REVISION";
+        const revisionCanReplace = relationIsRevision && this.answerScheduler.canCancel("asr_revision");
+        // A detector supersede is a relationship signal, not permission to
+        // tear down a visible answer. Only an explicit ASR revision before
+        // effective output may replace the active answer; follow-ups and
+        // augmentations remain in the scheduler queue.
+        if (revisionCanReplace && this.activeAnswerQuestion?.id === event.previousQuestionId) {
+          this.cancelAnswer("superseded", "asr-revision-before-output");
+        } else if (!this.activeAnswerQuestion || this.activeAnswerQuestion.id !== event.previousQuestionId) {
+          if (previousId) this.history.updateQuestionStatus?.(previousId, "superseded");
+          this.detector.markSuperseded(event.previousQuestionId);
+          this.questionGroups.mark(event.previousQuestionId, "cancelled");
+          this.markQuestionStateById(event.previousQuestionId, "cancelled");
+          this.recordRuntimeTrace("QUESTION_CANCELLED", {}, { questionId: event.previousQuestionId, reasonCode: relationIsRevision ? "asr-revision" : "superseded" });
+        }
       }
     }
     this.emitEvent({ type: "question", event });
@@ -1134,6 +1188,8 @@ export class InterviewCoordinator extends EventEmitter {
 
   private async observeFinalQuestion(utterance: TranscriptUtterance, sessionGeneration = this.sessionGeneration): Promise<void> {
     if (sessionGeneration !== this.sessionGeneration || !this.activeInterviewId) return;
+    const turn = this.turnBuilder.build(utterance);
+    this.turns.set(turn.id, turn);
     const detectionStartedAt = this.now();
     const trace = new QuestionTrace({
       questionTraceId: `question-trace-${utterance.id}`,
@@ -1283,6 +1339,9 @@ export class InterviewCoordinator extends EventEmitter {
           ...event.question,
           text: canonicalQuestion,
           canonicalQuestion,
+          utteranceId: utterance.id,
+          segmentIds: [...utterance.segmentIds],
+          turnId: turn.id,
           ...(resolved.parentQuestionId ? { parentQuestionId: resolved.parentQuestionId } : {}),
           ...(resolved.rootQuestionId ? { rootQuestionId: resolved.rootQuestionId } : {}),
           ...(resolved.anchorUsed ? { anchorId: resolved.anchorUsed.id } : {})
@@ -1348,6 +1407,9 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private cancelAnswer(reason: "user" | "superseded" | "timeout", traceReasonCode: string = reason): void {
+    const schedulerReason = reason === "timeout" ? "provider_timeout" : reason === "superseded" ? "asr_revision" : "user";
+    const schedulerCancellation = this.answerScheduler.cancel(schedulerReason);
+    if (reason === "superseded" && !schedulerCancellation.cancelled) return;
     this.answerGeneration += 1;
     const activeOperation = [...this.runtimeAnswers.values()].find((answer) => answer.controller === this.answerController);
     const answerId = this.answerId;

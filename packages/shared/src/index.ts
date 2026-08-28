@@ -271,6 +271,12 @@ export interface QuestionCandidate {
   codeContext?: boolean;
   anchorId?: string;
   canonicalQuestion?: string;
+  /** Runtime turn/group metadata added after final ASR assembly. */
+  utteranceId?: string;
+  segmentIds?: string[];
+  turnId?: string;
+  groupId?: string;
+  relationType?: "ASR_REVISION" | "SAME_QUESTION_AUGMENTATION" | "PARALLEL_SUBQUESTION" | "FOLLOW_UP" | "NEW_TOPIC";
 }
 
 export type QuestionEvent =
@@ -550,6 +556,9 @@ export * from "./interview-memory";
 export * from "./interview/speech-act-classifier";
 export * from "./interview/context-anchor-store";
 export * from "./interview/context-anchor-resolver";
+export * from "./interview/turn-builder";
+export * from "./interview/question-group";
+export * from "./interview/answer-scheduler";
 export * from "./question-trace";
 export * from "./question";
 export * from "./profile-builder";
