@@ -1,68 +1,21 @@
 import type { AnswerMode, AnswerQuestionKind } from "../answer";
-import { normalizeTechnicalTerms } from "../terminology";
+import { SpokenAnswerFormatter } from "./spoken-answer-formatter";
 
-export const ANSWER_LENGTH_POLICY: Record<AnswerMode, { min: number; max: number }> = {
-  FAST: { min: 20, max: 60 },
-  NORMAL: { min: 60, max: 130 },
-  DEEP: { min: 120, max: 250 }
-};
+// Compatibility boundary for callers that still use the old formatter name.
+import { ANSWER_LENGTH_POLICY, CODE_LENGTH_POLICY } from "./answer-length-controller";
 
-const CODE_LENGTH_POLICY: Record<AnswerMode, { min: number; max: number }> = {
-  FAST: { min: 80, max: 900 },
-  NORMAL: { min: 160, max: 1_800 },
-  DEEP: { min: 260, max: 3_200 }
-};
+export { ANSWER_LENGTH_POLICY, CODE_LENGTH_POLICY } from "./answer-length-controller";
 
-function cleanMarkdown(text: string): string {
-  return text
-    .replace(/\r\n?/g, "\n")
-    .replace(/^\s*#{1,6}\s+[^\n]*$/gm, "")
-    .replace(/^\s*[-*•]\s+/gm, "")
-    .replace(/^\s*\d+[.)]\s+/gm, "")
-    .split("\n")
-    .map((line) => line.replace(/[ \t]+/g, " ").trim())
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function naturalize(text: string): string {
-  return text
-    .replace(/^(综上所述|综上|总的来说)[，,：:]?\s*/i, "")
-    .replace(/首先[，,：:]?/g, "我一般先")
-    .replace(/其次[，,：:]?/g, "然后")
-    .replace(/因此/g, "所以")
-    .replace(/需要注意的是[，,：:]?/g, "我会特别注意")
-    .replace(/该项目/g, "这个项目")
-    .replace(/本项目/g, "我的项目")
-    .replace(/进行(了)?/g, "做了")
-    .replace(/[ \t]+/g, " ")
-    .replace(/[ \t]*\n[ \t]*/g, "\n")
-    .trim();
-}
-
-function sentenceParts(text: string): string[] {
-  const compact = text.replace(/\n+/g, " ").replace(/[ \t]+/g, " ").trim();
-  if (!compact) return [];
-  return (compact.match(/[^。！？!?；;]+(?:[。！？!?；;]|$)/g) ?? [compact])
-    .map((sentence) => sentence.trim())
-    .filter(Boolean);
-}
-
-function groupSpokenBlocks(text: string, mode: AnswerMode): string {
-  const sentences = text.split(/\n{2,}/).flatMap(sentenceParts);
-  if (sentences.length <= 1) return text.trim();
-  const targetBlocks = mode === "FAST" ? 2 : mode === "DEEP" ? 6 : 4;
-  const blockCount = Math.min(targetBlocks, sentences.length);
-  const perBlock = Math.ceil(sentences.length / blockCount);
-  const blocks: string[] = [];
-  for (let index = 0; index < sentences.length; index += perBlock) blocks.push(sentences.slice(index, index + perBlock).join(""));
-  return blocks.join("\n\n").trim();
-}
-
-/** Converts provider output into compact, spoken interview language at the final boundary. */
+/**
+ * Compatibility facade for integrations that still use the pre-Phase-1 name.
+ * The live answer path uses SpokenAnswerFormatter directly.
+ */
 export class InterviewAnswerFormatter {
-  policy(mode: AnswerMode, kind: AnswerQuestionKind = "technical"): { min: number; max: number } { return kind === "code" ? CODE_LENGTH_POLICY[mode] : ANSWER_LENGTH_POLICY[mode]; }
+  private readonly spokenFormatter = new SpokenAnswerFormatter();
+
+  policy(mode: AnswerMode, kind: AnswerQuestionKind = "technical"): { min: number; max: number } {
+    return kind === "code" ? CODE_LENGTH_POLICY[mode] : ANSWER_LENGTH_POLICY[mode];
+  }
 
   instructions(mode: AnswerMode, kind: AnswerQuestionKind = "technical"): string {
     const { min, max } = this.policy(mode, kind);
@@ -72,15 +25,6 @@ export class InterviewAnswerFormatter {
   }
 
   format(text: string, mode: AnswerMode, kind: AnswerQuestionKind = "technical"): string {
-    if (kind === "code") return text.replace(/\r\n/g, "\n").trim();
-    // The model can still spell an embedded term inconsistently even when
-    // ASR was corrected. Normalize the completed answer at the local output
-    // boundary so the candidate sees one canonical vocabulary.
-    const clean = naturalize(normalizeTechnicalTerms(cleanMarkdown(text)));
-    if (!clean) return "";
-    // The provider receives an explicit output-token budget. Do not slice the
-    // final answer here: slicing is what previously removed the tail of a
-    // valid explanation and could leave the user with an incomplete answer.
-    return groupSpokenBlocks(clean, mode);
+    return this.spokenFormatter.format(text, mode, kind);
   }
 }

@@ -38,6 +38,27 @@ describe("Answer routing and generation", () => {
     expect(prompt).toContain("首次出现较难术语");
   });
 
+  it("passes a structured answer plan into the provider prompt", async () => {
+    let prompt = "";
+    const planningProvider: AnswerProvider = {
+      stream: async function* (request) {
+        prompt = request.sections.map((section) => section.content).join("\n");
+        yield "我负责这个项目的通信模块。";
+      }
+    };
+    for await (const event of new AnswerAgent({ normal: planningProvider }, new ModelRouter({ normal: "test-model" })).stream(
+      { id: "planned", text: "介绍一下你负责的项目" },
+      "NORMAL",
+      { currentProject: "通信项目", projectEvidence: ["我负责通信模块"] },
+      undefined,
+      { allowQualityRepair: false }
+    )) void event;
+    expect(prompt).toContain("题型：project");
+    expect(prompt).toContain("结构顺序：project_background");
+    expect(prompt).toContain("目标口述时长约");
+    expect(prompt).toContain("我负责通信模块");
+  });
+
   it("keeps code answers complete instead of slicing the tail", () => {
     const code = "思路：双指针。\n```cpp\nint main() { return 0; }\n```\n复杂度 O(1)。";
     expect(new InterviewAnswerFormatter().format(code, "NORMAL", "code")).toBe(code);

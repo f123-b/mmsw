@@ -1,5 +1,5 @@
 import type { AnswerMode, AnswerQuestionKind } from "../answer";
-import { ANSWER_LENGTH_POLICY } from "./interview-answer-formatter";
+import { AnswerLengthController } from "./answer-length-controller";
 
 export interface AnswerQualityResult {
   score: number;
@@ -18,22 +18,24 @@ export interface AnswerQualityInput {
 
 /** Lightweight deterministic guardrail; it does not call an LLM or alter SQLite data. */
 export class AnswerQualityChecker {
+  private readonly lengthController = new AnswerLengthController();
+
   check(input: AnswerQualityInput): AnswerQualityResult {
     const issues: string[] = [];
     const suggestions: string[] = [];
     const kind = input.kind ?? "technical";
-    const policy = kind === "code" ? { min: 80, max: 3_200 } : ANSWER_LENGTH_POLICY[input.mode];
+    const policy = this.lengthController.policy(input.mode, kind);
     const answer = input.answer.trim();
     const grounding = `${input.groundingText || ""} ${input.question}`.toLowerCase();
     let score = 1;
-    if (answer.length < policy.min && input.mode !== "FAST") {
+    if (answer.length < policy.minCharacters && input.mode !== "FAST") {
       issues.push("answer-too-short");
-      suggestions.push(`补充到约 ${policy.min}~${policy.max} 字，补足题型要求的关键内容`);
+      suggestions.push(`补充到约 ${policy.minCharacters}~${policy.maxCharacters} 字，补足题型要求的关键内容`);
       score -= 0.18;
     }
-    if (answer.length > policy.max) {
+    if (answer.length > policy.maxCharacters) {
       issues.push("answer-too-long");
-      suggestions.push(`压缩到约 ${policy.min}~${policy.max} 字`);
+      suggestions.push(`压缩到约 ${policy.minCharacters}~${policy.maxCharacters} 字`);
       score -= 0.2;
     }
     if ((kind === "project" || kind === "behavioral") && !/(我|我们|我会|我一般|在项目中|我的)/.test(answer)) {
