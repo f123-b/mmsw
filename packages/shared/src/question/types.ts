@@ -2,6 +2,7 @@ import type { InterviewMemorySnapshot } from "../interview-memory";
 import type { QuestionCategory, QuestionClassification } from "../question-classifier";
 import type { InterviewSpeechAct, SpeechActAnchorContext } from "../interview/speech-act-classifier";
 import type { TerminologyCorrection } from "../terminology";
+import type { QuestionSemanticFrame } from "./semantic-frame";
 
 export type QuestionDetectionType = "technical" | "project" | "behavior" | "follow_up" | "clarification" | "not_question";
 export type QuestionSpeechAct = InterviewSpeechAct | "SMALL_TALK" | "INSTRUCTION";
@@ -66,5 +67,6 @@ export interface QuestionAnalysis extends QuestionDetectionResult {
   contextRelation?: "standalone" | "follow_up" | "continuation" | "repair";
   inheritedTopic?: string;
   topic?: string;
+  semanticFrame?: QuestionSemanticFrame;
   terminologyCorrections?: TerminologyCorrection[];
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { planAnswerSource } from "./project-answer-source-planner";
+import { matchCoreTechnicalQa } from "./core-technical-qa";
 import type { ProjectQaRouteResult } from "../question-bank-router";
 
 const projectQa = (level: ProjectQaRouteResult["level"], verified = true): ProjectQaRouteResult => ({
@@ -42,6 +43,11 @@ const projectQa = (level: ProjectQaRouteResult["level"], verified = true): Proje
 });
 
 describe("Project QA answer source planner", () => {
+  it("routes verified high-risk general facts before project evidence", () => {
+    const core = matchCoreTechnicalQa("CAN 总线如何仲裁？");
+    expect(core?.verified).toBe(true);
+    expect(planAnswerSource({ projectId: "foc", projectAnchorAvailable: true, projectQuestion: false, coreTechnicalQa: core }).mode).toBe("general_core_qa");
+  });
   it("keeps a selected project as an anchor without routing a generic question to project QA", () => {
     expect(planAnswerSource({ projectId: "foc", projectAnchorAvailable: true, projectQuestion: false }).mode).toBe("general_technical");
     expect(planAnswerSource({ projectId: "foc", projectAnchorAvailable: true, projectQuestion: false })).toMatchObject({ projectAnchorAvailable: true, projectQuestionRequested: false, allowProjectKnowledge: false });

@@ -3,6 +3,7 @@ import { normalizeTechnicalTerms } from "../terminology";
 import { AnswerLengthController } from "./answer-length-controller";
 import type { AnswerPlan } from "./answer-planner";
 import type { AnswerQuestionKind } from "./answer-strategy";
+import { applyChineseTechnicalLanguagePolicy } from "./chinese-technical-language-policy";
 
 function cleanMarkdown(text: string): string {
   return text
@@ -87,7 +88,7 @@ export class SpokenAnswerFormatter {
 
   format(text: string, mode: AnswerMode, kind: AnswerQuestionKind = "technical", plan?: AnswerPlan): string {
     if (kind === "code") return text.replace(/\r\n/g, "\n").trim();
-    const clean = removeReplacementArtifacts(removeModelThroat(normalizeTechnicalTerms(cleanMarkdown(text))));
+    const clean = removeReplacementArtifacts(removeModelThroat(applyChineseTechnicalLanguagePolicy(normalizeTechnicalTerms(cleanMarkdown(text)))));
     if (!clean) return "";
     const maxSentenceCharacters = plan?.length.maxSentenceCharacters ?? this.policy(mode, kind).maxSentenceCharacters;
     return groupSpokenBlocks(clean, mode, maxSentenceCharacters);

@@ -764,6 +764,13 @@ export class SqliteDatabase {
         ALTER TABLE questions ADD COLUMN topic TEXT;
         ALTER TABLE questions ADD COLUMN terminology_corrections_json TEXT NOT NULL DEFAULT '[]';
       `],
+      [28, `
+        ALTER TABLE questions ADD COLUMN semantic_frame TEXT;
+      `],
+      [29, `
+        ALTER TABLE profiles ADD COLUMN company_context TEXT;
+        ALTER TABLE profiles ADD COLUMN salary_expectation_json TEXT;
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -807,7 +814,7 @@ export class SqliteProfileRepository {
   save(input: Profile | ProfileInput, now = Date.now()): Profile {
     const existing = "id" in input ? input : undefined;
     const profile = existing ? { ...existing, updatedAt: now } : createProfile(input, now);
-    this.database.run("INSERT INTO profiles(id, name, language, resume_json, job_description_json, instructions, expression_level, explain_advanced_terms, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, language=excluded.language, resume_json=excluded.resume_json, job_description_json=excluded.job_description_json, instructions=excluded.instructions, expression_level=excluded.expression_level, explain_advanced_terms=excluded.explain_advanced_terms, updated_at=excluded.updated_at", [profile.id, profile.name, profile.language, profile.resume ? JSON.stringify(profile.resume) : null, profile.jobDescription ? JSON.stringify(profile.jobDescription) : null, profile.instructions ?? null, profile.expressionLevel ?? "plain", profile.explainAdvancedTerms === false ? 0 : 1, profile.createdAt, profile.updatedAt]);
+    this.database.run("INSERT INTO profiles(id, name, language, resume_json, job_description_json, instructions, expression_level, explain_advanced_terms, company_context, salary_expectation_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, language=excluded.language, resume_json=excluded.resume_json, job_description_json=excluded.job_description_json, instructions=excluded.instructions, expression_level=excluded.expression_level, explain_advanced_terms=excluded.explain_advanced_terms, company_context=excluded.company_context, salary_expectation_json=excluded.salary_expectation_json, updated_at=excluded.updated_at", [profile.id, profile.name, profile.language, profile.resume ? JSON.stringify(profile.resume) : null, profile.jobDescription ? JSON.stringify(profile.jobDescription) : null, profile.instructions ?? null, profile.expressionLevel ?? "plain", profile.explainAdvancedTerms === false ? 0 : 1, profile.companyContext ?? null, profile.salaryExpectation ? JSON.stringify(profile.salaryExpectation) : null, profile.createdAt, profile.updatedAt]);
     // Reconcile skills by stable id. Deleting and re-inserting the whole
     // profile used to cascade-delete project_skills on every profile save.
     const incomingSkillIds = new Set(profile.skills.map((skill) => skill.id));
@@ -846,10 +853,10 @@ export class SqliteProfileRepository {
     return idRow ? this.get(idRow.value) : this.list()[0];
   }
 
-  private hydrate(row: { id: string; name: string; language: string; resume_json: string | null; job_description_json: string | null; instructions: string | null; expression_level: string; explain_advanced_terms: number; created_at: number; updated_at: number }): Profile {
+  private hydrate(row: { id: string; name: string; language: string; resume_json: string | null; job_description_json: string | null; instructions: string | null; expression_level: string; explain_advanced_terms: number; company_context?: string | null; salary_expectation_json?: string | null; created_at: number; updated_at: number }): Profile {
     const skills = this.database.all<{ id: string; name: string; description: string; content: string; tags_json: string }>("SELECT id, name, description, content, tags_json FROM skills WHERE profile_id = ? ORDER BY name", [row.id]).map((skill) => ({ id: skill.id, name: skill.name, description: skill.description, content: skill.content, tags: JSON.parse(skill.tags_json) as string[] }));
     const knowledgeBaseIds = this.database.all<{ knowledge_base_id: string }>("SELECT knowledge_base_id FROM profile_knowledge WHERE profile_id = ?", [row.id]).map((item) => item.knowledge_base_id);
-    return { id: row.id, name: row.name, language: row.language, resume: row.resume_json ? JSON.parse(row.resume_json) : undefined, jobDescription: row.job_description_json ? JSON.parse(row.job_description_json) : undefined, instructions: value<string>(row.instructions), expressionLevel: ["plain", "standard", "expert"].includes(row.expression_level) ? row.expression_level as Profile["expressionLevel"] : "plain", explainAdvancedTerms: Number(row.explain_advanced_terms) !== 0, skills, knowledgeBaseIds, createdAt: row.created_at, updatedAt: row.updated_at };
+    return { id: row.id, name: row.name, language: row.language, resume: row.resume_json ? JSON.parse(row.resume_json) : undefined, jobDescription: row.job_description_json ? JSON.parse(row.job_description_json) : undefined, instructions: value<string>(row.instructions), expressionLevel: ["plain", "standard", "expert"].includes(row.expression_level) ? row.expression_level as Profile["expressionLevel"] : "plain", explainAdvancedTerms: Number(row.explain_advanced_terms) !== 0, ...(row.company_context ? { companyContext: row.company_context } : {}), ...(row.salary_expectation_json ? { salaryExpectation: JSON.parse(row.salary_expectation_json) } : {}), skills, knowledgeBaseIds, createdAt: row.created_at, updatedAt: row.updated_at };
   }
 }
 
@@ -1908,7 +1915,7 @@ export class SqliteInterviewHistoryRepository {
 
   addQuestion(input: Omit<QuestionRecord, "id">): QuestionRecord {
     const record = { ...input, id: id("question", input.detectedAt) };
-    this.database.run("INSERT INTO questions(id, interview_id, text, confidence, source, detected_at, status, parent_question_id, root_question_id, raw_transcript, normalized_question, canonical_question, context_relation, inherited_topic, topic, terminology_corrections_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.interviewId, record.text, record.confidence, record.source, record.detectedAt, record.status, record.parentQuestionId ?? null, record.rootQuestionId ?? null, record.rawTranscript ?? null, record.normalizedQuestion ?? null, record.canonicalQuestion ?? null, record.contextRelation ?? null, record.inheritedTopic ?? null, record.topic ?? null, JSON.stringify(record.terminologyCorrections ?? [])]);
+    this.database.run("INSERT INTO questions(id, interview_id, text, confidence, source, detected_at, status, parent_question_id, root_question_id, raw_transcript, normalized_question, canonical_question, context_relation, inherited_topic, topic, terminology_corrections_json, semantic_frame) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.interviewId, record.text, record.confidence, record.source, record.detectedAt, record.status, record.parentQuestionId ?? null, record.rootQuestionId ?? null, record.rawTranscript ?? null, record.normalizedQuestion ?? null, record.canonicalQuestion ?? null, record.contextRelation ?? null, record.inheritedTopic ?? null, record.topic ?? null, JSON.stringify(record.terminologyCorrections ?? []), record.semanticFrame ?? null]);
     this.database.flush();
     this.emitChanged(record.interviewId, "question");
     return record;
@@ -1917,7 +1924,7 @@ export class SqliteInterviewHistoryRepository {
   updateQuestionStatus(questionId: string, status: QuestionRecord["status"]): QuestionRecord | undefined {
     this.database.run("UPDATE questions SET status = ? WHERE id = ?", [status, questionId]);
     this.database.flushNow();
-    const record = this.database.first<Record<string, unknown>>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status, parent_question_id AS parentQuestionId, root_question_id AS rootQuestionId, raw_transcript AS rawTranscript, normalized_question AS normalizedQuestion, canonical_question AS canonicalQuestion, context_relation AS contextRelation, inherited_topic AS inheritedTopic, topic, terminology_corrections_json AS terminologyCorrectionsJson FROM questions WHERE id = ?", [questionId]);
+    const record = this.database.first<Record<string, unknown>>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status, parent_question_id AS parentQuestionId, root_question_id AS rootQuestionId, raw_transcript AS rawTranscript, normalized_question AS normalizedQuestion, canonical_question AS canonicalQuestion, context_relation AS contextRelation, inherited_topic AS inheritedTopic, topic, terminology_corrections_json AS terminologyCorrectionsJson, semantic_frame AS semanticFrame FROM questions WHERE id = ?", [questionId]);
     if (!record) return undefined;
     const hydrated = this.hydrateQuestion(record);
     this.emitChanged(hydrated.interviewId, "question");
@@ -1956,7 +1963,7 @@ export class SqliteInterviewHistoryRepository {
     const interview = this.database.first<InterviewRecord>("SELECT id, profile_id AS profileId, project_id AS projectId, job_target_id AS jobTargetId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews WHERE id = ?", [interviewId]);
     if (!interview) throw new Error(`Interview not found: ${interviewId}`);
     const transcripts = this.database.all<Record<string, unknown>>("SELECT id, interview_id AS interviewId, source, text, raw_text AS rawText, normalized_text AS normalizedText, canonical_text AS canonicalText, terminology_corrections_json AS terminologyCorrectionsJson, start_ms AS startMs, end_ms AS endMs, final, confidence, created_at AS createdAt FROM transcripts WHERE interview_id = ? ORDER BY start_ms", [interviewId]).map((row) => this.hydrateTranscript(row));
-    const questions = this.database.all<Record<string, unknown>>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status, parent_question_id AS parentQuestionId, root_question_id AS rootQuestionId, raw_transcript AS rawTranscript, normalized_question AS normalizedQuestion, canonical_question AS canonicalQuestion, context_relation AS contextRelation, inherited_topic AS inheritedTopic, topic, terminology_corrections_json AS terminologyCorrectionsJson FROM questions WHERE interview_id = ? ORDER BY detected_at", [interviewId]).map((row) => this.hydrateQuestion(row));
+    const questions = this.database.all<Record<string, unknown>>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status, parent_question_id AS parentQuestionId, root_question_id AS rootQuestionId, raw_transcript AS rawTranscript, normalized_question AS normalizedQuestion, canonical_question AS canonicalQuestion, context_relation AS contextRelation, inherited_topic AS inheritedTopic, topic, terminology_corrections_json AS terminologyCorrectionsJson, semantic_frame AS semanticFrame FROM questions WHERE interview_id = ? ORDER BY detected_at", [interviewId]).map((row) => this.hydrateQuestion(row));
     const answers = this.database.all<AnswerRecord>("SELECT a.id, a.question_id AS questionId, a.text, a.model, a.mode, a.latency_first_token AS latencyFirstToken, a.latency_total AS latencyTotal, a.cancel_reason AS cancelReason, a.started_at AS startedAt, a.first_token_at AS firstTokenAt, a.finished_at AS finishedAt, a.created_at AS createdAt FROM answers a JOIN questions q ON q.id = a.question_id WHERE q.interview_id = ? ORDER BY a.created_at", [interviewId]);
     return { interview, transcripts, questions, answers };
   }
@@ -1978,7 +1985,7 @@ export class SqliteInterviewHistoryRepository {
   private hydrateQuestion(row: Record<string, unknown>): QuestionRecord {
     return {
       id: String(row.id), interviewId: String(row.interviewId), text: String(row.text), confidence: String(row.confidence) as QuestionRecord["confidence"], source: String(row.source) as QuestionRecord["source"], detectedAt: Number(row.detectedAt), status: String(row.status) as QuestionRecord["status"],
-      ...(row.parentQuestionId ? { parentQuestionId: String(row.parentQuestionId) } : {}), ...(row.rootQuestionId ? { rootQuestionId: String(row.rootQuestionId) } : {}), ...(row.rawTranscript ? { rawTranscript: String(row.rawTranscript) } : {}), ...(row.normalizedQuestion ? { normalizedQuestion: String(row.normalizedQuestion) } : {}), ...(row.canonicalQuestion ? { canonicalQuestion: String(row.canonicalQuestion) } : {}), ...(row.contextRelation ? { contextRelation: String(row.contextRelation) as QuestionRecord["contextRelation"] } : {}), ...(row.inheritedTopic ? { inheritedTopic: String(row.inheritedTopic) } : {}), ...(row.topic ? { topic: String(row.topic) } : {}), terminologyCorrections: this.parseJson(row.terminologyCorrectionsJson)
+      ...(row.parentQuestionId ? { parentQuestionId: String(row.parentQuestionId) } : {}), ...(row.rootQuestionId ? { rootQuestionId: String(row.rootQuestionId) } : {}), ...(row.rawTranscript ? { rawTranscript: String(row.rawTranscript) } : {}), ...(row.normalizedQuestion ? { normalizedQuestion: String(row.normalizedQuestion) } : {}), ...(row.canonicalQuestion ? { canonicalQuestion: String(row.canonicalQuestion) } : {}), ...(row.contextRelation ? { contextRelation: String(row.contextRelation) as QuestionRecord["contextRelation"] } : {}), ...(row.inheritedTopic ? { inheritedTopic: String(row.inheritedTopic) } : {}), ...(row.topic ? { topic: String(row.topic) } : {}), ...(row.semanticFrame ? { semanticFrame: String(row.semanticFrame) as QuestionRecord["semanticFrame"] } : {}), terminologyCorrections: this.parseJson(row.terminologyCorrectionsJson)
     };
   }
 

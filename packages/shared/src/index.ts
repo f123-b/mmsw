@@ -74,6 +74,7 @@ export function normalizeMeter(value: number): number {
 import type { TranscriptSegment, TranscriptSource } from "@interview-copilot/protocol";
 import { classifyQuestion, questionFingerprint, type QuestionCategory } from "./question-classifier";
 import type { QuestionAnalysis, QuestionDetectionType, QuestionScore, QuestionSpeechAct } from "./question/types";
+import { classifyQuestionSemanticFrame, type QuestionSemanticFrame } from "./question/semantic-frame";
 
 export { classifyQuestion, questionFingerprint } from "./question-classifier";
 export {
@@ -279,6 +280,7 @@ export interface QuestionCandidate {
   contextRelation?: "standalone" | "follow_up" | "continuation" | "repair";
   inheritedTopic?: string;
   topic?: string;
+  semanticFrame?: QuestionSemanticFrame;
   terminologyCorrections?: TerminologyCorrection[];
   /** Runtime turn/group metadata added after final ASR assembly. */
   utteranceId?: string;
@@ -530,6 +532,7 @@ export class QuestionDetector {
       contextRelation: analysis?.contextRelation,
       inheritedTopic: analysis?.inheritedTopic,
       topic: analysis?.topic,
+      semanticFrame: analysis?.semanticFrame ?? classifyQuestionSemanticFrame(analysis?.normalizedQuestion ?? text, analysis?.type),
       terminologyCorrections: analysis?.terminologyCorrections
     };
   }

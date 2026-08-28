@@ -1,5 +1,6 @@
 import type { AnswerMode } from "./answer";
 import type { TerminologyCorrection } from "./terminology";
+import type { QuestionSemanticFrame } from "./question/semantic-frame";
 
 export type InterviewStatus = "created" | "running" | "ended" | "error";
 export type HistoryQuestionStatus = "candidate" | "confirmed" | "answering" | "superseded" | "answered" | "ignored";
@@ -50,6 +51,7 @@ export interface QuestionRecord {
   inheritedTopic?: string;
   topic?: string;
   terminologyCorrections?: TerminologyCorrection[];
+  semanticFrame?: QuestionSemanticFrame;
 }
 
 export interface HistoryChangedEvent {

@@ -1,10 +1,12 @@
 import type { QuestionBankRouteHit, ProjectQaMatchLevel, ProjectQaRouteResult } from "../question-bank-router";
+import type { CoreTechnicalQaCard } from "./core-technical-qa";
 
 export type AnswerSourceMode =
   | "project_qa_direct"
   | "project_qa_augmented"
   | "project_knowledge_generated"
   | "general_technical"
+  | "general_core_qa"
   | "personal_experience";
 
 export interface AnswerSourcePlan {
@@ -41,6 +43,7 @@ export interface AnswerSourcePlannerInput {
     stale?: boolean;
     questionId?: string;
   };
+  coreTechnicalQa?: CoreTechnicalQaCard;
 }
 
 function selectedAnswerCard(hit?: QuestionBankRouteHit): { id: string; verified: boolean; content: string } | undefined {
@@ -115,6 +118,20 @@ export function planAnswerSource(input: AnswerSourcePlannerInput): AnswerSourceP
       allowGeneralKnowledge: true,
       allowSessionEvidence: true,
       answerRewriteUsed: false
+    };
+  }
+
+  if (input.coreTechnicalQa?.verified && !projectQuestionRequested && !personalQuestionRequested) {
+    return {
+      mode: "general_core_qa",
+      projectAnchorAvailable,
+      projectQuestionRequested,
+      qaMatchLevel: "none",
+      preserveStoredAnswerFacts: true,
+      allowProjectKnowledge: false,
+      allowGeneralKnowledge: false,
+      allowSessionEvidence: false,
+      answerRewriteUsed: true
     };
   }
 

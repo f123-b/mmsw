@@ -11,7 +11,7 @@ import { createScreenshotFixtureResult, ScreenshotManager } from "./screenshot-m
 import { createScreenshotRequestId, SCREENSHOT_PROMPT, ScreenshotOperationRegistry, ScreenshotTraceBuffer, withScreenshotTimeout, type ScreenshotTraceEvent, type ScreenshotTraceEventName } from "./screenshot-pipeline";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, AnswerAgent, AgentToolRegistry, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, AnswerAgent, AgentToolRegistry, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
@@ -2068,6 +2068,7 @@ if (hasSingleInstanceLock) {
   const answerContextProvider = async (question: { text: string }, profileId: string, recentTranscript: string[] = [], interviewContext?: InterviewContextSelection) => {
     const profile = profileRepository?.get(profileId);
     const normalizedQuestion = normalizeTechnicalTerms(question.text);
+    const coreTechnicalQa = matchCoreTechnicalQa(normalizedQuestion);
     const projectSnapshot = projectMemoryService?.get(profileId) ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] };
     const questionAnalysis = new QuestionAnalyzer().analyze(normalizedQuestion, projectSnapshot.projects.map((project) => project.name));
     const detectedProjectId = questionAnalysis.project ? projectSnapshot.projects.find((project) => project.name.toLowerCase() === questionAnalysis.project?.toLowerCase())?.id : undefined;
@@ -2209,6 +2210,7 @@ if (hasSingleInstanceLock) {
       projectQuestion: projectQuestionRequested,
       personalQuestion: answerIntent.requiresPersonalIdentity || answerIntent.requiresPersonalOwnership || answerIntent.requiresPersonalMetric || answerIntent.requiresPersonalResult || answerIntent.asksBehavioralEpisode,
       projectQa: projectQaRoute,
+      coreTechnicalQa,
       ...(preparedAnswerContent && preparedCard && questionBankMatch ? { preparedAnswer: { content: preparedAnswerContent, answerCardId: preparedCard.id, questionId: questionBankMatch.question.id, score: questionBankMatch.score, verified: preparedCard.verified, stale: preparedCard.stale } } : {})
     });
     const projectQaEvidence = (sourcePlan.mode === "project_qa_direct" || sourcePlan.mode === "project_qa_augmented") && preparedAnswerContent && preparedCard?.verified && questionBankMatch?.question.verified && !questionBankMatch.question.stale
@@ -2229,7 +2231,7 @@ if (hasSingleInstanceLock) {
       retrieved = await new HybridKnowledgeRetriever({ ...retrievalOptions, embeddingProvider: { embed: () => queryEmbedding }, timings: embeddingTiming }).search(normalizedQuestion);
       retrievalDiagnostics = { ...retrievalDiagnostics, embeddingMs: cachedVector ? 0 : retrievalDiagnostics.embeddingMs, rerankMs: embeddingTiming.rerankMs ?? 0, totalRetrievalMs: embeddingTiming.totalRetrievalMs ?? retrievalDiagnostics.totalRetrievalMs };
     }
-    const retrievedKnowledge = sourcePlan.mode === "project_qa_direct" ? [] : [
+    const retrievedKnowledge = sourcePlan.mode === "project_qa_direct" || sourcePlan.mode === "general_core_qa" ? [] : [
       ...(projectQuestionRequested && targetProject ? [`项目回答视角政策：${resolveProjectAnswerPerspective(targetProject, relevantFactMatches[0]?.fact ?? { type: "background", title: "项目", content: "", id: "", projectId: targetProject.id, confidence: 0, verified: false, sourceIds: [] }).instruction}`] : []),
       ...(understandingContext ? [`PROJECT_UNDERSTANDING_ROUTE=${understandingRetrieval.route}\n${understandingContext}`] : []),
       ...structuredProjectRetrieval,
@@ -2296,6 +2298,9 @@ if (hasSingleInstanceLock) {
       preparedAnswer: preparedCard && questionBankMatch && preparedAnswerContent ? { content: preparedAnswerContent, score: questionBankMatch.score, verified: preparedCard.verified, source: questionBankMatch.question.scope === "project" ? "project-question-bank" : "question-bank", answerCardId: preparedCard.id, questionId: questionBankMatch.question.id, stale: preparedCard.stale } : undefined,
       questionBankMatches: questionBankRoute?.hits ?? [],
       answerSourcePlan: sourcePlan,
+      coreTechnicalQa,
+      companyContext: profile?.companyContext,
+      salaryExpectation: profile?.salaryExpectation,
       projectQaEvidence,
       retrievedKnowledge,
       recentTranscript: recentTranscript.slice(-8)

@@ -4,6 +4,7 @@ import { AnswerLengthController, type AnswerLengthPolicy } from "./answer-length
 import { answerStrategyFor, classifyAnswerQuestion, type AnswerEvidenceRequirement, type AnswerPlanQuestionType, type AnswerQuestionKind, type AnswerStrategy } from "./answer-strategy";
 import type { QuestionBankRouteHit } from "../question-bank-router";
 import { analyzeAnswerIntent, requiresPersonalClaimEvidence, type AnswerIntent } from "./answer-intent";
+import { decomposeQuestion, type QuestionDecomposition } from "../question/question-decomposer";
 
 export interface AnswerPlannerInput {
   question: string;
@@ -17,6 +18,7 @@ export interface AnswerPlannerInput {
   retrievedKnowledge?: string[];
   preparedAnswer?: { content: string; score: number; verified: boolean; source?: string };
   questionBankContext?: QuestionBankRouteHit[];
+  questionDecomposition?: QuestionDecomposition;
   interviewMode?: AnswerMode;
 }
 export interface AnswerPlan {
@@ -35,6 +37,7 @@ export interface AnswerPlan {
   intent: AnswerIntent;
   length: AnswerLengthPolicy;
   questionBankContext: QuestionBankRouteHit[];
+  questionDecomposition: QuestionDecomposition;
   reason: string;
 }
 
@@ -58,6 +61,7 @@ export class AnswerPlanner {
 
   plan(input: AnswerPlannerInput): AnswerPlan {
     const question = input.question.trim();
+    const questionDecomposition = input.questionDecomposition ?? decomposeQuestion(question);
     const kind = input.questionType ?? classifyAnswerQuestion(question);
     const hasProjectEvidence = (input.projectEvidence?.length ?? 0) > 0;
     const intent = analyzeAnswerIntent({ question, kind });
@@ -101,6 +105,7 @@ export class AnswerPlanner {
       intent,
       length,
       questionBankContext: (input.questionBankContext ?? []).slice(0, 5),
+      questionDecomposition,
       reason
     };
   }

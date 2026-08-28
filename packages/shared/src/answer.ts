@@ -14,6 +14,11 @@ import { ClaimGate } from "./answer/claim-gate";
 import { createEvidenceSnapshot, type EvidenceSnapshot } from "./answer/evidence-context";
 import { analyzeAnswerIntent, requiresPersonalClaimEvidence } from "./answer/answer-intent";
 import type { CandidateStatementEvidence } from "./answer/session-evidence";
+import { multiSlotPrompt } from "./question/question-decomposer";
+import { classifyQuestionSemanticFrame } from "./question/semantic-frame";
+import { matchCoreTechnicalQa, type CoreTechnicalQaCard } from "./answer/core-technical-qa";
+import { TechnicalAccuracyGuard } from "./answer/technical-accuracy-guard";
+import { enforceHrProfilePolicy } from "./answer/hr-profile-policy";
 
 export * from "./answer/claim-gate";
 export * from "./answer/evidence-context";
@@ -21,6 +26,10 @@ export * from "./answer/answer-intent";
 export * from "./answer/project-question-intent";
 export * from "./answer/project-qa-generator";
 export * from "./answer/session-evidence";
+export * from "./answer/core-technical-qa";
+export * from "./answer/technical-accuracy-guard";
+export * from "./answer/chinese-technical-language-policy";
+export * from "./answer/hr-profile-policy";
 
 export type AnswerMode = "FAST" | "NORMAL" | "DEEP";
 export { classifyAnswerQuestion } from "./answer/answer-strategy";
@@ -66,6 +75,9 @@ export interface AnswerContextInput {
   preparedAnswer?: PreparedAnswer;
   questionBankMatches?: QuestionBankRouteHit[];
   answerSourcePlan?: AnswerSourcePlan;
+  coreTechnicalQa?: CoreTechnicalQaCard;
+  companyContext?: string;
+  salaryExpectation?: import("./profile").SalaryExpectation;
   projectQaEvidence?: string[];
   currentProject?: string;
   currentTopic?: string;
@@ -95,6 +107,9 @@ export interface ContextPack {
   preparedAnswer?: PreparedAnswer;
   questionBankMatches: QuestionBankRouteHit[];
   answerSourcePlan?: AnswerSourcePlan;
+  coreTechnicalQa?: CoreTechnicalQaCard;
+  companyContext?: string;
+  salaryExpectation?: import("./profile").SalaryExpectation;
   projectQaEvidence: string[];
   currentProject?: string;
   currentTopic?: string;
@@ -127,6 +142,7 @@ export class ContextRouter {
     const answerSourcePlan = snapshot?.answerSourcePlan ?? input.answerSourcePlan;
     const projectQaEvidence = snapshot?.projectQaEvidence ?? input.projectQaEvidence ?? [];
     const directProjectQa = answerSourcePlan?.mode === "project_qa_direct";
+    const coreTechnicalQa = directProjectQa || answerSourcePlan?.projectQuestionRequested ? undefined : input.coreTechnicalQa ?? matchCoreTechnicalQa(question);
     const routedSessionEvidence = snapshot
       ? (snapshot.sessionEvidence ?? snapshot.candidateStatements ?? [])
       : [...(input.sessionEvidence ?? []), ...(input.candidateStatements ?? [])];
@@ -150,10 +166,13 @@ export class ContextRouter {
       skills,
       experienceContext: (snapshot?.experienceContext ?? input.experienceContext ?? []).slice(0, 5),
       personalMemoryEvidence: (snapshot?.personalMemoryEvidence ?? input.personalMemoryEvidence ?? []).slice(0, 5),
-      retrievedKnowledge: directProjectQa ? [] : (snapshot?.retrievedKnowledge ?? input.retrievedKnowledge ?? []).slice(0, 6),
+      retrievedKnowledge: directProjectQa || Boolean(coreTechnicalQa) ? [] : (snapshot?.retrievedKnowledge ?? input.retrievedKnowledge ?? []).slice(0, 6),
       preparedAnswer: input.preparedAnswer,
       questionBankMatches: (input.questionBankMatches ?? []).slice(0, 5),
       ...(answerSourcePlan ? { answerSourcePlan } : {}),
+      ...(coreTechnicalQa ? { coreTechnicalQa } : {}),
+      ...(input.companyContext ? { companyContext: input.companyContext } : {}),
+      ...(input.salaryExpectation ? { salaryExpectation: { ...input.salaryExpectation } } : {}),
       projectQaEvidence: projectQaEvidence.slice(0, 8),
       currentProject: snapshot?.currentProject ?? input.currentProject,
       currentTopic: snapshot?.currentTopic ?? input.currentTopic,
@@ -172,7 +191,7 @@ export class ContextRouter {
 }
 
 export interface PromptSection {
-  name: "system/base" | "interview-style" | "project-qa-context" | "profile-context" | "skill-context" | "experience-context" | "evidence-context" | "retrieval-context" | "question-bank-context" | "recent-transcript" | "interview-memory" | "follow-up-context" | "conversation-history" | "question" | "output-format";
+  name: "system/base" | "interview-style" | "project-qa-context" | "core-qa-context" | "profile-context" | "skill-context" | "experience-context" | "evidence-context" | "retrieval-context" | "question-bank-context" | "recent-transcript" | "interview-memory" | "follow-up-context" | "multi-slot-context" | "conversation-history" | "question" | "output-format";
   content: string;
 }
 
@@ -182,6 +201,8 @@ export class PromptBuilder {
     const selectedStrategy = plan?.strategy ?? answerStrategyFor(kind, question.text, context.projectEvidence.length > 0);
     const intent = plan?.intent ?? analyzeAnswerIntent({ question: question.text, kind });
     const personalClaimRequested = requiresPersonalClaimEvidence(intent) || intent.asksBehavioralEpisode;
+    const hrFrame = classifyQuestionSemanticFrame(question.text);
+    const hrContextRequested = hrFrame === "company" || hrFrame === "salary";
     const projectContextRequested = intent.asksProjectImplementation || intent.allowsProjectEvidence;
     const sourceMode = context.answerSourcePlan?.mode;
     const sections: PromptSection[] = [
@@ -198,8 +219,12 @@ export class PromptBuilder {
       const direct = sourceMode === "project_qa_direct";
       sections.push({ name: "project-qa-context", content: `${direct ? "这是当前项目已确认的标准答案。以它为事实底稿，只做口语化改写和必要的当前问题对齐；保留原答案中的事实、技术选择、数字和边界，不要新增项目事实。" : "这是当前项目的相似标准答案。优先复用其中已确认的事实，再结合项目资料补足当前问题；不能把未确认内容写成候选人亲自负责。"}\n${context.preparedAnswer.content}` });
     }
+    if (context.coreTechnicalQa?.verified && sourceMode === "general_core_qa") {
+      const card = context.coreTechnicalQa;
+      sections.push({ name: "core-qa-context", content: `这是已审核的通用核心技术事实（${card.id}，版本 ${card.version}）。只能在不改变事实的前提下口语化改写；不要引入项目经历、未经审核的数字或相反结论。\n短答：${card.shortAnswer}\n标准答：${card.normalAnswer}\n深答：${card.deepAnswer}` });
+    }
     const experienceRequested = personalClaimRequested;
-    if (personalClaimRequested && (context.profileSummary || context.jobDescriptionSummary || context.profileInstructions)) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary, context.profileInstructions ? `候选人回答偏好：${context.profileInstructions}` : ""].filter(Boolean).join("\n") });
+    if ((personalClaimRequested || hrContextRequested) && (context.profileSummary || context.jobDescriptionSummary || context.profileInstructions || context.companyContext || context.salaryExpectation)) sections.push({ name: "profile-context", content: [context.profileSummary, context.jobDescriptionSummary, context.profileInstructions ? `候选人回答偏好：${context.profileInstructions}` : "", hrContextRequested && context.companyContext ? `已确认的公司/业务资料：${context.companyContext}` : "", hrContextRequested && context.salaryExpectation ? `已配置薪资口径：${JSON.stringify(context.salaryExpectation)}` : ""].filter(Boolean).join("\n") });
     if (context.skills.length > 0) sections.push({ name: "skill-context", content: context.skills.map((skill) => `${skill.name}: ${skill.content}`).join("\n") });
     if (personalClaimRequested && context.sessionEvidence.length > 0) sections.push({ name: "experience-context", content: `当前面试中候选人已经明确说过的事实（来源为 candidate_asserted，只能承接为候选人当前声称过的内容，不能擅自升级为已验证结果）：\n${context.sessionEvidence.map((item) => item.text).join("\n---\n")}` });
     if (personalClaimRequested && context.personalMemoryEvidence.length > 0) sections.push({ name: "experience-context", content: `以下是优先级最高的个人工程经验。必须用第一人称，只使用其中有证据的内容；没有记录的内容明确说资料不足：\n${context.personalMemoryEvidence.join("\n---\n")}` });
@@ -233,6 +258,7 @@ export class PromptBuilder {
       if (!context.followUpContext || memory.currentTopic) sections.push({ name: "interview-memory", content: [`当前主题：${memory.currentTopic || "未确定"}`, turns].filter(Boolean).join("\n") });
     }
     sections.push({ name: "question", content: question.text });
+    if (plan?.questionDecomposition?.isMultiSlot) sections.push({ name: "multi-slot-context", content: multiSlotPrompt(plan.questionDecomposition) });
     const length = plan
       ? `${plan.length.minCharacters}~${plan.length.maxCharacters} 字，目标 ${plan.targetDurationSec} 秒`
       : kind === "code"
@@ -371,6 +397,9 @@ export class AnswerAgent {
       candidateStatements: routedContext.candidateStatements
     });
     const context = { ...routedContext, evidenceSnapshot };
+    if (context.coreTechnicalQa && (!context.answerSourcePlan || context.answerSourcePlan.mode === "general_technical") && !context.answerSourcePlan?.projectQuestionRequested) {
+      context.answerSourcePlan = planAnswerSource({ coreTechnicalQa: context.coreTechnicalQa });
+    }
     const kind = classifyAnswerQuestion(routedQuestion.text, routedQuestion.kind);
     const plan = this.answerPlanner.plan({
       question: routedQuestion.text,
@@ -510,6 +539,18 @@ export class AnswerAgent {
         quality = repairedQuality;
       }
     }
+    const technicalAccuracy = new TechnicalAccuracyGuard().check({ question: routedQuestion.text, answer: formattedText });
+    if (technicalAccuracy.decision === "rewrite" && technicalAccuracy.rewrittenAnswer) {
+      formattedText = technicalAccuracy.rewrittenAnswer;
+      quality = {
+        ...evaluateQuality(formattedText),
+        issues: [...new Set([...quality.issues, ...technicalAccuracy.issues.map((issue) => `technical-accuracy-${issue}`)])],
+        suggestions: quality.suggestions,
+        needsRepair: false
+      };
+    }
+    const hrPolicy = enforceHrProfilePolicy({ question: routedQuestion.text, answer: formattedText, companyContext: context.companyContext, salaryExpectation: context.salaryExpectation });
+    if (hrPolicy.rewritten) formattedText = hrPolicy.answer;
     const claimGate = new ClaimGate().check({
       question: routedQuestion.text,
       answer: formattedText,

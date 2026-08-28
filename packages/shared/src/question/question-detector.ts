@@ -3,6 +3,7 @@ import type { LocalQuestionModel, LocalQuestionResult } from "./local-classifier
 import type { QuestionAnalysis, QuestionDetectionContext, QuestionDetectionType, QuestionLLMConfirmer, QuestionScore, QuestionSpeechAct } from "./types";
 import { normalizeTechnicalTerms } from "../terminology";
 import { classifyInterviewSpeechAct, shouldHardRejectSpeechAct } from "../interview/speech-act-classifier";
+import { classifyQuestionSemanticFrame } from "./semantic-frame";
 
 const RULE_KEYWORDS = /什么|为什么|为何|怎么|如何|介绍|原理|区别|优化|请问|能不能|是否|有没有|哪些|哪种|哪个|哪里|解释|说明|讲一下|说一下|说说|展开|常见误区|作用|困难|挑战|设计|架构|系统|如果.*(重新|改|换|设计)/;
 const ROBUST_QUESTION_FORM = /为什么|为何|什么是|哪些|哪种|区别|原理|介绍|解释|说明|常见误区|作用|请问|怎么(?:排查|解决|定位|判断|验证|设计|优化)|如何(?:排查|解决|定位|判断|验证|设计|优化)|如果.*(?:重新|改|换|设计)|会怎么优化|设计.*(?:系统|架构|方案|模块)/;
@@ -228,6 +229,7 @@ function buildAnalysisWithClassifier(
       classification: nonQuestionClassification,
       legacyCategory: nonQuestionClassification.category,
       shouldAnswer: false,
+      semanticFrame: classifyQuestionSemanticFrame(normalized, "not_question"),
       ...(speech.codeContext ? { codeContext: true } : {})
     };
   }
@@ -248,6 +250,7 @@ function buildAnalysisWithClassifier(
       classification: nonQuestionClassification,
       legacyCategory: nonQuestionClassification.category,
       shouldAnswer: false,
+      semanticFrame: classifyQuestionSemanticFrame(normalized, "not_question"),
       topicAnchor: speech.speechAct === "TOPIC_ANCHOR",
       ...(speech.codeContext ? { codeContext: true } : {})
     };
@@ -314,6 +317,7 @@ function buildAnalysisWithClassifier(
     classification,
     legacyCategory: classification.category,
     shouldAnswer: decision.shouldAnswer,
+    semanticFrame: classifyQuestionSemanticFrame(normalized, isQuestion ? type : "not_question"),
     ...(speech.codeContext ? { codeContext: true } : {})
   };
 }
