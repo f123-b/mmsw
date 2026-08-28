@@ -8,6 +8,7 @@ import { sanitizeStreamingAnswer, StreamingAnswerSanitizer } from "./answer/stre
 import { normalizeTechnicalTerms } from "./terminology";
 import { PersonalAnswerValidator, QuestionAnalyzer } from "./knowledge/index";
 import type { FollowUpContext } from "./follow-up-context";
+import type { QuestionBankRouteHit } from "./question-bank-router";
 
 export type AnswerMode = "FAST" | "NORMAL" | "DEEP";
 export { classifyAnswerQuestion } from "./answer/answer-strategy";
@@ -41,6 +42,7 @@ export interface AnswerContextInput {
   personalMemoryEvidence?: string[];
   retrievedKnowledge?: string[];
   preparedAnswer?: { content: string; score: number; verified: boolean; source?: string };
+  questionBankMatches?: QuestionBankRouteHit[];
   currentProject?: string;
   currentTopic?: string;
   currentModule?: string;
@@ -61,6 +63,7 @@ export interface ContextPack {
   personalMemoryEvidence: string[];
   retrievedKnowledge: string[];
   preparedAnswer?: { content: string; score: number; verified: boolean; source?: string };
+  questionBankMatches: QuestionBankRouteHit[];
   currentProject?: string;
   currentTopic?: string;
   currentModule?: string;
@@ -105,6 +108,7 @@ export class ContextRouter {
       personalMemoryEvidence: (input.personalMemoryEvidence ?? []).slice(0, 5),
       retrievedKnowledge: (input.retrievedKnowledge ?? []).slice(0, 6),
       preparedAnswer: input.preparedAnswer,
+      questionBankMatches: (input.questionBankMatches ?? []).slice(0, 5),
       currentProject: input.currentProject,
       currentTopic: input.currentTopic,
       currentModule: input.currentModule,
@@ -117,7 +121,7 @@ export class ContextRouter {
 }
 
 export interface PromptSection {
-  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "experience-context" | "retrieval-context" | "recent-transcript" | "interview-memory" | "follow-up-context" | "conversation-history" | "question" | "output-format";
+  name: "system/base" | "interview-style" | "profile-context" | "skill-context" | "experience-context" | "retrieval-context" | "question-bank-context" | "recent-transcript" | "interview-memory" | "follow-up-context" | "conversation-history" | "question" | "output-format";
   content: string;
 }
 
@@ -146,6 +150,7 @@ export class PromptBuilder {
       sections.push({ name: "experience-context", content: `以下是已确认的项目证据。只使用与问题直接相关的事实，不能补写未出现的职责、指标或结果：\n${context.projectEvidence.join("\n---\n")}` });
     }
     if (context.retrievedKnowledge.length > 0) sections.push({ name: "retrieval-context", content: `资料分层规则：PROJECT_SOURCE 仅辅助实现说明；GLOBAL_REFERENCE 仅解释通用知识，不能形成项目事实或个人经历。\n${context.retrievedKnowledge.join("\n---\n")}` });
+    if (context.questionBankMatches.length > 0) sections.push({ name: "question-bank-context", content: `以下是题库路由结果，仅用于选择已整理素材和判断题型；不要把题库内容当成个人经历证据：\n${context.questionBankMatches.map((hit) => `${hit.question.bankType}/${hit.question.category}（语义 ${Math.round(hit.semanticScore * 100)}%，优先级 ${hit.priority}%）：${hit.question.canonicalText}${hit.reasons.length ? ` [${hit.reasons.join(", ")}]` : ""}`).join("\n")}` });
     if (context.followUpContext) {
       const followUp = context.followUpContext;
       sections.push({ name: "follow-up-context", content: [
@@ -305,6 +310,7 @@ export class AnswerAgent {
       projectEvidence: context.projectEvidence,
       retrievedKnowledge: context.retrievedKnowledge,
       preparedAnswer: context.preparedAnswer,
+      questionBankContext: context.questionBankMatches,
       interviewMode: mode
     });
     let selection = this.modelRouter.select(routedQuestion.text, mode, options.hasScreenshot ?? false, options.modelOverride);

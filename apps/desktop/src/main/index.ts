@@ -10,7 +10,7 @@ import { createScreenshotFixtureResult, ScreenshotManager } from "./screenshot-m
 import { createScreenshotRequestId, SCREENSHOT_PROMPT, ScreenshotOperationRegistry, ScreenshotTraceBuffer, withScreenshotTimeout, type ScreenshotTraceEvent, type ScreenshotTraceEventName } from "./screenshot-pipeline";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeInterview, AnswerAgent, AgentToolRegistry, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeInterview, AnswerAgent, AgentToolRegistry, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseStructuredChatResponse, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
@@ -1613,6 +1613,10 @@ function registerIpc(): void {
   ipcMain.handle("question-bank:delete-question", (_event, questionId: string) => { questionBankRepository?.deleteQuestion(questionId); return true; });
   ipcMain.handle("question-bank:save-answer", (_event, input: Parameters<SqliteQuestionBankRepository["saveAnswerCard"]>[0]) => questionBankRepository?.saveAnswerCard(input));
   ipcMain.handle("question-bank:delete-answer", (_event, answerCardId: string) => { questionBankRepository?.deleteAnswerCard(answerCardId); return true; });
+  ipcMain.handle("question-bank:route", (_event, text: string, options?: Parameters<SqliteQuestionBankRepository["routeQuestion"]>[1]) => questionBankRepository?.routeQuestion(text, options));
+  ipcMain.handle("question-bank:save-relation", (_event, input: Parameters<SqliteQuestionBankRepository["saveRelation"]>[0]) => questionBankRepository?.saveRelation(input));
+  ipcMain.handle("question-bank:list-relations", (_event, questionId?: string) => questionBankRepository?.listRelations(questionId) ?? []);
+  ipcMain.handle("question-bank:delete-relation", (_event, relationId: string) => { questionBankRepository?.deleteRelation(relationId); return true; });
   ipcMain.handle("question-bank:list-skills", (_event, search?: string) => questionBankRepository?.listSkills(search) ?? []);
   ipcMain.handle("question-bank:save-skill", (_event, input: Parameters<SqliteQuestionBankRepository["saveSkill"]>[0]) => questionBankRepository?.saveSkill(input));
   ipcMain.handle("question-bank:save-skill-point", (_event, input: Parameters<SqliteQuestionBankRepository["saveSkillPoint"]>[0]) => questionBankRepository?.saveSkillPoint(input));
@@ -2062,11 +2066,20 @@ if (hasSingleInstanceLock) {
       ? trustedFactExperience.slice(0, 6)
       : [...artifactExperience, ...resumeExperience].slice(0, 6);
     const personalEvidence = useProjectContext ? trustedFactExperience.slice(0, 6) : [];
-    const questionBankMatch = questionBankRepository?.matchQuestion(normalizedQuestion, {
-      ...(useProjectContext || questionAnalysis.type === "behavioral" || questionAnalysis.type === "follow-up" ? {} : { scope: "global" }),
+    const questionBankSkills = questionBankRepository?.listSkills() ?? [];
+    const questionBankSkillIds = new Set(questionBankSkills.map((skill) => skill.id));
+    const mentionedSkillIds = questionBankSkills
+      .filter((skill) => [skill.normalizedName, ...skill.aliases.map((alias) => normalizeQuestionBankText(alias))].some((term) => term && normalizeQuestionBankText(normalizedQuestion).includes(term)))
+      .map((skill) => skill.id);
+    const profileSkillIds = (profile?.skills ?? []).map((skill) => skill.id).filter((skillId) => questionBankSkillIds.has(skillId));
+    const questionBankRoute = questionBankRepository?.routeQuestion(normalizedQuestion, {
+      ...(useProjectContext || questionAnalysis.type === "behavioral" || questionAnalysis.type === "follow-up" ? {} : { scope: "global" as const }),
       profileId,
-      ...(targetProjectId ? { projectId: targetProjectId } : {})
+      ...(targetProjectId ? { projectId: targetProjectId } : {}),
+      skillIds: [...new Set([...profileSkillIds, ...mentionedSkillIds])],
+      limit: 5
     });
+    const questionBankMatch = questionBankRoute?.top;
     const candidateCard = questionBankMatch?.question.answerCards.find((card) => card.verified && !card.stale)
       ?? questionBankMatch?.question.answerCards.find((card) => questionBankMatch.question.type === "code" ? card.mode === "code" : card.mode === "standard")
       ?? questionBankMatch?.question.answerCards[0];
@@ -2096,7 +2109,7 @@ if (hasSingleInstanceLock) {
       metadata: retrievalDiagnostics,
       hits: [
         ...understandingRetrieval.hits.map((hit) => ({ resultType: "project-understanding" as const, resultId: hit.id, score: Math.min(1, hit.score / 12), verified: hit.evidenceRefs.length > 0, preview: `${hit.title}: ${hit.content}`, metadata: { projectId: targetProjectId ?? null, kind: hit.kind, route: understandingRetrieval.route, evidenceRefs: hit.evidenceRefs } })),
-        ...(questionBankMatch ? [{ resultType: "question" as const, resultId: questionBankMatch.question.id, score: questionBankMatch.score, verified: questionBankMatch.question.verified, preview: questionBankMatch.question.canonicalText, metadata: { scope: questionBankMatch.question.scope, type: questionBankMatch.question.type } }] : []),
+        ...(questionBankMatch ? [{ resultType: "question" as const, resultId: questionBankMatch.question.id, score: questionBankMatch.score, verified: questionBankMatch.question.verified, preview: questionBankMatch.question.canonicalText, metadata: { scope: questionBankMatch.question.scope, type: questionBankMatch.question.type, bankType: questionBankMatch.question.bankType, category: questionBankMatch.question.category, priority: questionBankMatch.priority, reasons: questionBankMatch.reasons } }] : []),
         ...factMatches.map((hit) => ({ resultType: "project-fact" as const, resultId: hit.fact.id, score: hit.finalScore, verified: hit.fact.verified, preview: `${hit.fact.title}: ${hit.fact.content}`, metadata: { projectId: hit.fact.projectId, type: hit.fact.type, evidenceLevel: hit.fact.evidenceLevel ?? "pending", ownership: hit.fact.ownership ?? "unknown", eligible: isFactEligible(hit.fact), stale: Boolean(hit.fact.stale), conflictStatus: hit.fact.conflictStatus ?? "confirmed", lexicalScore: hit.lexicalScore, vectorScore: hit.vectorScore, typeScore: hit.typeScore, projectScore: hit.projectScore, verifiedBoost: hit.verifiedBoost, reason: hit.reason } })),
         ...jobMatches.map((hit) => ({ resultType: "job-requirement" as const, resultId: hit.requirement.id, score: hit.score, verified: hit.requirement.verified, preview: hit.requirement.requirement, metadata: { category: hit.requirement.category, importance: hit.requirement.importance } })),
         ...retrieved.slice(0, 3).map((hit) => ({ resultType: "document-chunk" as const, resultId: hit.id, score: hit.score, preview: hit.text, metadata: { ...(hit.metadata as unknown as Record<string, unknown>), scope: hit.metadata.scope ?? (targetProjectId ? "project" : "profile"), projectId: hit.metadata.projectId ?? targetProjectId ?? null, sourceRole: hit.metadata.sourceRole ?? null, relationship: hit.metadata.relationship ?? null, sourceId: hit.metadata.sourceId ?? hit.metadata.documentId, documentId: hit.metadata.documentId } }))
@@ -2112,6 +2125,7 @@ if (hasSingleInstanceLock) {
       experienceContext: experience,
       personalMemoryEvidence: personalEvidence,
       preparedAnswer: preparedCard && questionBankMatch ? { content: preparedCard.content, score: questionBankMatch.score, verified: preparedCard.verified, source: "question-bank" } : undefined,
+      questionBankMatches: questionBankRoute?.hits ?? [],
       retrievedKnowledge: [
         ...(targetProject ? [`项目回答视角政策：${resolveProjectAnswerPerspective(targetProject, relevantFactMatches[0]?.fact ?? { type: "background", title: "项目", content: "", id: "", projectId: targetProject.id, confidence: 0, verified: false, sourceIds: [] }).instruction}`] : []),
         ...(understandingContext ? [`PROJECT_UNDERSTANDING_ROUTE=${understandingRetrieval.route}\n${understandingContext}`] : []),

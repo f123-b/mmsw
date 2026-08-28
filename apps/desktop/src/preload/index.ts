@@ -14,9 +14,9 @@ import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { OverlayPreferences, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
-import type { ChatAction, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
+import type { ChatAction, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
+import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankRelationInput, QuestionBankRouteQuery, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 import type { ModelCatalogResult } from "../main/model-catalog";
@@ -200,6 +200,10 @@ const api = {
     deleteQuestion: (questionId: string): Promise<boolean> => ipcRenderer.invoke("question-bank:delete-question", questionId),
     saveAnswer: (input: QuestionBankAnswerCardInput): Promise<QuestionBankAnswerCardRecord | undefined> => ipcRenderer.invoke("question-bank:save-answer", input),
     deleteAnswer: (answerCardId: string): Promise<boolean> => ipcRenderer.invoke("question-bank:delete-answer", answerCardId),
+    route: (text: string, options?: QuestionBankRouteQuery): Promise<QuestionBankRouteResult | undefined> => ipcRenderer.invoke("question-bank:route", text, options),
+    saveRelation: (input: QuestionBankRelationInput): Promise<QuestionBankRelationRecord | undefined> => ipcRenderer.invoke("question-bank:save-relation", input),
+    listRelations: (questionId?: string): Promise<QuestionBankRelationRecord[]> => ipcRenderer.invoke("question-bank:list-relations", questionId),
+    deleteRelation: (relationId: string): Promise<boolean> => ipcRenderer.invoke("question-bank:delete-relation", relationId),
     listSkills: (search?: string): Promise<QuestionBankSkillRecord[]> => ipcRenderer.invoke("question-bank:list-skills", search),
     saveSkill: (input: QuestionBankSkillInput): Promise<QuestionBankSkillRecord | undefined> => ipcRenderer.invoke("question-bank:save-skill", input),
     saveSkillPoint: (input: QuestionBankSkillPointInput): Promise<unknown> => ipcRenderer.invoke("question-bank:save-skill-point", input),

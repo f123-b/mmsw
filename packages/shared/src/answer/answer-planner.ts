@@ -2,6 +2,7 @@ import type { FollowUpContext } from "../follow-up-context";
 import type { AnswerMode } from "../answer";
 import { AnswerLengthController, type AnswerLengthPolicy } from "./answer-length-controller";
 import { answerStrategyFor, classifyAnswerQuestion, type AnswerEvidenceRequirement, type AnswerPlanQuestionType, type AnswerQuestionKind, type AnswerStrategy } from "./answer-strategy";
+import type { QuestionBankRouteHit } from "../question-bank-router";
 
 export interface AnswerPlannerInput {
   question: string;
@@ -14,6 +15,7 @@ export interface AnswerPlannerInput {
   projectEvidence?: string[];
   retrievedKnowledge?: string[];
   preparedAnswer?: { content: string; score: number; verified: boolean; source?: string };
+  questionBankContext?: QuestionBankRouteHit[];
   interviewMode?: AnswerMode;
 }
 export interface AnswerPlan {
@@ -30,6 +32,7 @@ export interface AnswerPlan {
   complexity: "low" | "medium" | "high";
   strategy: AnswerStrategy;
   length: AnswerLengthPolicy;
+  questionBankContext: QuestionBankRouteHit[];
   reason: string;
 }
 
@@ -66,7 +69,8 @@ export class AnswerPlanner {
       `strategy=${strategy.id}`,
       `complexity=${complexity}`,
       useCurrentProject ? "project-context=enabled" : "project-context=disabled",
-      hasProjectEvidence ? "evidence=available" : "evidence=missing"
+      hasProjectEvidence ? "evidence=available" : "evidence=missing",
+      input.questionBankContext?.length ? `question-bank=${input.questionBankContext.length}` : "question-bank=none"
     ].join(";");
     return {
       question,
@@ -82,6 +86,7 @@ export class AnswerPlanner {
       complexity,
       strategy,
       length,
+      questionBankContext: (input.questionBankContext ?? []).slice(0, 5),
       reason
     };
   }

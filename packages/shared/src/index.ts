@@ -78,7 +78,11 @@ export { classifyQuestion, questionFingerprint } from "./question-classifier";
 export {
   QUESTION_BANK_TYPES,
   QUESTION_BANK_TYPE_LABELS,
+  QUESTION_BANK_BANK_TYPES,
+  QUESTION_BANK_BANK_LABELS,
   QUESTION_BANK_SCOPES,
+  QUESTION_BANK_RELATION_TYPES,
+  inferQuestionBankBankType,
   inferQuestionBankType,
   normalizeQuestionBankText,
   parseQuestionBankText,
@@ -87,9 +91,12 @@ export {
 export type {
   QuestionBankAnswerCardRecord,
   QuestionBankAnswerMode,
+  QuestionBankBankType,
   QuestionBankJobProfileRecord,
   QuestionBankMatch,
   QuestionBankQuestionRecord,
+  QuestionBankRelationRecord,
+  QuestionBankRelationType,
   QuestionBankScope,
   ParsedQuestionBankEntry,
   QuestionBankSkillPointRecord,
@@ -97,6 +104,8 @@ export type {
   QuestionBankSourceType,
   QuestionBankType
 } from "./question-bank";
+export { QuestionBankRouter } from "./question-bank-router";
+export type { QuestionBankRouteHit, QuestionBankRouteOptions, QuestionBankRouteResult } from "./question-bank-router";
 export type { QuestionCategory, QuestionClassification } from "./question-classifier";
 
 export interface TranscriptSnapshot {

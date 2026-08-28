@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inferQuestionBankType, normalizeQuestionBankText, parseQuestionBankText, questionBankSimilarity } from "./question-bank";
+import { inferQuestionBankBankType, inferQuestionBankType, normalizeQuestionBankText, parseQuestionBankText, questionBankSimilarity } from "./question-bank";
 
 describe("question bank", () => {
   it("normalizes technical terms before matching", () => {
@@ -11,6 +11,14 @@ describe("question bank", () => {
     expect(inferQuestionBankType("请手写二叉树遍历并说明复杂度")).toBe("code");
     expect(inferQuestionBankType("如果 IIC 读不到数据，如何定位故障")).toBe("troubleshooting");
     expect(inferQuestionBankType("为什么选择这个项目架构")).toBe("project");
+  });
+
+  it("maps legacy question records into the phase-two bank categories", () => {
+    expect(inferQuestionBankBankType({ scope: "project", projectId: "project-a", type: "project" })).toBe("project");
+    expect(inferQuestionBankBankType({ scope: "job", jobProfileId: "job-a" })).toBe("job");
+    expect(inferQuestionBankBankType({ type: "behavioral" })).toBe("behavioral");
+    expect(inferQuestionBankBankType({ type: "general" })).toBe("general");
+    expect(inferQuestionBankBankType({ type: "technical", skillIds: ["skill-linux"] })).toBe("skill");
   });
 
   it("parses consecutive numbered questions without blank lines", () => {

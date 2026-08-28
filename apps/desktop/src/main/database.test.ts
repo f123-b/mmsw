@@ -206,7 +206,7 @@ describe("SQLite persistence", () => {
   it("applies migration 23 ownership and technical memory semantics", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(25);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(26);
       expect(database.all<{ name: string }>("PRAGMA table_info(projects)").map((row) => row.name)).toEqual(expect.arrayContaining(["ownership_mode", "ownership_note"]));
       expect(database.all<{ name: string }>("PRAGMA table_info(project_facts)").map((row) => row.name)).toEqual(expect.arrayContaining(["experience_relation", "value_json"]));
       new SqliteProfileRepository(database).save({ id: "profile-v4", name: "V4", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
@@ -287,6 +287,23 @@ describe("SQLite persistence", () => {
     } finally { database.close(); }
   });
 
+  it("stores categorized project questions, modules, relations and route metadata", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const questionBank = new SqliteQuestionBankRepository(database);
+      const root = questionBank.saveQuestion({ id: "project-root", canonicalText: "FOC 项目为什么要同步采样？", type: "project", bankType: "project", category: "project", scope: "project", projectId: "foc", moduleId: "current-loop", verified: true });
+      const followUp = questionBank.saveQuestion({ id: "project-follow-up", canonicalText: "具体怎么验证采样时序？", type: "troubleshooting", bankType: "project", category: "troubleshooting", scope: "project", projectId: "foc", moduleId: "current-loop" });
+      questionBank.saveAnswerCard({ questionId: root.id, content: "我会用示波器核对 PWM 触发点和 ADC 采样点，再用同一工况回归。", verified: true });
+      const relation = questionBank.saveRelation({ sourceQuestionId: root.id, targetQuestionId: followUp.id, relationType: "FOLLOW_UP" });
+
+      expect(questionBank.listQuestions({ bankType: "project", projectId: "foc", moduleId: "current-loop" })).toHaveLength(2);
+      expect(questionBank.getQuestion(root.id)).toMatchObject({ bankType: "project", category: "project", projectId: "foc", moduleId: "current-loop", frequency: 0, mastery: 0 });
+      expect(questionBank.getQuestion(root.id)?.relations).toEqual([expect.objectContaining({ id: relation.id, relationType: "FOLLOW_UP", targetQuestionId: followUp.id })]);
+      expect(questionBank.getQuestion(root.id)?.followUps).toHaveLength(1);
+      expect(questionBank.routeQuestion("FOC 项目为什么要同步采样？", { projectId: "foc" }).top?.question.id).toBe(root.id);
+    } finally { database.close(); }
+  });
+
   it("repairs legacy trust defaults when migration 21 is applied", async () => {
     const directory = await mkdtemp(join(tmpdir(), "interview-copilot-migration-"));
     const filePath = join(directory, "legacy.sqlite");
@@ -314,7 +331,7 @@ describe("SQLite persistence", () => {
       first.close();
       const second = await SqliteDatabase.open(filePath);
       try {
-        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(25);
+        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(26);
         const repaired = new SqliteProjectMemoryRepository(second);
         repaired.repairProjectTechnicalSemantics("project-migration");
         expect(repaired.listFacts(profile.id, "project-migration", { includeStale: true, includeRejected: true })).toHaveLength(2);
@@ -353,7 +370,7 @@ describe("SQLite persistence", () => {
       expect(memory.getUnderstandingSnapshot(project.id, "hash-a")?.understanding.summary).toContain("可缓存");
       expect(memory.getSnapshot(profile.id).understandings?.[0]?.projectId).toBe(project.id);
       expect(memory.getUnderstandingSnapshot(project.id, "different-hash")).toBeUndefined();
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(25);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(26);
     } finally { database.close(); }
   });
 

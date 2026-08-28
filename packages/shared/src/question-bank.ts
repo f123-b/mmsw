@@ -14,9 +14,32 @@ export const QUESTION_BANK_TYPES = [
 
 export type QuestionBankType = typeof QUESTION_BANK_TYPES[number];
 export type QuestionBankAnswerMode = "short" | "standard" | "deep" | "code";
-export type QuestionBankSourceType = "manual" | "imported" | "verified" | "generated";
+export const QUESTION_BANK_BANK_TYPES = ["project", "skill", "general", "behavioral", "job", "custom"] as const;
+export type QuestionBankBankType = typeof QUESTION_BANK_BANK_TYPES[number];
+export const QUESTION_BANK_BANK_LABELS: Record<QuestionBankBankType, string> = {
+  project: "项目题库",
+  skill: "技能题库",
+  general: "通用题库",
+  behavioral: "行为题库",
+  job: "岗位题库",
+  custom: "自定义题库"
+};
+export type QuestionBankSourceType = "manual" | "imported" | "verified" | "generated" | "resume" | "project-document" | "project-code" | "github" | "jd" | "skill" | "interview-history" | "ai-generated";
 export const QUESTION_BANK_SCOPES = ["global", "profile", "project", "job"] as const;
 export type QuestionBankScope = typeof QUESTION_BANK_SCOPES[number];
+export const QUESTION_BANK_RELATION_TYPES = ["FOLLOW_UP", "DEEPER", "RELATED", "PREREQUISITE", "ALTERNATIVE", "PROJECT_VARIANT"] as const;
+export type QuestionBankRelationType = typeof QUESTION_BANK_RELATION_TYPES[number];
+
+export interface QuestionBankRelationRecord {
+  id: string;
+  sourceQuestionId: string;
+  targetQuestionId: string;
+  relationType: QuestionBankRelationType;
+  confidence: number;
+  source: QuestionBankSourceType;
+  createdAt: number;
+  updatedAt: number;
+}
 
 export interface ParsedQuestionBankEntry {
   question: string;
@@ -42,9 +65,12 @@ export interface QuestionBankQuestionRecord {
   canonicalText: string;
   normalizedText: string;
   type: QuestionBankType;
+  bankType: QuestionBankBankType;
+  category: string;
   scope: QuestionBankScope;
   profileId?: string;
   projectId?: string;
+  moduleId?: string;
   jobProfileId?: string;
   difficulty: string;
   jobRole?: string;
@@ -56,8 +82,13 @@ export interface QuestionBankQuestionRecord {
   embedding?: number[];
   factIds?: string[];
   variants: string[];
+  relations: QuestionBankRelationRecord[];
+  followUps: QuestionBankRelationRecord[];
   answerCards: QuestionBankAnswerCardRecord[];
   skillIds: string[];
+  frequency: number;
+  lastAskedAt?: number;
+  mastery: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -116,6 +147,15 @@ export interface QuestionBankMatch {
   question: QuestionBankQuestionRecord;
   score: number;
   exact: boolean;
+}
+
+export function inferQuestionBankBankType(input: { scope?: QuestionBankScope; type?: QuestionBankType; projectId?: string; jobProfileId?: string; skillIds?: string[]; source?: QuestionBankSourceType }): QuestionBankBankType {
+  if (input.scope === "project" || input.projectId || input.type === "project") return "project";
+  if (input.scope === "job" || input.jobProfileId || input.source === "jd") return "job";
+  if (input.type === "behavioral") return "behavioral";
+  if (input.type === "general") return "general";
+  if (input.skillIds?.length || input.type) return "skill";
+  return "custom";
 }
 
 const QUESTION_LINE_PREFIX = /^\s*(?:(?:q\s*\d*|question|问题|题目)\s*[:：]|(?:\d+\s*[\.、）)]|[（(]\s*\d+\s*[）)]|[一二三四五六七八九十百]+\s*[、.）)]|[-•]\s+))\s*/i;
