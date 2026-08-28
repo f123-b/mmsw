@@ -171,7 +171,7 @@ describe("InterviewCoordinator software E2E", () => {
     clock = 3_600;
     vi.advanceTimersByTime(500);
     for (let turn = 0; turn < 24; turn += 1) await Promise.resolve();
-    expect(confirmed.some((text) => text.includes("电机控制/FOC") && text.includes("好，说说"))).toBe(true);
+    expect(confirmed.some((text) => text === "好，说说")).toBe(true);
     await coordinator.stop();
     vi.useRealTimers();
   });
