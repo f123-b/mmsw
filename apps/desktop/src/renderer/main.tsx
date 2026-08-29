@@ -1,7 +1,5 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { App } from "./App";
-import { RootErrorBoundary } from "./components/ErrorBoundary";
 import "./styles.css";
 import "./overlay-simplified.css";
 
@@ -27,14 +25,17 @@ if (isOverlayWindow) {
   document.body.classList.add("overlay-window");
 }
 if (rootElement) {
-  const root = createRoot(rootElement);
-  root.render(window.interviewCopilot ? (
-    <StrictMode>
-      <RootErrorBoundary><App /></RootErrorBoundary>
-    </StrictMode>
-  ) : <FatalStartupError />);
-  document.documentElement.dataset.appReady = "true";
-  if (window.interviewCopilot) window.interviewCopilot.diagnostics.markRendererReady();
+  const mount = async () => {
+    if (!window.interviewCopilot) { createRoot(rootElement).render(<FatalStartupError />); return; }
+    if (overlayWindowMode === "overlay-question") { const module = await import("./overlay-question"); void module; return; }
+    if (overlayWindowMode === "overlay-answer") { const module = await import("./overlay-answer"); void module; return; }
+    if (overlayWindowMode === "overlay-control") { const module = await import("./overlay-control"); void module; return; }
+    const [{ App }, { RootErrorBoundary }] = await Promise.all([import("./App"), import("./components/ErrorBoundary")]);
+    createRoot(rootElement).render(<StrictMode><RootErrorBoundary><App /></RootErrorBoundary></StrictMode>);
+    document.documentElement.dataset.appReady = "true";
+    window.interviewCopilot.diagnostics.markRendererReady();
+  };
+  void mount();
 } else {
   document.body.textContent = "Interview Copilot 启动失败：根节点不存在。";
 }

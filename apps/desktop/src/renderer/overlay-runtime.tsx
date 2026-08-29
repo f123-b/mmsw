@@ -1,0 +1,157 @@
+import { StrictMode, useEffect, useMemo, useState, type JSX } from "react";
+import { createRoot } from "react-dom/client";
+import type { RealtimeServerMessage } from "@interview-copilot/protocol";
+import { AnswerThreadStore, answerRelationForQuestion, type AnswerThread, type QuestionCandidate, type QuestionEvent, type SessionState } from "@interview-copilot/shared";
+import type { HUDState, OverlayMode } from "../main/overlay-manager";
+import type { OverlayPreferences } from "../shared/overlay-preferences";
+import { OverlayWindowRoot } from "./overlay/OverlayWindowRoot";
+import type { OverlayRootProps, OverlaySurface } from "./overlay/OverlayRoot";
+import { RootErrorBoundary } from "./components/ErrorBoundary";
+
+type QuestionGroup = OverlayRootProps["questionGroups"][number];
+
+const initialHUDState: HUDState = { running: false, panelVisible: false, transcriptVisible: false, answerVisible: false, shortcutVisible: false, shareMode: false, topBarVisible: false, mouseMode: "passthrough", mode: "HIDDEN" };
+const initialPreferences = (): OverlayPreferences | undefined => undefined;
+
+function replaceQuestionGroup(groups: QuestionGroup[], question: QuestionCandidate): QuestionGroup[] {
+  const groupId = question.groupId ?? `question-group-${question.id}`;
+  const current = groups.find((group) => group.id === groupId);
+  const item = { id: question.id, questionId: question.id, text: question.text, type: question.threadItemType ?? "NEW_TOPIC", answerable: question.answerable !== false, state: question.status };
+  const next = current ? { ...current, title: current.title || question.text, primaryQuestion: current.primaryQuestion || question.text, items: [...current.items.filter((entry) => entry.id !== item.id), item], updatedAt: Date.now() } : { id: groupId, title: question.text, primaryQuestion: question.text, items: [item], slots: [], updatedAt: Date.now() };
+  return [...groups.filter((group) => group.id !== groupId), next];
+}
+
+function applyRealtimeMessage(message: RealtimeServerMessage, state: RuntimeState, answerStore: AnswerThreadStore): RuntimeState {
+  if (message.type === "question_group_updated") {
+    const group: QuestionGroup = { id: message.groupId, title: message.title, primaryQuestion: message.primaryQuestion, items: message.items, slots: message.slots, updatedAt: message.updatedAt };
+    return { ...state, questionGroups: [...state.questionGroups.filter((item) => item.id !== group.id), group], activeQuestionGroupId: group.id };
+  }
+  if (message.type === "runtime_error") return { ...state, notice: `${message.code}: ${message.message}` };
+  if (message.type === "answer_start") {
+    const question = state.question;
+    const groupId = message.groupId ?? question?.groupId;
+    answerStore.start({ answerId: message.answerId, questionId: message.questionId, ...(groupId ? { groupId } : {}), title: groupId ? state.questionGroups.find((group) => group.id === groupId)?.title : undefined, questionText: question?.text ?? "截图识别的问题", relation: message.relation ?? (question ? answerRelationForQuestion(question) : "PRIMARY") });
+    return { ...state, answerText: "", answerStreaming: true, answerId: message.answerId, activeQuestionGroupId: groupId ?? state.activeQuestionGroupId, answerMode: message.mode, answerThreads: answerStore.list() };
+  }
+  if (message.type === "answer_delta") {
+    answerStore.delta(message.answerId, message.delta);
+    return { ...state, answerText: `${state.answerText}${message.delta}`, answerStreaming: true, answerThreads: answerStore.list() };
+  }
+  if (message.type === "answer_end") {
+    answerStore.complete(message.answerId, message.text);
+    return { ...state, answerText: message.text, answerStreaming: false, answerId: message.answerId, answerThreads: answerStore.list() };
+  }
+  if (message.type === "answer_cancelled") {
+    answerStore.cancel(message.answerId);
+    return { ...state, answerStreaming: false, answerThreads: answerStore.list() };
+  }
+  return state;
+}
+
+interface RuntimeState {
+  mic: number;
+  system: number;
+  state: string;
+  sessionState: string;
+  realtimeState: string;
+  operationMode: "IDLE" | "INTERVIEW" | "WRITTEN_TEST";
+  overlayMode: OverlayMode;
+  hudState: HUDState;
+  automationMode: "MANUAL" | "AUTO";
+  answerMode: "FAST" | "NORMAL" | "DEEP";
+  question?: QuestionCandidate;
+  answerText: string;
+  answerStreaming: boolean;
+  answerId?: string;
+  questionGroups: QuestionGroup[];
+  activeQuestionGroupId?: string;
+  answerThreads: AnswerThread[];
+  preferences?: OverlayPreferences;
+  layoutEditMode: boolean;
+  captureProtection?: { requested: boolean; supported?: boolean; osFlagApplied?: boolean; displayCaptureVerified?: boolean | null; lastError?: string };
+  notice?: string;
+}
+
+const initialRuntimeState: RuntimeState = { mic: 0, system: 0, state: "STOPPED", sessionState: "IDLE", realtimeState: "disconnected", operationMode: "IDLE", overlayMode: "passive", hudState: initialHUDState, automationMode: "AUTO", answerMode: "NORMAL", answerText: "", answerStreaming: false, questionGroups: [], answerThreads: [], layoutEditMode: false };
+
+function useOverlayRuntime(surface: OverlaySurface): RuntimeState {
+  const [state, setState] = useState<RuntimeState>(() => ({ ...initialRuntimeState, preferences: initialPreferences() }));
+  const answerStore = useMemo(() => new AnswerThreadStore(), []);
+  useEffect(() => {
+    let disposed = false;
+    const update = (patch: Partial<RuntimeState>) => { if (!disposed) setState((current) => ({ ...current, ...patch })); };
+    void Promise.all([window.interviewCopilot.overlay.getState(), window.interviewCopilot.overlay.getPreferences(), window.interviewCopilot.overlay.getCaptureProtection()]).then(([hudState, preferences, captureProtection]) => update({ hudState: hudState ?? initialHUDState, preferences, captureProtection })).catch(() => undefined);
+    const cleanups = [
+      window.interviewCopilot.events.onAudio((event) => { if (event.type === "meter") update({ mic: Math.max(0, Math.min(1, event.mic)), system: Math.max(0, Math.min(1, event.system)) }); else if (event.type === "audio_state") update({ state: event.state }); }),
+      window.interviewCopilot.events.onSessionState((sessionState: SessionState) => update({ sessionState, operationMode: sessionState === "IDLE" || sessionState === "ENDED" ? "IDLE" : "INTERVIEW" })),
+      window.interviewCopilot.events.onRealtimeState((realtimeState) => update({ realtimeState })),
+      window.interviewCopilot.events.onOverlayMode((overlayMode) => update({ overlayMode })),
+      window.interviewCopilot.events.onOverlayState((hudState) => update({ hudState })),
+      window.interviewCopilot.events.onOverlayPreferences((preferences) => update({ preferences })),
+      window.interviewCopilot.events.onOverlayCaptureProtection((captureProtection) => update({ captureProtection })),
+      window.interviewCopilot.events.onOverlayLayoutEditMode((layoutEditMode) => update({ layoutEditMode })),
+      window.interviewCopilot.events.onAutomationMode((automationMode) => update({ automationMode })),
+      window.interviewCopilot.events.onAnswerMode((answerMode) => update({ answerMode })),
+      window.interviewCopilot.events.onQuestion((event: QuestionEvent) => {
+        if (event.type !== "question_confirmed" && event.type !== "question_superseded") return;
+        setState((current) => ({ ...current, question: event.question, questionGroups: replaceQuestionGroup(current.questionGroups, event.question), activeQuestionGroupId: event.question.groupId ?? current.activeQuestionGroupId }));
+      }),
+      window.interviewCopilot.events.onRealtimeMessage((message) => setState((current) => applyRealtimeMessage(message, current, answerStore))),
+      window.interviewCopilot.events.onOverlayGlobalWheel(({ deltaY }) => { const selector = surface === "answer" ? ".answer-thread-panel" : ".question-thread-panel"; const element = document.querySelector(selector) as HTMLElement | null; if (element) element.scrollTop += deltaY; })
+    ];
+    window.interviewCopilot.diagnostics.markRendererReady();
+    return () => { disposed = true; cleanups.forEach((cleanup) => cleanup()); };
+  }, [answerStore, surface]);
+  return state;
+}
+
+function OverlayRuntimeApp({ surface }: { surface: OverlaySurface }): JSX.Element {
+  const state = useOverlayRuntime(surface);
+  const props: OverlayRootProps = {
+    surface,
+    panel: surface === "question" ? "question" : surface === "answer" ? "answer" : undefined,
+    mic: state.mic,
+    system: state.system,
+    state: state.state,
+    sessionState: state.sessionState,
+    realtimeState: state.realtimeState,
+    operationMode: state.operationMode,
+    overlayMode: state.overlayMode,
+    hudState: state.hudState,
+    automationMode: state.automationMode,
+    answerMode: state.answerMode,
+    question: state.question,
+    answerText: state.answerText,
+    answerStreaming: state.answerStreaming,
+    questionGroups: state.questionGroups,
+    activeQuestionGroupId: state.activeQuestionGroupId,
+    answerThreads: state.answerThreads,
+    onToggleMode: () => void window.interviewCopilot.overlay.setMode(state.overlayMode === "interactive" ? "passive" : "interactive"),
+    onToggleAutomation: async () => { await window.interviewCopilot.interview.setAutomationMode(state.automationMode === "AUTO" ? "MANUAL" : "AUTO"); },
+    onAnswerLatest: () => window.interviewCopilot.interview.answerLatest(),
+    onAnswerScreenshot: () => window.interviewCopilot.interview.answerScreenshot(),
+    onEndInterview: () => window.interviewCopilot.interview.stop(),
+    onHideAll: () => void window.interviewCopilot.overlay.hideAll(),
+    onShowAll: () => void window.interviewCopilot.overlay.showAll(),
+    onTogglePanels: () => void window.interviewCopilot.overlay.toggleAll(),
+    onToggleTranscript: () => void window.interviewCopilot.overlay.toggleTranscript(),
+    onToggleAnswer: () => void window.interviewCopilot.overlay.toggleAnswer(),
+    onToggleShortcuts: () => void window.interviewCopilot.overlay.toggleShortcuts(),
+    onRequestEndInterview: () => void window.interviewCopilot.overlay.requestEndInterview(),
+    onToggleShare: () => void window.interviewCopilot.overlay.toggleShareMode(),
+    captureProtectionEnabled: state.captureProtection?.requested,
+    captureProtectionSupported: state.captureProtection?.supported,
+    captureProtectionOsFlagApplied: state.captureProtection?.osFlagApplied,
+    captureProtectionDisplayVerified: state.captureProtection?.displayCaptureVerified,
+    captureProtectionLastError: state.captureProtection?.lastError,
+    onToggleCaptureProtection: () => void window.interviewCopilot.overlay.setCaptureProtection(!(state.captureProtection?.requested ?? true))
+  };
+  return <OverlayWindowRoot {...props} />;
+}
+
+export function mountOverlayRenderer(surface: OverlaySurface): void {
+  const rootElement = document.getElementById("root");
+  if (!rootElement) return;
+  createRoot(rootElement).render(<StrictMode><RootErrorBoundary><OverlayRuntimeApp surface={surface} /></RootErrorBoundary></StrictMode>);
+  document.documentElement.dataset.appReady = "true";
+}
