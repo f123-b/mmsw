@@ -15,8 +15,8 @@ function inline(value: unknown, fallback = "—"): string {
   return display(value, fallback).replace(/[\r\n]+/g, " ").replace(/\|/g, "\\|");
 }
 
-function dateTime(value?: number): string {
-  return value === undefined ? "—" : new Date(value).toLocaleString("zh-CN");
+function dateTime(value?: number | null): string {
+  return value === undefined || value === null || !Number.isFinite(value) ? "—" : new Date(value).toLocaleString("zh-CN");
 }
 
 function duration(value: number): string {

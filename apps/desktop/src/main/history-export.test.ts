@@ -59,4 +59,17 @@ describe("interview history markdown export", () => {
     expect(markdown).toContain("未完成 · 超时中断");
     expect(markdown).toContain("未生成完整回答");
   });
+
+  it("renders a running record with a NULL end time without epoch leakage", () => {
+    const startedAt = Date.now();
+    const snapshot: InterviewSnapshot = {
+      interview: { id: "interview-running", profileId: "profile-1", startedAt, endedAt: null as unknown as undefined, status: "running", language: "zh-CN", automationMode: "AUTO", createdAt: startedAt },
+      transcripts: [],
+      questions: [],
+      answers: []
+    };
+    const markdown = formatInterviewMarkdown(snapshot, analyzeInterview(snapshot));
+    expect(markdown).toContain("- 结束时间：—");
+    expect(markdown).not.toContain("1970");
+  });
 });

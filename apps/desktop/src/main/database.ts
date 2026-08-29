@@ -1903,8 +1903,9 @@ export class SqliteInterviewHistoryRepository {
   endInterview(interviewId: string, status: "ended" | "error" = "ended", endedAt = Date.now()): InterviewRecord {
     this.database.run("UPDATE interviews SET status = ?, ended_at = ? WHERE id = ?", [status, endedAt, interviewId]);
     this.database.flushNow();
-    const record = this.database.first<InterviewRecord>("SELECT id, profile_id AS profileId, project_id AS projectId, job_target_id AS jobTargetId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews WHERE id = ?", [interviewId]);
-    if (!record) throw new Error(`Interview not found: ${interviewId}`);
+    const row = this.database.first<Record<string, unknown>>("SELECT id, profile_id AS profileId, project_id AS projectId, job_target_id AS jobTargetId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews WHERE id = ?", [interviewId]);
+    if (!row) throw new Error(`Interview not found: ${interviewId}`);
+    const record = this.hydrateInterview(row);
     this.emitChanged(interviewId, "state");
     return record;
   }
@@ -1946,7 +1947,7 @@ export class SqliteInterviewHistoryRepository {
   }
 
   listInterviews(): InterviewRecord[] {
-    return this.database.all<InterviewRecord>("SELECT id, profile_id AS profileId, project_id AS projectId, job_target_id AS jobTargetId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews ORDER BY created_at DESC");
+    return this.database.all<Record<string, unknown>>("SELECT id, profile_id AS profileId, project_id AS projectId, job_target_id AS jobTargetId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews ORDER BY created_at DESC").map((row) => this.hydrateInterview(row));
   }
 
   deleteInterview(interviewId: string): void {
@@ -1965,8 +1966,9 @@ export class SqliteInterviewHistoryRepository {
   }
 
   snapshot(interviewId: string): InterviewSnapshot {
-    const interview = this.database.first<InterviewRecord>("SELECT id, profile_id AS profileId, project_id AS projectId, job_target_id AS jobTargetId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews WHERE id = ?", [interviewId]);
-    if (!interview) throw new Error(`Interview not found: ${interviewId}`);
+    const interviewRow = this.database.first<Record<string, unknown>>("SELECT id, profile_id AS profileId, project_id AS projectId, job_target_id AS jobTargetId, started_at AS startedAt, ended_at AS endedAt, status, language, automation_mode AS automationMode, created_at AS createdAt FROM interviews WHERE id = ?", [interviewId]);
+    if (!interviewRow) throw new Error(`Interview not found: ${interviewId}`);
+    const interview = this.hydrateInterview(interviewRow);
     const transcripts = this.database.all<Record<string, unknown>>("SELECT id, interview_id AS interviewId, source, text, raw_text AS rawText, normalized_text AS normalizedText, canonical_text AS canonicalText, terminology_corrections_json AS terminologyCorrectionsJson, start_ms AS startMs, end_ms AS endMs, final, confidence, created_at AS createdAt FROM transcripts WHERE interview_id = ? ORDER BY start_ms", [interviewId]).map((row) => this.hydrateTranscript(row));
     const questions = this.database.all<Record<string, unknown>>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status, parent_question_id AS parentQuestionId, root_question_id AS rootQuestionId, raw_transcript AS rawTranscript, normalized_question AS normalizedQuestion, canonical_question AS canonicalQuestion, context_relation AS contextRelation, inherited_topic AS inheritedTopic, topic, terminology_corrections_json AS terminologyCorrectionsJson, semantic_frame AS semanticFrame FROM questions WHERE interview_id = ? ORDER BY detected_at", [interviewId]).map((row) => this.hydrateQuestion(row));
     const answers = this.database.all<Record<string, unknown>>("SELECT a.id, a.question_id AS questionId, a.text, a.model, a.mode, a.latency_first_token AS latencyFirstToken, a.latency_total AS latencyTotal, a.cancel_reason AS cancelReason, a.started_at AS startedAt, a.first_token_at AS firstTokenAt, a.finished_at AS finishedAt, a.telemetry_json AS telemetryJson, a.created_at AS createdAt FROM answers a JOIN questions q ON q.id = a.question_id WHERE q.interview_id = ? ORDER BY a.created_at", [interviewId]).map((row) => ({
@@ -1979,6 +1981,21 @@ export class SqliteInterviewHistoryRepository {
     const revision = (this.revisions.get(interviewId) ?? 0) + 1;
     this.revisions.set(interviewId, revision);
     this.onChanged?.({ interviewId, revision, type, createdAt: Date.now() });
+  }
+
+  private hydrateInterview(row: Record<string, unknown>): InterviewRecord {
+    return {
+      id: String(row.id),
+      profileId: String(row.profileId),
+      ...(row.projectId ? { projectId: String(row.projectId) } : {}),
+      ...(row.jobTargetId ? { jobTargetId: String(row.jobTargetId) } : {}),
+      startedAt: Number(row.startedAt),
+      ...(row.endedAt !== null && row.endedAt !== undefined && Number.isFinite(Number(row.endedAt)) ? { endedAt: Number(row.endedAt) } : {}),
+      status: String(row.status) as InterviewRecord["status"],
+      language: String(row.language),
+      automationMode: String(row.automationMode) as InterviewRecord["automationMode"],
+      createdAt: Number(row.createdAt)
+    };
   }
 
   private hydrateTranscript(row: Record<string, unknown>): TranscriptRecord {
