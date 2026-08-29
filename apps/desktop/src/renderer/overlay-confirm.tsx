@@ -10,8 +10,8 @@ function ConfirmDialogApp() {
       <strong id="overlay-confirm-title" style={{ display: "block", fontSize: 19 }}>结束面试？</strong>
       <p style={{ margin: "12px 0 22px", color: "#b8c1d1", lineHeight: 1.55 }}>结束后将停止录音，并保存本次面试记录。</p>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
-        <button type="button" onClick={() => void window.interviewCopilot.overlay.cancelEndInterview()} style={{ minWidth: 84, border: "1px solid #58657b", borderRadius: 9, padding: "9px 14px", background: "transparent", color: "#e6ebf4", cursor: "pointer" }}>取消</button>
-        <button type="button" onClick={() => void window.interviewCopilot.overlay.confirmEndInterview()} style={{ minWidth: 84, border: 0, borderRadius: 9, padding: "9px 14px", background: "#e66a5c", color: "#fff", cursor: "pointer" }}>结束</button>
+        <button type="button" data-testid="confirm-cancel" onClick={() => void window.interviewCopilot.overlay.cancelEndInterview()} style={{ minWidth: 84, border: "1px solid #58657b", borderRadius: 9, padding: "9px 14px", background: "transparent", color: "#e6ebf4", cursor: "pointer" }}>取消</button>
+        <button type="button" data-testid="confirm-end" onClick={() => void window.interviewCopilot.overlay.confirmEndInterview()} style={{ minWidth: 84, border: 0, borderRadius: 9, padding: "9px 14px", background: "#e66a5c", color: "#fff", cursor: "pointer" }}>结束</button>
       </div>
     </section>
   </main>;

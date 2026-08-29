@@ -362,6 +362,7 @@ async function screenshot(name, client = main) {
 
 const evidence = [];
 let overlay;
+let overlayAnswer;
 let overlayControl;
 try {
   await waitFor(() => document.documentElement?.dataset.appReady === "true");
@@ -591,28 +592,37 @@ try {
   evidence.push("Probe: PASS; PROBE_COMPLETES_BEFORE_INTERVIEW_START: PASS");
   await clickSelector(".setup-modal .dark-pill");
   await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "RUNNING"), 15_000);
-  const overlayTarget = await waitForTarget((item) => { try { return item.type === "page" && new URL(item.url).searchParams.get("window") === "overlay"; } catch { return false; } }, 15_000);
+  const overlayTarget = await waitForTarget((item) => { try { return item.type === "page" && new URL(item.url).searchParams.get("window") === "overlay-question"; } catch { return false; } }, 15_000);
   overlay = connectTarget(overlayTarget);
   await new Promise((resolve, reject) => { overlay.socket.once("open", resolve); overlay.socket.once("error", reject); });
   await overlay.command("Runtime.enable");
   await overlay.command("Log.enable");
+  const overlayAnswerTarget = await waitForTarget((item) => { try { return item.type === "page" && new URL(item.url).searchParams.get("window") === "overlay-answer"; } catch { return false; } }, 15_000);
+  overlayAnswer = connectTarget(overlayAnswerTarget);
+  await new Promise((resolve, reject) => { overlayAnswer.socket.once("open", resolve); overlayAnswer.socket.once("error", reject); });
+  await overlayAnswer.command("Runtime.enable");
+  await overlayAnswer.command("Log.enable");
   const overlayControlTarget = await waitForTarget((item) => { try { return item.type === "page" && new URL(item.url).searchParams.get("window") === "overlay-control"; } catch { return false; } }, 15_000);
   overlayControl = connectTarget(overlayControlTarget);
   await new Promise((resolve, reject) => { overlayControl.socket.once("open", resolve); overlayControl.socket.once("error", reject); });
   await overlayControl.command("Runtime.enable");
   await overlayControl.command("Log.enable");
   await overlay.evaluate("window.__e2eScreenshotCaptured = 0; window.interviewCopilot.events.onScreenshot(() => { window.__e2eScreenshotCaptured += 1; });");
+  await overlayAnswer.evaluate("window.__e2eScreenshotCaptured = 0; window.interviewCopilot.events.onScreenshot(() => { window.__e2eScreenshotCaptured += 1; });");
   await main.evaluate("window.__e2eMainScreenshotCaptured = 0; window.interviewCopilot.events.onScreenshot(() => { window.__e2eMainScreenshotCaptured += 1; });");
   const controlSurface = await overlayControl.evaluate("(() => ({ surface: document.querySelector('.overlay-root')?.dataset.overlaySurface, buttons: document.querySelectorAll('button').length, contentPanels: document.querySelectorAll('.question-panel, .answer-panel').length }))()");
-  const contentSurface = await overlay.evaluate("(() => ({ surface: document.querySelector('.overlay-root')?.dataset.overlaySurface, hasToolbar: Boolean(document.querySelector('.toolbar-panel')) }))()");
-  if (controlSurface?.surface !== "control" || controlSurface.buttons < 3 || controlSurface.contentPanels !== 0 || contentSurface?.surface !== "content" || contentSurface.hasToolbar) throw new Error(`OVERLAY_SURFACE_SPLIT failed: ${JSON.stringify({ controlSurface, contentSurface })}`);
+  const contentSurface = await overlay.evaluate("(() => ({ surface: document.querySelector('.overlay-root')?.dataset.overlaySurface, hasToolbar: Boolean(document.querySelector('.toolbar-panel')), hasQuestionPanel: Boolean(document.querySelector('.question-panel')), hasAnswerPanel: Boolean(document.querySelector('.answer-panel')) }))()");
+  const answerSurface = await overlayAnswer.evaluate("(() => ({ surface: document.querySelector('.overlay-root')?.dataset.overlaySurface, hasToolbar: Boolean(document.querySelector('.toolbar-panel')), hasQuestionPanel: Boolean(document.querySelector('.question-panel')), hasAnswerPanel: Boolean(document.querySelector('.answer-panel')) }))()");
+  if (controlSurface?.surface !== "control" || controlSurface.buttons < 3 || controlSurface.contentPanels !== 0 || contentSurface?.surface !== "question" || contentSurface.hasToolbar || !contentSurface.hasQuestionPanel || contentSurface.hasAnswerPanel || answerSurface?.surface !== "answer" || answerSurface.hasToolbar || answerSurface.hasQuestionPanel || !answerSurface.hasAnswerPanel) throw new Error(`OVERLAY_SURFACE_SPLIT failed: ${JSON.stringify({ controlSurface, contentSurface, answerSurface })}`);
   await nativeClick(".toolbar-shortcut-toggle", overlayControl);
   await waitFor(() => Boolean(document.querySelector(".shortcut-panel")), 5_000, overlay);
   await nativeClick(".toolbar-shortcut-toggle", overlayControl);
   await waitFor(() => !document.querySelector(".shortcut-panel"), 5_000, overlay);
   evidence.push("Overlay control surface: PASS; native first-click toolbar action: PASS; content surface remains panel-only: PASS");
   await screenshot("10-interview-running.png", overlay);
-   const overlayStructure = await overlay.evaluate("(() => { const question = document.querySelector('.question-thread-panel'); const answer = document.querySelector('.answer-thread-panel'); const qPanel = document.querySelector('.question-panel')?.getBoundingClientRect(); const aPanel = document.querySelector('.answer-panel')?.getBoundingClientRect(); const bodyText = document.body.innerText; return { questionOverflow: question ? getComputedStyle(question).overflowY : '', answerOverflow: answer ? getComputedStyle(answer).overflowY : '', questionPointerEvents: question ? getComputedStyle(question).pointerEvents : '', answerPointerEvents: answer ? getComputedStyle(answer).pointerEvents : '', hasFullTranscript: Boolean(document.querySelector('.transcript-scroll, .transcript-bubble, .timeline-scroll')), hasNavigator: bodyText.includes('问题导航') || bodyText.includes('QUESTION NAVIGATOR'), hasReader: bodyText.includes('答案阅读器') || bodyText.includes('ANSWER READER'), independentPanels: Boolean(qPanel && aPanel && qPanel.width > 0 && aPanel.width > 0 && qPanel.left !== aPanel.left) }; })()");
+   const questionStructure = await overlay.evaluate("(() => { const panel = document.querySelector('.question-thread-panel'); const box = document.querySelector('.question-panel')?.getBoundingClientRect(); const bodyText = document.body.innerText; return { overflow: panel ? getComputedStyle(panel).overflowY : '', pointerEvents: panel ? getComputedStyle(panel).pointerEvents : '', hasFullTranscript: Boolean(document.querySelector('.transcript-scroll, .transcript-bubble, .timeline-scroll')), hasNavigator: bodyText.includes('问题导航') || bodyText.includes('QUESTION NAVIGATOR'), panelWidth: box?.width ?? 0 }; })()");
+   const answerStructure = await overlayAnswer.evaluate("(() => { const panel = document.querySelector('.answer-thread-panel'); const box = document.querySelector('.answer-panel')?.getBoundingClientRect(); const bodyText = document.body.innerText; return { overflow: panel ? getComputedStyle(panel).overflowY : '', pointerEvents: panel ? getComputedStyle(panel).pointerEvents : '', hasReader: bodyText.includes('答案阅读器') || bodyText.includes('ANSWER READER'), panelWidth: box?.width ?? 0 }; })()");
+   const overlayStructure = { questionOverflow: questionStructure?.overflow, answerOverflow: answerStructure?.overflow, questionPointerEvents: questionStructure?.pointerEvents, answerPointerEvents: answerStructure?.pointerEvents, hasFullTranscript: questionStructure?.hasFullTranscript || answerStructure?.hasFullTranscript, hasNavigator: questionStructure?.hasNavigator, hasReader: answerStructure?.hasReader, independentPanels: Boolean((questionStructure?.panelWidth ?? 0) > 0 && (answerStructure?.panelWidth ?? 0) > 0) };
   if (!overlayStructure || !['auto', 'scroll'].includes(overlayStructure.questionOverflow) || !['auto', 'scroll'].includes(overlayStructure.answerOverflow) || overlayStructure.questionPointerEvents !== 'auto' || overlayStructure.answerPointerEvents !== 'auto' || overlayStructure.hasFullTranscript || !overlayStructure.hasNavigator || !overlayStructure.hasReader || !overlayStructure.independentPanels) throw new Error(`OVERLAY_SCROLL_LAYOUT_REGRESSION failed: ${JSON.stringify(overlayStructure)}`);
   evidence.push("Overlay A startup/structure: PASS; B two independent readers: PASS; C native question wheel region: PASS; D native answer wheel region: PASS; E passive hit-test handoff: PASS; F no full transcript in overlay: PASS");
   evidence.push(`Formal Start: PASS; meterOnly:false: PASS; MIC Channel: PASS; SYSTEM Channel: PASS; PCM packets: ${pcmPackets}`);
@@ -621,8 +631,8 @@ try {
   evidence.push("Supersede: PASS");
   await waitForText(interviewQuestions.auto[0], 15_000, overlay);
   await screenshot("11-overlay-question.png", overlay);
-  await waitFor(() => document.body.innerText.includes("Mock LLM answer"), 15_000, overlay);
-  await screenshot("12-overlay-answer-streaming.png", overlay);
+  await waitFor(() => document.body.innerText.includes("Mock LLM answer"), 15_000, overlayAnswer);
+  await screenshot("12-overlay-answer-streaming.png", overlayAnswer);
   await waitForNode(() => answerRequests.length >= 3, 15_000);
   evidence.push("Remote Transcript: PASS; Question Confirmed: PASS; AUTO_3_QUESTIONS: PASS; AUTO Answer: PASS; Overlay: PASS");
 
@@ -664,7 +674,7 @@ try {
   evidence.push("AUTOMATION_RUNTIME_SWITCH: PASS; Overlay AUTO/MANUAL Sync: PASS");
 
   const beforeManualSend = answerRequests.length;
-  const overlayComposerPresent = await overlay.evaluate("Boolean(document.querySelector('.overlay-answer-composer textarea, .overlay-answer-composer input'))");
+  const overlayComposerPresent = await overlayAnswer.evaluate("Boolean(document.querySelector('.overlay-answer-composer textarea, .overlay-answer-composer input'))");
   if (overlayComposerPresent) throw new Error("OVERLAY_COMPOSER_REMOVED failed");
   await main.evaluate("void window.interviewCopilot.interview.answerQuestion('Mock manual question'); true");
   await waitForNode(() => answerRequests.length > beforeManualSend, 15_000);
@@ -673,37 +683,44 @@ try {
   const beforeVisionRequests = visionRequests.length;
   const beforeCaptured = await main.evaluate("window.__e2eMainScreenshotCaptured ?? 0");
   await main.evaluate(`window.__e2eMainScreenshotBaseline = ${beforeCaptured}`);
-  await waitFor(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('截图回答') || (item.innerText || '').includes('附截图')); return Boolean(button && !button.disabled); }, 15_000, overlay);
-  const screenshotButtonState = await overlay.evaluate("(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('截图回答') || (item.innerText || '').includes('附截图')); if (!button) return { found: false }; button.click(); return { found: true, disabled: button.disabled }; })()");
+  await waitFor(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('截图回答') || (item.innerText || '').includes('附截图')); return Boolean(button && !button.disabled); }, 15_000, overlayAnswer);
+  const screenshotButtonState = await overlayAnswer.evaluate("(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('截图回答') || (item.innerText || '').includes('附截图')); if (!button) return { found: false }; button.click(); return { found: true, disabled: button.disabled }; })()");
   if (!screenshotButtonState?.found || screenshotButtonState.disabled) throw new Error(`Screenshot button unavailable: ${JSON.stringify(screenshotButtonState)}`);
   await waitForNode(() => visionRequests.slice(beforeVisionRequests).some((request) => request.requestType === "vision" && request.hasImage && request.imageBytes > 0 && request.imageMimeType === "image/png"), 15_000);
   // The capture event is broadcast before the independent vision request and
   // can be consumed while the renderer is between reloads. The runtime
   // diagnostic is the authoritative end-to-end completion signal here.
   await waitFor(() => window.interviewCopilot.screenshot.getDiagnostics().then((diagnostics) => diagnostics.lastLifecycleEvent === "SCREENSHOT_PIPELINE_COMPLETED"), 15_000, main);
-  await waitFor(() => document.body.innerText.includes("Mock vision answer"), 15_000, overlay);
+  await waitFor(() => document.body.innerText.includes("Mock vision answer"), 15_000, overlayAnswer);
   const beforeWheelVision = visionRequests.length;
-  const screenshotQuestionVisible = await overlay.evaluate("(() => { const question = document.querySelector('.question-thread-panel'); const answer = document.querySelector('.answer-thread-panel'); if (!question || !answer) return false; question.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 240 })); answer.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 240 })); return document.body.innerText.includes('截图识别题') && document.querySelectorAll('[data-answer-id]').length > 0; })()");
+  const screenshotQuestionVisible = await overlay.evaluate("(() => { const question = document.querySelector('.question-thread-panel'); if (!question) return false; question.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 240 })); return document.body.innerText.includes('截图识别题'); })()");
+  const screenshotAnswerVisible = await overlayAnswer.evaluate("(() => { const answer = document.querySelector('.answer-thread-panel'); if (!answer) return false; answer.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 240 })); return document.querySelectorAll('[data-answer-id]').length > 0; })()");
   await sleep(300);
-  if (!screenshotQuestionVisible || visionRequests.length !== beforeWheelVision) throw new Error(`WHEEL_MUST_NOT_TRIGGER_SCREENSHOT failed: ${JSON.stringify({ screenshotQuestionVisible, beforeWheelVision, afterWheelVision: visionRequests.length })}`);
+  if (!screenshotQuestionVisible || !screenshotAnswerVisible || visionRequests.length !== beforeWheelVision) throw new Error(`WHEEL_MUST_NOT_TRIGGER_SCREENSHOT failed: ${JSON.stringify({ screenshotQuestionVisible, screenshotAnswerVisible, beforeWheelVision, afterWheelVision: visionRequests.length })}`);
   evidence.push("Overlay Screenshot Button: PASS; Vision Request: PASS");
   evidence.push("G manual scroll retention policy: PASS; H new-content badge policy: PASS; I wheel does not trigger screenshot: PASS; J screenshot question navigator: PASS; K screenshot answer stack retention: PASS; L screenshot region/config round-trip: PASS");
 
   const beforeIpcScreenshot = screenshotAnswerRequests;
   const beforeIpcCaptured = await main.evaluate("window.__e2eMainScreenshotCaptured ?? 0");
   await main.evaluate(`window.__e2eMainScreenshotBaseline = ${beforeIpcCaptured}`);
-  const ipcResult = await overlay.evaluate("window.interviewCopilot.interview.answerScreenshot().then(() => 'ok').catch((error) => `error:${String(error)}`)");
+  const ipcResult = await overlayAnswer.evaluate("window.interviewCopilot.interview.answerScreenshot().then(() => 'ok').catch((error) => `error:${String(error)}`)");
   if (ipcResult !== "ok") throw new Error(`Screenshot IPC failed: ${ipcResult}`);
   await waitForNode(() => screenshotAnswerRequests > beforeIpcScreenshot, 15_000);
   await waitFor(() => (window.__e2eMainScreenshotCaptured ?? 0) > (window.__e2eMainScreenshotBaseline ?? 0), 15_000, main);
   evidence.push("Screenshot IPC: PASS");
 
   await nativeClick(".toolbar-end-button", overlayControl);
-  await waitFor(() => Boolean(document.querySelector(".end-interview-dialog")), 5_000, overlay);
-  const confirmedEnd = await overlay.evaluate("(() => { const button = document.querySelector('.dialog-confirm'); if (!button) return false; button.click(); return true; })()");
+  const overlayConfirmTarget = await waitForTarget((item) => { try { return item.type === "page" && new URL(item.url).searchParams.get("window") === "overlay-confirm"; } catch { return false; } }, 5_000);
+  const overlayConfirm = connectTarget(overlayConfirmTarget);
+  await new Promise((resolve, reject) => { overlayConfirm.socket.once("open", resolve); overlayConfirm.socket.once("error", reject); });
+  await overlayConfirm.command("Runtime.enable");
+  await overlayConfirm.command("Log.enable");
+  await waitFor(() => Boolean(document.querySelector("[data-testid='confirm-end']")), 5_000, overlayConfirm);
+  const confirmedEnd = await overlayConfirm.evaluate("(() => { const button = document.querySelector('[data-testid=\"confirm-end\"]'); if (!button) return false; button.click(); return true; })()");
   if (!confirmedEnd) throw new Error("End interview confirmation button was not rendered");
   await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "ENDED"), 15_000);
-  evidence.push("Native end-interview click: PASS; confirmation dialog: PASS; session shutdown: PASS");
+  evidence.push("Native end-interview click: PASS; independent confirmation dialog: PASS; dialog action: PASS; session shutdown: PASS");
+  overlayConfirm.socket.close();
   const firstSnapshot = await main.evaluate("(async () => { const records = await window.interviewCopilot.history.list(); const record = records[0]; return record ? { record, detail: await window.interviewCopilot.history.get(record.id), count: records.length } : undefined; })()");
   if (!firstSnapshot?.record || firstSnapshot.record.status !== "ended") throw new Error("History interview did not end");
   if ((firstSnapshot.detail?.transcripts ?? []).filter((item) => item.source === "remote").length < 3) throw new Error("History remote transcript count < 3");
@@ -716,7 +733,7 @@ try {
   const beforeScreenshotOnly = screenshotOnlyRequests;
   await main.evaluate("window.interviewCopilot.interview.answerScreenshot()");
   await waitForNode(() => screenshotOnlyRequests > beforeScreenshotOnly, 15_000);
-  await waitFor(() => document.body.innerText.includes("Mock vision answer"), 15_000, overlay);
+  await waitFor(() => document.body.innerText.includes("Mock vision answer"), 15_000, overlayAnswer);
   evidence.push("Screenshot-only: PASS; SCREENSHOT_WITHOUT_CURRENT_QUESTION: PASS");
   await main.evaluate("window.interviewCopilot.interview.stop()");
   await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "ENDED"), 15_000);
@@ -734,7 +751,7 @@ try {
   const historyAfterDelete = await main.evaluate("window.interviewCopilot.history.list().then((records) => records.length)");
   if (historyAfterDelete !== historyBeforeDelete - 1) throw new Error(`History delete failed: ${historyBeforeDelete} -> ${historyAfterDelete}`);
   evidence.push("History deletion cascade: PASS");
-  if (main.rendererErrors.length || (overlay?.rendererErrors.length ?? 0) || (overlayControl?.rendererErrors.length ?? 0)) throw new Error(`Critical renderer errors: ${[...main.rendererErrors, ...(overlay?.rendererErrors ?? []), ...(overlayControl?.rendererErrors ?? [])].join(" | ")}`);
+  if (main.rendererErrors.length || (overlay?.rendererErrors.length ?? 0) || (overlayAnswer?.rendererErrors.length ?? 0) || (overlayControl?.rendererErrors.length ?? 0)) throw new Error(`Critical renderer errors: ${[...main.rendererErrors, ...(overlay?.rendererErrors ?? []), ...(overlayAnswer?.rendererErrors ?? []), ...(overlayControl?.rendererErrors ?? [])].join(" | ")}`);
   evidence.push("Critical Renderer Errors: 0");
 } catch (error) {
   evidence.push(`FUNCTIONAL_INTERVIEW_E2E: FAIL · ${String(error)}`);
@@ -744,6 +761,7 @@ try {
   const report = `# Functional Interview E2E Report\n\nDate: ${new Date().toISOString()}\n\n${evidence.map((item) => `- ${item}`).join("\n")}\n\n## Test providers\n\n- Mock Audio Sidecar: ${audioSidecar}\n- Mock ASR Gateway: ws://127.0.0.1:${asrPort}/realtime\n- Mock LLM Provider: http://127.0.0.1:${mockPort}\n- Real credentials used: none\n\n## Evidence\n\nScreenshots are generated from the running Electron application and the real renderer/IPC/coordinator/answer/history path.\n`;
   await writeFile(join(artifactDirectory, "FUNCTIONAL_TEST_REPORT.md"), report, "utf8");
   overlay?.socket.close();
+  overlayAnswer?.socket.close();
   overlayControl?.socket.close();
   main.socket.close();
   asrServer.close();

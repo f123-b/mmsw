@@ -1144,19 +1144,16 @@ export function App(): JSX.Element {
       const asrUrl = realtimeUrl.trim() || asrBaseUrl.trim();
       if (!profileId) throw new Error("PROFILE_NOT_FOUND: 请先创建或选择一个面试档案。");
       if (!currentProbeReady) throw new Error("AUDIO_PROBE_REQUIRED: 请先完成一次音频检测。");
-      const preflight = await window.interviewCopilot.settings.preflight(true);
-      if (!preflight.llm.configured) throw new Error("LLM_NOT_CONFIGURED: 未配置 LLM API Key");
-      if (!preflight.llm.reachable) throw new Error(`LLM_CONNECT_FAILED: ${preflight.llm.message ?? preflight.llm.status}`);
       if (asrProviderType === "custom-gateway" && !asrUrl) throw new Error("ASR_CONNECT_FAILED: Custom Gateway 需要配置 WebSocket URL");
-      if (asrProviderType !== "custom-gateway" && asrProviderType !== "funasr-local" && !preflight.asr.configured) throw new Error(`ASR_AUTH_FAILED: 未配置${asrProviderType === "qwen" ? "千问" : " Deepgram"} API Key`);
-      if (!preflight.asr.reachable) throw new Error(`ASR_CONNECT_FAILED: ${preflight.asr.message ?? preflight.asr.status}`);
       if (!inputDeviceId || !outputDeviceId) throw new Error("AUDIO_DEVICE_FAILED: 未选择可用的音频设备");
       persistDevice("interview-copilot.input-device", inputDeviceId);
       persistDevice("interview-copilot.output-device", outputDeviceId);
+      setSetupOpen(false);
+      store.setNotice("面试正在启动，悬浮窗即将显示…");
       await window.interviewCopilot.profiles.selectActive(profileId);
       await window.interviewCopilot.interview.start({ profileId, projectId: interviewProjectId || undefined, jobTargetId: interviewJobTargetId || undefined, url: asrProviderType === "custom-gateway" ? asrUrl : undefined, gatewayToken: asrProviderType === "custom-gateway" ? realtimeTicket.trim() || undefined : undefined, language: selectedProfile?.language, inputDeviceId, outputDeviceId, automationMode: store.automationMode, answerMode, providerType: asrProviderType });
-      setSetupOpen(false);
     } catch (error) {
+      setSetupOpen(true);
       store.setNotice(`面试启动失败：${userFacingError(error)}`);
     }
   };

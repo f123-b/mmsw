@@ -879,6 +879,7 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   await waitForNativeCount(underlay, 1).catch(async (error) => { const state = await underlay.webContents.executeJavaScript("({ count: window.__nativeMouseClickCount, href: location.href, body: document.body.innerText })", true); throw new Error(`${String(error)}; underlayBounds=${JSON.stringify(underlay.getBounds())}; underlayPoint=${JSON.stringify(underlaySelfTestPoint)}; cursor=${JSON.stringify(screen.getCursorScreenPoint())}; displays=${JSON.stringify(screen.getAllDisplays().map((display) => ({ bounds: display.bounds, workArea: display.workArea, scaleFactor: display.scaleFactor }))) }; underlayState=${JSON.stringify(state)}`); });
   await underlay.webContents.executeJavaScript("window.__nativeMouseClickCount = 0", true);
   main.hide();
+  await manager.prepare();
   const questionWindow = manager.enterInterviewMode();
   await Promise.all(manager.currentWindows.map((window) => waitForRendererLoad(window)));
   await new Promise((resolve) => setTimeout(resolve, 250));
@@ -926,19 +927,23 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
 
   const endTarget = await elementCenter(controlWindow, ".toolbar-end-button");
   await nativeMouseClick(endTarget.x, endTarget.y);
+  const confirmWindow = manager.currentConfirmWindow;
+  if (!confirmWindow) throw new Error("End confirmation window was not created after native ControlWindow click");
+  await waitForRendererLoad(confirmWindow);
+  await waitForRendererReady(confirmWindow);
+  await waitForWindowVisible(confirmWindow);
   const dialogDeadline = Date.now() + 5_000;
   let dialogVisible = false;
   while (Date.now() < dialogDeadline) {
-    dialogVisible = await questionWindow.webContents.executeJavaScript("Boolean(document.querySelector('.end-interview-dialog'))", true) as boolean;
+    dialogVisible = await confirmWindow.webContents.executeJavaScript("Boolean(document.querySelector('[data-testid=\"confirm-cancel\"]'))", true) as boolean;
     if (dialogVisible) break;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   if (!dialogVisible) throw new Error("End dialog did not open after native ControlWindow click");
-  const dialogCancel = await elementCenter(questionWindow, ".dialog-cancel");
+  const dialogCancel = await elementCenter(confirmWindow, "[data-testid='confirm-cancel']");
   await nativeMouseClick(dialogCancel.x, dialogCancel.y);
   await new Promise((resolve) => setTimeout(resolve, 180));
-  const dialogClosed = await questionWindow.webContents.executeJavaScript("!document.querySelector('.end-interview-dialog')", true) as boolean;
-  if (!dialogClosed) throw new Error("End dialog did not close after native cancel");
+  if (confirmWindow.isVisible() || manager.endInterviewConfirmOpen) throw new Error("End confirmation window did not close after native cancel");
   const beforeCancelControl = manager.hudState.transcriptVisible;
   await nativeMouseClick(controlTarget.x, controlTarget.y);
   await new Promise((resolve) => setTimeout(resolve, 180));
@@ -953,10 +958,21 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 250));
   const afterEditBounds = questionWindow.getBounds();
   manager.setLayoutEditMode(false);
+  const finalEndTarget = await elementCenter(controlWindow, ".toolbar-end-button");
+  await nativeMouseClick(finalEndTarget.x, finalEndTarget.y);
+  const finalConfirmWindow = manager.currentConfirmWindow;
+  if (!finalConfirmWindow) throw new Error("Final end confirmation window was not created");
+  await waitForRendererReady(finalConfirmWindow);
+  await waitForWindowVisible(finalConfirmWindow);
+  const finalEndButton = await elementCenter(finalConfirmWindow, "[data-testid='confirm-end']");
+  await nativeMouseClick(finalEndButton.x, finalEndButton.y);
+  const stopDeadline = Date.now() + 5_000;
+  while (Date.now() < stopDeadline && (manager.hudState.running || finalConfirmWindow.isVisible())) await new Promise((resolve) => setTimeout(resolve, 50));
+  if (manager.hudState.running || finalConfirmWindow.isVisible()) throw new Error("End confirmation did not stop the interview after native confirm click");
   underlay.destroy();
   manager.exitInterviewMode();
   const dragged = afterEditBounds.x !== beforeEditBounds.x || afterEditBounds.y !== beforeEditBounds.y;
-  const result = { ok: dragged, result: dragged ? "PASS" : "FAIL", questionClickThrough: true, answerClickThrough: true, controlClick: true, endDialogSingleOwner: true, cancelRestoresControl: true, layoutEditDrag: dragged, questionWindow: beforeEditBounds, questionWindowAfterDrag: afterEditBounds, mainWindow: !main.isDestroyed() };
+  const result = { ok: dragged, result: dragged ? "PASS" : "FAIL", questionClickThrough: true, answerClickThrough: true, controlClick: true, endDialogSingleOwner: true, confirmDialogInteractive: true, cancelRestoresPassthrough: true, endClickStopsInterview: true, layoutEditDrag: dragged, questionWindow: beforeEditBounds, questionWindowAfterDrag: afterEditBounds, mainWindow: !main.isDestroyed() };
   process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify(result)}\n`);
   app.exit(result.ok ? 0 : 1);
 }
@@ -1671,9 +1687,10 @@ function registerIpc(): void {
   });
   ipcMain.handle("realtime:get-transcript", () => ({ ...realtimeTranscriptSnapshots }));
   ipcMain.handle("interview:start", async (_event, options: InterviewStartOptions) => {
-    interviewStartupTiming = new InterviewStartupTiming(Date.now as unknown as () => number, pendingStartupButtonClickAt ?? Date.now());
+    interviewStartupTiming = new InterviewStartupTiming(Date.now, pendingStartupButtonClickAt ?? Date.now());
     markInterviewStartup("START_BUTTON_CLICK");
     let coordinatorStarted = false;
+    let overlayShown = false;
     try {
       if (!profileRepository?.get(options.profileId)) throw new Error("PROFILE_NOT_FOUND: 面试档案不存在");
       if (options.projectId && !projectMemoryRepository?.getSnapshot(options.profileId).projects.some((project) => project.id === options.projectId)) throw new Error("PROJECT_NOT_FOUND: 重点项目不属于当前档案");
@@ -1683,11 +1700,19 @@ function registerIpc(): void {
       const asr = providerConfigStore?.get("asr");
       const asrProviderType = options.providerType ?? asr?.providerType ?? "deepgram";
       if (asrProviderType !== "custom-gateway" && asrProviderType !== "funasr-local" && !asr?.apiKey) throw new Error(`ASR_AUTH_FAILED: 未配置${asrProviderType === "qwen" ? "千问" : " Deepgram"} API Key`);
+      // Show the prewarmed HUD before provider checks and local service startup.
+      // A slow network or model boot must not leave the user staring at a frozen main window.
+      mainWindow?.hide();
+      overlayManager?.enterInterviewMode();
+      overlayShown = true;
+      markInterviewStartup("OVERLAY_SHOW_REQUEST");
       if (asrProviderType === "funasr-local") {
+        markInterviewStartup("LOCAL_ASR_PREPARE_BEGIN");
         await localAsrServiceManager.ensureRunning({
           webSocketUrl: options.url ?? asr?.baseUrl,
           model: options.model ?? asr?.model
         });
+        markInterviewStartup("LOCAL_ASR_PREPARE_END");
       }
       markInterviewStartup("PREFLIGHT_BEGIN");
       const preflight = await runProviderPreflight({ llm, asr: asr ?? { providerName: "ASR", providerType: "custom-gateway", baseUrl: options.url ?? "", apiKey: "", model: options.model ?? "", timeoutMs: 10_000, maxRetries: 0 }, embedding: providerConfigStore?.get("embedding") ?? { providerName: "Embedding", baseUrl: "", apiKey: "", model: "", timeoutMs: 10_000, maxRetries: 0 } }, true, providerPreflightCache);
@@ -1696,19 +1721,14 @@ function registerIpc(): void {
       if (!preflight.asr.reachable) throw new Error(`ASR_CONNECT_FAILED: ${preflight.asr.message ?? preflight.asr.status}`);
       markInterviewStartup("COORDINATOR_START_BEGIN");
       const interviewId = await coordinator().start(options);
-        // The main window must not remain underneath the transparent HUD. Keep
-       // it available for restoration after an explicit or exceptional stop.
-       mainWindow?.hide();
-       overlayManager?.enterInterviewMode();
-       coordinatorStarted = true;
-       markInterviewStartup("OVERLAY_SHOW_REQUEST");
-       markInterviewStartup("INTERVIEW_READY");
-       finishInterviewStartupTrace();
-       return interviewId;
+      coordinatorStarted = true;
+      markInterviewStartup("INTERVIEW_READY");
+      finishInterviewStartupTrace();
+      return interviewId;
     } catch (error) {
       // If window creation fails after the coordinator has started, unwind the
       // session and restore the main window before reporting the error.
-      if (coordinatorStarted || coordinator().running) {
+      if (overlayShown || coordinatorStarted || coordinator().running) {
         await coordinator().stop("error").catch(() => undefined);
         overlayManager?.exitInterviewMode();
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
