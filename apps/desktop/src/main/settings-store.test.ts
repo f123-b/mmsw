@@ -133,6 +133,26 @@ describe("OverlaySettingsStore", () => {
     } finally { database.close(); }
   });
 
+  it("persists independent window, behavior, preset, and screenshot settings", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      const saved = settings.setPreferences({
+        layoutPreset: "wide",
+        questionWindow: { width: 460, height: 520, fontSize: 15, titleFontSize: 12, lineHeight: 1.7, paragraphGap: 9, padding: 14, opacity: 0.82, blur: 8, radius: 12, shadow: true },
+        answerWindow: { width: 760, height: 520, fontSize: 16, titleFontSize: 12, lineHeight: 1.72, paragraphGap: 10, padding: 16, opacity: 0.86, blur: 10, radius: 12, shadow: true },
+        behavior: { followLatestQuestion: false, followLatestAnswer: true, alwaysOnTop: true, lockPosition: true, mousePassthrough: true, autoDim: false, rememberPosition: true, rememberSize: true, showQuestionStatus: true, showAnswerStatus: true, compactHeader: true },
+        screenshot: { middleMouseEnabled: true, enabledInManualInterview: true, enabledInExamMode: true, captureMode: "last_region", fixedRegion: { x: 10, y: 20, width: 800, height: 600 } }
+      });
+      expect(saved.layoutPreset).toBe("wide");
+      expect(saved.questionWindow.width).toBe(460);
+      expect(saved.answerWindow.fontSize).toBe(16);
+      expect(saved.behavior.lockPosition).toBe(true);
+      expect(saved.screenshot.captureMode).toBe("last_region");
+      expect(new OverlaySettingsStore(database).getPreferences()).toEqual(saved);
+    } finally { database.close(); }
+  });
+
   it("defaults to enabled and persists the main-process setting", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {

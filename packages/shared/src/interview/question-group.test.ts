@@ -49,4 +49,32 @@ describe("QuestionGroupManager", () => {
     expect(revised.relation?.type).toBe("ASR_REVISION");
     expect(revised.group.items).toHaveLength(2);
   });
+
+  it("starts a new lifecycle for standalone technical topics even when the detector reports a weak follow-up", () => {
+    const builder = new TurnBuilder();
+    const manager = new QuestionGroupManager(builder);
+    const firstTurn = builder.build({ id: "turn-1", text: "volatile 有什么作用？", startMs: 0, endMs: 600 });
+    const secondTurn = builder.build({ id: "turn-2", text: "static 和 const 的区别是什么？", startMs: 1_000, endMs: 1_700 });
+    manager.add({ turn: firstTurn, question: question("q1", firstTurn.text, { contextRelation: "standalone", topic: "volatile" }), now: 1_000 });
+    const second = manager.add({ turn: secondTurn, question: question("q2", secondTurn.text, { contextRelation: "standalone", category: "followup", detectionType: "follow_up" }), now: 2_000 });
+
+    expect(second.isNewGroup).toBe(true);
+    expect(second.relation?.type).toBe("NEW_TOPIC");
+    expect(second.group.status).toBe("active");
+    expect(manager.list().find((group) => group.id !== second.group.id)?.status).toBe("closed");
+  });
+
+  it("keeps an explicit follow-up in the current group and leaves the group open", () => {
+    const builder = new TurnBuilder();
+    const manager = new QuestionGroupManager(builder);
+    const firstTurn = builder.build({ id: "turn-1", text: "volatile 有什么作用？", startMs: 0, endMs: 600 });
+    const followUpTurn = builder.build({ id: "turn-2", text: "那在 ISR 中怎么使用？", startMs: 1_000, endMs: 1_700 });
+    manager.add({ turn: firstTurn, question: question("q1", firstTurn.text, { contextRelation: "standalone" }), now: 1_000 });
+    const followUp = manager.add({ turn: followUpTurn, question: question("q2", followUpTurn.text, { speechAct: "FOLLOW_UP", contextRelation: "follow_up" }), now: 2_000 });
+
+    expect(followUp.isNewGroup).toBe(false);
+    expect(followUp.relation?.type).toBe("FOLLOW_UP");
+    expect(followUp.group.status).toBe("active");
+    expect(manager.list()).toHaveLength(1);
+  });
 });
