@@ -10,7 +10,7 @@ import {
   InterviewMemory,
   InterviewHistoryStore,
   normalizeTechnicalTerms,
-  normalizeTechnicalTermsWithCorrections,
+  buildDynamicTechnicalLexicon,
   classifyQuestionSemanticFrame,
   resolveContextualTerminology,
   ContextAnchorResolver,
@@ -30,6 +30,8 @@ import {
   SessionStateMachine,
   TranscriptAggregator,
   type AnswerContextInput,
+  type AnswerTelemetry,
+  type DynamicTechnicalLexicon,
   type AnswerMode,
   type AnswerRecord,
   type AsrLanguage,
@@ -94,6 +96,7 @@ export interface InterviewStartOptions extends Omit<RealtimeConnectOptions, "aut
   automationMode?: "MANUAL" | "AUTO";
   answerMode: AnswerMode;
   language?: string;
+  terminologyLexicon?: DynamicTechnicalLexicon;
 }
 
 export interface InterviewContextSelection {
@@ -109,6 +112,7 @@ export interface InterviewHistoryPort {
   addQuestion(input: Omit<QuestionRecord, "id">): QuestionRecord;
   updateQuestionStatus?(questionId: string, status: QuestionRecord["status"]): QuestionRecord | undefined;
   addAnswer(input: Omit<AnswerRecord, "id">): AnswerRecord;
+  getRevision?(interviewId: string): number;
 }
 
 export interface InterviewCoordinatorOptions {
@@ -123,6 +127,7 @@ export interface InterviewCoordinatorOptions {
   aggregator?: TranscriptAggregator;
   history?: InterviewHistoryPort;
   contextProvider?: (question: QuestionCandidate, profileId: string, recentTranscript: string[], context?: InterviewContextSelection) => AnswerContextInput | Promise<AnswerContextInput>;
+  terminologyLexiconProvider?: (profileId: string, projectId?: string) => DynamicTechnicalLexicon | Promise<DynamicTechnicalLexicon>;
   asrSettingsProvider?: (profileId: string) => Pick<RealtimeConnectOptions, "providerType" | "providerName" | "model" | "language" | "url">;
   interviewBrain?: InterviewBrain;
   now?: () => number;
@@ -184,6 +189,7 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly speechActClassifier = new SpeechActClassifier();
   private readonly anchorResolver = new ContextAnchorResolver();
   private readonly anchorStore: ContextAnchorStore;
+  private sessionTerminologyLexicon: DynamicTechnicalLexicon = buildDynamicTechnicalLexicon();
   private readonly turnBuilder = new TurnBuilder();
   private readonly questionGroups = new QuestionGroupManager(this.turnBuilder);
   private readonly answerScheduler = new AnswerScheduler();
@@ -461,6 +467,9 @@ export class InterviewCoordinator extends EventEmitter {
       this.runtimeSessionStartedAt = startedAt;
       this.activeOptions = { ...startOptions, automationMode };
       this.activeProfileId = startOptions.profileId;
+      const providedLexicon = startOptions.terminologyLexicon ?? this.options.terminologyLexiconProvider?.(startOptions.profileId, startOptions.projectId);
+      if (providedLexicon && typeof (providedLexicon as PromiseLike<DynamicTechnicalLexicon>).then === "function") this.sessionTerminologyLexicon = await (providedLexicon as Promise<DynamicTechnicalLexicon>);
+      else this.sessionTerminologyLexicon = (providedLexicon as DynamicTechnicalLexicon | undefined) ?? buildDynamicTechnicalLexicon({ recentTopics: [startOptions.projectId].filter((value): value is string => Boolean(value)) });
       this.detector.reset();
       this.questionGroups.reset();
       this.answerScheduler.reset();
@@ -832,7 +841,8 @@ export class InterviewCoordinator extends EventEmitter {
         const preparedText = normalizeTechnicalTerms(preparedAnswer.content);
         this.answerScheduler.markVisibleOutput(preparedText);
         const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
-        this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: preparedText, model: "question-bank", mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
+        const telemetry = this.buildAnswerTelemetry(question, { answerSourceMode: "question-bank", technicalGuardDecision: "allow", technicalViolationCount: 0, claimGateDecision: "allow", blockedPersonalClaimCount: 0 });
+        this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: preparedText, model: "question-bank", mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, telemetry, createdAt: finishedAt });
         if (answerOperation) answerOperation.state = "committed";
         this.recordRuntimeTrace("ANSWER_COMMITTED", {}, { questionId: question.id, answerId, providerRequestId, reasonCode: "question-bank" });
         this.emitRealtimeMessage({ type: "answer_end", answerId, text: preparedText });
@@ -853,7 +863,7 @@ export class InterviewCoordinator extends EventEmitter {
         this.answerFirstTokenAt = undefined;
         return;
       }
-      const context = { ...lockedProviderContext, recentTranscript: lockedProviderContext.recentTranscript ?? [...frozenContext.recentTranscript], interviewMemory: lockedProviderContext.interviewMemory ?? memorySnapshot, ...(followUpContext ? { followUpContext } : {}) };
+      const context = { ...lockedProviderContext, recentTranscript: lockedProviderContext.recentTranscript ?? [...frozenContext.recentTranscript], interviewMemory: lockedProviderContext.interviewMemory ?? memorySnapshot, questionTelemetry: this.buildAnswerTelemetry(question), ...(followUpContext ? { followUpContext } : {}) };
       answerTrace?.update({ answerSource: projectQaMode ? "project-qa" : "llm", ...(projectQaMode ? { answerSourceMode: projectQaMode, qaMatchLevel: lockedProviderContext.answerSourcePlan?.qaMatchLevel } : {}) }).mark("llmRequestStarted", this.now());
       this.recordRuntimeTrace("PROVIDER_STREAM_REQUESTED", {}, { questionId: question.id, providerRequestId });
       if (streamOptions.screenshotRequestId) {
@@ -945,7 +955,15 @@ export class InterviewCoordinator extends EventEmitter {
           if (event.quality?.issues.includes("QUALITY_UNGROUNDED_CLAIM")) this.emitDiagnostic("QUALITY_UNGROUNDED_CLAIM");
           if (event.quality?.issues.includes("strict-grounding-fallback")) this.emitDiagnostic("STRICT_GROUNDING_FALLBACK");
           const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
-          this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: answerText, model: this.answerModel ?? "configured", mode: this.answerMode ?? mode, startedAt: this.answerStartedAt ?? startedAt, firstTokenAt: this.answerFirstTokenAt, finishedAt, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, createdAt: finishedAt });
+          const telemetry = this.buildAnswerTelemetry(question, {
+            ...(event.quality?.telemetry ?? {}),
+            answerSourceMode: event.quality?.answerSourceMode,
+            technicalGuardDecision: "allow",
+            technicalViolationCount: 0,
+            claimGateDecision: event.quality?.claimGateDecision,
+            blockedPersonalClaimCount: event.quality?.blockedClaimCount
+          });
+          this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: answerText, model: this.answerModel ?? "configured", mode: this.answerMode ?? mode, startedAt: this.answerStartedAt ?? startedAt, firstTokenAt: this.answerFirstTokenAt, finishedAt, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, telemetry, createdAt: finishedAt });
           if (answerOperation) answerOperation.state = "committed";
           this.recordRuntimeTrace("ANSWER_COMMITTED", {}, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "provider-completed" });
           this.emitRealtimeMessage({ type: "answer_end", answerId: event.answerId, text: answerText, quality: event.quality });
@@ -1039,7 +1057,8 @@ export class InterviewCoordinator extends EventEmitter {
     });
     this.asr.on("transcript", (snapshot: unknown, rawSegment: TranscriptSegment) => {
       const receivedAt = this.now();
-      const segment: TranscriptSegment = { ...rawSegment, text: normalizeTechnicalTerms(rawSegment.text) };
+      const segmentTerminology = resolveContextualTerminology(rawSegment.text, { contextText: this.memory.contextText(), topics: [this.anchorStore.snapshot(receivedAt).currentTopic].filter((topic): topic is string => Boolean(topic)), lexicon: this.sessionTerminologyLexicon });
+      const segment: TranscriptSegment = { ...rawSegment, text: segmentTerminology.canonicalText };
       if (!this.activeInterviewId || this.runtimeSessionState !== "running") {
         this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "transcript", source: segment.source, final: segment.final, textLength: segment.text.length }, { reasonCode: "inactive-session" });
         return;
@@ -1047,8 +1066,8 @@ export class InterviewCoordinator extends EventEmitter {
       this.recordRuntimeTrace("TRANSCRIPT_RECEIVED", { source: segment.source, final: segment.final, textLength: segment.text.length });
       this.emit("event", { type: "transcript", snapshot, segment });
       if (segment.final) {
-        const transcriptVariants = normalizeTechnicalTermsWithCorrections(rawSegment.text);
-        this.history.addTranscript({ interviewId: this.activeInterviewId, source: segment.source, text: segment.text, rawText: rawSegment.text, normalizedText: transcriptVariants.text, canonicalText: segment.text, terminologyCorrections: transcriptVariants.corrections, startMs: segment.startMs, endMs: segment.endMs, final: true, confidence: segment.confidence });
+        const transcriptVariants = resolveContextualTerminology(rawSegment.text, { contextText: this.memory.contextText(), topics: [this.anchorStore.snapshot(receivedAt).currentTopic].filter((topic): topic is string => Boolean(topic)), lexicon: this.sessionTerminologyLexicon });
+        this.history.addTranscript({ interviewId: this.activeInterviewId, source: segment.source, text: segment.text, rawText: rawSegment.text, normalizedText: transcriptVariants.normalizedText, canonicalText: transcriptVariants.canonicalText, terminologyCorrections: transcriptVariants.corrections, startMs: segment.startMs, endMs: segment.endMs, final: true, confidence: segment.confidence });
         this.recentTranscript.push(`${segment.source === "remote" ? "面试官" : "我"}：${segment.text}`);
         while (this.recentTranscript.length > 12) this.recentTranscript.shift();
         if (segment.source === "mic") {
@@ -1296,7 +1315,9 @@ export class InterviewCoordinator extends EventEmitter {
     const terminology = resolveContextualTerminology(utterance.text, {
       contextText,
       entities: this.memory.snapshot().entities,
-      topics: [anchorSnapshot.currentTopic].filter((topic): topic is string => Boolean(topic))
+      topics: [anchorSnapshot.currentTopic].filter((topic): topic is string => Boolean(topic)),
+      previousQuestion: anchorSnapshot.lastConfirmedQuestion?.text,
+      lexicon: this.sessionTerminologyLexicon
     });
     const correctedText = terminology.text;
     const speech = this.speechActClassifier.classify(correctedText, {
@@ -1312,6 +1333,9 @@ export class InterviewCoordinator extends EventEmitter {
       ...questionTraceTextMetadata(utterance.text),
       speechAct: speech.speechAct,
       contextTopic: anchorSnapshot.currentTopic,
+      terminologyCorrectionCount: terminology.corrections.length,
+      terminologyConfidence: terminology.confidence,
+      projectAnchorAvailable: Boolean(this.activeOptions?.projectId),
       isFollowUp: speech.speechAct === "FOLLOW_UP"
     });
     const promotesStatement = speech.speechAct === "STATEMENT" && Boolean(speech.topic || speech.entities.length);
@@ -1398,6 +1422,9 @@ export class InterviewCoordinator extends EventEmitter {
       llmScore: analysis.score.llmScore,
       finalScore: analysis.score.finalScore,
       contextTopic: anchorSnapshot.currentTopic,
+      contextRelation: resolved.contextRelation,
+      topicRelation: resolved.contextRelation === "standalone" ? "NEW_TOPIC" : resolved.contextRelation === "continuation" ? "RELATED_TOPIC" : "SAME_TOPIC",
+      semanticFrame: analysis.semanticFrame,
       ...(resolved.parentQuestionId ? { parentQuestionId: resolved.parentQuestionId } : {}),
       isFollowUp: analysis.speechAct === "FOLLOW_UP"
     });
@@ -1558,7 +1585,7 @@ export class InterviewCoordinator extends EventEmitter {
     if (persistedQuestionId && inFlight) {
       this.activeQuestionTrace?.mark("answerEnded", now);
       this.emitQuestionTrace(this.activeQuestionTrace);
-      this.history.addAnswer({ questionId: this.historyQuestionIds.get(persistedQuestionId) ?? persistedQuestionId, text: this.accumulatedAnswerText, model: this.answerModel ?? "unknown", mode: this.answerMode, startedAt: this.answerStartedAt ?? now, firstTokenAt: this.answerFirstTokenAt, finishedAt: now, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - (this.questionConfirmedAt.get(persistedQuestionId) ?? now), latencyTotal: now - (this.questionConfirmedAt.get(persistedQuestionId) ?? now), cancelReason: reason, createdAt: now });
+          this.history.addAnswer({ questionId: this.historyQuestionIds.get(persistedQuestionId) ?? persistedQuestionId, text: this.accumulatedAnswerText, model: this.answerModel ?? "unknown", mode: this.answerMode, startedAt: this.answerStartedAt ?? now, firstTokenAt: this.answerFirstTokenAt, finishedAt: now, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - (this.questionConfirmedAt.get(persistedQuestionId) ?? now), latencyTotal: now - (this.questionConfirmedAt.get(persistedQuestionId) ?? now), cancelReason: reason, telemetry: this.buildAnswerTelemetry(this.currentQuestion?.id === persistedQuestionId ? this.currentQuestion : { id: persistedQuestionId, text: "" } as QuestionCandidate), createdAt: now });
     }
     this.answerQuestionId = undefined;
     this.answerMode = undefined;
@@ -1631,6 +1658,37 @@ export class InterviewCoordinator extends EventEmitter {
 
   private emitDiagnostic(message: string): void {
     this.emitEvent({ type: "diagnostic", message });
+  }
+
+  private buildAnswerTelemetry(question: QuestionCandidate, extra: Partial<AnswerTelemetry> = {}): AnswerTelemetry {
+    const projectQuestionRequested = /项目|简历|经历|负责|做过|成果|业绩|个人|你的实现|你的方案/.test(question.text);
+    return {
+      rawText: question.rawText,
+      normalizedText: question.normalizedText ?? question.text,
+      canonicalText: question.canonicalText ?? question.text,
+      terminologyCorrectionCount: question.terminologyCorrections?.length ?? 0,
+      terminologyConfidence: question.terminologyCorrections?.length ? Math.min(...question.terminologyCorrections.map((item) => item.confidence ?? 0.9)) : 1,
+      speechAct: question.speechAct,
+      semanticFrame: question.semanticFrame,
+      contextRelation: question.contextRelation,
+      topicRelation: question.relationType,
+      parentQuestionId: question.parentQuestionId,
+      rootQuestionId: question.rootQuestionId,
+      projectAnchorAvailable: Boolean(this.activeOptions?.projectId),
+      projectQuestionRequested,
+      historyRevision: this.activeInterviewId ? this.history.getRevision?.(this.activeInterviewId) : undefined,
+      timings: {
+        terminologyMs: undefined,
+        topicBoundaryMs: undefined,
+        semanticFrameMs: undefined,
+        coreQaRouteMs: undefined,
+        projectQaRouteMs: undefined,
+        retrievalMs: this.activeQuestionTrace?.snapshot().metrics.retrievalMs,
+        firstTokenMs: this.activeQuestionTrace?.snapshot().metrics.llmFirstTokenMs,
+        totalAnswerMs: this.activeQuestionTrace?.snapshot().metrics.answerTotalMs
+      },
+      ...extra
+    };
   }
 
   private emitTelemetry(name: string, fields: Record<string, unknown>): void {

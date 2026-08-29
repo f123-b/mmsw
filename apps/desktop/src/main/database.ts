@@ -771,6 +771,9 @@ export class SqliteDatabase {
         ALTER TABLE profiles ADD COLUMN company_context TEXT;
         ALTER TABLE profiles ADD COLUMN salary_expectation_json TEXT;
       `],
+      [30, `
+        ALTER TABLE answers ADD COLUMN telemetry_json TEXT;
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -1887,6 +1890,8 @@ export class SqliteInterviewHistoryRepository {
 
   constructor(private readonly database: SqliteDatabase, private readonly onChanged?: (event: HistoryChangedEvent) => void) {}
 
+  getRevision(interviewId: string): number { return this.revisions.get(interviewId) ?? 0; }
+
   createInterview(input: Omit<InterviewRecord, "id" | "createdAt">, now = Date.now()): InterviewRecord {
     const record = { ...input, id: id("interview", now), createdAt: now };
     this.database.run("INSERT INTO interviews(id, profile_id, project_id, job_target_id, started_at, ended_at, status, language, automation_mode, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.profileId, record.projectId ?? null, record.jobTargetId ?? null, record.startedAt, record.endedAt ?? null, record.status, record.language, record.automationMode, record.createdAt]);
@@ -1933,7 +1938,7 @@ export class SqliteInterviewHistoryRepository {
 
   addAnswer(input: Omit<AnswerRecord, "id">): AnswerRecord {
     const record = { ...input, id: id("answer", input.createdAt) };
-    this.database.run("INSERT INTO answers(id, question_id, text, model, mode, latency_first_token, latency_total, cancel_reason, started_at, first_token_at, finished_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.questionId, record.text, record.model, record.mode ?? null, record.latencyFirstToken ?? null, record.latencyTotal ?? null, record.cancelReason ?? null, record.startedAt ?? null, record.firstTokenAt ?? null, record.finishedAt ?? null, record.createdAt]);
+    this.database.run("INSERT INTO answers(id, question_id, text, model, mode, latency_first_token, latency_total, cancel_reason, started_at, first_token_at, finished_at, telemetry_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.questionId, record.text, record.model, record.mode ?? null, record.latencyFirstToken ?? null, record.latencyTotal ?? null, record.cancelReason ?? null, record.startedAt ?? null, record.firstTokenAt ?? null, record.finishedAt ?? null, record.telemetry ? JSON.stringify(record.telemetry) : null, record.createdAt]);
     this.database.flushNow();
     const interviewId = this.database.first<{ interviewId: string }>("SELECT q.interview_id AS interviewId FROM questions q WHERE q.id = ?", [record.questionId])?.interviewId;
     if (interviewId) this.emitChanged(interviewId, "answer");
@@ -1964,14 +1969,16 @@ export class SqliteInterviewHistoryRepository {
     if (!interview) throw new Error(`Interview not found: ${interviewId}`);
     const transcripts = this.database.all<Record<string, unknown>>("SELECT id, interview_id AS interviewId, source, text, raw_text AS rawText, normalized_text AS normalizedText, canonical_text AS canonicalText, terminology_corrections_json AS terminologyCorrectionsJson, start_ms AS startMs, end_ms AS endMs, final, confidence, created_at AS createdAt FROM transcripts WHERE interview_id = ? ORDER BY start_ms", [interviewId]).map((row) => this.hydrateTranscript(row));
     const questions = this.database.all<Record<string, unknown>>("SELECT id, interview_id AS interviewId, text, confidence, source, detected_at AS detectedAt, status, parent_question_id AS parentQuestionId, root_question_id AS rootQuestionId, raw_transcript AS rawTranscript, normalized_question AS normalizedQuestion, canonical_question AS canonicalQuestion, context_relation AS contextRelation, inherited_topic AS inheritedTopic, topic, terminology_corrections_json AS terminologyCorrectionsJson, semantic_frame AS semanticFrame FROM questions WHERE interview_id = ? ORDER BY detected_at", [interviewId]).map((row) => this.hydrateQuestion(row));
-    const answers = this.database.all<AnswerRecord>("SELECT a.id, a.question_id AS questionId, a.text, a.model, a.mode, a.latency_first_token AS latencyFirstToken, a.latency_total AS latencyTotal, a.cancel_reason AS cancelReason, a.started_at AS startedAt, a.first_token_at AS firstTokenAt, a.finished_at AS finishedAt, a.created_at AS createdAt FROM answers a JOIN questions q ON q.id = a.question_id WHERE q.interview_id = ? ORDER BY a.created_at", [interviewId]);
+    const answers = this.database.all<Record<string, unknown>>("SELECT a.id, a.question_id AS questionId, a.text, a.model, a.mode, a.latency_first_token AS latencyFirstToken, a.latency_total AS latencyTotal, a.cancel_reason AS cancelReason, a.started_at AS startedAt, a.first_token_at AS firstTokenAt, a.finished_at AS finishedAt, a.telemetry_json AS telemetryJson, a.created_at AS createdAt FROM answers a JOIN questions q ON q.id = a.question_id WHERE q.interview_id = ? ORDER BY a.created_at", [interviewId]).map((row) => ({
+      id: String(row.id), questionId: String(row.questionId), text: String(row.text), model: String(row.model), ...(row.mode ? { mode: String(row.mode) as AnswerRecord["mode"] } : {}), ...(row.latencyFirstToken !== null && row.latencyFirstToken !== undefined ? { latencyFirstToken: Number(row.latencyFirstToken) } : {}), ...(row.latencyTotal !== null && row.latencyTotal !== undefined ? { latencyTotal: Number(row.latencyTotal) } : {}), ...(row.cancelReason ? { cancelReason: String(row.cancelReason) as AnswerRecord["cancelReason"] } : {}), ...(row.startedAt !== null && row.startedAt !== undefined ? { startedAt: Number(row.startedAt) } : {}), ...(row.firstTokenAt !== null && row.firstTokenAt !== undefined ? { firstTokenAt: Number(row.firstTokenAt) } : {}), ...(row.finishedAt !== null && row.finishedAt !== undefined ? { finishedAt: Number(row.finishedAt) } : {}), ...(row.telemetryJson ? { telemetry: safeJson<AnswerRecord["telemetry"]>(row.telemetryJson) } : {}), createdAt: Number(row.createdAt)
+    } satisfies AnswerRecord));
     return { interview, transcripts, questions, answers };
   }
 
   private emitChanged(interviewId: string, type: HistoryChangedEvent["type"]): void {
     const revision = (this.revisions.get(interviewId) ?? 0) + 1;
     this.revisions.set(interviewId, revision);
-    this.onChanged?.({ interviewId, revision, type });
+    this.onChanged?.({ interviewId, revision, type, createdAt: Date.now() });
   }
 
   private hydrateTranscript(row: Record<string, unknown>): TranscriptRecord {

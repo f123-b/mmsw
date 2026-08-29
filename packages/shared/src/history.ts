@@ -1,4 +1,4 @@
-import type { AnswerMode } from "./answer";
+import type { AnswerMode, AnswerTelemetry } from "./answer";
 import type { TerminologyCorrection } from "./terminology";
 import type { QuestionSemanticFrame } from "./question/semantic-frame";
 
@@ -58,6 +58,7 @@ export interface HistoryChangedEvent {
   interviewId: string;
   revision: number;
   type: "transcript" | "question" | "answer" | "state";
+  createdAt?: number;
 }
 
 export interface AnswerRecord {
@@ -72,6 +73,7 @@ export interface AnswerRecord {
   firstTokenAt?: number;
   finishedAt?: number;
   cancelReason?: "user" | "superseded" | "timeout";
+  telemetry?: AnswerTelemetry;
   createdAt: number;
 }
 
@@ -96,6 +98,8 @@ export class InterviewHistoryStore {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
+
+  getRevision(interviewId: string): number { return this.revisions.get(interviewId) ?? 0; }
 
   createInterview(input: Omit<InterviewRecord, "id" | "createdAt">, now = Date.now()): InterviewRecord {
     const interview = { ...input, id: id("interview", now), createdAt: now };
@@ -164,7 +168,7 @@ export class InterviewHistoryStore {
   private emitChanged(interviewId: string, type: HistoryChangedEvent["type"]): void {
     const revision = (this.revisions.get(interviewId) ?? 0) + 1;
     this.revisions.set(interviewId, revision);
-    const event = { interviewId, revision, type } satisfies HistoryChangedEvent;
+    const event = { interviewId, revision, type, createdAt: Date.now() } satisfies HistoryChangedEvent;
     this.listeners.forEach((listener) => listener(event));
   }
 }

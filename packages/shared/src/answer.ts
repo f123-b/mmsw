@@ -52,6 +52,35 @@ export interface AnswerSkillContext {
   relevance?: number;
 }
 
+/** Bounded, explainable metadata attached to every completed answer. */
+export interface AnswerTelemetry {
+  rawText?: string;
+  normalizedText?: string;
+  canonicalText?: string;
+  terminologyCorrectionCount?: number;
+  terminologyConfidence?: number;
+  speechAct?: string;
+  semanticFrame?: string;
+  topicRelation?: string;
+  contextRelation?: string;
+  parentQuestionId?: string;
+  rootQuestionId?: string;
+  projectAnchorAvailable?: boolean;
+  projectQuestionRequested?: boolean;
+  answerSourceMode?: string;
+  coreQaMatchLevel?: string;
+  coreQaQuestionId?: string;
+  coreQaScore?: number;
+  projectQaMatchLevel?: string;
+  projectQaQuestionId?: string;
+  technicalGuardDecision?: "allow" | "rewrite";
+  technicalViolationCount?: number;
+  claimGateDecision?: "allow" | "rewrite" | "partial" | "abstain";
+  blockedPersonalClaimCount?: number;
+  historyRevision?: number;
+  timings?: Record<string, number | undefined>;
+}
+
 export interface PreparedAnswer {
   content: string;
   score: number;
@@ -92,6 +121,7 @@ export interface AnswerContextInput {
   candidateStatements?: CandidateStatementEvidence[];
   /** Evidence captured for this question; when present it is authoritative. */
   evidenceSnapshot?: EvidenceSnapshot;
+  questionTelemetry?: Partial<AnswerTelemetry>;
 }
 
 export interface ContextPack {
@@ -123,6 +153,7 @@ export interface ContextPack {
   evidenceSnapshot?: EvidenceSnapshot;
   sessionEvidence: CandidateStatementEvidence[];
   candidateStatements: CandidateStatementEvidence[];
+  questionTelemetry?: Partial<AnswerTelemetry>;
 }
 
 function answerTokenBudget(mode: AnswerMode, kind: AnswerQuestionKind): number {
@@ -186,6 +217,7 @@ export class ContextRouter {
       evidenceSnapshot: snapshot,
       sessionEvidence: routedSessionEvidence.map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) })),
       candidateStatements: routedSessionEvidence.map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) }))
+      ,...(input.questionTelemetry ? { questionTelemetry: { ...input.questionTelemetry } } : {})
     };
   }
 }
@@ -572,6 +604,19 @@ export class AnswerAgent {
       claimGateDecision: claimGate.decision,
       blockedClaimCount: claimGate.blockedClaims.length,
       ...(context.answerSourcePlan ? { answerSourceMode: context.answerSourcePlan.mode, qaMatchLevel: context.answerSourcePlan.qaMatchLevel } : {})
+    };
+    quality.telemetry = {
+      ...(context.questionTelemetry ?? {}),
+      normalizedText: context.questionTelemetry?.normalizedText ?? routedQuestion.text,
+      canonicalText: context.questionTelemetry?.canonicalText ?? routedQuestion.text,
+      answerSourceMode: context.answerSourcePlan?.mode ?? context.questionTelemetry?.answerSourceMode,
+      coreQaQuestionId: context.coreTechnicalQa?.id ?? context.questionTelemetry?.coreQaQuestionId,
+      coreQaMatchLevel: context.coreTechnicalQa ? "verified" : context.questionTelemetry?.coreQaMatchLevel,
+      technicalGuardDecision: technicalAccuracy.decision,
+      technicalViolationCount: technicalAccuracy.violationCount,
+      claimGateDecision: claimGate.decision,
+      blockedPersonalClaimCount: claimGate.blockedClaims.length,
+      ...(context.answerSourcePlan?.qaMatch?.questionId ? { projectQaQuestionId: context.answerSourcePlan.qaMatch.questionId } : {})
     };
     yield { type: "answer_end", answerId, text: formattedText, quality };
   }

@@ -297,7 +297,7 @@ describe("InterviewCoordinator software E2E", () => {
     expect(snapshot.questions).toHaveLength(3);
     expect(snapshot.questions.every((question) => question.status === "answered")).toBe(true);
     expect(snapshot.answers).toHaveLength(3);
-    expect(snapshot.answers.every((answer) => answer.model === "test-model" && answer.latencyFirstToken !== undefined && answer.latencyTotal !== undefined)).toBe(true);
+    expect(snapshot.answers.every((answer) => answer.model === "test-model" && answer.latencyFirstToken !== undefined && answer.latencyTotal !== undefined && answer.telemetry?.canonicalText && answer.telemetry.technicalGuardDecision)).toBe(true);
     await coordinator.stop();
     vi.useRealTimers();
   });

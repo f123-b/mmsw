@@ -9,6 +9,13 @@ export interface QuestionTraceInput {
   localClassifierScore?: number;
   llmScore?: number;
   contextTopic?: string;
+  contextRelation?: string;
+  topicRelation?: string;
+  semanticFrame?: string;
+  terminologyCorrectionCount?: number;
+  terminologyConfidence?: number;
+  projectAnchorAvailable?: boolean;
+  projectQuestionRequested?: boolean;
   parentQuestionId?: string;
   isFollowUp?: boolean;
   finalScore?: number;

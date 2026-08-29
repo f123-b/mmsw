@@ -1,4 +1,5 @@
 import type { AnswerMode, AnswerQuestionKind } from "../answer";
+import type { AnswerTelemetry } from "../answer";
 import { AnswerLengthController } from "./answer-length-controller";
 
 export interface AnswerQualityResult {
@@ -10,6 +11,7 @@ export interface AnswerQualityResult {
   blockedClaimCount?: number;
   answerSourceMode?: string;
   qaMatchLevel?: string;
+  telemetry?: AnswerTelemetry;
 }
 
 export interface AnswerQualityInput {

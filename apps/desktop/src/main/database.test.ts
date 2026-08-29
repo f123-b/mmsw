@@ -206,7 +206,7 @@ describe("SQLite persistence", () => {
   it("applies migration 23 ownership and technical memory semantics", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(29);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(30);
       expect(database.all<{ name: string }>("PRAGMA table_info(projects)").map((row) => row.name)).toEqual(expect.arrayContaining(["ownership_mode", "ownership_note"]));
       expect(database.all<{ name: string }>("PRAGMA table_info(project_facts)").map((row) => row.name)).toEqual(expect.arrayContaining(["experience_relation", "value_json"]));
       new SqliteProfileRepository(database).save({ id: "profile-v4", name: "V4", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
@@ -419,7 +419,7 @@ describe("SQLite persistence", () => {
       first.close();
       const second = await SqliteDatabase.open(filePath);
       try {
-        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(29);
+        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(30);
         const repaired = new SqliteProjectMemoryRepository(second);
         repaired.repairProjectTechnicalSemantics("project-migration");
         expect(repaired.listFacts(profile.id, "project-migration", { includeStale: true, includeRejected: true })).toHaveLength(2);
@@ -458,7 +458,22 @@ describe("SQLite persistence", () => {
       expect(memory.getUnderstandingSnapshot(project.id, "hash-a")?.understanding.summary).toContain("可缓存");
       expect(memory.getSnapshot(profile.id).understandings?.[0]?.projectId).toBe(project.id);
       expect(memory.getUnderstandingSnapshot(project.id, "different-hash")).toBeUndefined();
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(29);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(30);
+    } finally { database.close(); }
+  });
+
+  it("persists answer telemetry and revision timestamps for history diagnostics", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const events: Array<{ revision: number; createdAt?: number }> = [];
+      const history = new SqliteInterviewHistoryRepository(database, (event) => events.push(event));
+      const interview = history.createInterview({ profileId: "telemetry-profile", startedAt: 1, status: "running", language: "zh-CN", automationMode: "AUTO" }, 1);
+      const question = history.addQuestion({ interviewId: interview.id, text: "C 语言里 static 有什么作用？", confidence: "high", source: "rules", detectedAt: 2, status: "confirmed", rawTranscript: "study 有什么作用", normalizedQuestion: "static 有什么作用", canonicalQuestion: "static 有什么作用？", contextRelation: "standalone", semanticFrame: "keyword", terminologyCorrections: [{ raw: "study", canonical: "static", source: "phonetic", confidence: 0.97 }] });
+      history.addAnswer({ questionId: question.id, text: "static 影响存储期或链接范围。", model: "core", telemetry: { rawText: "study 有什么作用", normalizedText: "static 有什么作用", canonicalText: "static 有什么作用？", terminologyCorrectionCount: 1, terminologyConfidence: 0.97, semanticFrame: "keyword", answerSourceMode: "general_core_qa", historyRevision: history.getRevision(interview.id) }, createdAt: 3 });
+      const saved = history.snapshot(interview.id).answers[0];
+      expect(saved?.telemetry).toMatchObject({ canonicalText: "static 有什么作用？", terminologyCorrectionCount: 1, answerSourceMode: "general_core_qa" });
+      expect(events.every((event) => typeof event.createdAt === "number")).toBe(true);
+      expect(history.getRevision(interview.id)).toBe(3);
     } finally { database.close(); }
   });
 
