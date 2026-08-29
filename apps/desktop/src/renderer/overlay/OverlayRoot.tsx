@@ -132,7 +132,10 @@ function useOverlayLayout(preferences: OverlayPreferences): [OverlayLayout, (key
   const update = useCallback((key: PanelKey, patch: Partial<PanelLayout>, altPressed = false) => setLayout((current) => {
     const nextPanel = { ...current[key], ...patch };
     const designerPanel: DesignerPanel | undefined = key === "transcript" ? "question" : key === "answer" ? "answer" : key === "toolbar" ? "controlBar" : undefined;
-    const next = { ...current, [key]: designerPanel ? clampLayout(key, { ...nextPanel, ...snapDesignerRect(designerPanel, nextPanel, { question: current.transcript, answer: current.answer, controlBar: current.toolbar }, { width: window.innerWidth, height: window.innerHeight }, preferencesRef.current.behavior.snapThreshold, altPressed) }) : clampLayout(key, nextPanel) };
+    const snapped = designerPanel && preferencesRef.current.behavior.snapEnabled
+      ? snapDesignerRect(designerPanel, nextPanel, { question: current.transcript, answer: current.answer, controlBar: current.toolbar }, { width: window.innerWidth, height: window.innerHeight }, preferencesRef.current.behavior.snapThreshold, altPressed)
+      : nextPanel;
+    const next = { ...current, [key]: designerPanel ? clampLayout(key, { ...nextPanel, ...snapped }) : clampLayout(key, nextPanel) };
     layoutRef.current = next;
     try { localStorage.setItem(storageKeyRef.current, JSON.stringify(next)); } catch { /* best effort */ }
     return next;
@@ -153,8 +156,10 @@ function useOverlayLayout(preferences: OverlayPreferences): [OverlayLayout, (key
   useEffect(() => {
     setLayout((current) => {
       const next = viewportDefaults(preferences);
-      const preservePosition = preferences.layoutPreset === "custom";
-      const merged = { ...current, transcript: { ...next.transcript, ...(preservePosition ? { x: current.transcript.x, y: current.transcript.y } : {}) }, answer: { ...next.answer, ...(preservePosition ? { x: current.answer.x, y: current.answer.y } : {}) }, toolbar: { ...current.toolbar, ...next.toolbar }, shortcuts: { ...current.shortcuts, ...next.shortcuts } };
+      // Settings coordinates are the source of truth when they change. Dragging
+      // remains local until pointer-up, so this does not interrupt an in-flight
+      // edit and keeps Settings → Overlay synchronization bidirectional.
+      const merged = { ...current, transcript: { ...next.transcript }, answer: { ...next.answer }, toolbar: { ...current.toolbar, ...next.toolbar }, shortcuts: { ...current.shortcuts, ...next.shortcuts } };
       layoutRef.current = merged;
       try { localStorage.setItem(storageKeyRef.current, JSON.stringify(merged)); } catch { /* best effort */ }
       return merged;
@@ -414,9 +419,13 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
     const unsubscribeProtection = window.interviewCopilot.events.onOverlayCaptureProtection((next) => { if (!disposed) setRuntimeProtection(next); });
     const unsubscribeLayout = window.interviewCopilot.events.onOverlayLayout((next) => { if (!disposed) { displayMeta.current = { displayId: next.displayId, scaleFactor: next.scaleFactor }; applyMainLayout(next); } });
     const unsubscribeLayoutEdit = window.interviewCopilot.events.onOverlayLayoutEditMode((enabled) => { if (!disposed) setLayoutEditMode(enabled); });
+    const unsubscribeGlobalWheel = window.interviewCopilot.events.onOverlayGlobalWheel(({ x, y, deltaY }) => {
+      const element = document.elementsFromPoint(x, y).find((candidate) => candidate instanceof HTMLElement && candidate.matches(".question-thread-panel, .answer-thread-panel")) as HTMLElement | undefined;
+      if (element) element.scrollTop += deltaY;
+    });
     const unsubscribePreferences = window.interviewCopilot.events.onOverlayPreferences((next) => { if (!disposed) setPreferences(next); });
     const unsubscribeCommands = window.interviewCopilot.events.onOverlayCommand((command: OverlayCommand) => { if (command === "confirm-end") setEndConfirmOpen(true); else if (command === "reset-layout") clearSavedLayout(); });
-    return () => { disposed = true; unsubscribeProtection(); unsubscribeLayout(); unsubscribeLayoutEdit(); unsubscribePreferences(); unsubscribeCommands(); };
+    return () => { disposed = true; unsubscribeProtection(); unsubscribeLayout(); unsubscribeLayoutEdit(); unsubscribeGlobalWheel(); unsubscribePreferences(); unsubscribeCommands(); };
   }, [applyMainLayout, clearSavedLayout]);
   const status = hudState({ state, sessionState, realtimeState, operationMode, question, answerText, answerStreaming });
   const statusMeta = HUD_LABELS[status];
@@ -488,11 +497,11 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
     "--overlay-toolbar-background": backgroundWithOpacity(toolbarVisual.backgroundColor, toolbarVisual.backgroundOpacity),
     "--overlay-toolbar-text-color": backgroundWithOpacity(toolbarVisual.textColor, toolbarVisual.textOpacity),
     "--overlay-toolbar-font-size": `${toolbarVisual.fontSize}px`,
-    "--overlay-question-border-opacity": questionVisual.borderOpacity,
-    "--overlay-answer-border-opacity": answerVisual.borderOpacity,
-    "--overlay-toolbar-border-opacity": toolbarVisual.borderOpacity,
+    "--overlay-question-border-opacity": preferences.appearance.border ? questionVisual.borderOpacity : 0,
+    "--overlay-answer-border-opacity": preferences.appearance.border ? answerVisual.borderOpacity : 0,
+    "--overlay-toolbar-border-opacity": preferences.appearance.border ? toolbarVisual.borderOpacity : 0,
     "--overlay-blur": `${preferences.appearance.mode === "text_only" ? 0 : preferences.appearance.mode === "custom" ? preferences.appearance.blur : preferences.appearance.mode === "translucent" ? clampNumber(preferences.appearance.blur, 4, 12) : clampNumber(preferences.appearance.blur, 12, 24)}px`,
-    "--overlay-radius": `${preferences.appearance.mode === "text_only" ? 0 : questionVisual.radius}px`,
+    "--overlay-radius": `${preferences.appearance.mode === "text_only" ? 0 : preferences.appearance.mode === "custom" ? questionVisual.radius : preferences.appearance.radius}px`,
     "--overlay-text-shadow": textShadow,
     "--overlay-text-outline": `${preferences.appearance.textOutline}px`,
     "--overlay-designer-shadow": preferences.appearance.mode === "text_only" || !preferences.appearance.shadow ? "none" : "0 18px 45px rgba(0,0,0,.24)"

@@ -47,6 +47,7 @@ mod windows_capture {
     const SM_CYVIRTUALSCREEN: i32 = 79;
     const WH_MOUSE_LL: i32 = 14;
     const WM_MBUTTONDOWN: usize = 0x0207;
+    const WM_MOUSEWHEEL: usize = 0x020A;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -65,6 +66,16 @@ mod windows_capture {
         time: u32,
         pt: Point,
         lPrivate: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct MouseHookStruct {
+        pt: Point,
+        mouseData: u32,
+        flags: u32,
+        time: u32,
+        dwExtraInfo: usize,
     }
 
     #[repr(C)]
@@ -664,9 +675,16 @@ mod windows_capture {
     }
 
     unsafe extern "system" fn mouse_hook(code: i32, wparam: usize, lparam: isize) -> isize {
-        if code >= 0 && wparam == WM_MBUTTONDOWN {
-            println!(r#"{{"event":"middle-click"}}"#);
-            let _ = io::stdout().flush();
+        if code >= 0 && lparam != 0 {
+            let mouse = *(lparam as *const MouseHookStruct);
+            if wparam == WM_MBUTTONDOWN {
+                println!(r#"{{"event":"middle-click"}}"#);
+                let _ = io::stdout().flush();
+            } else if wparam == WM_MOUSEWHEEL {
+                let delta = ((mouse.mouseData >> 16) & 0xffff) as i16;
+                println!(r#"{{"event":"mouse-wheel","x":{},"y":{},"deltaY":{}}}"#, mouse.pt.x, mouse.pt.y, delta);
+                let _ = io::stdout().flush();
+            }
         }
         CallNextHookEx(0, code, wparam, lparam)
     }

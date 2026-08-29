@@ -275,6 +275,11 @@ const api = {
       ipcRenderer.on("overlay:layout-edit-mode", handler);
       return () => ipcRenderer.removeListener("overlay:layout-edit-mode", handler);
     },
+    onOverlayGlobalWheel: (listener: (event: { x: number; y: number; deltaY: number; dual: boolean }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: { x: number; y: number; deltaY: number; dual: boolean }) => listener(payload);
+      ipcRenderer.on("overlay:global-wheel", handler);
+      return () => ipcRenderer.removeListener("overlay:global-wheel", handler);
+    },
     onOverlayCommand: (listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end") => void) => {
       const handler = (_event: Electron.IpcRendererEvent, command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end") => listener(command);
       ipcRenderer.on("overlay:command", handler);

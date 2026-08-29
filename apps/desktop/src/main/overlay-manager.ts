@@ -197,6 +197,15 @@ export class OverlayManager {
     this.sendLayoutEditMode();
   }
 
+  handleGlobalWheel(x: number, y: number, deltaY: number): void {
+    if (this.interactionMode === "interactive" || this.interactionMode === "full_passthrough" || this.wheelRouting === "underlying_app") return;
+    const window = this.currentWindow;
+    if (!window || window.isDestroyed() || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(deltaY)) return;
+    const bounds = window.getBounds();
+    if (x < bounds.x || y < bounds.y || x > bounds.x + bounds.width || y > bounds.y + bounds.height) return;
+    window.webContents.send("overlay:global-wheel", { x: x - bounds.x, y: y - bounds.y, deltaY, dual: this.wheelRouting === "dual" });
+  }
+
   coverCurrentMonitor(): void {
     const window = this.currentWindow;
     if (!window) return;
@@ -314,7 +323,7 @@ export class OverlayManager {
 
   private applyMode(): void {
     if (!this.window || this.window.isDestroyed()) return;
-    const interactiveRegion = this.layoutEditMode || this.interactionMode === "interactive" || (this.interactionMode === "click_through" && this.interactiveRegion);
+    const interactiveRegion = this.layoutEditMode || this.mode === "interactive" || (this.interactionMode === "click_through" && this.interactiveRegion);
     applyOverlayMode(this.window, this.mode, interactiveRegion);
     this.window.webContents.send("overlay:mode", this.mode);
     this.sendHudState();

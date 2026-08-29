@@ -1583,6 +1583,7 @@ body { background: #f1f1ee; color: var(--text-primary); }
 #root .overlay-root .floating-panel.layout-editing .overlay-scroll-region { cursor: text; }
 #root .overlay-root .resize-handle { position: absolute; z-index: 5; width: 10px; height: 10px; border: 1px solid rgba(174,220,255,.9); border-radius: 50%; background: #37678f; opacity: 0; transition: opacity .12s ease; }
 #root .overlay-root .floating-panel.layout-editing .resize-handle { opacity: 1; }
+#root .overlay-root .floating-panel.layout-editing .resize-handle { pointer-events: auto; }
 #root .overlay-root .resize-handle-n { top: -5px; right: calc(50% - 5px); cursor: ns-resize; }
 #root .overlay-root .resize-handle-ne { top: -5px; right: -5px; cursor: nesw-resize; }
 #root .overlay-root .resize-handle-e { top: calc(50% - 5px); right: -5px; cursor: ew-resize; }
@@ -1593,6 +1594,7 @@ body { background: #f1f1ee; color: var(--text-primary); }
 #root .overlay-root .resize-handle-nw { top: -5px; left: -5px; cursor: nwse-resize; }
 #root .overlay-root .layout-edit-toolbar { position: fixed; z-index: 20; right: 18px; bottom: 18px; display: flex; align-items: center; gap: 10px; border: 1px solid rgba(150,211,255,.5); border-radius: 999px; padding: 8px 10px 8px 13px; background: rgba(19,46,72,.94); color: #e8f6ff; font-size: 11px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
 #root .overlay-root .layout-edit-toolbar button { border-radius: 999px; padding: 6px 11px; background: #c8ecff; color: #173a56; font-size: 11px; font-weight: 700; }
+#root .overlay-root .layout-edit-toolbar { pointer-events: auto; }
 #root .overlay-root .toolbar-vertical .floating-toolbar { flex-direction: column; width: 100%; height: 100%; }
 #root .overlay-root .toolbar-vertical .toolbar-divider { width: 70%; height: 1px; }
 #root .overlay-root .toolbar-vertical .toolbar-runtime,

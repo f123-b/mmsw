@@ -2421,7 +2421,9 @@ if (hasSingleInstanceLock) {
         realtimeLogger?.warn("MIDDLE_MOUSE_SCREENSHOT_FAILED", { error: String(error) });
         broadcast("runtime:error", { code: "SCREENSHOT_FAILED", message: "鼠标中键截图识别失败，请重试", recoverable: true });
       });
-    }, (message) => realtimeLogger?.warn(message));
+    }, (message) => realtimeLogger?.warn(message), (event) => {
+      if (event.event === "mouse-wheel" && event.x !== undefined && event.y !== undefined && event.deltaY !== undefined) overlayManager?.handleGlobalWheel(event.x, event.y, event.deltaY);
+    });
     middleMouseShortcutManager.start();
   } else {
     appLogger?.warn("MIDDLE_MOUSE_HELPER_NOT_FOUND");

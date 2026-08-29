@@ -228,6 +228,7 @@ declare global {
         onOverlayState(listener: (state: HUDState) => void): () => void;
         onOverlayLayout(listener: (layout: HUDLayout) => void): () => void;
         onOverlayLayoutEditMode(listener: (enabled: boolean) => void): () => void;
+        onOverlayGlobalWheel(listener: (event: { x: number; y: number; deltaY: number; dual: boolean }) => void): () => void;
         onOverlayPreferences(listener: (preferences: OverlayPreferences) => void): () => void;
         onOverlayCommand(listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end") => void): () => void;
         onOverlayCaptureProtection(listener: (state: CaptureProtectionState) => void): () => void;
