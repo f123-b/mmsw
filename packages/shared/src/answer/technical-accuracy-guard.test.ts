@@ -24,4 +24,16 @@ describe("technical accuracy guard", () => {
     const result = guard.check({ question: "CAN 总线如何仲裁？", answer: "CAN 不会打断正在发送的完整报文。" });
     expect(result.decision).toBe("allow");
   });
+
+  it.each([
+    ["++p 和 p++ 有什么区别？", "++p 先取值，p++ 先移动。", "前置自增"],
+    ["PWM 中心对齐有什么好处？", "中心对齐 PWM 一定会多一次采样机会。", "不能绝对化"],
+    ["FOC 为什么只采两相电流？", "两相采样必然少一次中断。", "ia、ib"],
+    ["UDP 可靠吗？", "UDP 绝对不会重传。", "协议本身不提供"]
+  ] as const)("repairs newly covered accuracy risk: %s", (question, answer, expected) => {
+    const result = guard.check({ question, answer });
+    expect(result.decision).toBe("rewrite");
+    expect(result.rewrittenAnswer).toContain(expected);
+    expect(result.violationCount).toBeGreaterThan(0);
+  });
 });
