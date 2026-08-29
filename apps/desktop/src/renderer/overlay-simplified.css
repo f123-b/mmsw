@@ -93,6 +93,39 @@
   border-radius: 10px !important;
   font-size: 12px !important;
 }
+.designer-preset-buttons {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+.designer-preset-buttons button {
+  min-height: 38px;
+  border: 1px solid #dfe5eb;
+  border-radius: 10px;
+  background: #fff;
+  color: #62738b;
+  font-size: 11px;
+}
+.designer-preset-buttons button.selected {
+  border-color: #7e9fc8;
+  background: #f2f7fd;
+  color: #3f668c;
+  box-shadow: 0 0 0 2px rgba(83,123,171,.1);
+}
+.designer-advanced-content {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+}
+.designer-advanced-content details {
+  border-top: 1px solid #edf0f3;
+  padding-top: 9px;
+}
+.designer-advanced-content details summary {
+  cursor: pointer;
+  color: #62738b;
+  font-size: 11px;
+}
 
 /* Geometry belongs beside the preview, not duplicated three times in the left rail. */
 .overlay-designer-controls > .designer-section:first-child .designer-section-card,
