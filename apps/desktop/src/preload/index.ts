@@ -52,6 +52,7 @@ const api = {
     toggleAll: () => ipcRenderer.invoke("overlay:toggle-all"),
     toggleTranscript: () => ipcRenderer.invoke("overlay:toggle-transcript"),
     toggleAnswer: () => ipcRenderer.invoke("overlay:toggle-answer"),
+    requestEndInterview: () => ipcRenderer.invoke("overlay:request-end"),
     resetLayout: () => ipcRenderer.invoke("overlay:reset-layout"),
     toggleShortcuts: () => ipcRenderer.invoke("overlay:toggle-shortcuts"),
     getState: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:get-state"),

@@ -1386,6 +1386,7 @@ function registerIpc(): void {
    ipcMain.handle("overlay:toggle-all", () => { overlayManager?.toggleAll(); return true; });
    ipcMain.handle("overlay:toggle-transcript", () => { overlayManager?.toggleTranscript(); return true; });
    ipcMain.handle("overlay:toggle-answer", () => { overlayManager?.toggleAnswer(); return true; });
+   ipcMain.handle("overlay:request-end", () => { if (coordinator().running || writtenTestController?.running) overlayManager?.requestEndInterviewConfirmation(); return true; });
    ipcMain.handle("overlay:reset-layout", () => {
      const next = overlaySettingsStore?.resetLayout();
      if (next) {

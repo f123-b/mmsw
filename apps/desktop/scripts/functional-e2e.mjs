@@ -698,9 +698,12 @@ try {
   await waitFor(() => (window.__e2eMainScreenshotCaptured ?? 0) > (window.__e2eMainScreenshotBaseline ?? 0), 15_000, main);
   evidence.push("Screenshot IPC: PASS");
 
-  const stopped = await main.evaluate("(async () => { await window.interviewCopilot.interview.stop(); return true; })()");
-  if (!stopped) throw new Error("Interview stop did not return");
+  await nativeClick(".toolbar-end-button", overlayControl);
+  await waitFor(() => Boolean(document.querySelector(".end-interview-dialog")), 5_000, overlay);
+  const confirmedEnd = await overlay.evaluate("(() => { const button = document.querySelector('.dialog-confirm'); if (!button) return false; button.click(); return true; })()");
+  if (!confirmedEnd) throw new Error("End interview confirmation button was not rendered");
   await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "ENDED"), 15_000);
+  evidence.push("Native end-interview click: PASS; confirmation dialog: PASS; session shutdown: PASS");
   const firstSnapshot = await main.evaluate("(async () => { const records = await window.interviewCopilot.history.list(); const record = records[0]; return record ? { record, detail: await window.interviewCopilot.history.get(record.id), count: records.length } : undefined; })()");
   if (!firstSnapshot?.record || firstSnapshot.record.status !== "ended") throw new Error("History interview did not end");
   if ((firstSnapshot.detail?.transcripts ?? []).filter((item) => item.source === "remote").length < 3) throw new Error("History remote transcript count < 3");

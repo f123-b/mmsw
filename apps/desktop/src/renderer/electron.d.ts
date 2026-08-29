@@ -39,6 +39,7 @@ declare global {
         toggleAll(): Promise<boolean>;
         toggleTranscript(): Promise<boolean>;
         toggleAnswer(): Promise<boolean>;
+        requestEndInterview(): Promise<boolean>;
         resetLayout(): Promise<boolean>;
         toggleShortcuts(): Promise<boolean>;
         getState(): Promise<HUDState | undefined>;
