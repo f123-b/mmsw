@@ -101,7 +101,7 @@ function fromHUDLayout(next: HUDLayout): OverlayLayout {
 
 function loadLayout(key = STORAGE_KEY, preferences = DEFAULT_OVERLAY_PREFERENCES, fallback?: OverlayLayout): OverlayLayout {
   try {
-    const raw = localStorage.getItem(key) ?? (key === STORAGE_KEY ? localStorage.getItem(LEGACY_STORAGE_KEY) : null);
+    const raw = localStorage.getItem(key) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
     const saved = JSON.parse(raw ?? "{}");
     const base = fallback ?? viewportDefaults(preferences);
     const savedToolbar = saved.toolbar?.width ? saved.toolbar : {};
