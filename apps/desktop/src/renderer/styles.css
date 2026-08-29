@@ -1708,6 +1708,19 @@ body { background: #f1f1ee; color: var(--text-primary); }
 #root .overlay-root .resize-handle-e::after, #root .overlay-root .resize-handle-w::after { top: 6px; right: 6px; bottom: 6px; left: 6px; width: 10px; height: auto; }
 #root .overlay-root .resize-handle-ne::after, #root .overlay-root .resize-handle-se::after, #root .overlay-root .resize-handle-sw::after, #root .overlay-root .resize-handle-nw::after { top: 6px; right: 6px; bottom: 6px; left: 6px; width: auto; height: auto; }
 
+/* Runtime is never a layout editor. Keep this rule after every HUD theme so
+   a later visual rule cannot resurrect editor affordances. */
+.overlay-root:not([data-layout-edit-mode="on"]) .resize-handle,
+.overlay-root:not([data-layout-edit-mode="on"]) .resize-handle::after {
+  display: none !important;
+  opacity: 0 !important;
+}
+.overlay-root:not([data-layout-edit-mode="on"]) .floating-panel,
+.overlay-root:not([data-layout-edit-mode="on"]) .floating-panel::before,
+.overlay-root:not([data-layout-edit-mode="on"]) .floating-panel::after {
+  outline: 0 !important;
+}
+
 .overlay-designer-layout { grid-template-columns: minmax(320px, 380px) minmax(640px, 1fr); }
 .desktop-preview-heading-actions { display: flex; align-items: center; gap: 8px; }
 .desktop-preview-heading-actions select { min-height: 32px; max-width: 240px; border: 1px solid #dce4ed; border-radius: 8px; padding: 5px 7px; background: #fff; color: #60718a; font-size: 10px; }

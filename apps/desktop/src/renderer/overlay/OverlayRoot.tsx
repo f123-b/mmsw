@@ -163,7 +163,7 @@ function DraggableResizablePanel({ panel, layout, onChange, onCommit, editMode, 
   const cleanupRef = useRef<(() => void) | undefined>(undefined);
   useEffect(() => () => cleanupRef.current?.(), []);
   const beginDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (layout.locked || (event.target as HTMLElement).closest("button, input, textarea, select, .resize-handle, .overlay-scroll-region") || (!editMode && (event.target as HTMLElement).closest(".overlay-content"))) return;
+    if (!editMode || layout.locked || (event.target as HTMLElement).closest("button, input, textarea, select, .resize-handle, .overlay-scroll-region")) return;
     const origin = { x: event.clientX - layout.x, y: event.clientY - layout.y };
     setDragging(true);
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* best effort */ }
@@ -186,7 +186,7 @@ function DraggableResizablePanel({ panel, layout, onChange, onCommit, editMode, 
     window.addEventListener("blur", end, { once: true });
   };
   const beginResize = (handle: ResizeHandle, event: ReactPointerEvent<HTMLDivElement>) => {
-    if (layout.locked) return;
+    if (!editMode || layout.locked) return;
     event.stopPropagation();
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* best effort */ }
     void window.interviewCopilot.overlay.setInteractionLock(true);
@@ -217,7 +217,7 @@ function DraggableResizablePanel({ panel, layout, onChange, onCommit, editMode, 
   // container itself; parent opacity also fades text and harms readability.
   const panelStyle = { left: layout.x, top: layout.y, width: layout.width, height: layout.height, display: layout.visible ? undefined : "none", "--hud-panel-width": `${layout.width}px`, "--hud-panel-height": `${layout.height}px` } as CSSProperties;
   const resizeHandles: ResizeHandle[] = ["n", "ne", "e", "se", "s", "sw", "w", "nw"];
-  return <div className={`floating-panel ${className} ${dragging ? "dragging" : ""} ${editMode ? "layout-editing" : ""}`} data-panel={panel} style={panelStyle} onPointerDown={beginDrag}>{children}{!layout.locked && resizeHandles.map((handle) => <div className={`resize-handle resize-handle-${handle}`} aria-label={`调整大小 ${handle}`} key={handle} onPointerDown={(event) => beginResize(handle, event)} />)}</div>;
+  return <div className={`floating-panel ${className} ${dragging ? "dragging" : ""} ${editMode ? "layout-editing" : ""}`} data-panel={panel} style={panelStyle} onPointerDown={beginDrag}>{children}{editMode && !layout.locked && resizeHandles.map((handle) => <div className={`resize-handle resize-handle-${handle}`} aria-label={`调整大小 ${handle}`} key={handle} onPointerDown={(event) => beginResize(handle, event)} />)}</div>;
 }
 
 function hudState({ state, sessionState, realtimeState, operationMode, question, answerText, answerStreaming }: Pick<OverlayRootProps, "state" | "sessionState" | "realtimeState" | "operationMode" | "question" | "answerText" | "answerStreaming">): HudState {

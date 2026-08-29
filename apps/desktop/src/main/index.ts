@@ -2450,8 +2450,8 @@ if (hasSingleInstanceLock) {
   });
   overlayManager.applyPreferences(overlaySettingsStore?.getPreferences().behavior ?? {
     alwaysOnTop: true,
-    interactionMode: "interactive",
-    mousePassthrough: false,
+    interactionMode: "click_through",
+    mousePassthrough: true,
     wheelRouting: "overlay_under_cursor"
   });
   appLogger?.info("OVERLAY_CAPTURE_PROTECTION_RUNTIME", {

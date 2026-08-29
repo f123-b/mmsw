@@ -5,6 +5,7 @@ import { applyCaptureProtection, getCaptureProtectionCapabilities, type CaptureP
 import { initialHUDState, reduceHUDState, type HUDAction, type HUDState } from "./hud-state";
 import { calculateHUDLayout, type HUDLayout, type HUDWorkArea } from "./hud-layout";
 import type { MouseInteractionMode, OverlayBehaviorPreferences, WheelRoutingMode } from "../shared/overlay-preferences";
+import { initialOverlayLifecycleState, isOverlayLayoutEditing, reduceOverlayLifecycle, type OverlayLifecycleState } from "./overlay-lifecycle";
 
 export { applyOverlayMode, nextOverlayMode } from "./overlay-mode";
 export type { OverlayMode, OverlayWindowLike } from "./overlay-mode";
@@ -14,6 +15,8 @@ export { initialHUDState, reduceHUDState } from "./hud-state";
 export type { HUDAction, HUDMode, HUDMouseMode, HUDState } from "./hud-state";
 export { calculateHUDLayout } from "./hud-layout";
 export type { HUDLayout, HUDPanelLayout, HUDWorkArea } from "./hud-layout";
+export { initialOverlayLifecycleState, isOverlayLayoutEditing, isOverlayRuntime, reduceOverlayLifecycle } from "./overlay-lifecycle";
+export type { OverlayLifecycleAction, OverlayLifecycleState } from "./overlay-lifecycle";
 
 export interface OverlayDisplayInfo {
   id: number;
@@ -36,13 +39,11 @@ export type OverlayPanelCommand = "show-all" | "hide-all" | "toggle-all" | "rese
 export class OverlayManager {
   private window: BrowserWindow | undefined;
   private mode: OverlayMode = "passive";
-  private interactiveRegion = false;
   private alwaysOnTop = true;
-  private interactionMode: MouseInteractionMode = "interactive";
+  private interactionMode: MouseInteractionMode = "click_through";
   private wheelRouting: WheelRoutingMode = "overlay_under_cursor";
-  private layoutEditMode = false;
-  private interactionLock = false;
-  private layoutEditRestore: { mode: OverlayMode; interactiveRegion: boolean } | undefined;
+  private lifecycleState: OverlayLifecycleState = initialOverlayLifecycleState;
+  private interactionClaim: "none" | "region" | "drag" = "none";
   private hudStateValue: HUDState = { ...initialHUDState };
   private hudLayoutValue: HUDLayout = calculateHUDLayout({ x: 0, y: 0, width: 1440, height: 900 });
   private captureProtectionEnabled: boolean;
@@ -108,11 +109,12 @@ export class OverlayManager {
   }
 
   private enterHUDMode(): BrowserWindow {
-    // The configured interaction mode is applied to the existing HUD window;
-    // this only changes native hit testing and never touches interview state.
+    // This is an atomic lifecycle boundary: no renderer callback is needed to
+    // clear editor state before the live HUD is allowed to render.
+    this.lifecycleState = reduceOverlayLifecycle(this.lifecycleState, { type: "start-interview" });
+    this.interactionClaim = "none";
     this.transition({ type: "start" });
     this.mode = this.interactionMode === "interactive" ? "interactive" : "passive";
-    this.interactiveRegion = false;
     const window = this.show();
     this.coverCurrentMonitor();
     window.showInactive();
@@ -131,8 +133,8 @@ export class OverlayManager {
 
   private exitHUDMode(): void {
     this.transition({ type: "stop" });
+    this.lifecycleState = reduceOverlayLifecycle(this.lifecycleState, { type: "finish" });
     this.mode = "interactive";
-    this.interactiveRegion = false;
     this.applyMode();
     this.hide();
   }
@@ -151,7 +153,7 @@ export class OverlayManager {
     this.transition({ type: "set-share-mode", enabled });
     if (this.hudState.shareMode) {
       this.mode = "passive";
-      this.interactiveRegion = false;
+      this.interactionClaim = "none";
       this.applyMode();
       // Sharing must remove the HUD from the captured desktop, not merely
       // render transparent DOM. Keep the BrowserWindow alive so the ASR/AI
@@ -159,7 +161,7 @@ export class OverlayManager {
       this.hide();
     } else if (this.hudState.running) {
       this.mode = this.hudState.mouseMode === "interactive" ? "interactive" : "passive";
-      this.interactiveRegion = false;
+      this.interactionClaim = "none";
       this.applyMode();
       this.show().showInactive();
     }
@@ -168,13 +170,29 @@ export class OverlayManager {
   setClickThrough(enabled: boolean): void { this.setMode(enabled ? "passive" : "interactive"); }
 
   setControlRegion(interactive: boolean): void {
-    this.interactiveRegion = this.hudState.shareMode ? false : Boolean(interactive);
+    if (this.hudState.shareMode) {
+      this.interactionClaim = "none";
+    } else if (this.lifecycleState === "LAYOUT_EDIT") {
+      this.interactionClaim = Boolean(interactive) ? "region" : "none";
+    } else if (this.lifecycleState === "INTERVIEW_PASSIVE" || this.lifecycleState === "INTERVIEW_TEMP_INTERACTIVE") {
+      this.interactionClaim = Boolean(interactive) ? "region" : "none";
+      this.lifecycleState = Boolean(interactive)
+        ? reduceOverlayLifecycle(this.lifecycleState, { type: "claim-interaction" })
+        : reduceOverlayLifecycle(this.lifecycleState, { type: "release-interaction" });
+    } else {
+      this.interactionClaim = "none";
+    }
     this.applyMode();
   }
 
   /** Keep native hit testing enabled while a renderer drag crosses its DOM edge. */
   setInteractionLock(locked: boolean): void {
-    this.interactionLock = Boolean(locked);
+    if (locked) {
+      this.interactionClaim = "drag";
+    } else {
+      this.interactionClaim = "none";
+      this.lifecycleState = reduceOverlayLifecycle(this.lifecycleState, { type: "release-interaction" });
+    }
     this.applyMode();
   }
 
@@ -185,7 +203,7 @@ export class OverlayManager {
     const window = this.currentWindow;
     if (window) {
       window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
-      if (!this.layoutEditMode) this.mode = this.interactionMode === "interactive" ? "interactive" : "passive";
+      if (!this.isLayoutEditMode) this.mode = this.interactionMode === "interactive" ? "interactive" : "passive";
       this.applyMode();
     }
   }
@@ -194,9 +212,9 @@ export class OverlayManager {
 
   get currentWheelRouting(): WheelRoutingMode { return this.wheelRouting; }
 
-  get isLayoutEditMode(): boolean { return this.layoutEditMode; }
+  get isLayoutEditMode(): boolean { return isOverlayLayoutEditing(this.lifecycleState); }
 
-  get isInteractionLocked(): boolean { return this.interactionLock; }
+  get isInteractionLocked(): boolean { return this.interactionClaim === "drag"; }
 
   getDisplays(): OverlayDisplayInfo[] {
     return screen.getAllDisplays().map((display) => ({
@@ -209,29 +227,27 @@ export class OverlayManager {
 
   setLayoutEditMode(enabled: boolean): void {
     const nextEnabled = Boolean(enabled);
-    if (nextEnabled === this.layoutEditMode) {
+    if (nextEnabled === this.isLayoutEditMode) {
       if (!nextEnabled) this.setInteractionLock(false);
       this.sendLayoutEditMode();
       return;
     }
-    if (nextEnabled) this.layoutEditRestore = { mode: this.mode, interactiveRegion: this.interactiveRegion };
-    this.layoutEditMode = nextEnabled;
-    if (this.layoutEditMode) {
+    if (nextEnabled) {
+      this.lifecycleState = reduceOverlayLifecycle(this.lifecycleState, { type: "enter-layout-edit" });
       const window = this.show();
       // The full-screen BrowserWindow stays passive. Renderer hit testing
       // promotes only the toolbar/panels/handles, and interactionLock keeps
       // a drag alive after it leaves the original element.
       this.mode = "passive";
-      this.interactiveRegion = false;
-      this.interactionLock = false;
+      this.interactionClaim = "none";
       this.applyMode();
       window.showInactive();
     } else {
-      const restore = this.layoutEditRestore;
-      this.layoutEditRestore = undefined;
-      this.mode = restore?.mode ?? (this.interactionMode === "interactive" ? "interactive" : "passive");
-      this.interactiveRegion = restore?.interactiveRegion ?? false;
-      this.interactionLock = false;
+      this.lifecycleState = this.hudStateValue.running
+        ? reduceOverlayLifecycle(this.lifecycleState, { type: "start-interview" })
+        : reduceOverlayLifecycle(this.lifecycleState, { type: "finish" });
+      this.mode = this.hudStateValue.running && this.interactionMode === "interactive" ? "interactive" : "passive";
+      this.interactionClaim = "none";
       this.applyMode();
     }
     this.sendLayoutEditMode();
@@ -308,10 +324,8 @@ export class OverlayManager {
     this.window.on("closed", () => {
       // A renderer can disappear without delivering pointerup/blur. Never
       // carry a stale native hit-test lock into a future overlay instance.
-      this.interactionLock = false;
-      this.layoutEditMode = false;
-      this.layoutEditRestore = undefined;
-      this.interactiveRegion = false;
+      this.lifecycleState = initialOverlayLifecycleState;
+      this.interactionClaim = "none";
       this.window = undefined;
     });
     this.applyMode();
@@ -330,7 +344,7 @@ export class OverlayManager {
 
   setMode(mode: OverlayMode): void {
     this.mode = this.hudStateValue.shareMode ? "passive" : mode;
-    this.interactiveRegion = false;
+    this.interactionClaim = "none";
     this.transition({ type: "set-mouse-mode", mode: this.mode === "interactive" ? "interactive" : "passthrough" });
     this.applyMode();
   }
@@ -368,10 +382,8 @@ export class OverlayManager {
   }
 
   destroy(): void {
-    this.interactionLock = false;
-    this.layoutEditMode = false;
-    this.layoutEditRestore = undefined;
-    this.interactiveRegion = false;
+    this.lifecycleState = initialOverlayLifecycleState;
+    this.interactionClaim = "none";
     this.window?.destroy();
     this.window = undefined;
     this.hudStateValue = { ...initialHUDState };
@@ -383,8 +395,8 @@ export class OverlayManager {
     // while the designer is open. Outside designer mode, preserve the
     // existing whole-window interactive mode; click-through/full-passthrough
     // still promote only a reported region or an active drag.
-    const interactiveRegion = this.interactionLock || this.interactiveRegion;
-    applyOverlayMode(this.window, this.layoutEditMode ? "passive" : this.mode, interactiveRegion);
+    const interactiveRegion = this.interactionClaim !== "none";
+    applyOverlayMode(this.window, isOverlayLayoutEditing(this.lifecycleState) ? "passive" : this.mode, interactiveRegion);
     this.window.webContents.send("overlay:mode", this.mode);
     this.sendHudState();
   }
@@ -416,7 +428,7 @@ export class OverlayManager {
 
   private sendLayoutEditMode(): void {
     const window = this.currentWindow;
-    if (window) window.webContents.send("overlay:layout-edit-mode", this.layoutEditMode);
+    if (window) window.webContents.send("overlay:layout-edit-mode", this.isLayoutEditMode);
   }
 
   private targetMonitorBounds(): Electron.Rectangle {
