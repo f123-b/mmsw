@@ -6,7 +6,9 @@ interface ProfileAnalysisPanelProps {
   artifact?: ProfileBuilderArtifactRecord;
   suggestions: SkillSuggestion[];
   running: boolean;
+  resumeAnalysisRunning: boolean;
   onRebuild: () => void;
+  onAnalyzeResume: () => void;
   onReviewSuggestion: (id: string, status: SkillSuggestionStatus) => void;
 }
 
@@ -19,12 +21,12 @@ function statusLabel(artifact: ProfileBuilderArtifactRecord | undefined, running
   return "待分析";
 }
 
-export function ProfileAnalysisPanel({ artifact, suggestions, running, onRebuild, onReviewSuggestion }: ProfileAnalysisPanelProps): JSX.Element {
+export function ProfileAnalysisPanel({ artifact, suggestions, running, resumeAnalysisRunning, onRebuild, onAnalyzeResume, onReviewSuggestion }: ProfileAnalysisPanelProps): JSX.Element {
   const output = artifact?.artifact;
   const pending = suggestions.filter((suggestion) => suggestion.status === "pending");
   return <section className="profile-subsection profile-builder-panel">
     <div className="profile-builder-heading"><div><span className="page-kicker">AI PROFILE ANALYSIS</span><h3>AI 结构化分析</h3><p className="page-note">只把可回溯到候选人资料的内容纳入建议；岗位要求仅作为目标上下文。</p></div><span className="profile-builder-status">{statusLabel(artifact, running)}</span></div>
-    <div className="detail-actions"><button className="outline-pill" disabled={running} onClick={onRebuild}>{running ? "分析中…" : artifact?.status === "stale" ? "重新分析" : "开始分析"}</button><span className="page-note">{output ? `技能 ${output.skillGraph.nodes.length} · 项目 ${output.projectGraph.nodes.length} · 回答素材 ${output.answerMaterials.length} · FAQ ${output.faqs.length}` : "上传资料后可手动开始分析"}</span></div>
+    <div className="detail-actions"><button className="outline-pill" disabled={running} onClick={onRebuild}>{running ? "分析中…" : artifact?.status === "stale" ? "重新分析" : "开始分析"}</button><button className="outline-pill" disabled={resumeAnalysisRunning} onClick={onAnalyzeResume}>{resumeAnalysisRunning ? "简历解析中…" : "解析简历项目"}</button><span className="page-note">{output ? `技能 ${output.skillGraph.nodes.length} · 项目 ${output.projectGraph.nodes.length} · 回答素材 ${output.answerMaterials.length} · FAQ ${output.faqs.length}` : "先解析简历项目，再生成个人档案；岗位要求只作为独立上下文"}</span></div>
     {artifact?.error && <small className="page-note profile-builder-error">本次分析失败：{artifact.error}；上次结果仍可查看。</small>}
     {output?.warnings.map((warning) => <small className="page-note" key={warning}>{warning}</small>)}
     <div className="profile-builder-grid">

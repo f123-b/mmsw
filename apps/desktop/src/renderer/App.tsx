@@ -791,6 +791,7 @@ export function App(): JSX.Element {
   const [profileBuilderArtifact, setProfileBuilderArtifact] = useState<ProfileBuilderArtifactRecord>();
   const [skillSuggestions, setSkillSuggestions] = useState<SkillSuggestion[]>([]);
   const [profileBuilderRunning, setProfileBuilderRunning] = useState(false);
+  const [resumeAnalysisRunning, setResumeAnalysisRunning] = useState(false);
   const [projectMemory, setProjectMemory] = useState<ProjectMemorySnapshot>();
   const [projectMemoryStats, setProjectMemoryStats] = useState<ProjectMemoryStats>({ projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0, questions: 0, facts: 0, eligibleFacts: 0, reviewRequiredFacts: 0, userActionRequiredFacts: 0, conflictingFacts: 0, conflictGroups: 0, userActions: 0, staleFacts: 0 });
   const [projectMemoryRunning, setProjectMemoryRunning] = useState(false);
@@ -1073,6 +1074,7 @@ export function App(): JSX.Element {
   }, [historyDetail?.interview.id]);
 
   useEffect(() => {
+    setResumeAnalysisRunning(false);
     if (!profileId) {
       setProfileBuilderArtifact(undefined);
       setSkillSuggestions([]);
@@ -1110,7 +1112,14 @@ export function App(): JSX.Element {
       if (job.status === "cancelled") store.setNotice("个人档案分析已取消");
       if (job.status === "completed") store.setNotice("个人档案分析已完成：技能、项目和回答素材已更新");
     });
-    return () => { cleanupArtifact(); cleanupJob(); };
+    const cleanupResumeJob = window.interviewCopilot.events.onResumeAnalysisJob((job) => {
+      if (job.profileId !== profileId) return;
+      setResumeAnalysisRunning(["queued", "running"].includes(job.status));
+      if (job.status === "failed") store.setNotice(`简历项目解析失败：${job.error ?? "Worker 异常"}`);
+      if (job.status === "cancelled") store.setNotice("简历项目解析已取消");
+      if (job.status === "completed") store.setNotice("简历项目解析已完成，可继续生成个人档案");
+    });
+    return () => { cleanupArtifact(); cleanupJob(); cleanupResumeJob(); };
   }, [profileId]);
 
   useEffect(() => {
@@ -1458,6 +1467,16 @@ export function App(): JSX.Element {
       store.setNotice(`个人档案分析失败：${userFacingError(error)}`);
     }
   };
+  const analyzeResume = async () => {
+    if (!selectedProfile?.resume || resumeAnalysisRunning) return;
+    try {
+      const job = await window.interviewCopilot.resumeAnalysis.start(selectedProfile.id);
+      setResumeAnalysisRunning(["queued", "running"].includes(job.status));
+      store.setNotice("简历项目解析已排队，页面仍可继续操作");
+    } catch (error) {
+      store.setNotice(`简历项目解析失败：${userFacingError(error)}`);
+    }
+  };
   const rebuildProjectMemory = async (projectId?: string) => {
     if (!selectedProfile || projectMemoryRunning) return;
     setProjectMemoryRunning(true);
@@ -1698,7 +1717,7 @@ export function App(): JSX.Element {
       : page === "job-targets"
       ? <JobTargetsPage targets={jobTargets} onUploadJob={uploadJobDescription} onOpenProfile={() => setPage("profiles")} />
       : page === "profiles"
-        ? <ProfileWorkspacePage profiles={profiles} profileId={profileId} selectedProfile={selectedProfile} knowledgeBases={knowledgeBases} artifact={profileBuilderArtifact} suggestions={skillSuggestions} analysisRunning={profileBuilderRunning} onSelectProfile={(id) => { setProfileId(id); void window.interviewCopilot.profiles.selectActive(id); }} onCreateProfile={async () => { const created = await window.interviewCopilot.profiles.save({ name: `面试档案 ${profiles.length + 1}`, language: "zh-CN", skills: [], knowledgeBaseIds: knowledgeBases[0] ? [knowledgeBases[0].id] : [] }); if (created) { setProfiles((current) => [created, ...current]); setProfileId(created.id); } }} onAttachMaterial={attachProfileMaterial} onRemoveMaterial={removeProfileMaterial} onEditInstructions={() => void editInstructions()} onEditCompanyContext={() => void editCompanyContext()} onEditSalaryExpectation={() => void editSalaryExpectation()} onAddSkill={() => void addSkill()} onEditSkill={(id) => void editSkill(id)} onDeleteSkill={(id) => void deleteSkill(id)} onCloneProfile={() => void cloneProfile()} onRenameProfile={() => void renameProfile()} onDeleteProfile={() => void deleteProfile()} onToggleKnowledgeBase={(id, linked) => void toggleKnowledgeBase(id, linked)} onReviewSuggestion={(id, status) => void reviewSkillSuggestion(id, status)} onRebuildAnalysis={() => void rebuildProfileBuilder()} onUpdateExpression={(patch) => void updateProfileExpression(patch)} />
+        ? <ProfileWorkspacePage profiles={profiles} profileId={profileId} selectedProfile={selectedProfile} knowledgeBases={knowledgeBases} artifact={profileBuilderArtifact} suggestions={skillSuggestions} analysisRunning={profileBuilderRunning} resumeAnalysisRunning={resumeAnalysisRunning} onSelectProfile={(id) => { setProfileId(id); void window.interviewCopilot.profiles.selectActive(id); }} onCreateProfile={async () => { const created = await window.interviewCopilot.profiles.save({ name: `面试档案 ${profiles.length + 1}`, language: "zh-CN", skills: [], knowledgeBaseIds: knowledgeBases[0] ? [knowledgeBases[0].id] : [] }); if (created) { setProfiles((current) => [created, ...current]); setProfileId(created.id); } }} onAttachMaterial={attachProfileMaterial} onRemoveMaterial={removeProfileMaterial} onEditInstructions={() => void editInstructions()} onEditCompanyContext={() => void editCompanyContext()} onEditSalaryExpectation={() => void editSalaryExpectation()} onAddSkill={() => void addSkill()} onEditSkill={(id) => void editSkill(id)} onDeleteSkill={(id) => void deleteSkill(id)} onCloneProfile={() => void cloneProfile()} onRenameProfile={() => void renameProfile()} onDeleteProfile={() => void deleteProfile()} onToggleKnowledgeBase={(id, linked) => void toggleKnowledgeBase(id, linked)} onReviewSuggestion={(id, status) => void reviewSkillSuggestion(id, status)} onRebuildAnalysis={() => void rebuildProfileBuilder()} onAnalyzeResume={() => void analyzeResume()} onUpdateExpression={(patch) => void updateProfileExpression(patch)} />
       : undefined;
   const modernPageContent = specialPageContent ?? (() => {
     if (page === "settings") {
