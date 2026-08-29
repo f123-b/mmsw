@@ -127,6 +127,7 @@ async function waitForNode(predicate, timeoutMs = 15_000) {
 
 let main;
 let overlay;
+let overlayControl;
 try {
   const mainTarget = await waitForTarget((item) => item.type === "page" && item.url.includes("index.html"));
   main = connectTarget(mainTarget);
@@ -147,6 +148,9 @@ try {
   overlay = connectTarget(overlayTarget);
   await new Promise((resolve, reject) => { overlay.socket.once("open", resolve); overlay.socket.once("error", reject); });
   await overlay.command("Runtime.enable");
+  const overlayControlTarget = await waitForTarget((item) => { try { return item.type === "page" && new URL(item.url).searchParams.get("window") === "overlay-control"; } catch { return false; } });
+  overlayControl = connectTarget(overlayControlTarget);
+  await new Promise((resolve, reject) => { overlayControl.socket.once("open", resolve); overlayControl.socket.once("error", reject); });
   await waitFor(() => [...document.querySelectorAll("button")].some((button) => (button.innerText || "").includes("截图回答") && !button.disabled), overlay);
   const clicked = await overlay.evaluate("(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('截图回答') && !item.disabled); if (!button) return false; button.click(); return true; })()");
   if (!clicked) throw new Error("Screenshot smoke button was not clickable");
@@ -162,7 +166,8 @@ try {
   await waitFor(() => window.interviewCopilot.interview.getRuntimeDiagnostics().then((diagnostics) => diagnostics.sessionState === "stopped" && diagnostics.activeTimers === 0 && diagnostics.activeAbortControllers === 0), main);
   const finalDiagnostics = await main.evaluate("window.interviewCopilot.screenshot.getDiagnostics()");
   overlay.socket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression: "window.close()", awaitPromise: false, returnByValue: false } }));
-  main.socket.send(JSON.stringify({ id: 2, method: "Runtime.evaluate", params: { expression: "window.close()", awaitPromise: false, returnByValue: false } }));
+  overlayControl.socket.send(JSON.stringify({ id: 2, method: "Runtime.evaluate", params: { expression: "window.close()", awaitPromise: false, returnByValue: false } }));
+  main.socket.send(JSON.stringify({ id: 3, method: "Runtime.evaluate", params: { expression: "window.close()", awaitPromise: false, returnByValue: false } }));
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("RUNTIME_E2E_TIMEOUT Electron did not exit after screenshot idle")), 10_000);
     child.once("exit", (code) => { clearTimeout(timer); if (code && code !== 0) reject(new Error(`Electron exited with ${code}`)); else resolve(); });
@@ -170,6 +175,7 @@ try {
   console.log(`SCREENSHOT_SMOKE_E2E_RESULT ${JSON.stringify({ visionRequests, requiredTrace: true, finalDiagnostics, processExited: true })}`);
 } finally {
   overlay?.socket.close();
+  overlayControl?.socket.close();
   main?.socket.close();
   asrServer.close();
   llmServer.close();

@@ -129,6 +129,7 @@ async function waitFor(predicate, client, timeoutMs = 15_000) {
 
 let main;
 let overlay;
+let overlayControl;
 let lifecycleResult;
 try {
   const mainTarget = await waitForTarget((item) => item.type === "page" && item.url.includes("index.html"));
@@ -153,6 +154,9 @@ try {
   overlay = connectTarget(overlayTarget);
   await new Promise((resolve, reject) => { overlay.socket.once("open", resolve); overlay.socket.once("error", reject); });
   await overlay.command("Runtime.enable");
+  const overlayControlTarget = await waitForTarget((item) => { try { return item.type === "page" && new URL(item.url).searchParams.get("window") === "overlay-control"; } catch { return false; } });
+  overlayControl = connectTarget(overlayControlTarget);
+  await new Promise((resolve, reject) => { overlayControl.socket.once("open", resolve); overlayControl.socket.once("error", reject); });
   await waitFor(() => document.body.innerText.includes("Mock smoke answer"), overlay);
   await waitFor(() => window.interviewCopilot.interview.getRuntimeTrace(300).then((events) => events.some((event) => event.name === "QUESTION_FINISHED")), main);
   const stopStartedAt = Date.now();
@@ -176,6 +180,7 @@ try {
   // that is intentionally being destroyed. Electron's before-quit handler
   // then runs the normal application shutdown controller.
   overlay.send("Runtime.evaluate", { expression: "window.close()", awaitPromise: false, returnByValue: false });
+  overlayControl.socket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression: "window.close()", awaitPromise: false, returnByValue: false } }));
   main.send("Runtime.evaluate", { expression: "window.close()", awaitPromise: false, returnByValue: false });
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("RUNTIME_E2E_TIMEOUT Electron did not exit after successful idle")), 10_000);
@@ -184,6 +189,7 @@ try {
   console.log(`REALTIME_SMOKE_E2E_RESULT ${JSON.stringify({ ...lifecycleResult, processExited: true })}`);
 } finally {
   overlay?.socket.close();
+  overlayControl?.socket.close();
   main?.socket.close();
   asrServer.close();
   llmServer.close();
