@@ -82,6 +82,7 @@ export function normalizeProfileBuilderArtifact(raw: unknown, context: { profile
     profileId: stringValue(source.profileId, context.profileId ?? ""),
     generatedAt: finiteNumber(source.generatedAt, Date.now()),
     status,
+    analysisQuality: stringValue(source.analysisQuality) === "model" ? "model" : "fallback",
     sourceIds: stringArray(source.sourceIds),
     skillGraph: { nodes: normalizeSkillNodes(skillGraph.nodes), edges: normalizeEdges(skillGraph.edges) },
     projectGraph: { nodes: normalizeProjectNodes(projectGraph.nodes), edges: normalizeEdges(projectGraph.edges) },

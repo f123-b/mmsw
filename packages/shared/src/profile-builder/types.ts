@@ -1,4 +1,5 @@
 export type ProfileBuilderSourceKind = "resume" | "job_target" | "project" | "interview" | "knowledge" | "skill";
+import type { ResumeAnalysis } from "../resume-analysis";
 
 export interface ProfileBuilderSource {
   id: string;
@@ -17,6 +18,8 @@ export interface ProfileBuilderInput {
   profileId: string;
   profileName: string;
   sources: ProfileBuilderSource[];
+  /** Resume projects are supplied after explicit section parsing and user review. */
+  resumeAnalysis?: ResumeAnalysis;
 }
 
 export interface ProfileGraphNode {
@@ -74,6 +77,7 @@ export interface ProfileBuilderOutput {
   profileId: string;
   generatedAt: number;
   status: "ready" | "partial" | "error";
+  analysisQuality: "model" | "fallback";
   sourceIds: string[];
   skillGraph: ProfileSkillGraph;
   projectGraph: ProfileProjectGraph;
