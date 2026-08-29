@@ -253,6 +253,7 @@ function QuestionThreadPanel({ groups, activeGroupId, followLatestPreference, sh
   const scrollRef = useRef<HTMLDivElement>(null);
   const [followMode, setFollowMode] = useState<OverlayFollowMode>(followLatestPreference ? "following" : "manual");
   const [newCount, setNewCount] = useState(0);
+  const [olderGroupsOpen, setOlderGroupsOpen] = useState(true);
   const previousItemCount = useRef(groups.reduce((total, group) => total + group.items.length, 0));
   const active = groups.find((group) => group.id === activeGroupId) ?? groups.at(-1);
   const older = groups.filter((group) => group.id !== active?.id).reverse();
@@ -277,7 +278,7 @@ function QuestionThreadPanel({ groups, activeGroupId, followLatestPreference, sh
       {visibleQuestionDetails(active).map((item) => <div className="question-thread-detail" key={item.id}><span>{questionItemLabel(item.type)}</span><strong>{compactQuestionText(item.text, 140)}</strong></div>)}
       {visibleQuestionItems(active).map((item, index) => <button type="button" className="question-thread-follow-up question-select-button" key={item.id} onClick={() => onSelectQuestion(item.questionId)}><span>追问 {index + 1}</span><strong>{compactQuestionText(item.text, 150)}</strong></button>)}
     </article>}
-    {older.length > 0 && <details className="older-question-groups" open={older.some((group) => group.id.startsWith("screenshot-group-"))}><summary>更早问题 · {older.length} 组</summary>{older.map((group) => <article className="question-group-card compact-group" key={group.id}><button type="button" className="question-history-button" onClick={() => selectGroupQuestion(group)}><span className="panel-kicker">{compactQuestionText(group.title, 80)}</span><strong>{compactQuestionText(group.primaryQuestion, 150)}</strong></button>{visibleQuestionItems(group).map((item) => <button type="button" className="question-history-follow-up" key={item.id} onClick={() => onSelectQuestion(item.questionId)}>追问 · {compactQuestionText(item.text, 130)}</button>)}</article>)}</details>}
+    {older.length > 0 && <details className="older-question-groups" open={olderGroupsOpen} onToggle={(event) => setOlderGroupsOpen(event.currentTarget.open)}><summary>更早问题 · {older.length} 组</summary>{older.map((group) => <article className="question-group-card compact-group" key={group.id}><button type="button" className="question-history-button" onClick={() => selectGroupQuestion(group)}><span className="panel-kicker">{compactQuestionText(group.title, 80)}</span><strong>{compactQuestionText(group.primaryQuestion, 150)}</strong></button>{visibleQuestionItems(group).map((item) => <button type="button" className="question-history-follow-up" key={item.id} onClick={() => onSelectQuestion(item.questionId)}>追问 · {compactQuestionText(item.text, 130)}</button>)}</article>)}</details>}
     {newCount > 0 && <button type="button" className="new-content-badge" onClick={jumpToLatest}>{newContentBadgeLabel(newCount)}</button>}
   </div>;
 }
