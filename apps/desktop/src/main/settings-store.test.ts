@@ -180,6 +180,30 @@ describe("OverlaySettingsStore", () => {
     }
   });
 
+  it("keeps custom control-bar placement across partial saves and clamps designer ranges", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      const saved = settings.setPreferences({
+        questionWindow: { width: 2_000, height: 1, fontSize: 40, backgroundOpacity: 0, textOpacity: 1, borderOpacity: 0 },
+        answerWindow: { width: 2_000, height: 1, fontSize: 40 },
+        controlBar: { x: 144, y: 280, positionMode: "custom", orientation: "vertical" },
+        appearance: { mode: "text_only", radius: 99 },
+        behavior: { interactionMode: "full_passthrough", snapEnabled: false, snapThreshold: 99 }
+      });
+      expect(saved.questionWindow).toMatchObject({ width: 1_000, height: 120, fontSize: 32, backgroundOpacity: 0, textOpacity: 1, borderOpacity: 0 });
+      expect(saved.answerWindow).toMatchObject({ width: 1_600, height: 150, fontSize: 40 });
+      expect(saved.controlBar).toMatchObject({ x: 144, y: 280, positionMode: "custom", orientation: "vertical" });
+      expect(saved.appearance).toMatchObject({ mode: "text_only", radius: 32 });
+      expect(saved.behavior).toMatchObject({ interactionMode: "full_passthrough", mousePassthrough: true, snapEnabled: false, snapThreshold: 16 });
+
+      const partial = settings.setPreferences({ controlBar: { x: 210, y: 310, width: 720, height: 72 } });
+      expect(partial.controlBar).toMatchObject({ x: 210, y: 310, width: 720, height: 72, positionMode: "custom", orientation: "vertical" });
+    } finally {
+      database.close();
+    }
+  });
+
   it("persists Tencent desktop and window validation independently", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {

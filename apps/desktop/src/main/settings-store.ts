@@ -378,6 +378,7 @@ function normalizeOverlayPreferences(input: OverlayPreferencesPatch): OverlayPre
   const appearance = (value: Partial<OverlayAppearancePreferences> | undefined): OverlayAppearancePreferences => ({
     mode: enumValue(value?.mode, ["glass", "translucent", "text_only", "custom"] as const, DEFAULT_OVERLAY_PREFERENCES.appearance.mode),
     blur: number(value?.blur, DEFAULT_OVERLAY_PREFERENCES.appearance.blur, 0, 40),
+    radius: number(value?.radius, DEFAULT_OVERLAY_PREFERENCES.appearance.radius, 0, 32),
     shadow: flag(value?.shadow, DEFAULT_OVERLAY_PREFERENCES.appearance.shadow),
     border: flag(value?.border, DEFAULT_OVERLAY_PREFERENCES.appearance.border),
     textShadow: enumValue(value?.textShadow, ["none", "soft", "medium"] as const, DEFAULT_OVERLAY_PREFERENCES.appearance.textShadow),
@@ -393,8 +394,8 @@ function normalizeOverlayPreferences(input: OverlayPreferencesPatch): OverlayPre
   const backgroundColor = color(input.backgroundColor, DEFAULT_OVERLAY_PREFERENCES.backgroundColor);
   const fontColor = color(input.fontColor, DEFAULT_OVERLAY_PREFERENCES.fontColor);
   const controlBar = windowPreferences(controlInput, DEFAULT_OVERLAY_PREFERENCES.controlBar, "control") as OverlayControlBarPreferences;
-  controlBar.positionMode = enumValue(input.controlBar?.positionMode, ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right", "custom"] as const, DEFAULT_OVERLAY_PREFERENCES.controlBar.positionMode);
-  controlBar.orientation = enumValue(input.controlBar?.orientation, ["horizontal", "vertical"] as const, DEFAULT_OVERLAY_PREFERENCES.controlBar.orientation);
+  controlBar.positionMode = enumValue(controlInput.positionMode, ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right", "custom"] as const, DEFAULT_OVERLAY_PREFERENCES.controlBar.positionMode);
+  controlBar.orientation = enumValue(controlInput.orientation, ["horizontal", "vertical"] as const, DEFAULT_OVERLAY_PREFERENCES.controlBar.orientation);
   return {
     backgroundOpacity,
     backgroundColor,

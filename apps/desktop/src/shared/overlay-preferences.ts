@@ -75,6 +75,7 @@ export interface OverlayBehaviorPreferences {
 export interface OverlayAppearancePreferences {
   mode: OverlayAppearanceMode;
   blur: number;
+  radius: number;
   shadow: boolean;
   border: boolean;
   textShadow: OverlayTextShadow;
@@ -212,6 +213,7 @@ export const DEFAULT_OVERLAY_PREFERENCES: OverlayPreferences = {
   appearance: {
     mode: "glass",
     blur: 18,
+    radius: 12,
     shadow: true,
     border: true,
     textShadow: "soft",
