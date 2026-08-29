@@ -83,6 +83,7 @@ export interface AddQuestionResult {
   group: QuestionGroup;
   item: QuestionItem;
   relation?: QuestionRelation;
+  closedGroup?: QuestionGroup;
   isNewGroup: boolean;
 }
 
@@ -148,6 +149,13 @@ function isExample(question: QuestionCandidate): boolean {
   return /^(?:比如|例如|举例|像是|像)\s*/.test(question.text.trim());
 }
 
+function hasExplicitFollowUpSignal(question: QuestionCandidate): boolean {
+  const text = question.text.trim();
+  return question.speechAct === "FOLLOW_UP"
+    || question.contextRelation === "follow_up"
+    || /^(?:那|那么|然后|还有|这个|它|这里|其中|接下来|再|如果|假如|具体|对于这个|针对这个)\b/.test(text);
+}
+
 function isQuestionNucleus(question: QuestionCandidate, previous?: QuestionItem): boolean {
   const text = question.text.trim();
   if (previous?.itemType !== "TOPIC_FRAGMENT") return false;
@@ -161,7 +169,8 @@ function itemTypeFor(question: QuestionCandidate, previous?: QuestionItem, detec
   if (isExample(question)) return "EXAMPLE";
   if (isQuestionNucleus(question, previous)) return "QUESTION_NUCLEUS";
   if (isTopicFragment(question)) return "TOPIC_FRAGMENT";
-  if (question.speechAct === "FOLLOW_UP" || question.detectionType === "follow_up" || question.category === "followup" || /^(?:那|那么|然后|还有|这个|它|这里|其中|接下来|再|如果|假如|具体)\b/.test(question.text.trim())) return "FOLLOW_UP";
+  if (question.contextRelation === "standalone" && !hasExplicitFollowUpSignal(question)) return "NEW_TOPIC";
+  if (question.speechAct === "FOLLOW_UP" || question.contextRelation === "follow_up" || question.detectionType === "follow_up" || question.category === "followup" || /^(?:那|那么|然后|还有|这个|它|这里|其中|接下来|再|如果|假如|具体)\b/.test(question.text.trim())) return "FOLLOW_UP";
   return "PARALLEL_SUBQUESTION";
 }
 
@@ -178,7 +187,7 @@ function relationForType(type: QuestionThreadItemType, fallback?: QuestionRelati
 
 function isAnswerable(type: QuestionThreadItemType, question: QuestionCandidate): boolean {
   if (type === "TOPIC_FRAGMENT" || type === "ANSWER_CONSTRAINT" || type === "EXAMPLE" || type === "ASR_REVISION") return false;
-  if (type === "NEW_TOPIC" && !/[？?]/.test(question.text) && !/(?:什么|为什么|为何|怎么|如何|哪些|哪个|是否|有没有|介绍一下|说说|讲一下)/.test(question.text)) return false;
+  if (type === "NEW_TOPIC" && !/[？?]/.test(question.text) && !/(?:什么|为什么|为何|怎么|如何|哪些|哪个|是否|有没有|介绍一下|自我介绍|说说|讲一下)/.test(question.text)) return false;
   return true;
 }
 
@@ -229,6 +238,13 @@ export class QuestionGroupManager {
         ? this.makeRelation(previous, input.question, "SAME_QUESTION_AUGMENTATION", 0.95, "topic-fragment-plus-question-nucleus", now)
         : undefined;
     const sameGroup = Boolean(current && type !== "NEW_TOPIC" && type !== "TOPIC_FRAGMENT" && (forcedTopicJoin || (relation && relation.type !== "NEW_TOPIC") || input.turn.id === current.turnId));
+    let closedGroup: QuestionGroup | undefined;
+    if (current && !sameGroup) {
+      current.status = "closed";
+      current.endedAt = now;
+      current.updatedAt = now;
+      closedGroup = copyGroup(current);
+    }
     const group = sameGroup ? current! : this.createGroup(input.turn, now, type === "TOPIC_FRAGMENT" ? sentenceEnd(input.question.text) : input.question.text);
     if (type === "TOPIC_FRAGMENT" && !group.topic) group.topic = sentenceEnd(input.question.text);
 
@@ -277,7 +293,7 @@ export class QuestionGroupManager {
     group.updatedAt = now;
     if (answerable) group.status = "active";
     this.questionToGroup.set(input.question.id, group.id);
-    return { group: copyGroup(group), item: copyItem(item), ...(relation ? { relation } : {}), isNewGroup: !sameGroup };
+    return { group: copyGroup(group), item: copyItem(item), ...(relation ? { relation } : {}), ...(closedGroup ? { closedGroup } : {}), isNewGroup: !sameGroup };
   }
 
   getGroup(groupId: string): QuestionGroup | undefined {

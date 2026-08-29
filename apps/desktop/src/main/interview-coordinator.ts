@@ -1168,7 +1168,7 @@ export class InterviewCoordinator extends EventEmitter {
         ...(event.type === "question_superseded" ? { relationType: "ASR_REVISION" as const } : {})
       });
       event = { ...event, question: groupResult.item.question };
-      this.emitQuestionGroupUpdate(groupResult.group);
+      this.emitQuestionGroupResult(groupResult);
       this.markQuestionState(event.question, "confirmed");
       this.recordRuntimeTrace("QUESTION_CONFIRMED", { textLength: event.question.text.length }, { questionId: event.question.id, reasonCode: event.type });
       this.currentQuestion = event.question;
@@ -1716,6 +1716,11 @@ export class InterviewCoordinator extends EventEmitter {
     });
   }
 
+  private emitQuestionGroupResult(result: ReturnType<QuestionGroupManager["add"]>): void {
+    if (result.closedGroup) this.emitQuestionGroupUpdate(result.closedGroup);
+    this.emitQuestionGroupUpdate(result.group);
+  }
+
   private recordQuestionThreadFragment(utterance: TranscriptUtterance, turn: InterviewTurn, text: string, speechAct?: QuestionCandidate["speechAct"]): void {
     const id = `question-thread-fragment-${utterance.id}`;
     if (this.questionGroups.getGroupForQuestion(id)) return;
@@ -1733,7 +1738,7 @@ export class InterviewCoordinator extends EventEmitter {
       ...(speechAct ? { speechAct } : {})
     };
     const result = this.questionGroups.add({ turn, question: fragment, now: this.now() });
-    this.emitQuestionGroupUpdate(result.group);
+    this.emitQuestionGroupResult(result);
   }
 
   private markQuestionGroup(questionId: string, state: Parameters<QuestionGroupManager["mark"]>[1]): void {

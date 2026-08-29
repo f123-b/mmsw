@@ -7,7 +7,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { AudioManager, type AudioStartOptions } from "./audio-manager";
 import { OverlayManager, type OverlayMode } from "./overlay-manager";
-import { createScreenshotFixtureResult, ScreenshotManager } from "./screenshot-manager";
+import { createScreenshotFixtureResult, ScreenshotManager, type ScreenshotRegion } from "./screenshot-manager";
 import { createScreenshotRequestId, SCREENSHOT_PROMPT, ScreenshotOperationRegistry, ScreenshotTraceBuffer, withScreenshotTimeout, type ScreenshotTraceEvent, type ScreenshotTraceEventName } from "./screenshot-pipeline";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
@@ -15,7 +15,7 @@ import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, an
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
-import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type OverlayPreferences, type ProviderSection } from "./settings-store";
+import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type OverlayPreferences, type OverlayPreferencesPatch, type ProviderSection } from "./settings-store";
 import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnection } from "./provider-preflight";
 import { discoverProviderModels } from "./model-catalog";
 import { isZipBytes, normalizeDocumentBytes, parseDocument } from "./document-parsers";
@@ -519,6 +519,13 @@ function screenshotSessionId(): string | undefined {
   return interviewCoordinator?.getRuntimeDiagnostics().sessionId;
 }
 
+function configuredScreenshotRegion(): ScreenshotRegion | undefined {
+  const screenshot = overlaySettingsStore?.getPreferences().screenshot;
+  if (!screenshot || screenshot.captureMode === "full_screen" || screenshot.captureMode === "current_display") return undefined;
+  if (screenshot.captureMode === "fixed_region") return screenshot.fixedRegion;
+  return screenshot.lastRegion ?? screenshot.fixedRegion;
+}
+
 function recordScreenshotTrace(name: ScreenshotTraceEventName, screenshotRequestId: string, details: Partial<Omit<ScreenshotTraceEvent, "name" | "timestamp" | "elapsedMs" | "screenshotRequestId">> = {}): ScreenshotTraceEvent {
   const operation = screenshotOperations.get(screenshotRequestId);
   const event: ScreenshotTraceEvent = {
@@ -589,8 +596,11 @@ async function runIndependentVisionAnswer(visionInput: ReturnType<typeof buildVi
         recordScreenshotTrace("VISION_PROVIDER_REQUEST_RECEIVED", screenshotRequestId, { providerRequestId, answerId, providerModel: event.model, status: "streaming", messageShape: "multimodal" });
         // A screenshot answer is independent of the ASR question stream. Give
         // it a stable transient group so the non-destructive answer stack can
-        // keep it visible instead of placing it in the collapsed history.
-        broadcast("realtime:message", { type: "answer_start", answerId, questionId, groupId: `screenshot-group-${screenshotRequestId}`, relation: "PRIMARY", mode: event.mode, model: event.model });
+        // keep it visible instead of placing it in the collapsed history,
+        // while still exposing a compact navigator entry on the left pane.
+        const screenshotGroupId = `screenshot-group-${screenshotRequestId}`;
+        broadcast("realtime:message", { type: "question_group_updated", groupId: screenshotGroupId, title: "截图题", primaryQuestion: "截图识别题（以图片为准）", items: [{ id: questionId, questionId, text: "截图识别题（以图片为准）", type: "NEW_TOPIC", answerable: true, state: "answering" }], slots: [{ id: `question-slot-${questionId}`, text: "截图识别题（以图片为准）", status: "covered" }], updatedAt: Date.now() });
+        broadcast("realtime:message", { type: "answer_start", answerId, questionId, groupId: screenshotGroupId, relation: "PRIMARY", mode: event.mode, model: event.model });
       } else if (event.type === "answer_delta") {
         answerText += event.delta;
         if (!answerText) continue;
@@ -630,7 +640,7 @@ async function captureScreenshot(trigger = "screenshot-answer"): Promise<void> {
     if (mode) await answerCapturedScreenshot(mode, screenshotRequestId, trigger);
     else {
       recordScreenshotTrace("SCREENSHOT_ACTION_REQUESTED", screenshotRequestId, { fields: { trigger, source: "global-shortcut" } });
-      const result = await screenshotManager.capturePrimaryDisplay();
+      const result = await screenshotManager.capturePrimaryDisplay(undefined, configuredScreenshotRegion());
       try { broadcast("screenshot:captured", result); }
       finally { await screenshotManager.cleanup(result); }
     }
@@ -657,7 +667,7 @@ async function answerCapturedScreenshot(mode: "interview" | "written-test" = "in
   let capturedResult: Awaited<ReturnType<ScreenshotManager["capturePrimaryDisplay"]>> | undefined;
   try {
     recordScreenshotTrace("SCREENSHOT_CAPTURE_STARTED", screenshotRequestId, { fields: { mode } });
-    capturedResult = await withScreenshotTimeout(screenshotManager.capturePrimaryDisplay(operation.controller.signal), 3_000, () => operation.controller.abort());
+    capturedResult = await withScreenshotTimeout(screenshotManager.capturePrimaryDisplay(operation.controller.signal, configuredScreenshotRegion()), 3_000, () => operation.controller.abort());
     screenshotOperations.setCaptureBytes(screenshotRequestId, capturedResult.bytes.byteLength);
     recordScreenshotTrace("SCREENSHOT_CAPTURE_COMPLETED", screenshotRequestId, { imageMimeType: capturedResult.mimeType, imageBytes: capturedResult.bytes.byteLength, imageWidth: capturedResult.width, imageHeight: capturedResult.height, fields: { captureSource: screenshotFixtureRequested ? "test-fixture" : "primary-display" } });
     broadcast("screenshot:captured", capturedResult);
@@ -1378,9 +1388,9 @@ function registerIpc(): void {
    ipcMain.handle("overlay:get-state", () => overlayManager?.hudState);
    ipcMain.handle("overlay:get-layout", () => overlayManager?.hudLayout);
    ipcMain.handle("overlay:get-preferences", () => overlaySettingsStore?.getPreferences());
-   ipcMain.handle("overlay:set-preferences", (_event, input: Partial<OverlayPreferences>) => {
+   ipcMain.handle("overlay:set-preferences", (_event, input: OverlayPreferencesPatch) => {
      const next = overlaySettingsStore?.setPreferences(input);
-     if (next) broadcast("overlay:preferences", next);
+     if (next) { overlayManager?.applyPreferences(next.behavior); broadcast("overlay:preferences", next); }
      return next;
    });
    ipcMain.handle("overlay:set-share-mode", (_event, enabled: boolean) => { overlayManager?.setShareMode(Boolean(enabled)); return overlayManager?.hudState; });
@@ -1421,7 +1431,7 @@ function registerIpc(): void {
     appLogger?.info(event, { mode, status });
     return next;
   });
-  ipcMain.handle("screenshot:capture", () => screenshotManager.capturePrimaryDisplay());
+  ipcMain.handle("screenshot:capture", () => screenshotManager.capturePrimaryDisplay(undefined, configuredScreenshotRegion()));
   ipcMain.handle("session:get-state", () => session.state);
   ipcMain.handle("realtime:connect", (_event, options: RealtimeConnectOptions) => {
     realtimeSession.connect(options);
@@ -2400,7 +2410,8 @@ if (hasSingleInstanceLock) {
     middleMouseShortcutManager = new MiddleMouseShortcutManager(middleMouseHelper, () => {
       const interviewRunning = Boolean(interviewCoordinator?.running);
       const writtenTestRunning = Boolean(writtenTestController?.running);
-      if (!shouldHandleMiddleMouseShortcut({ interviewRunning, automationMode: interviewCoordinator?.automationMode ?? "AUTO", writtenTestRunning })) return;
+      const preferences = overlaySettingsStore?.getPreferences();
+      if (!shouldHandleMiddleMouseShortcut({ interviewRunning, automationMode: interviewCoordinator?.automationMode ?? "AUTO", writtenTestRunning, middleMouseEnabled: preferences?.screenshot.middleMouseEnabled, enabledInManualInterview: preferences?.screenshot.enabledInManualInterview, enabledInExamMode: preferences?.screenshot.enabledInExamMode })) return;
       const mode = interviewRunning ? "interview" : writtenTestRunning ? "written-test" : undefined;
       if (!mode) return;
       broadcast("shortcut", "middle-mouse-screenshot");

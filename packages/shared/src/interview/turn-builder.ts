@@ -33,8 +33,8 @@ export interface InterviewTurn {
 }
 
 export interface QuestionRelationContext {
-  previousQuestion?: Pick<QuestionCandidate, "id" | "text" | "speechAct" | "detectionType" | "category" | "utteranceId" | "segmentIds" | "turnId">;
-  currentQuestion?: Pick<QuestionCandidate, "id" | "text" | "speechAct" | "detectionType" | "category" | "utteranceId" | "segmentIds" | "turnId">;
+  previousQuestion?: Pick<QuestionCandidate, "id" | "text" | "speechAct" | "detectionType" | "category" | "contextRelation" | "utteranceId" | "segmentIds" | "turnId">;
+  currentQuestion?: Pick<QuestionCandidate, "id" | "text" | "speechAct" | "detectionType" | "category" | "contextRelation" | "utteranceId" | "segmentIds" | "turnId">;
   previousTurn?: Pick<InterviewTurn, "id" | "text" | "startMs" | "endMs">;
   currentTurn?: Pick<InterviewTurn, "id" | "text" | "startMs" | "endMs">;
 }
@@ -62,8 +62,9 @@ function similarity(left: string, right: string): number {
   return Math.max(intersection / Math.max(1, union), containment * 0.96);
 }
 
-function isFollowUp(question?: Pick<QuestionCandidate, "text" | "speechAct" | "detectionType" | "category">): boolean {
+function isFollowUp(question?: Pick<QuestionCandidate, "text" | "speechAct" | "detectionType" | "category" | "contextRelation">): boolean {
   if (!question) return false;
+  if (question.contextRelation === "standalone" && question.speechAct !== "FOLLOW_UP") return false;
   return question.speechAct === "FOLLOW_UP"
     || question.detectionType === "follow_up"
     || question.category === "followup"
@@ -126,6 +127,9 @@ export class TurnBuilder {
     }
     if (NEW_TOPIC_PREFIX.test(current.text.trim())) {
       return { type: "NEW_TOPIC", confidence: 0.98, reason: "explicit-topic-transition" };
+    }
+    if (current.contextRelation === "standalone" && current.speechAct !== "FOLLOW_UP") {
+      return { type: "NEW_TOPIC", confidence: 0.96, reason: "standalone-context-boundary" };
     }
     if (isFollowUp(current)) {
       return { type: "FOLLOW_UP", confidence: 0.94, reason: "follow-up-speech-act" };

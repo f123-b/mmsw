@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { selectPrimaryScreenSource } from "./screen-source-selection";
-import { createScreenshotFixtureResult, ScreenshotManager } from "./screenshot-manager";
+import { createScreenshotFixtureResult, mapScreenshotRegion, ScreenshotManager } from "./screenshot-manager";
 
 describe("selectPrimaryScreenSource", () => {
   const sources = [
@@ -19,6 +19,10 @@ describe("selectPrimaryScreenSource", () => {
 });
 
 describe("screenshot fixture", () => {
+  it("maps a configured display region onto the captured thumbnail", () => {
+    expect(mapScreenshotRegion({ x: 100, y: 50, width: 800, height: 500 }, { width: 1_280, height: 720 }, { width: 1_920, height: 1_080 })).toEqual({ x: 66, y: 33, width: 533, height: 333 });
+  });
+
   it("is a non-empty valid PNG image for deterministic pipeline tests", () => {
     const result = createScreenshotFixtureResult();
     expect(result.mimeType).toBe("image/png");

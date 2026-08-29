@@ -18,6 +18,21 @@ export interface ScreenshotResult extends ScreenshotImage {
   dataUrl: string;
 }
 
+export interface ScreenshotRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export function mapScreenshotRegion(region: ScreenshotRegion, sourceSize: { width: number; height: number }, displaySize = sourceSize): ScreenshotRegion {
+  const x = Math.max(0, Math.min(sourceSize.width - 1, Math.floor((region.x / Math.max(1, displaySize.width)) * sourceSize.width)));
+  const y = Math.max(0, Math.min(sourceSize.height - 1, Math.floor((region.y / Math.max(1, displaySize.height)) * sourceSize.height)));
+  const width = Math.max(1, Math.min(sourceSize.width - x, Math.floor((region.width / Math.max(1, displaySize.width)) * sourceSize.width)));
+  const height = Math.max(1, Math.min(sourceSize.height - y, Math.floor((region.height / Math.max(1, displaySize.height)) * sourceSize.height)));
+  return { x, y, width, height };
+}
+
 export interface ScreenshotManagerOptions {
   onDiagnostic?: (message: string) => void;
   getOverlayWindow?: () => { isDestroyed(): boolean; isVisible(): boolean; hide(): void; showInactive(): void } | undefined;
@@ -36,12 +51,12 @@ export function createScreenshotFixtureResult(path = `fixture://${Date.now()}.pn
 export class ScreenshotManager {
   constructor(private readonly options: ScreenshotManagerOptions = {}) {}
 
-  async capturePrimaryDisplay(signal?: AbortSignal): Promise<ScreenshotResult> {
+  async capturePrimaryDisplay(signal?: AbortSignal, region?: ScreenshotRegion): Promise<ScreenshotResult> {
     if (this.options.captureFixture) return await this.withAbort(this.options.captureFixture(), signal);
     let result: ScreenshotResult;
     try {
       let timeout: ReturnType<typeof setTimeout> | undefined;
-      const directCapture = this.capturePrimaryDisplayDirect();
+      const directCapture = this.capturePrimaryDisplayDirect(region);
       try {
         result = await this.withAbort(Promise.race([
           directCapture,
@@ -62,7 +77,7 @@ export class ScreenshotManager {
     if (signal?.aborted) throw this.abortError();
     if (await this.options.shouldUseInternalFallback?.(result)) {
       await this.cleanup(result);
-      return await this.withAbort(this.captureWithInternalFallback(), signal);
+      return await this.withAbort(this.captureWithInternalFallback(region), signal);
     }
     return result;
   }
@@ -91,7 +106,7 @@ export class ScreenshotManager {
     }
   }
 
-  private async capturePrimaryDisplayDirect(): Promise<ScreenshotResult> {
+  private async capturePrimaryDisplayDirect(region?: ScreenshotRegion): Promise<ScreenshotResult> {
     await this.cleanupExpired();
     const primaryDisplay = screen.getPrimaryDisplay();
     const sources = await desktopCapturer.getSources({
@@ -106,18 +121,18 @@ export class ScreenshotManager {
       );
     }
 
-    return this.saveSource(source);
+    return this.saveSource(source, region, primaryDisplay.bounds);
   }
 
-  private async captureWithInternalFallback(): Promise<ScreenshotResult> {
+  private async captureWithInternalFallback(region?: ScreenshotRegion): Promise<ScreenshotResult> {
     const overlay = this.options.getOverlayWindow?.();
-    if (!overlay || overlay.isDestroyed() || !overlay.isVisible()) return await this.capturePrimaryDisplayDirect();
+    if (!overlay || overlay.isDestroyed() || !overlay.isVisible()) return await this.capturePrimaryDisplayDirect(region);
     const started = Date.now();
     overlay.hide();
     try {
       await new Promise<void>((resolve) => setTimeout(resolve, 80));
       this.options.onDiagnostic?.("INTERNAL_SCREENSHOT_FALLBACK_ACTIVE");
-      return await this.capturePrimaryDisplayDirect();
+      return await this.capturePrimaryDisplayDirect(region);
     } finally {
       overlay.showInactive();
       if (Date.now() - started > 200) this.options.onDiagnostic?.("INTERNAL_SCREENSHOT_FALLBACK_SLOW");
@@ -135,8 +150,12 @@ export class ScreenshotManager {
     return this.saveSource(source);
   }
 
-  private async saveSource(source: Electron.DesktopCapturerSource): Promise<ScreenshotResult> {
+  private async saveSource(source: Electron.DesktopCapturerSource, region?: ScreenshotRegion, displayBounds?: Electron.Rectangle): Promise<ScreenshotResult> {
     let image = source.thumbnail;
+    if (region) {
+      const original = image.getSize();
+      image = image.crop(mapScreenshotRegion(region, original, { width: displayBounds?.width ?? original.width, height: displayBounds?.height ?? original.height }));
+    }
     const original = image.getSize();
     const scale = Math.min(1, MAX_DIMENSION / Math.max(original.width, original.height));
     if (scale < 1) {
