@@ -4,6 +4,7 @@ import { applyOverlayMode, nextOverlayMode, type OverlayMode } from "./overlay-m
 import { applyCaptureProtection, getCaptureProtectionCapabilities, type CaptureProtectionCapabilities, type CaptureProtectionState } from "./overlay-capture-protection";
 import { initialHUDState, reduceHUDState, type HUDAction, type HUDState } from "./hud-state";
 import { calculateHUDLayout, type HUDLayout, type HUDWorkArea } from "./hud-layout";
+import type { OverlayBehaviorPreferences } from "../shared/overlay-preferences";
 
 export { applyOverlayMode, nextOverlayMode } from "./overlay-mode";
 export type { OverlayMode, OverlayWindowLike } from "./overlay-mode";
@@ -29,6 +30,8 @@ export class OverlayManager {
   private window: BrowserWindow | undefined;
   private mode: OverlayMode = "passive";
   private interactiveRegion = false;
+  private alwaysOnTop = true;
+  private mousePassthrough = true;
   private hudStateValue: HUDState = { ...initialHUDState };
   private hudLayoutValue: HUDLayout = calculateHUDLayout({ x: 0, y: 0, width: 1440, height: 900 });
   private captureProtectionEnabled: boolean;
@@ -155,8 +158,18 @@ export class OverlayManager {
   setClickThrough(enabled: boolean): void { this.setMode(enabled ? "passive" : "interactive"); }
 
   setControlRegion(interactive: boolean): void {
-    this.interactiveRegion = this.hudState.shareMode ? false : Boolean(interactive);
+    this.interactiveRegion = this.hudState.shareMode ? false : this.mousePassthrough && Boolean(interactive);
     this.applyMode();
+  }
+
+  applyPreferences(preferences: Pick<OverlayBehaviorPreferences, "alwaysOnTop" | "mousePassthrough">): void {
+    this.alwaysOnTop = Boolean(preferences.alwaysOnTop);
+    this.mousePassthrough = Boolean(preferences.mousePassthrough);
+    const window = this.currentWindow;
+    if (window) {
+      window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
+      this.applyMode();
+    }
   }
 
   coverCurrentMonitor(): void {
@@ -202,7 +215,7 @@ export class OverlayManager {
         sandbox: false
       }
     });
-    this.window.setAlwaysOnTop(true, "screen-saver");
+    this.window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
     void this.options.loadRenderer(this.window);
     this.window.once("ready-to-show", () => {
       // Chromium may only expose the final native HWND after the first compositor frame.
@@ -274,7 +287,7 @@ export class OverlayManager {
 
   private applyMode(): void {
     if (!this.window || this.window.isDestroyed()) return;
-    applyOverlayMode(this.window, this.mode, this.interactiveRegion);
+    applyOverlayMode(this.window, this.mode, this.mousePassthrough ? this.interactiveRegion : true);
     this.window.webContents.send("overlay:mode", this.mode);
     this.sendHudState();
   }
@@ -293,7 +306,8 @@ export class OverlayManager {
 
   private refreshLayout(bounds: Electron.Rectangle): void {
     const workArea: HUDWorkArea = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
-    this.hudLayoutValue = calculateHUDLayout(workArea);
+    const display = screen.getDisplayNearestPoint({ x: bounds.x + Math.round(bounds.width / 2), y: bounds.y + Math.round(bounds.height / 2) });
+    this.hudLayoutValue = { ...calculateHUDLayout(workArea), displayId: display.id, scaleFactor: display.scaleFactor };
     const window = this.currentWindow;
     if (window) window.webContents.send("overlay:layout", this.hudLayoutValue);
   }

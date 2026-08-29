@@ -12,7 +12,7 @@ import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
 import type { ChatAction, KnowledgeDocumentType, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectMemorySnapshot, ProjectQaGenerationResult, ProjectQuestionBankImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
-import type { LlmModelProfileInput, OverlayPreferences, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
+import type { LlmModelProfileInput, OverlayPreferences, OverlayPreferencesPatch, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectAnalysisState, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankRelationInput, QuestionBankRouteQuery, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
@@ -44,7 +44,7 @@ declare global {
         getState(): Promise<HUDState | undefined>;
         getLayout(): Promise<HUDLayout | undefined>;
         getPreferences(): Promise<OverlayPreferences>;
-        setPreferences(input: Partial<OverlayPreferences>): Promise<OverlayPreferences>;
+        setPreferences(input: OverlayPreferencesPatch): Promise<OverlayPreferences>;
         setShareMode(enabled: boolean): Promise<HUDState | undefined>;
         toggleShareMode(): Promise<HUDState | undefined>;
         setMode(mode: OverlayMode): Promise<void>;

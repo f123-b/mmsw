@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Poin
 import type { AnswerThread } from "@interview-copilot/shared";
 import type { HUDLayout, HUDState, OverlayMode } from "../../main/overlay-manager";
 import { DEFAULT_OVERLAY_PREFERENCES, type OverlayPreferences } from "../../shared/overlay-preferences";
+import { followModeAfterScroll, newContentBadgeLabel, shouldAutoFollowLatest, type OverlayFollowMode } from "./overlay-interaction";
 
 type HudState = "IDLE" | "LISTENING" | "QUESTION_DETECTED" | "GENERATING" | "ANSWER_READY" | "PAUSED" | "ERROR";
 type PanelKey = "toolbar" | "transcript" | "answer" | "shortcuts";
@@ -47,7 +48,8 @@ interface OverlayRootProps {
   captureTest?: boolean;
 }
 
-const STORAGE_KEY = "interview-copilot.overlay-layout-v2";
+const STORAGE_KEY = "interview-copilot.overlay-layout-v3";
+const LEGACY_STORAGE_KEY = "interview-copilot.overlay-layout-v2";
 const defaults: OverlayLayout = {
   toolbar: { x: 0, y: 80, width: 680, height: 50, visible: true, collapsed: false, locked: true, opacity: 1 },
   transcript: { x: 0, y: 320, width: 394, height: 406, visible: true, collapsed: false, locked: false, opacity: 1 },
@@ -55,18 +57,34 @@ const defaults: OverlayLayout = {
   shortcuts: { x: 24, y: 0, width: 320, height: 360, visible: false, collapsed: false, locked: false, opacity: 1 }
 };
 
-function viewportDefaults(): OverlayLayout {
-  const usablePanelWidth = Math.max(0, Math.min(1080, window.innerWidth - 48));
-  const horizontalMargin = Math.max(24, Math.round((window.innerWidth - usablePanelWidth) / 2));
-  const panelTop = Math.max(180, Math.round(window.innerHeight * 0.325));
-  const panelHeight = Math.max(300, Math.min(Math.round(window.innerHeight * 0.39), window.innerHeight - panelTop - 32));
-  const transcriptWidth = Math.round(usablePanelWidth * 0.365);
-  const answerWidth = Math.max(0, usablePanelWidth - transcriptWidth - 16);
+function storageKey(displayId?: number, scaleFactor?: number): string {
+  return displayId === undefined ? STORAGE_KEY : `${STORAGE_KEY}-${displayId}-${Math.round((scaleFactor ?? 1) * 100)}`;
+}
+
+function clampNumber(value: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+function viewportDefaults(preferences = DEFAULT_OVERLAY_PREFERENCES): OverlayLayout {
+  const preset = preferences.layoutPreset;
+  const gap = 12;
+  const margin = preset === "dual_screen" ? 20 : Math.max(20, Math.round((window.innerWidth - Math.min(1_340, window.innerWidth - 40)) / 2));
+  const availableWidth = Math.max(0, window.innerWidth - margin * 2);
+  const panelTop = Math.max(96, Math.min(150, Math.round(window.innerHeight * 0.12)));
+  const panelHeight = Math.max(260, Math.min(Math.round(window.innerHeight * (preset === "compact" ? 0.46 : 0.62)), window.innerHeight - panelTop - 24));
+  const presetQuestionWidth = preset === "compact" ? 360 : preset === "wide" || preset === "dual_screen" ? 500 : preferences.questionWindow.width;
+  const presetAnswerWidth = preset === "compact" ? 560 : preset === "wide" || preset === "dual_screen" ? 760 : preferences.answerWindow.width;
+  const totalPreferred = presetQuestionWidth + gap + presetAnswerWidth;
+  const scale = totalPreferred > availableWidth ? availableWidth / Math.max(1, totalPreferred) : 1;
+  const questionWidth = Math.max(310, Math.round(presetQuestionWidth * scale));
+  const answerWidth = Math.max(340, Math.min(presetAnswerWidth * scale, availableWidth - questionWidth - gap));
+  const totalWidth = questionWidth + gap + answerWidth;
+  const horizontalMargin = Math.max(12, Math.round((window.innerWidth - totalWidth) / 2));
   const toolbarWidth = Math.min(680, Math.max(460, Math.round(window.innerWidth * 0.42)), Math.max(0, window.innerWidth - 40));
   return {
     toolbar: { ...defaults.toolbar, x: Math.max(0, Math.round((window.innerWidth - toolbarWidth) / 2)), y: Math.max(24, Math.round(window.innerHeight * 0.08)), width: toolbarWidth },
-    transcript: { ...defaults.transcript, x: horizontalMargin, y: panelTop, width: transcriptWidth, height: panelHeight },
-    answer: { ...defaults.answer, x: horizontalMargin + transcriptWidth + 40, y: panelTop, width: answerWidth, height: panelHeight },
+    transcript: { ...defaults.transcript, x: horizontalMargin, y: panelTop, width: questionWidth, height: panelHeight },
+    answer: { ...defaults.answer, x: horizontalMargin + questionWidth + gap, y: panelTop, width: answerWidth, height: panelHeight },
     shortcuts: { ...defaults.shortcuts, y: Math.max(0, window.innerHeight - 360 - 24) }
   };
 }
@@ -81,15 +99,16 @@ function fromHUDLayout(next: HUDLayout): OverlayLayout {
   };
 }
 
-function loadLayout(): OverlayLayout {
+function loadLayout(key = STORAGE_KEY, preferences = DEFAULT_OVERLAY_PREFERENCES, fallback?: OverlayLayout): OverlayLayout {
   try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}");
-    const fallback = viewportDefaults();
-    const savedToolbar = saved.toolbar?.width === defaults.toolbar.width ? saved.toolbar : {};
-    const savedShortcuts = saved.shortcuts?.width === defaults.shortcuts.width ? saved.shortcuts : {};
-    return Object.fromEntries(Object.entries(fallback).map(([key, value]) => [key, { ...value, ...(key === "toolbar" ? savedToolbar : key === "shortcuts" ? savedShortcuts : (saved[key] ?? {})) }])) as OverlayLayout;
+    const raw = localStorage.getItem(key) ?? (key === STORAGE_KEY ? localStorage.getItem(LEGACY_STORAGE_KEY) : null);
+    const saved = JSON.parse(raw ?? "{}");
+    const base = fallback ?? viewportDefaults(preferences);
+    const savedToolbar = saved.toolbar?.width ? saved.toolbar : {};
+    const savedShortcuts = saved.shortcuts?.width ? saved.shortcuts : {};
+    return Object.fromEntries(Object.entries(base).map(([panelKey, value]) => [panelKey, { ...value, ...(panelKey === "toolbar" ? savedToolbar : panelKey === "shortcuts" ? savedShortcuts : (saved[panelKey] ?? {})) }])) as OverlayLayout;
   } catch {
-    return defaults;
+    return fallback ?? viewportDefaults(preferences);
   }
 }
 
@@ -99,25 +118,41 @@ function clampLayout(layout: PanelLayout): PanelLayout {
   return { ...layout, width, height, x: Math.max(8, Math.min(layout.x, Math.max(8, window.innerWidth - width - 8))), y: Math.max(8, Math.min(layout.y, Math.max(8, window.innerHeight - height - 8))) };
 }
 
-function useOverlayLayout(): [OverlayLayout, (key: PanelKey, patch: Partial<PanelLayout>) => void, (next: HUDLayout) => void] {
-  const [layout, setLayout] = useState<OverlayLayout>(() => loadLayout());
+function useOverlayLayout(preferences: OverlayPreferences): [OverlayLayout, (key: PanelKey, patch: Partial<PanelLayout>) => void, (next: HUDLayout) => void, () => void] {
+  const [layout, setLayout] = useState<OverlayLayout>(() => loadLayout(STORAGE_KEY, preferences));
+  const storageKeyRef = useRef(STORAGE_KEY);
+  const preferencesRef = useRef(preferences);
+  preferencesRef.current = preferences;
   const update = useCallback((key: PanelKey, patch: Partial<PanelLayout>) => setLayout((current) => {
     const next = { ...current, [key]: clampLayout({ ...current[key], ...patch }) };
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* best effort */ }
+    try { localStorage.setItem(storageKeyRef.current, JSON.stringify(next)); } catch { /* best effort */ }
     return next;
   }), []);
   const applyMainLayout = useCallback((next: HUDLayout) => {
     const nextLayout = fromHUDLayout(next);
-    setLayout(nextLayout);
-    try { localStorage.removeItem(STORAGE_KEY); } catch { /* best effort */ }
+    storageKeyRef.current = storageKey(next.displayId, next.scaleFactor);
+    setLayout(loadLayout(storageKeyRef.current, preferencesRef.current, nextLayout));
   }, []);
-  return [layout, update, applyMainLayout];
+  const clearSavedLayout = useCallback(() => {
+    try { localStorage.removeItem(storageKeyRef.current); } catch { /* best effort */ }
+    setLayout(viewportDefaults(preferencesRef.current));
+  }, []);
+  useEffect(() => {
+    if (preferences.layoutPreset === "custom") return;
+    setLayout((current) => {
+      const next = viewportDefaults(preferences);
+      const merged = { ...current, transcript: { ...next.transcript, x: current.transcript.x, y: current.transcript.y }, answer: { ...next.answer, x: current.answer.x, y: current.answer.y }, toolbar: { ...current.toolbar, ...next.toolbar }, shortcuts: { ...current.shortcuts, ...next.shortcuts } };
+      try { localStorage.setItem(storageKeyRef.current, JSON.stringify(merged)); } catch { /* best effort */ }
+      return merged;
+    });
+  }, [preferences.layoutPreset, preferences.questionWindow.width, preferences.questionWindow.height, preferences.answerWindow.width, preferences.answerWindow.height]);
+  return [layout, update, applyMainLayout, clearSavedLayout];
 }
 
 function DraggableResizablePanel({ panel, layout, onChange, className, children }: { panel: PanelKey; layout: PanelLayout; onChange: (key: PanelKey, patch: Partial<PanelLayout>) => void; className: string; children: JSX.Element }): JSX.Element {
   const [dragging, setDragging] = useState(false);
   const beginDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (layout.locked || (event.target as HTMLElement).closest("button, input, textarea, select, .resize-handle")) return;
+    if (layout.locked || (event.target as HTMLElement).closest("button, input, textarea, select, .resize-handle, .overlay-scroll-region, .overlay-content")) return;
     const origin = { x: event.clientX - layout.x, y: event.clientY - layout.y };
     setDragging(true);
     const move = (next: PointerEvent) => onChange(panel, { x: next.clientX - origin.x, y: next.clientY - origin.y });
@@ -137,7 +172,7 @@ function DraggableResizablePanel({ panel, layout, onChange, className, children 
   // Panel transparency belongs to the background surface, never to the
   // container itself; parent opacity also fades text and harms readability.
   const panelStyle = { left: layout.x, top: layout.y, width: layout.width, height: layout.height, display: layout.visible ? undefined : "none", "--hud-panel-width": `${layout.width}px` } as CSSProperties;
-  return <div className={`floating-panel ${className} ${dragging ? "dragging" : ""}`} style={panelStyle} onPointerDown={beginDrag}>{children}{!layout.locked && <div className="resize-handle" aria-label="调整大小" onPointerDown={beginResize} />}</div>;
+  return <div className={`floating-panel ${className} ${dragging ? "dragging" : ""}`} data-panel={panel} style={panelStyle} onPointerDown={beginDrag}>{children}{!layout.locked && <div className="resize-handle" aria-label="调整大小" onPointerDown={beginResize} />}</div>;
 }
 
 function hudState({ state, sessionState, realtimeState, operationMode, question, answerText, answerStreaming }: Pick<OverlayRootProps, "state" | "sessionState" | "realtimeState" | "operationMode" | "question" | "answerText" | "answerStreaming">): HudState {
@@ -170,6 +205,12 @@ function visibleQuestionItems(group: OverlayGroup): OverlayGroup["items"] {
   return group.items.filter((item) => item.answerable && (item.type === "FOLLOW_UP" || item.type === "PARALLEL_SUBQUESTION"));
 }
 
+function compactQuestionText(text: string, limit = 180): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, Math.max(1, limit - 1)).trimEnd()}…`;
+}
+
 function questionItemLabel(type: string): string {
   if (type === "TOPIC_FRAGMENT") return "上下文";
   if (type === "ANSWER_CONSTRAINT") return "回答要求";
@@ -181,21 +222,39 @@ function questionItemLabel(type: string): string {
 }
 
 function visibleQuestionDetails(group: OverlayGroup): OverlayGroup["items"] {
-  return group.items.filter((item) => !(item.type === "QUESTION_NUCLEUS" && item.text === group.primaryQuestion) && item.type !== "FOLLOW_UP" && item.type !== "PARALLEL_SUBQUESTION");
+  return group.items.filter((item) => item.type === "ANSWER_CONSTRAINT" || item.type === "EXAMPLE" || item.type === "SAME_QUESTION_AUGMENTATION");
 }
 
-function QuestionThreadPanel({ groups, activeGroupId }: { groups: OverlayRootProps["questionGroups"]; activeGroupId?: string }): JSX.Element {
+function QuestionThreadPanel({ groups, activeGroupId, followLatestPreference, showStatus, onSelectQuestion }: { groups: OverlayRootProps["questionGroups"]; activeGroupId?: string; followLatestPreference: boolean; showStatus: boolean; onSelectQuestion: (questionId: string) => void }): JSX.Element {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [followMode, setFollowMode] = useState<OverlayFollowMode>(followLatestPreference ? "following" : "manual");
+  const [newCount, setNewCount] = useState(0);
+  const previousItemCount = useRef(groups.reduce((total, group) => total + group.items.length, 0));
   const active = groups.find((group) => group.id === activeGroupId) ?? groups.at(-1);
   const older = groups.filter((group) => group.id !== active?.id).reverse();
-  return <div className="question-thread-panel">
+  useEffect(() => { setFollowMode(followLatestPreference ? "following" : "manual"); }, [followLatestPreference]);
+  useEffect(() => {
+    const itemCount = groups.reduce((total, group) => total + group.items.length, 0);
+    const delta = Math.max(0, itemCount - previousItemCount.current);
+    previousItemCount.current = itemCount;
+    if (shouldAutoFollowLatest(followMode)) {
+      setNewCount(0);
+      requestAnimationFrame(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; });
+    } else if (delta) setNewCount((count) => count + delta);
+  }, [groups, followMode]);
+  const onScroll = () => { if (scrollRef.current) { const nextMode = followModeAfterScroll(scrollRef.current); setFollowMode(nextMode); if (nextMode === "following") setNewCount(0); } };
+  const jumpToLatest = () => { setFollowMode("following"); setNewCount(0); requestAnimationFrame(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }); };
+  const selectGroupQuestion = (group: OverlayGroup) => { const item = group.items.find((candidate) => candidate.answerable) ?? group.items[0]; if (item) onSelectQuestion(item.questionId); };
+  return <div className="question-thread-panel overlay-scroll-region" ref={scrollRef} onScroll={onScroll}>
     {!active && <p className="overlay-empty">等待识别问题</p>}
     {active && <article className="question-group-card active-group">
-      <div className="question-group-heading"><span className="panel-kicker">当前问题组</span><span className="question-group-status">{active.items.some((item) => item.state === "answering") ? "回答中" : "已识别"}</span></div>
-      <h3>{active.primaryQuestion}</h3>
-      {visibleQuestionDetails(active).map((item) => <div className="question-thread-detail" key={item.id}><span>{questionItemLabel(item.type)}</span><strong>{item.text}</strong></div>)}
-      {visibleQuestionItems(active).map((item, index) => <div className="question-thread-follow-up" key={item.id}><span>追问 {index + 1}</span><strong>{item.text}</strong></div>)}
+      <div className="question-group-heading"><span className="panel-kicker">QUESTION NAVIGATOR</span>{showStatus && <span className="question-group-status">{active.items.some((item) => item.state === "answering") ? "回答中" : "已识别"}</span>}</div>
+      <button type="button" className="question-primary-button" onClick={() => selectGroupQuestion(active)}>{compactQuestionText(active.primaryQuestion)}</button>
+      {visibleQuestionDetails(active).map((item) => <div className="question-thread-detail" key={item.id}><span>{questionItemLabel(item.type)}</span><strong>{compactQuestionText(item.text, 140)}</strong></div>)}
+      {visibleQuestionItems(active).map((item, index) => <button type="button" className="question-thread-follow-up question-select-button" key={item.id} onClick={() => onSelectQuestion(item.questionId)}><span>追问 {index + 1}</span><strong>{compactQuestionText(item.text, 150)}</strong></button>)}
     </article>}
-    {older.length > 0 && <details className="older-question-groups"><summary>更早问题 · {older.length} 组</summary>{older.map((group) => <article className="question-group-card compact-group" key={group.id}><span className="panel-kicker">{group.title}</span><strong>{group.primaryQuestion}</strong>{visibleQuestionItems(group).map((item) => <small key={item.id}>追问 · {item.text}</small>)}</article>)}</details>}
+    {older.length > 0 && <details className="older-question-groups"><summary>更早问题 · {older.length} 组</summary>{older.map((group) => <article className="question-group-card compact-group" key={group.id}><button type="button" className="question-history-button" onClick={() => selectGroupQuestion(group)}><span className="panel-kicker">{compactQuestionText(group.title, 80)}</span><strong>{compactQuestionText(group.primaryQuestion, 150)}</strong></button>{visibleQuestionItems(group).map((item) => <button type="button" className="question-history-follow-up" key={item.id} onClick={() => onSelectQuestion(item.questionId)}>追问 · {compactQuestionText(item.text, 130)}</button>)}</article>)}</details>}
+    {newCount > 0 && <button type="button" className="new-content-badge" onClick={jumpToLatest}>{newContentBadgeLabel(newCount)}</button>}
   </div>;
 }
 
@@ -237,18 +296,42 @@ function answerRelationLabel(relation: AnswerThread["answers"][number]["relation
   return "主回答";
 }
 
-function AnswerThreadPanel({ threads, activeGroupId, fallbackText, fallbackQuestion, streaming }: { threads: AnswerThread[]; activeGroupId?: string; fallbackText: string; fallbackQuestion?: string; streaming: boolean }): JSX.Element {
+function AnswerThreadPanel({ threads, activeGroupId, fallbackText, fallbackQuestion, streaming, followLatestPreference, selectedQuestionId }: { threads: AnswerThread[]; activeGroupId?: string; fallbackText: string; fallbackQuestion?: string; streaming: boolean; followLatestPreference: boolean; selectedQuestionId?: string }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [followLatest, setFollowLatest] = useState(true);
+  const answerRefs = useRef(new Map<string, HTMLElement>());
+  const [followMode, setFollowMode] = useState<OverlayFollowMode>(followLatestPreference ? "following" : "manual");
+  const [newCount, setNewCount] = useState(0);
+  const [expandedGroupIds, setExpandedGroupIds] = useState<Set<string>>(() => new Set(activeGroupId ? [activeGroupId] : []));
+  const [olderGroupsOpen, setOlderGroupsOpen] = useState(false);
+  const previousAnswerCount = useRef(threads.reduce((total, thread) => total + thread.answers.length, 0));
   const active = threads.find((thread) => thread.groupId === activeGroupId) ?? threads.at(-1);
   const older = threads.filter((thread) => thread.groupId !== active?.groupId).reverse();
-  useEffect(() => { if (followLatest && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [threads, followLatest]);
-  const onScroll = () => { const element = scrollRef.current; if (element) setFollowLatest(element.scrollHeight - element.scrollTop - element.clientHeight < 30); };
+  useEffect(() => { setFollowMode(followLatestPreference ? "following" : "manual"); }, [followLatestPreference]);
+  useEffect(() => { if (active) setExpandedGroupIds((current) => new Set(current).add(active.groupId)); }, [active?.groupId]);
+  useEffect(() => {
+    const answerCount = threads.reduce((total, thread) => total + thread.answers.length, 0);
+    const delta = Math.max(0, answerCount - previousAnswerCount.current);
+    previousAnswerCount.current = answerCount;
+    if (shouldAutoFollowLatest(followMode)) {
+      setNewCount(0);
+      requestAnimationFrame(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; });
+    } else if (delta) setNewCount((count) => count + delta);
+  }, [threads, followMode]);
+  useEffect(() => {
+    if (!selectedQuestionId) return;
+    const selected = threads.flatMap((thread) => thread.answers.map((answer) => ({ thread, answer }))).find(({ answer }) => answer.questionId === selectedQuestionId);
+    if (!selected) return;
+    setExpandedGroupIds((current) => new Set(current).add(selected.thread.groupId));
+    if (selected.thread.groupId !== active?.groupId) setOlderGroupsOpen(true);
+    requestAnimationFrame(() => answerRefs.current.get(selected.answer.answerId)?.scrollIntoView({ behavior: "smooth", block: "center" }));
+  }, [selectedQuestionId, threads]);
+  const onScroll = () => { const element = scrollRef.current; if (element) { const nextMode = followModeAfterScroll(element); setFollowMode(nextMode); if (nextMode === "following") setNewCount(0); } };
+  const jumpToLatest = () => { setFollowMode("following"); setNewCount(0); requestAnimationFrame(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }); };
   return <div className="answer-thread-panel-wrap"><div className="answer-thread-panel" ref={scrollRef} onScroll={onScroll}>
     {!active && fallbackText && <article className="answer-thread-card active-answer-card"><div className="answer-card-heading"><span>主回答</span><small>{streaming ? "生成中" : "已完成"}</small></div>{fallbackQuestion && <strong>{fallbackQuestion}</strong>}<AnswerCore text={fallbackText} /></article>}
-    {active && <article className="answer-thread-group active-answer-group"><div className="answer-group-heading"><div><span className="panel-kicker">{active.title}</span><strong>AI回答</strong></div><span>{active.answers.length} 条</span></div>{active.answers.map((answer) => <article className={`answer-thread-card ${answer.status}`} key={answer.answerId}><div className="answer-card-heading"><span>{answerRelationLabel(answer.relation)}</span><small>{answerStatusLabel(answer.status)}</small></div><strong>{answer.questionText}</strong><AnswerCore text={answer.answerText} />{answer.status === "generating" && <span className="answer-cursor">▌</span>}</article>)}</article>}
-    {older.length > 0 && <details className="older-answer-groups"><summary>更早回答 · {older.length} 组</summary>{older.map((thread) => <article className="answer-thread-group compact-answer-group" key={thread.groupId}><div className="answer-group-heading"><strong>{thread.title}</strong><span>{thread.answers.length} 条回答</span></div>{thread.answers.map((answer) => <article className="answer-thread-card" key={answer.answerId}><div className="answer-card-heading"><span>{answerRelationLabel(answer.relation)}</span><small>{answerStatusLabel(answer.status)}</small></div><AnswerCore text={answer.answerText} /></article>)}</article>)}</details>}
-  </div>{!followLatest && <button className="latest-jump" onClick={() => { setFollowLatest(true); if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }}>↓ 最新回答</button>}</div>;
+    {active && <article className="answer-thread-group active-answer-group"><div className="answer-group-heading"><div><span className="panel-kicker">{compactQuestionText(active.title, 100)}</span><strong>ANSWER READER</strong></div><span>{active.answers.length} 条</span></div>{active.answers.map((answer) => <article className={`answer-thread-card ${answer.status}`} data-answer-id={answer.answerId} ref={(node) => { if (node) answerRefs.current.set(answer.answerId, node); else answerRefs.current.delete(answer.answerId); }} key={answer.answerId}><div className="answer-card-heading"><span>{answerRelationLabel(answer.relation)}</span><small>{answerStatusLabel(answer.status)}</small></div>{answer.questionText !== active.title && <strong>{compactQuestionText(answer.questionText, 150)}</strong>}<AnswerCore text={answer.answerText} />{answer.status === "generating" && <span className="answer-cursor">▌</span>}</article>)}</article>}
+    {older.length > 0 && <details className="older-answer-groups" open={olderGroupsOpen} onToggle={(event) => setOlderGroupsOpen(event.currentTarget.open)}><summary>更早回答 · {older.length} 组</summary>{older.map((thread) => <article className="answer-thread-group compact-answer-group" key={thread.groupId}><div className="answer-group-heading"><strong>{compactQuestionText(thread.title, 100)}</strong><span>{thread.answers.length} 条回答</span></div>{thread.answers.map((answer) => <article className="answer-thread-card" data-answer-id={answer.answerId} ref={(node) => { if (node) answerRefs.current.set(answer.answerId, node); else answerRefs.current.delete(answer.answerId); }} key={answer.answerId}><div className="answer-card-heading"><span>{answerRelationLabel(answer.relation)}</span><small>{answerStatusLabel(answer.status)}</small></div><AnswerCore text={answer.answerText} /></article>)}</article>)}</details>}
+  </div>{newCount > 0 && <button className="new-content-badge answer-new-content-badge" onClick={jumpToLatest}>{newContentBadgeLabel(newCount)}</button>}{followMode === "manual" && <button className="latest-jump" onClick={jumpToLatest}>↓ 最新回答</button>}</div>;
 }
 
 function ToolbarIcon({ name }: { name: "eye" | "eye-off" | "glasses" | "keyboard" | "share" | "share-off" | "stop" | "menu" | "waveform" | "transcript" | "panel-left" | "panel-right" }): JSX.Element {
@@ -276,9 +359,10 @@ function ShortcutPopover({ writtenTestMode, onAnswerLatest, onAnswerScreenshot, 
 export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   const { state, sessionState, realtimeState, operationMode, overlayMode, hudState: sharedHUDState, automationMode, question, answerText, answerStreaming, questionGroups, activeQuestionGroupId, answerThreads, onToggleMode, onToggleAutomation, onAnswerLatest, onAnswerScreenshot, onEndInterview, onHideAll, onTogglePanels, onToggleTranscript, onToggleAnswer, onToggleShortcuts, captureProtectionEnabled, captureProtectionSupported, captureProtectionOsFlagApplied, captureProtectionDisplayVerified, captureProtectionLastError, captureTest } = props;
   const writtenTestMode = operationMode === "WRITTEN_TEST";
-  const [layout, updateLayout, applyMainLayout] = useOverlayLayout();
-  const [answerSending, setAnswerSending] = useState(false);
   const [preferences, setPreferences] = useState<OverlayPreferences>(DEFAULT_OVERLAY_PREFERENCES);
+  const [layout, updateLayout, applyMainLayout, clearSavedLayout] = useOverlayLayout(preferences);
+  const [answerSending, setAnswerSending] = useState(false);
+  const [selectedQuestionId, setSelectedQuestionId] = useState<string>();
   const [endConfirmOpen, setEndConfirmOpen] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [runtimeProtection, setRuntimeProtection] = useState<{ requested: boolean; osFlagApplied: boolean; displayCaptureVerified: boolean | null; lastError?: string }>();
@@ -301,9 +385,9 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
     const unsubscribeProtection = window.interviewCopilot.events.onOverlayCaptureProtection((next) => { if (!disposed) setRuntimeProtection(next); });
     const unsubscribeLayout = window.interviewCopilot.events.onOverlayLayout((next) => { if (!disposed) applyMainLayout(next); });
     const unsubscribePreferences = window.interviewCopilot.events.onOverlayPreferences((next) => { if (!disposed) setPreferences(next); });
-    const unsubscribeCommands = window.interviewCopilot.events.onOverlayCommand((command: OverlayCommand) => { if (command === "confirm-end") setEndConfirmOpen(true); });
+    const unsubscribeCommands = window.interviewCopilot.events.onOverlayCommand((command: OverlayCommand) => { if (command === "confirm-end") setEndConfirmOpen(true); else if (command === "reset-layout") clearSavedLayout(); });
     return () => { disposed = true; unsubscribeProtection(); unsubscribeLayout(); unsubscribePreferences(); unsubscribeCommands(); };
-  }, [applyMainLayout]);
+  }, [applyMainLayout, clearSavedLayout]);
   const status = hudState({ state, sessionState, realtimeState, operationMode, question, answerText, answerStreaming });
   const statusMeta = HUD_LABELS[status];
   const effectiveProtectionEnabled = runtimeProtection?.requested ?? captureProtectionEnabled;
@@ -319,12 +403,12 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
     if (overlayMode === "interactive" || sharedHUDState.shareMode) return;
     let lastInteractive: boolean | undefined;
     const reportControlRegion = (interactive: boolean) => { if (lastInteractive === interactive) return; lastInteractive = interactive; void window.interviewCopilot.overlay.setControlRegion(interactive); };
-    const onMouseMove = (event: MouseEvent) => { const hit = document.elementsFromPoint(event.clientX, event.clientY).some((element) => Boolean((element as HTMLElement).closest?.(".hud-interactive-region"))); reportControlRegion(hit); };
+    const onMouseMove = (event: MouseEvent) => { const hit = document.elementsFromPoint(event.clientX, event.clientY).some((element) => Boolean((element as HTMLElement).closest?.(".hud-interactive-region, .overlay-scroll-region, .overlay-content"))); reportControlRegion(hit); };
     const onMouseLeave = () => reportControlRegion(false);
     window.addEventListener("mousemove", onMouseMove, true);
     window.addEventListener("mouseleave", onMouseLeave, true);
     return () => { window.removeEventListener("mousemove", onMouseMove, true); window.removeEventListener("mouseleave", onMouseLeave, true); reportControlRegion(false); };
-  }, [overlayMode, sharedHUDState.shareMode]);
+  }, [overlayMode, sharedHUDState.shareMode, preferences.behavior.mousePassthrough]);
   const visualHidden = !sharedHUDState.running || sharedHUDState.shareMode;
   const transcriptVisible = preferences.showTranscript && sharedHUDState.transcriptVisible && !visualHidden;
   const answerVisible = preferences.showAnswer && sharedHUDState.answerVisible && !visualHidden;
@@ -332,13 +416,23 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   const appearanceStyle = {
     "--overlay-panel-background": backgroundWithOpacity(preferences.backgroundColor, preferences.backgroundOpacity),
     "--overlay-font-color": preferences.fontColor,
-    "--overlay-font-size": `${preferences.fontSize}px`
+    "--overlay-font-size": `${preferences.fontSize}px`,
+    "--overlay-question-font-size": `${preferences.questionWindow.fontSize}px`,
+    "--overlay-question-title-size": `${preferences.questionWindow.titleFontSize}px`,
+    "--overlay-question-line-height": preferences.questionWindow.lineHeight,
+    "--overlay-question-padding": `${preferences.questionWindow.padding}px`,
+    "--overlay-answer-font-size": `${preferences.answerWindow.fontSize}px`,
+    "--overlay-answer-title-size": `${preferences.answerWindow.titleFontSize}px`,
+    "--overlay-answer-line-height": preferences.answerWindow.lineHeight,
+    "--overlay-answer-padding": `${preferences.answerWindow.padding}px`,
+    "--overlay-question-background": backgroundWithOpacity(preferences.backgroundColor, preferences.questionWindow.opacity),
+    "--overlay-answer-background": backgroundWithOpacity(preferences.backgroundColor, preferences.answerWindow.opacity)
   } as CSSProperties;
-  return <main className="overlay-root" style={appearanceStyle} data-hud-state={status} data-hud-mode={sharedHUDState.mode} data-share-mode={sharedHUDState.shareMode ? "on" : "off"} data-overlay-mode={overlayMode} data-operation-mode={operationMode}>
+  return <main className="overlay-root" style={appearanceStyle} data-hud-state={status} data-hud-mode={sharedHUDState.mode} data-share-mode={sharedHUDState.shareMode ? "on" : "off"} data-overlay-mode={overlayMode} data-operation-mode={operationMode} data-compact-header={preferences.behavior.compactHeader ? "on" : "off"}>
     {captureTest && !visualHidden && <div className="capture-test-marker">CAPTURE_PROTECTION_TEST_MARKER_7F32</div>}
       {preferences.showToolbar && sharedHUDState.topBarVisible && !visualHidden && <DraggableResizablePanel panel="toolbar" layout={{ ...layout.toolbar, visible: true, locked: true }} onChange={updateLayout} className="toolbar-panel"><div className="floating-toolbar hud-interactive-region" role="toolbar" aria-label={writtenTestMode ? "笔试控制栏" : "面试控制栏"}><span className="toolbar-audio-mark" aria-hidden="true"><ToolbarIcon name="waveform" /></span><div className="toolbar-runtime"><span>{elapsedLabel}</span></div><span className="toolbar-divider" aria-hidden="true" /><div className={`toolbar-status-inline ${statusMeta.tone}`}><i aria-hidden="true" /><span>{listeningLabel}</span></div>{!writtenTestMode && <div className="toolbar-mode-switch" role="group" aria-label="回答模式"><button className={automationMode === "AUTO" ? "selected" : ""} onClick={() => { if (automationMode !== "AUTO") void onToggleAutomation(); }}>自动</button><button className={automationMode === "MANUAL" ? "selected" : ""} onClick={() => { if (automationMode !== "MANUAL") void onToggleAutomation(); }}>手动</button></div>}{preferences.showTranscript && <button className={`toolbar-inline-action toolbar-panel-toggle ${transcriptVisible ? "active" : "inactive"}`} onClick={onToggleTranscript} title={transcriptVisible ? "隐藏已识别问题" : "显示已识别问题"} aria-label={transcriptVisible ? "隐藏已识别问题" : "显示已识别问题"} aria-pressed={transcriptVisible}><ToolbarIcon name="panel-left" /></button>}{preferences.showAnswer && <button className={`toolbar-inline-action toolbar-panel-toggle ${answerVisible ? "active" : "inactive"}`} onClick={onToggleAnswer} title={answerVisible ? "隐藏AI回答" : "显示AI回答"} aria-label={answerVisible ? "隐藏AI回答" : "显示AI回答"} aria-pressed={answerVisible}><ToolbarIcon name="panel-right" /></button>}<button className="toolbar-inline-action toolbar-shortcut-toggle" onClick={onToggleShortcuts} title="打开快捷操作" aria-label="打开快捷操作"><ToolbarIcon name="keyboard" /></button><button className="toolbar-end-button" onClick={() => setEndConfirmOpen(true)} title={writtenTestMode ? "结束笔试 Ctrl+Alt+Q" : "结束面试 Ctrl+Alt+Q"} aria-label={writtenTestMode ? "结束笔试" : "结束面试"}>{writtenTestMode ? "结束笔试" : "结束面试"}</button></div></DraggableResizablePanel>}
-      {transcriptVisible && !writtenTestMode && <DraggableResizablePanel panel="transcript" layout={{ ...layout.transcript, visible: true }} onChange={updateLayout} className="question-panel"><section className="overlay-panel-card question-card" aria-label="已识别问题"><header><div><span className="panel-kicker">QUESTION THREADS</span><strong>已识别问题</strong></div></header><QuestionThreadPanel groups={questionGroups} activeGroupId={activeQuestionGroupId} /></section></DraggableResizablePanel>}
-      {answerVisible && <DraggableResizablePanel panel="answer" layout={{ ...layout.answer, visible: true }} onChange={updateLayout} className="answer-panel"><section className="overlay-panel-card answer-card" aria-label="AI回答"><header><div><span className="panel-kicker">ANSWER STACK</span><strong>AI回答</strong></div>{(answerStreaming || answerText) && <span className={`answer-ready ${answerStreaming ? "generating" : ""}`}>{answerStreaming ? "生成中" : "回答已就绪"}</span>}</header><AnswerThreadPanel threads={answerThreads} activeGroupId={activeQuestionGroupId} fallbackText={answerText} fallbackQuestion={question?.text} streaming={answerStreaming} />{writtenTestMode ? <div className="written-test-action hud-interactive-region"><span>按 Ctrl+Alt+S 截取当前题目</span><button onClick={() => void submitScreenshot()} disabled={answerSending}>截图回答</button></div> : <div className="overlay-answer-actions hud-interactive-region"><button onClick={() => void submitScreenshot()} disabled={answerSending}>截图回答</button></div>}</section></DraggableResizablePanel>}
+      {transcriptVisible && !writtenTestMode && <DraggableResizablePanel panel="transcript" layout={{ ...layout.transcript, visible: true, locked: layout.transcript.locked || preferences.behavior.lockPosition }} onChange={updateLayout} className="question-panel"><section className="overlay-panel-card question-card overlay-content" aria-label="问题导航"><header><div><span className="panel-kicker">QUESTION NAVIGATOR</span><strong>问题导航</strong></div></header><QuestionThreadPanel groups={questionGroups} activeGroupId={activeQuestionGroupId} followLatestPreference={preferences.behavior.followLatestQuestion} showStatus={preferences.behavior.showQuestionStatus} onSelectQuestion={setSelectedQuestionId} /></section></DraggableResizablePanel>}
+      {answerVisible && <DraggableResizablePanel panel="answer" layout={{ ...layout.answer, visible: true, locked: layout.answer.locked || preferences.behavior.lockPosition }} onChange={updateLayout} className="answer-panel"><section className="overlay-panel-card answer-card overlay-content" aria-label="答案阅读器"><header><div><span className="panel-kicker">ANSWER READER</span><strong>答案阅读器</strong></div>{preferences.behavior.showAnswerStatus && (answerStreaming || answerText) && <span className={`answer-ready ${answerStreaming ? "generating" : ""}`}>{answerStreaming ? "生成中" : "回答已就绪"}</span>}</header><AnswerThreadPanel threads={answerThreads} activeGroupId={activeQuestionGroupId} fallbackText={answerText} fallbackQuestion={question?.text} streaming={answerStreaming} followLatestPreference={preferences.behavior.followLatestAnswer} selectedQuestionId={selectedQuestionId} />{writtenTestMode ? <div className="written-test-action hud-interactive-region"><span>按 Ctrl+Alt+S 截取当前题目</span><button onClick={() => void submitScreenshot()} disabled={answerSending}>截图回答</button></div> : <div className="overlay-answer-actions hud-interactive-region"><button onClick={() => void submitScreenshot()} disabled={answerSending}>截图回答</button></div>}</section></DraggableResizablePanel>}
     {shortcutVisible && <DraggableResizablePanel panel="shortcuts" layout={{ ...layout.shortcuts, visible: true }} onChange={updateLayout} className="shortcut-panel"><div className="hud-interactive-region"><ShortcutPopover writtenTestMode={writtenTestMode} onAnswerLatest={onAnswerLatest} onAnswerScreenshot={onAnswerScreenshot} onHideAll={onHideAll} onToggleMode={onToggleMode} onToggleAutomation={() => void onToggleAutomation()} onResetLayout={() => void window.interviewCopilot.overlay.resetLayout()} onEndInterview={() => setEndConfirmOpen(true)} onClose={onToggleShortcuts} /></div></DraggableResizablePanel>}
     {endConfirmOpen && !visualHidden && <EndInterviewDialog writtenTestMode={writtenTestMode} onCancel={() => setEndConfirmOpen(false)} onConfirm={() => { setEndConfirmOpen(false); void onEndInterview(); }} />}
     {!visualHidden && <div className={`hud-protection-indicator ${protectionTone}`} title={!effectiveProtectionSupported ? "当前平台不支持 Windows Capture Protection" : effectiveLastError ? "Windows protection flag 失败" : effectiveDisplayVerified === true ? "Display Capture Verified" : effectiveProtectionEnabled ? "Windows protection on" : "Windows protection off"}>{effectiveProtectionSupported ? "◈" : "·"}</div>}

@@ -12,7 +12,7 @@ import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-
 import type { HistoryChangedEvent, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
-import type { OverlayPreferences, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
+import type { OverlayPreferences, OverlayPreferencesPatch, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
 import type { ChatAction, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectQaGenerationResult, ProjectQuestionBankImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
@@ -57,7 +57,7 @@ const api = {
     getState: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:get-state"),
     getLayout: (): Promise<HUDLayout | undefined> => ipcRenderer.invoke("overlay:get-layout"),
     getPreferences: (): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:get-preferences"),
-    setPreferences: (input: Partial<OverlayPreferences>): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:set-preferences", input),
+    setPreferences: (input: OverlayPreferencesPatch): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:set-preferences", input),
     setShareMode: (enabled: boolean): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:set-share-mode", enabled),
     toggleShareMode: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:toggle-share-mode"),
     setMode: (mode: OverlayMode) => ipcRenderer.invoke("overlay:set-mode", mode),

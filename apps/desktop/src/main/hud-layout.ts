@@ -17,6 +17,9 @@ export interface HUDLayout {
   transcript: HUDPanelLayout;
   answer: HUDPanelLayout;
   shortcuts: HUDPanelLayout;
+  /** Renderer storage profile metadata; optional for old IPC consumers. */
+  displayId?: number;
+  scaleFactor?: number;
 }
 
 const TOPBAR_MAX_WIDTH = 680;
@@ -24,8 +27,8 @@ const TOPBAR_HEIGHT = 50;
 const TOPBAR_TOP_RATIO = 0.08;
 const SHORTCUT_WIDTH = 320;
 const SHORTCUT_HEIGHT = 360;
-const PANEL_GAP = 16;
-const PANEL_CONTENT_MAX_WIDTH = 1080;
+const PANEL_GAP = 12;
+const PANEL_CONTENT_MAX_WIDTH = 1340;
 
 /**
  * Calculate the default HUD geometry in work-area coordinates.
@@ -37,9 +40,9 @@ const PANEL_CONTENT_MAX_WIDTH = 1080;
 export function calculateHUDLayout(workArea: HUDWorkArea): HUDLayout {
   const usableWidth = Math.max(0, Math.min(PANEL_CONTENT_MAX_WIDTH, workArea.width - 48));
   const horizontalMargin = Math.max(24, Math.round((workArea.width - usableWidth) / 2));
-  const panelTop = Math.max(180, Math.round(workArea.height * 0.325));
-  const panelHeight = Math.max(300, Math.min(Math.round(workArea.height * 0.39), workArea.height - panelTop - 32));
-  const transcriptWidth = Math.round(usableWidth * 0.365);
+  const panelTop = Math.max(96, Math.round(workArea.height * 0.12));
+  const panelHeight = Math.max(260, Math.min(Math.round(workArea.height * 0.62), workArea.height - panelTop - 24));
+  const transcriptWidth = Math.round(usableWidth * 0.34);
   const answerWidth = Math.max(0, usableWidth - transcriptWidth - PANEL_GAP);
   const toolbarWidth = Math.min(TOPBAR_MAX_WIDTH, Math.max(460, Math.round(workArea.width * 0.42)), Math.max(0, workArea.width - 40));
 

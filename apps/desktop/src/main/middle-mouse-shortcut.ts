@@ -2,8 +2,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-export function shouldHandleMiddleMouseShortcut(input: { interviewRunning: boolean; automationMode: "AUTO" | "MANUAL"; writtenTestRunning: boolean }): boolean {
-  return input.interviewRunning && input.automationMode === "MANUAL" && !input.writtenTestRunning;
+export function shouldHandleMiddleMouseShortcut(input: { interviewRunning: boolean; automationMode: "AUTO" | "MANUAL"; writtenTestRunning: boolean; middleMouseEnabled?: boolean; enabledInManualInterview?: boolean; enabledInExamMode?: boolean }): boolean {
+  if (input.middleMouseEnabled === false) return false;
+  if (input.writtenTestRunning) return input.enabledInExamMode !== false;
+  if (input.interviewRunning && input.automationMode === "MANUAL") return input.enabledInManualInterview !== false;
+  return false;
 }
 
 export function middleMouseHelperCandidates(resourcesPath: string, appPath: string, cwd = process.cwd()): string[] {

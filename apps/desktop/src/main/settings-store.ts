@@ -4,9 +4,9 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { qwenAsrWebSocketUrl, QWEN_REALTIME_ASR_MODEL, validateLlmModelConfiguration, type AsrLanguage, type AsrProviderType, type ProviderSettings } from "@interview-copilot/shared";
 import { APP_DATA_DIRECTORY, type SqliteDatabase } from "./database";
-import { DEFAULT_OVERLAY_PREFERENCES, type OverlayPreferences } from "../shared/overlay-preferences";
+import { DEFAULT_OVERLAY_PREFERENCES, type OverlayPreferences, type OverlayPreferencesPatch, type OverlayRegion, type OverlayScreenshotPreferences, type OverlayWindowPreferences, type OverlayBehaviorPreferences } from "../shared/overlay-preferences";
 
-export type { OverlayPreferences } from "../shared/overlay-preferences";
+export type { OverlayPreferences, OverlayPreferencesPatch } from "../shared/overlay-preferences";
 
 export type ProviderSection = "llm" | "asr" | "embedding" | "reranker";
 
@@ -282,10 +282,39 @@ export interface OverlayCaptureProtectionSettings {
   captureProtection: boolean;
 }
 
-function normalizeOverlayPreferences(input: Partial<OverlayPreferences>): OverlayPreferences {
+function normalizeOverlayPreferences(input: OverlayPreferencesPatch): OverlayPreferences {
   const color = (value: unknown, fallback: string) => typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : fallback;
   const number = (value: unknown, fallback: number, minimum: number, maximum: number) => typeof value === "number" && Number.isFinite(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback;
   const flag = (value: unknown, fallback: boolean) => typeof value === "boolean" ? value : fallback;
+  const coordinate = (value: unknown, fallback?: number) => typeof value === "number" && Number.isFinite(value) ? Math.round(value) : fallback;
+  const region = (value: unknown, fallback?: OverlayRegion): OverlayRegion | undefined => {
+    if (!value || typeof value !== "object") return fallback;
+    const candidate = value as Partial<OverlayRegion>;
+    const width = number(candidate.width, fallback?.width ?? 0, 1, 20_000);
+    const height = number(candidate.height, fallback?.height ?? 0, 1, 20_000);
+    if (!width || !height) return fallback;
+    return { x: coordinate(candidate.x, fallback?.x ?? 0) ?? 0, y: coordinate(candidate.y, fallback?.y ?? 0) ?? 0, width, height };
+  };
+  const windowPreferences = (value: Partial<OverlayWindowPreferences> | undefined, fallback: OverlayWindowPreferences): OverlayWindowPreferences => ({
+    width: number(value?.width, fallback.width, 260, 2_400),
+    height: number(value?.height, fallback.height, 160, 1_600),
+    ...(coordinate(value?.x, fallback.x) !== undefined ? { x: coordinate(value?.x, fallback.x) } : {}),
+    ...(coordinate(value?.y, fallback.y) !== undefined ? { y: coordinate(value?.y, fallback.y) } : {}),
+    fontSize: number(value?.fontSize, fallback.fontSize, 11, 32),
+    titleFontSize: number(value?.titleFontSize, fallback.titleFontSize, 10, 24),
+    lineHeight: number(value?.lineHeight, fallback.lineHeight, 1.2, 2.4),
+    paragraphGap: number(value?.paragraphGap, fallback.paragraphGap, 0, 36),
+    padding: number(value?.padding, fallback.padding, 6, 40),
+    opacity: number(value?.opacity, fallback.opacity, 0.2, 1),
+    blur: number(value?.blur, fallback.blur, 0, 40),
+    radius: number(value?.radius, fallback.radius, 0, 32),
+    shadow: flag(value?.shadow, fallback.shadow)
+  });
+  const behavior = (value: Partial<OverlayBehaviorPreferences> | undefined): OverlayBehaviorPreferences => ({ ...DEFAULT_OVERLAY_PREFERENCES.behavior, ...(value ?? {}), followLatestQuestion: flag(value?.followLatestQuestion, DEFAULT_OVERLAY_PREFERENCES.behavior.followLatestQuestion), followLatestAnswer: flag(value?.followLatestAnswer, DEFAULT_OVERLAY_PREFERENCES.behavior.followLatestAnswer), alwaysOnTop: flag(value?.alwaysOnTop, DEFAULT_OVERLAY_PREFERENCES.behavior.alwaysOnTop), lockPosition: flag(value?.lockPosition, DEFAULT_OVERLAY_PREFERENCES.behavior.lockPosition), mousePassthrough: flag(value?.mousePassthrough, DEFAULT_OVERLAY_PREFERENCES.behavior.mousePassthrough), autoDim: flag(value?.autoDim, DEFAULT_OVERLAY_PREFERENCES.behavior.autoDim), rememberPosition: flag(value?.rememberPosition, DEFAULT_OVERLAY_PREFERENCES.behavior.rememberPosition), rememberSize: flag(value?.rememberSize, DEFAULT_OVERLAY_PREFERENCES.behavior.rememberSize), showQuestionStatus: flag(value?.showQuestionStatus, DEFAULT_OVERLAY_PREFERENCES.behavior.showQuestionStatus), showAnswerStatus: flag(value?.showAnswerStatus, DEFAULT_OVERLAY_PREFERENCES.behavior.showAnswerStatus), compactHeader: flag(value?.compactHeader, DEFAULT_OVERLAY_PREFERENCES.behavior.compactHeader) });
+  const screenshot = (value: Partial<OverlayScreenshotPreferences> | undefined): OverlayScreenshotPreferences => {
+    const captureMode = value?.captureMode === "full_screen" || value?.captureMode === "current_display" || value?.captureMode === "fixed_region" || value?.captureMode === "last_region" || value?.captureMode === "interactive" ? value.captureMode : DEFAULT_OVERLAY_PREFERENCES.screenshot.captureMode;
+    return { middleMouseEnabled: flag(value?.middleMouseEnabled, DEFAULT_OVERLAY_PREFERENCES.screenshot.middleMouseEnabled), enabledInManualInterview: flag(value?.enabledInManualInterview, DEFAULT_OVERLAY_PREFERENCES.screenshot.enabledInManualInterview), enabledInExamMode: flag(value?.enabledInExamMode, DEFAULT_OVERLAY_PREFERENCES.screenshot.enabledInExamMode), captureMode, ...(region(value?.fixedRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.fixedRegion) ? { fixedRegion: region(value?.fixedRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.fixedRegion) } : {}), ...(region(value?.lastRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.lastRegion) ? { lastRegion: region(value?.lastRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.lastRegion) } : {}) };
+  };
   return {
     backgroundOpacity: number(input.backgroundOpacity, DEFAULT_OVERLAY_PREFERENCES.backgroundOpacity, 0.2, 1),
     backgroundColor: color(input.backgroundColor, DEFAULT_OVERLAY_PREFERENCES.backgroundColor),
@@ -294,7 +323,12 @@ function normalizeOverlayPreferences(input: Partial<OverlayPreferences>): Overla
     showToolbar: flag(input.showToolbar, DEFAULT_OVERLAY_PREFERENCES.showToolbar),
     showTranscript: flag(input.showTranscript, DEFAULT_OVERLAY_PREFERENCES.showTranscript),
     showAnswer: flag(input.showAnswer, DEFAULT_OVERLAY_PREFERENCES.showAnswer),
-    showTimestamps: flag(input.showTimestamps, DEFAULT_OVERLAY_PREFERENCES.showTimestamps)
+    showTimestamps: flag(input.showTimestamps, DEFAULT_OVERLAY_PREFERENCES.showTimestamps),
+    layoutPreset: input.layoutPreset === "compact" || input.layoutPreset === "standard" || input.layoutPreset === "wide" || input.layoutPreset === "dual_screen" || input.layoutPreset === "custom" ? input.layoutPreset : DEFAULT_OVERLAY_PREFERENCES.layoutPreset,
+    questionWindow: windowPreferences(input.questionWindow, DEFAULT_OVERLAY_PREFERENCES.questionWindow),
+    answerWindow: windowPreferences(input.answerWindow, DEFAULT_OVERLAY_PREFERENCES.answerWindow),
+    behavior: behavior(input.behavior),
+    screenshot: screenshot(input.screenshot)
   };
 }
 
@@ -338,8 +372,9 @@ export class OverlaySettingsStore {
     catch { return { ...DEFAULT_OVERLAY_PREFERENCES }; }
   }
 
-  setPreferences(input: Partial<OverlayPreferences>): OverlayPreferences {
-    const next = normalizeOverlayPreferences({ ...this.getPreferences(), ...input });
+  setPreferences(input: OverlayPreferencesPatch): OverlayPreferences {
+    const current = this.getPreferences();
+    const next = normalizeOverlayPreferences({ ...current, ...input, questionWindow: { ...current.questionWindow, ...(input.questionWindow ?? {}) }, answerWindow: { ...current.answerWindow, ...(input.answerWindow ?? {}) }, behavior: { ...current.behavior, ...(input.behavior ?? {}) }, screenshot: { ...current.screenshot, ...(input.screenshot ?? {}) } });
     this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.preferencesKey, JSON.stringify(next)]);
     this.database.flushNow();
     return next;

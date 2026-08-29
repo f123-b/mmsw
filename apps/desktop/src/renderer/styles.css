@@ -1088,6 +1088,24 @@ body { background: #f1f1ee; color: var(--text-primary); }
 .overlay-settings-preview small { opacity: .7; font-size: 10px; letter-spacing: .1em; }
 .overlay-settings-preview strong { line-height: 1.45; }
 .overlay-settings-preview p { margin: 3px 0 0; line-height: 1.6; }
+.overlay-preset-row { display: grid; grid-template-columns: minmax(180px, 240px) 1fr; gap: 12px; align-items: end; }
+.overlay-preset-row .clean-field { margin: 0; }
+.overlay-preset-row select,
+.overlay-screenshot-settings select { width: 100%; border: 1px solid #dfe4e9; border-radius: 8px; padding: 9px 10px; background: #fff; color: #40516a; font-size: 12px; }
+.overlay-preset-row > small { padding-bottom: 10px; color: #8a94a3; font-size: 11px; }
+.overlay-window-settings { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.overlay-window-settings fieldset { min-width: 0; border: 1px solid #e5e9ef; border-radius: 12px; padding: 12px; background: #fbfcfe; }
+.overlay-window-settings legend { padding: 0 5px; color: #52637b; font-size: 11px; font-weight: 700; }
+.overlay-window-grid { display: grid; gap: 9px; }
+.overlay-window-grid .clean-field { margin: 0; }
+.overlay-window-grid input[type="range"] { width: 100%; accent-color: #385b8e; }
+.overlay-screenshot-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.overlay-screenshot-settings .clean-field { margin: 0; }
+.overlay-region-grid { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
+.overlay-region-grid label { display: grid; gap: 4px; color: #87909b; font-size: 10px; }
+.overlay-region-grid input { width: 100%; border: 1px solid #dfe4e9; border-radius: 7px; padding: 7px 8px; color: #40516a; font-size: 11px; }
+.overlay-preview-divider { height: 1px; margin: 3px 0; background: rgba(255,255,255,.24); }
+@media (max-width: 900px) { .overlay-window-settings, .overlay-screenshot-settings { grid-template-columns: 1fr; } .overlay-preset-row { grid-template-columns: 1fr; } }
 @media (max-width: 900px) { .overlay-preferences-layout,.overlay-function-grid,.overlay-appearance-grid { grid-template-columns: 1fr; } }
 
 .model-protocol-hint { display: block; margin-top: 6px; color: #6f7d91; font-size: 11px; }
@@ -1473,3 +1491,50 @@ body { background: #f1f1ee; color: var(--text-primary); }
 .answer-thread-card > strong { color: #52637b; font-size: 11px; line-height: 1.45; }
 .answer-thread-card .answer-core { min-height: 0; padding: 0; color: #344054; font-size: 13px; line-height: 1.65; }
 .compact-answer-group { display: grid; gap: 9px; margin-top: 10px; }
+
+/* Overlay interaction hardening: the two readers are real native scroll
+   regions. Passive mode keeps the rest of the HUD click-through, while the
+   regions below temporarily claim hit testing so wheel events stay local. */
+#root .overlay-root .overlay-content,
+#root .overlay-root .overlay-scroll-region { pointer-events: auto; }
+#root .overlay-root .question-card,
+#root .overlay-root .answer-card { min-height: 0; overflow: hidden; }
+#root .overlay-root .question-thread-panel,
+#root .overlay-root .answer-thread-panel { min-height: 0; overscroll-behavior: contain; scrollbar-color: rgba(255,255,255,.32) transparent; scrollbar-width: thin; }
+#root .overlay-root .question-thread-panel { flex: 1 1 auto; overflow-y: auto; }
+#root .overlay-root .answer-thread-panel { flex: 1 1 auto; overflow-y: auto; }
+#root .overlay-root .question-group-card,
+#root .overlay-root .answer-thread-card { border-color: transparent; border-radius: 8px; background: transparent; box-shadow: none; }
+#root .overlay-root .question-group-card.active-group { gap: 9px; padding: var(--overlay-question-padding); background: color-mix(in srgb, var(--overlay-question-background) 72%, transparent); }
+#root .overlay-root .answer-thread-card { gap: var(--overlay-answer-padding); padding: 10px 0; }
+#root .overlay-root .answer-thread-card + .answer-thread-card { border-top-color: color-mix(in srgb, var(--overlay-font-color) 12%, transparent); border-top-width: 1px; border-top-style: solid; }
+#root .overlay-root .question-primary-button,
+#root .overlay-root .question-select-button,
+#root .overlay-root .question-history-button,
+#root .overlay-root .question-history-follow-up { display: grid; width: 100%; gap: 4px; border: 0; background: transparent; color: inherit; padding: 0; text-align: left; }
+#root .overlay-root .question-primary-button { color: var(--overlay-font-color); font-size: var(--overlay-question-title-size); font-weight: 700; line-height: var(--overlay-question-line-height); }
+#root .overlay-root .question-primary-button:hover,
+#root .overlay-root .question-select-button:hover,
+#root .overlay-root .question-history-button:hover,
+#root .overlay-root .question-history-follow-up:hover { color: #b9dcff; }
+#root .overlay-root .question-thread-detail,
+#root .overlay-root .question-thread-follow-up { font-size: var(--overlay-question-font-size); line-height: var(--overlay-question-line-height); }
+#root .overlay-root .question-thread-follow-up { border-top: 1px solid color-mix(in srgb, var(--overlay-font-color) 12%, transparent); }
+#root .overlay-root .question-thread-follow-up strong,
+#root .overlay-root .question-thread-detail strong { color: var(--overlay-font-color); font-size: var(--overlay-question-font-size); line-height: var(--overlay-question-line-height); }
+#root .overlay-root .answer-thread-group { gap: 0; padding: var(--overlay-answer-padding); background: color-mix(in srgb, var(--overlay-answer-background) 72%, transparent); }
+#root .overlay-root .answer-thread-card .answer-core,
+#root .overlay-root .answer-thread-card .answer-core p { color: var(--overlay-font-color) !important; font-size: var(--overlay-answer-font-size) !important; line-height: var(--overlay-answer-line-height); }
+#root .overlay-root .answer-group-heading strong { font-size: var(--overlay-answer-title-size); }
+#root .overlay-root .compact-group,
+#root .overlay-root .compact-answer-group { padding: 9px 0; }
+#root .overlay-root .question-history-button strong,
+#root .overlay-root .question-history-follow-up,
+#root .overlay-root .compact-answer-group .answer-core { font-size: calc(var(--overlay-question-font-size) - 1px); line-height: 1.45; }
+#root .overlay-root .new-content-badge { position: sticky; z-index: 2; bottom: 10px; display: block; margin: 8px auto 0; border: 1px solid rgba(255,255,255,.3); border-radius: 999px; padding: 6px 11px; background: rgba(36,61,91,.92); color: #eaf4ff; cursor: pointer; font-size: 10px; }
+#root .overlay-root .answer-new-content-badge { position: absolute; right: 12px; bottom: 45px; }
+#root .overlay-root .latest-jump { z-index: 3; }
+#root .overlay-root .floating-panel.dragging .overlay-scroll-region { pointer-events: none; }
+#root .overlay-root[data-operation-mode="WRITTEN_TEST"] .answer-card { min-width: 0; }
+#root .overlay-root[data-compact-header="on"] .question-card > header,
+#root .overlay-root[data-compact-header="on"] .answer-card > header { padding-block: 9px; }

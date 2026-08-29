@@ -8,5 +8,7 @@ describe("middle mouse screenshot shortcut", () => {
     expect(shouldHandleMiddleMouseShortcut({ interviewRunning: false, automationMode: "MANUAL", writtenTestRunning: false })).toBe(false);
     expect(shouldHandleMiddleMouseShortcut({ interviewRunning: true, automationMode: "MANUAL", writtenTestRunning: true })).toBe(true);
     expect(shouldHandleMiddleMouseShortcut({ interviewRunning: false, automationMode: "AUTO", writtenTestRunning: true })).toBe(true);
+    expect(shouldHandleMiddleMouseShortcut({ interviewRunning: true, automationMode: "MANUAL", writtenTestRunning: false, middleMouseEnabled: false })).toBe(false);
+    expect(shouldHandleMiddleMouseShortcut({ interviewRunning: false, automationMode: "AUTO", writtenTestRunning: true, enabledInExamMode: false })).toBe(false);
   });
 });
