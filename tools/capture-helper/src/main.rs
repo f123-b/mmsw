@@ -11,10 +11,10 @@ fn main() {
 mod windows_capture {
     use std::ffi::c_void;
     use std::fs;
+    use std::io::{self, Write};
     use std::mem::size_of;
     use std::path::Path;
     use std::ptr::null_mut;
-    use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -50,7 +50,10 @@ mod windows_capture {
 
     #[repr(C)]
     #[derive(Clone, Copy)]
-    struct Point { x: i32, y: i32 }
+    struct Point {
+        x: i32,
+        y: i32,
+    }
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -114,7 +117,12 @@ mod windows_capture {
         fn PrintWindow(hwnd: Hwnd, hdc: Hdc, flags: u32) -> Bool;
         fn GetSystemMetrics(index: i32) -> i32;
         fn IsWindow(hwnd: Hwnd) -> Bool;
-        fn SetWindowsHookExW(idHook: i32, callback: Option<unsafe extern "system" fn(i32, usize, isize) -> isize>, instance: isize, threadId: u32) -> Hhook;
+        fn SetWindowsHookExW(
+            idHook: i32,
+            callback: Option<unsafe extern "system" fn(i32, usize, isize) -> isize>,
+            instance: isize,
+            threadId: u32,
+        ) -> Hhook;
         fn CallNextHookEx(hook: Hhook, code: i32, wParam: usize, lParam: isize) -> isize;
         fn UnhookWindowsHookEx(hook: Hhook) -> Bool;
         fn GetMessageW(message: *mut Msg, hwnd: Hwnd, min: u32, max: u32) -> i32;
@@ -252,7 +260,11 @@ mod windows_capture {
             }
         }
         let mode = mode.ok_or_else(|| "missing --mode".to_string())?;
-        let output = if mode == "mouse-watch" { output.unwrap_or_default() } else { output.ok_or_else(|| "missing --output".to_string())? };
+        let output = if mode == "mouse-watch" {
+            output.unwrap_or_default()
+        } else {
+            output.ok_or_else(|| "missing --output".to_string())?
+        };
         Ok(Args {
             mode,
             output,
@@ -662,7 +674,9 @@ mod windows_capture {
     fn watch_mouse() -> Result<(), String> {
         unsafe {
             let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), 0, 0);
-            if hook == 0 { return Err(format!("SetWindowsHookExW failed: {}", GetLastError())); }
+            if hook == 0 {
+                return Err(format!("SetWindowsHookExW failed: {}", GetLastError()));
+            }
             println!(r#"{{"event":"ready"}}"#);
             let _ = io::stdout().flush();
             let mut message = std::mem::zeroed::<Msg>();
@@ -686,7 +700,10 @@ mod windows_capture {
         if args.mode == "mouse-watch" {
             return match watch_mouse() {
                 Ok(()) => 0,
-                Err(error) => { println!(r#"{{"event":"error","error":"{}"}}"#, json_string(&error)); 2 }
+                Err(error) => {
+                    println!(r#"{{"event":"error","error":"{}"}}"#, json_string(&error));
+                    2
+                }
             };
         }
         let capture = match args.mode.as_str() {
