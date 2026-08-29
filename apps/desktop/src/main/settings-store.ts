@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { qwenAsrWebSocketUrl, QWEN_REALTIME_ASR_MODEL, validateLlmModelConfiguration, type AsrLanguage, type AsrProviderType, type ProviderSettings } from "@interview-copilot/shared";
 import { APP_DATA_DIRECTORY, type SqliteDatabase } from "./database";
-import { DEFAULT_OVERLAY_PREFERENCES, type OverlayPreferences, type OverlayPreferencesPatch, type OverlayRegion, type OverlayScreenshotPreferences, type OverlayWindowPreferences, type OverlayBehaviorPreferences } from "../shared/overlay-preferences";
+import { DEFAULT_OVERLAY_PREFERENCES, type OverlayAppearancePreferences, type OverlayBehaviorPreferences, type OverlayControlBarPreferences, type OverlayPreferences, type OverlayPreferencesPatch, type OverlayRegion, type OverlayScreenshotPreferences, type OverlayWindowPreferences } from "../shared/overlay-preferences";
 
 export type { OverlayPreferences, OverlayPreferencesPatch } from "../shared/overlay-preferences";
 
@@ -283,10 +283,12 @@ export interface OverlayCaptureProtectionSettings {
 }
 
 function normalizeOverlayPreferences(input: OverlayPreferencesPatch): OverlayPreferences {
+  const raw = input as unknown as Record<string, unknown>;
   const color = (value: unknown, fallback: string) => typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : fallback;
   const number = (value: unknown, fallback: number, minimum: number, maximum: number) => typeof value === "number" && Number.isFinite(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback;
   const flag = (value: unknown, fallback: boolean) => typeof value === "boolean" ? value : fallback;
   const coordinate = (value: unknown, fallback?: number) => typeof value === "number" && Number.isFinite(value) ? Math.round(value) : fallback;
+  const enumValue = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T => typeof value === "string" && allowed.includes(value as T) ? value as T : fallback;
   const region = (value: unknown, fallback?: OverlayRegion): OverlayRegion | undefined => {
     if (!value || typeof value !== "object") return fallback;
     const candidate = value as Partial<OverlayRegion>;
@@ -295,40 +297,122 @@ function normalizeOverlayPreferences(input: OverlayPreferencesPatch): OverlayPre
     if (!width || !height) return fallback;
     return { x: coordinate(candidate.x, fallback?.x ?? 0) ?? 0, y: coordinate(candidate.y, fallback?.y ?? 0) ?? 0, width, height };
   };
-  const windowPreferences = (value: Partial<OverlayWindowPreferences> | undefined, fallback: OverlayWindowPreferences): OverlayWindowPreferences => ({
-    width: number(value?.width, fallback.width, 260, 2_400),
-    height: number(value?.height, fallback.height, 160, 1_600),
-    ...(coordinate(value?.x, fallback.x) !== undefined ? { x: coordinate(value?.x, fallback.x) } : {}),
-    ...(coordinate(value?.y, fallback.y) !== undefined ? { y: coordinate(value?.y, fallback.y) } : {}),
-    fontSize: number(value?.fontSize, fallback.fontSize, 11, 32),
-    titleFontSize: number(value?.titleFontSize, fallback.titleFontSize, 10, 24),
-    lineHeight: number(value?.lineHeight, fallback.lineHeight, 1.2, 2.4),
-    paragraphGap: number(value?.paragraphGap, fallback.paragraphGap, 0, 36),
-    padding: number(value?.padding, fallback.padding, 6, 40),
-    opacity: number(value?.opacity, fallback.opacity, 0.2, 1),
-    blur: number(value?.blur, fallback.blur, 0, 40),
-    radius: number(value?.radius, fallback.radius, 0, 32),
-    shadow: flag(value?.shadow, fallback.shadow)
-  });
-  const behavior = (value: Partial<OverlayBehaviorPreferences> | undefined): OverlayBehaviorPreferences => ({ ...DEFAULT_OVERLAY_PREFERENCES.behavior, ...(value ?? {}), followLatestQuestion: flag(value?.followLatestQuestion, DEFAULT_OVERLAY_PREFERENCES.behavior.followLatestQuestion), followLatestAnswer: flag(value?.followLatestAnswer, DEFAULT_OVERLAY_PREFERENCES.behavior.followLatestAnswer), alwaysOnTop: flag(value?.alwaysOnTop, DEFAULT_OVERLAY_PREFERENCES.behavior.alwaysOnTop), lockPosition: flag(value?.lockPosition, DEFAULT_OVERLAY_PREFERENCES.behavior.lockPosition), mousePassthrough: flag(value?.mousePassthrough, DEFAULT_OVERLAY_PREFERENCES.behavior.mousePassthrough), autoDim: flag(value?.autoDim, DEFAULT_OVERLAY_PREFERENCES.behavior.autoDim), rememberPosition: flag(value?.rememberPosition, DEFAULT_OVERLAY_PREFERENCES.behavior.rememberPosition), rememberSize: flag(value?.rememberSize, DEFAULT_OVERLAY_PREFERENCES.behavior.rememberSize), showQuestionStatus: flag(value?.showQuestionStatus, DEFAULT_OVERLAY_PREFERENCES.behavior.showQuestionStatus), showAnswerStatus: flag(value?.showAnswerStatus, DEFAULT_OVERLAY_PREFERENCES.behavior.showAnswerStatus), compactHeader: flag(value?.compactHeader, DEFAULT_OVERLAY_PREFERENCES.behavior.compactHeader) });
-  const screenshot = (value: Partial<OverlayScreenshotPreferences> | undefined): OverlayScreenshotPreferences => {
-    const captureMode = value?.captureMode === "full_screen" || value?.captureMode === "current_display" || value?.captureMode === "fixed_region" || value?.captureMode === "last_region" || value?.captureMode === "interactive" ? value.captureMode : DEFAULT_OVERLAY_PREFERENCES.screenshot.captureMode;
-    return { middleMouseEnabled: flag(value?.middleMouseEnabled, DEFAULT_OVERLAY_PREFERENCES.screenshot.middleMouseEnabled), enabledInManualInterview: flag(value?.enabledInManualInterview, DEFAULT_OVERLAY_PREFERENCES.screenshot.enabledInManualInterview), enabledInExamMode: flag(value?.enabledInExamMode, DEFAULT_OVERLAY_PREFERENCES.screenshot.enabledInExamMode), captureMode, ...(region(value?.fixedRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.fixedRegion) ? { fixedRegion: region(value?.fixedRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.fixedRegion) } : {}), ...(region(value?.lastRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.lastRegion) ? { lastRegion: region(value?.lastRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.lastRegion) } : {}) };
+  const windowPreferences = (value: Partial<OverlayWindowPreferences> | undefined, fallback: OverlayWindowPreferences, kind: "question" | "answer" | "control"): OverlayWindowPreferences => {
+    const minimumWidth = kind === "question" ? 220 : kind === "answer" ? 300 : 120;
+    const maximumWidth = kind === "question" ? 1_000 : kind === "answer" ? 1_600 : 2_000;
+    const minimumHeight = kind === "question" ? 120 : kind === "answer" ? 150 : 36;
+    const maximumHeight = kind === "control" ? 240 : 1_200;
+    const backgroundOpacity = number(value?.backgroundOpacity, number(value?.opacity, fallback.backgroundOpacity, 0, 1), 0, 1);
+    return {
+      width: number(value?.width, fallback.width, minimumWidth, maximumWidth),
+      height: number(value?.height, fallback.height, minimumHeight, maximumHeight),
+      ...(coordinate(value?.x, fallback.x) !== undefined ? { x: coordinate(value?.x, fallback.x) } : {}),
+      ...(coordinate(value?.y, fallback.y) !== undefined ? { y: coordinate(value?.y, fallback.y) } : {}),
+      ...(typeof value?.displayId === "number" && Number.isFinite(value.displayId) ? { displayId: Math.round(value.displayId) } : fallback.displayId !== undefined ? { displayId: fallback.displayId } : {}),
+      ...(typeof value?.scaleFactor === "number" && Number.isFinite(value.scaleFactor) ? { scaleFactor: Math.max(0.5, Math.min(4, value.scaleFactor)) } : fallback.scaleFactor !== undefined ? { scaleFactor: fallback.scaleFactor } : {}),
+      fontSize: number(value?.fontSize, fallback.fontSize, kind === "question" ? 10 : kind === "answer" ? 10 : 9, kind === "question" ? 32 : kind === "answer" ? 40 : 24),
+      titleFontSize: number(value?.titleFontSize, fallback.titleFontSize, 9, 40),
+      fontWeight: typeof value?.fontWeight === "number" && (value.fontWeight === 400 || value.fontWeight === 500 || value.fontWeight === 600) ? value.fontWeight : fallback.fontWeight,
+      lineHeight: number(value?.lineHeight, fallback.lineHeight, 1.1, 2.2),
+      paragraphGap: number(value?.paragraphGap, fallback.paragraphGap, 0, 32),
+      itemGap: number(value?.itemGap, fallback.itemGap, 2, 24),
+      padding: number(value?.padding, fallback.padding, 0, 40),
+      backgroundOpacity,
+      textOpacity: number(value?.textOpacity, fallback.textOpacity, 0, 1),
+      borderOpacity: number(value?.borderOpacity, fallback.borderOpacity, 0, 1),
+      backgroundColor: color(value?.backgroundColor, fallback.backgroundColor),
+      textColor: color(value?.textColor, fallback.textColor),
+      blur: number(value?.blur, fallback.blur, 0, 40),
+      radius: number(value?.radius, fallback.radius, 0, 32),
+      shadow: flag(value?.shadow, fallback.shadow),
+      border: flag(value?.border, fallback.border),
+      opacity: backgroundOpacity
+    };
   };
+  const legacyWindowPatch: Partial<OverlayWindowPreferences> = {
+    ...(raw.width !== undefined ? { width: raw.width as number } : {}),
+    ...(raw.height !== undefined ? { height: raw.height as number } : {}),
+    ...(raw.x !== undefined ? { x: raw.x as number } : {}),
+    ...(raw.y !== undefined ? { y: raw.y as number } : {}),
+    ...(raw.opacity !== undefined ? { opacity: raw.opacity as number } : {}),
+    ...(raw.backgroundOpacity !== undefined ? { backgroundOpacity: raw.backgroundOpacity as number } : {}),
+    ...(raw.backgroundColor !== undefined ? { backgroundColor: raw.backgroundColor as string } : {}),
+    ...(raw.fontColor !== undefined ? { textColor: raw.fontColor as string } : {}),
+    ...(raw.fontSize !== undefined ? { fontSize: raw.fontSize as number } : {})
+  };
+  const questionInput = { ...legacyWindowPatch, ...(input.questionWindow ?? {}) };
+  const answerInput = { ...legacyWindowPatch, ...(input.answerWindow ?? {}) };
+  const controlInput = { ...DEFAULT_OVERLAY_PREFERENCES.controlBar, ...(input.controlBar ?? {}) };
+  const behaviorInput = input.behavior;
+  const legacyInteraction = behaviorInput && !Object.prototype.hasOwnProperty.call(behaviorInput, "interactionMode") && Object.prototype.hasOwnProperty.call(behaviorInput, "mousePassthrough")
+    ? (behaviorInput.mousePassthrough ? "click_through" : "interactive")
+    : undefined;
+  const legacyLock = behaviorInput && !Object.prototype.hasOwnProperty.call(behaviorInput, "lockLayout") && Object.prototype.hasOwnProperty.call(behaviorInput, "lockPosition")
+    ? behaviorInput.lockPosition
+    : undefined;
+  const behavior = (value: Partial<OverlayBehaviorPreferences> | undefined): OverlayBehaviorPreferences => {
+    const interactionMode = enumValue(value?.interactionMode ?? legacyInteraction, ["interactive", "click_through", "full_passthrough"] as const, DEFAULT_OVERLAY_PREFERENCES.behavior.interactionMode);
+    const lockLayout = flag(value?.lockLayout ?? legacyLock, DEFAULT_OVERLAY_PREFERENCES.behavior.lockLayout);
+    return {
+      ...DEFAULT_OVERLAY_PREFERENCES.behavior,
+      followLatestQuestion: flag(value?.followLatestQuestion, DEFAULT_OVERLAY_PREFERENCES.behavior.followLatestQuestion),
+      followLatestAnswer: flag(value?.followLatestAnswer, DEFAULT_OVERLAY_PREFERENCES.behavior.followLatestAnswer),
+      alwaysOnTop: flag(value?.alwaysOnTop, DEFAULT_OVERLAY_PREFERENCES.behavior.alwaysOnTop),
+      lockLayout,
+      lockPosition: lockLayout,
+      interactionMode,
+      mousePassthrough: interactionMode !== "interactive",
+      wheelRouting: enumValue(value?.wheelRouting, ["overlay_under_cursor", "underlying_app", "dual"] as const, DEFAULT_OVERLAY_PREFERENCES.behavior.wheelRouting),
+      temporaryInteractionModifier: enumValue(value?.temporaryInteractionModifier, ["ctrl", "alt", "shift", "ctrl_shift"] as const, DEFAULT_OVERLAY_PREFERENCES.behavior.temporaryInteractionModifier),
+      snapEnabled: flag(value?.snapEnabled, DEFAULT_OVERLAY_PREFERENCES.behavior.snapEnabled),
+      snapThreshold: number(value?.snapThreshold, DEFAULT_OVERLAY_PREFERENCES.behavior.snapThreshold, 8, 16),
+      liveApply: flag(value?.liveApply, DEFAULT_OVERLAY_PREFERENCES.behavior.liveApply),
+      autoDim: flag(value?.autoDim, DEFAULT_OVERLAY_PREFERENCES.behavior.autoDim),
+      rememberPosition: flag(value?.rememberPosition, DEFAULT_OVERLAY_PREFERENCES.behavior.rememberPosition),
+      rememberSize: flag(value?.rememberSize, DEFAULT_OVERLAY_PREFERENCES.behavior.rememberSize),
+      showQuestionStatus: flag(value?.showQuestionStatus, DEFAULT_OVERLAY_PREFERENCES.behavior.showQuestionStatus),
+      showAnswerStatus: flag(value?.showAnswerStatus, DEFAULT_OVERLAY_PREFERENCES.behavior.showAnswerStatus),
+      compactHeader: flag(value?.compactHeader, DEFAULT_OVERLAY_PREFERENCES.behavior.compactHeader)
+    };
+  };
+  const appearance = (value: Partial<OverlayAppearancePreferences> | undefined): OverlayAppearancePreferences => ({
+    mode: enumValue(value?.mode, ["glass", "translucent", "text_only", "custom"] as const, DEFAULT_OVERLAY_PREFERENCES.appearance.mode),
+    blur: number(value?.blur, DEFAULT_OVERLAY_PREFERENCES.appearance.blur, 0, 40),
+    shadow: flag(value?.shadow, DEFAULT_OVERLAY_PREFERENCES.appearance.shadow),
+    border: flag(value?.border, DEFAULT_OVERLAY_PREFERENCES.appearance.border),
+    textShadow: enumValue(value?.textShadow, ["none", "soft", "medium"] as const, DEFAULT_OVERLAY_PREFERENCES.appearance.textShadow),
+    textOutline: value?.textOutline === 0.5 || value?.textOutline === 1 ? value.textOutline : 0
+  });
+  const screenshot = (value: Partial<OverlayScreenshotPreferences> | undefined): OverlayScreenshotPreferences => {
+    const captureMode = enumValue(value?.captureMode, ["full_screen", "current_display", "fixed_region", "last_region", "interactive"] as const, DEFAULT_OVERLAY_PREFERENCES.screenshot.captureMode);
+    const fixedRegion = region(value?.fixedRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.fixedRegion);
+    const lastRegion = region(value?.lastRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.lastRegion);
+    return { middleMouseEnabled: flag(value?.middleMouseEnabled, DEFAULT_OVERLAY_PREFERENCES.screenshot.middleMouseEnabled), enabledInManualInterview: flag(value?.enabledInManualInterview, DEFAULT_OVERLAY_PREFERENCES.screenshot.enabledInManualInterview), enabledInExamMode: flag(value?.enabledInExamMode, DEFAULT_OVERLAY_PREFERENCES.screenshot.enabledInExamMode), captureMode, ...(fixedRegion ? { fixedRegion } : {}), ...(lastRegion ? { lastRegion } : {}) };
+  };
+  const backgroundOpacity = number(input.backgroundOpacity, DEFAULT_OVERLAY_PREFERENCES.backgroundOpacity, 0, 1);
+  const backgroundColor = color(input.backgroundColor, DEFAULT_OVERLAY_PREFERENCES.backgroundColor);
+  const fontColor = color(input.fontColor, DEFAULT_OVERLAY_PREFERENCES.fontColor);
+  const controlBar = windowPreferences(controlInput, DEFAULT_OVERLAY_PREFERENCES.controlBar, "control") as OverlayControlBarPreferences;
+  controlBar.positionMode = enumValue(input.controlBar?.positionMode, ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right", "custom"] as const, DEFAULT_OVERLAY_PREFERENCES.controlBar.positionMode);
+  controlBar.orientation = enumValue(input.controlBar?.orientation, ["horizontal", "vertical"] as const, DEFAULT_OVERLAY_PREFERENCES.controlBar.orientation);
   return {
-    backgroundOpacity: number(input.backgroundOpacity, DEFAULT_OVERLAY_PREFERENCES.backgroundOpacity, 0.2, 1),
-    backgroundColor: color(input.backgroundColor, DEFAULT_OVERLAY_PREFERENCES.backgroundColor),
-    fontColor: color(input.fontColor, DEFAULT_OVERLAY_PREFERENCES.fontColor),
-    fontSize: number(input.fontSize, DEFAULT_OVERLAY_PREFERENCES.fontSize, 12, 28),
+    backgroundOpacity,
+    backgroundColor,
+    fontColor,
+    fontSize: number(input.fontSize, DEFAULT_OVERLAY_PREFERENCES.fontSize, 12, 40),
     showToolbar: flag(input.showToolbar, DEFAULT_OVERLAY_PREFERENCES.showToolbar),
     showTranscript: flag(input.showTranscript, DEFAULT_OVERLAY_PREFERENCES.showTranscript),
     showAnswer: flag(input.showAnswer, DEFAULT_OVERLAY_PREFERENCES.showAnswer),
     showTimestamps: flag(input.showTimestamps, DEFAULT_OVERLAY_PREFERENCES.showTimestamps),
-    layoutPreset: input.layoutPreset === "compact" || input.layoutPreset === "standard" || input.layoutPreset === "wide" || input.layoutPreset === "dual_screen" || input.layoutPreset === "custom" ? input.layoutPreset : DEFAULT_OVERLAY_PREFERENCES.layoutPreset,
-    questionWindow: windowPreferences(input.questionWindow, DEFAULT_OVERLAY_PREFERENCES.questionWindow),
-    answerWindow: windowPreferences(input.answerWindow, DEFAULT_OVERLAY_PREFERENCES.answerWindow),
+    layoutPreset: enumValue(input.layoutPreset, ["compact", "standard", "wide", "dual_screen", "transparent", "custom"] as const, DEFAULT_OVERLAY_PREFERENCES.layoutPreset),
+    questionWindow: windowPreferences(questionInput, { ...DEFAULT_OVERLAY_PREFERENCES.questionWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "question"),
+    answerWindow: windowPreferences(answerInput, { ...DEFAULT_OVERLAY_PREFERENCES.answerWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "answer"),
+    controlBar,
     behavior: behavior(input.behavior),
-    screenshot: screenshot(input.screenshot)
+    appearance: appearance(input.appearance),
+    screenshot: screenshot(input.screenshot),
+    previewBackground: enumValue(input.previewBackground, ["light_desktop", "dark_ide", "web_page", "custom_color"] as const, DEFAULT_OVERLAY_PREFERENCES.previewBackground),
+    previewCustomColor: color(input.previewCustomColor, DEFAULT_OVERLAY_PREFERENCES.previewCustomColor)
   };
 }
 
@@ -374,7 +458,13 @@ export class OverlaySettingsStore {
 
   setPreferences(input: OverlayPreferencesPatch): OverlayPreferences {
     const current = this.getPreferences();
-    const next = normalizeOverlayPreferences({ ...current, ...input, questionWindow: { ...current.questionWindow, ...(input.questionWindow ?? {}) }, answerWindow: { ...current.answerWindow, ...(input.answerWindow ?? {}) }, behavior: { ...current.behavior, ...(input.behavior ?? {}) }, screenshot: { ...current.screenshot, ...(input.screenshot ?? {}) } });
+    const legacyBehaviorPatch = input.behavior && !Object.prototype.hasOwnProperty.call(input.behavior, "interactionMode") && Object.prototype.hasOwnProperty.call(input.behavior, "mousePassthrough")
+      ? { interactionMode: input.behavior.mousePassthrough ? "click_through" as const : "interactive" as const }
+      : {};
+    const legacyLockPatch = input.behavior && !Object.prototype.hasOwnProperty.call(input.behavior, "lockLayout") && Object.prototype.hasOwnProperty.call(input.behavior, "lockPosition")
+      ? { lockLayout: input.behavior.lockPosition }
+      : {};
+    const next = normalizeOverlayPreferences({ ...current, ...input, questionWindow: { ...current.questionWindow, ...(input.questionWindow ?? {}) }, answerWindow: { ...current.answerWindow, ...(input.answerWindow ?? {}) }, controlBar: { ...current.controlBar, ...(input.controlBar ?? {}) }, behavior: { ...current.behavior, ...legacyBehaviorPatch, ...legacyLockPatch, ...(input.behavior ?? {}) }, appearance: { ...current.appearance, ...(input.appearance ?? {}) }, screenshot: { ...current.screenshot, ...(input.screenshot ?? {}) } });
     this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.preferencesKey, JSON.stringify(next)]);
     this.database.flushNow();
     return next;

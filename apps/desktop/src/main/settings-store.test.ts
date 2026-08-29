@@ -153,6 +153,19 @@ describe("OverlaySettingsStore", () => {
     } finally { database.close(); }
   });
 
+  it("migrates flat legacy overlay settings without creating a second store", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      database.run("INSERT INTO app_state(key, value) VALUES (?, ?)", ["overlay.preferences", JSON.stringify({ backgroundOpacity: 0, backgroundColor: "#102030", fontColor: "#ffffff", fontSize: 10, width: 900, height: 0 })]);
+      const preferences = new OverlaySettingsStore(database).getPreferences();
+      expect(preferences.questionWindow).toMatchObject({ width: 900, height: 120, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
+      expect(preferences.answerWindow).toMatchObject({ width: 900, height: 150, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
+      expect(preferences.behavior.interactionMode).toBe("interactive");
+      expect(preferences.appearance.mode).toBe("glass");
+      expect(new OverlaySettingsStore(database).setPreferences({ behavior: { mousePassthrough: true } }).behavior.interactionMode).toBe("click_through");
+    } finally { database.close(); }
+  });
+
   it("defaults to enabled and persists the main-process setting", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
