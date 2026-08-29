@@ -473,6 +473,20 @@ export class OverlaySettingsStore {
     return next;
   }
 
+  resetLayout(): OverlayPreferences {
+    const current = this.getPreferences();
+    const next = normalizeOverlayPreferences({
+      ...current,
+      layoutPreset: DEFAULT_OVERLAY_PREFERENCES.layoutPreset,
+      questionWindow: { ...DEFAULT_OVERLAY_PREFERENCES.questionWindow },
+      answerWindow: { ...DEFAULT_OVERLAY_PREFERENCES.answerWindow },
+      controlBar: { ...DEFAULT_OVERLAY_PREFERENCES.controlBar }
+    });
+    this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.preferencesKey, JSON.stringify(next)]);
+    this.database.flushNow();
+    return next;
+  }
+
   getAutomationMode(): AutomationMode {
     const stored = this.database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", [OverlaySettingsStore.automationModeKey]);
     return stored?.value === '"MANUAL"' ? "MANUAL" : "AUTO";

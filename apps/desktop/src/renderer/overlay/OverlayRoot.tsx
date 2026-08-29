@@ -50,18 +50,12 @@ interface OverlayRootProps {
   captureTest?: boolean;
 }
 
-const STORAGE_KEY = "interview-copilot.overlay-layout-v3";
-const LEGACY_STORAGE_KEY = "interview-copilot.overlay-layout-v2";
 const defaults: OverlayLayout = {
   toolbar: { x: 0, y: 80, width: 680, height: 50, visible: true, collapsed: false, locked: true, opacity: 1 },
   transcript: { x: 0, y: 320, width: 394, height: 406, visible: true, collapsed: false, locked: false, opacity: 1 },
   answer: { x: 410, y: 320, width: 670, height: 406, visible: true, collapsed: false, locked: false, opacity: 1 },
   shortcuts: { x: 24, y: 0, width: 320, height: 360, visible: false, collapsed: false, locked: false, opacity: 1 }
 };
-
-function storageKey(displayId?: number, scaleFactor?: number): string {
-  return displayId === undefined ? STORAGE_KEY : `${STORAGE_KEY}-${displayId}-${Math.round((scaleFactor ?? 1) * 100)}`;
-}
 
 function clampNumber(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
@@ -83,29 +77,6 @@ function viewportDefaults(preferences = DEFAULT_OVERLAY_PREFERENCES): OverlayLay
   };
 }
 
-function fromHUDLayout(next: HUDLayout): OverlayLayout {
-  const panel = (key: PanelKey): PanelLayout => ({ ...next[key === "toolbar" ? "toolbar" : key], visible: true, collapsed: false, locked: key === "toolbar", opacity: 1 });
-  return {
-    toolbar: panel("toolbar"),
-    transcript: panel("transcript"),
-    answer: panel("answer"),
-    shortcuts: { ...panel("shortcuts"), visible: false }
-  };
-}
-
-function loadLayout(key = STORAGE_KEY, preferences = DEFAULT_OVERLAY_PREFERENCES, fallback?: OverlayLayout): OverlayLayout {
-  try {
-    const raw = localStorage.getItem(key) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
-    const saved = JSON.parse(raw ?? "{}");
-    const base = fallback ?? viewportDefaults(preferences);
-    const savedToolbar = saved.toolbar?.width ? saved.toolbar : {};
-    const savedShortcuts = saved.shortcuts?.width ? saved.shortcuts : {};
-    return Object.fromEntries(Object.entries(base).map(([panelKey, value]) => [panelKey, { ...value, ...(panelKey === "toolbar" ? savedToolbar : panelKey === "shortcuts" ? savedShortcuts : (saved[panelKey] ?? {})) }])) as OverlayLayout;
-  } catch {
-    return fallback ?? viewportDefaults(preferences);
-  }
-}
-
 function clampLayout(panel: PanelKey, layout: PanelLayout): PanelLayout {
   if (panel === "shortcuts") return { ...layout, width: Math.max(260, Math.min(layout.width, Math.max(260, window.innerWidth - 16))), height: Math.max(120, Math.min(layout.height, Math.max(120, window.innerHeight - 16))), x: Math.max(8, Math.min(layout.x, Math.max(8, window.innerWidth - layout.width - 8))), y: Math.max(8, Math.min(layout.y, Math.max(8, window.innerHeight - layout.height - 8))) };
   const designerPanel: DesignerPanel = panel === "transcript" ? "question" : panel === "answer" ? "answer" : "controlBar";
@@ -114,8 +85,7 @@ function clampLayout(panel: PanelKey, layout: PanelLayout): PanelLayout {
 }
 
 function useOverlayLayout(preferences: OverlayPreferences): [OverlayLayout, (key: PanelKey, patch: Partial<PanelLayout>, altPressed?: boolean) => void, (next: HUDLayout) => void, () => void, () => OverlayLayout] {
-  const [layout, setLayout] = useState<OverlayLayout>(() => loadLayout(STORAGE_KEY, preferences));
-  const storageKeyRef = useRef(STORAGE_KEY);
+  const [layout, setLayout] = useState<OverlayLayout>(() => viewportDefaults(preferences));
   const preferencesRef = useRef(preferences);
   const layoutRef = useRef(layout);
   preferencesRef.current = preferences;
@@ -127,18 +97,14 @@ function useOverlayLayout(preferences: OverlayPreferences): [OverlayLayout, (key
       : nextPanel;
     const next = { ...current, [key]: designerPanel ? clampLayout(key, { ...nextPanel, ...snapped }) : clampLayout(key, nextPanel) };
     layoutRef.current = next;
-    try { localStorage.setItem(storageKeyRef.current, JSON.stringify(next)); } catch { /* best effort */ }
     return next;
   }), []);
-  const applyMainLayout = useCallback((next: HUDLayout) => {
-    const nextLayout = fromHUDLayout(next);
-    storageKeyRef.current = storageKey(next.displayId, next.scaleFactor);
-    const loaded = loadLayout(storageKeyRef.current, preferencesRef.current, nextLayout);
-    layoutRef.current = loaded;
-    setLayout(loaded);
+  const applyMainLayout = useCallback((_next: HUDLayout) => {
+    const nextLayout = viewportDefaults(preferencesRef.current);
+    layoutRef.current = nextLayout;
+    setLayout(nextLayout);
   }, []);
   const clearSavedLayout = useCallback(() => {
-    try { localStorage.removeItem(storageKeyRef.current); } catch { /* best effort */ }
     const next = viewportDefaults(preferencesRef.current);
     layoutRef.current = next;
     setLayout(next);
@@ -146,12 +112,8 @@ function useOverlayLayout(preferences: OverlayPreferences): [OverlayLayout, (key
   useEffect(() => {
     setLayout((current) => {
       const next = viewportDefaults(preferences);
-      // Settings coordinates are the source of truth when they change. Dragging
-      // remains local until pointer-up, so this does not interrupt an in-flight
-      // edit and keeps Settings → Overlay synchronization bidirectional.
       const merged = { ...current, transcript: { ...next.transcript }, answer: { ...next.answer }, toolbar: { ...current.toolbar, ...next.toolbar }, shortcuts: { ...current.shortcuts, ...next.shortcuts } };
       layoutRef.current = merged;
-      try { localStorage.setItem(storageKeyRef.current, JSON.stringify(merged)); } catch { /* best effort */ }
       return merged;
     });
   }, [preferences.layoutPreset, preferences.questionWindow.x, preferences.questionWindow.y, preferences.questionWindow.width, preferences.questionWindow.height, preferences.answerWindow.x, preferences.answerWindow.y, preferences.answerWindow.width, preferences.answerWindow.height, preferences.controlBar.x, preferences.controlBar.y, preferences.controlBar.width, preferences.controlBar.height, preferences.controlBar.orientation, preferences.controlBar.positionMode]);

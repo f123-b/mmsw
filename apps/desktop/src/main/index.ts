@@ -1383,7 +1383,17 @@ function registerIpc(): void {
    ipcMain.handle("overlay:toggle-all", () => { overlayManager?.toggleAll(); return true; });
    ipcMain.handle("overlay:toggle-transcript", () => { overlayManager?.toggleTranscript(); return true; });
    ipcMain.handle("overlay:toggle-answer", () => { overlayManager?.toggleAnswer(); return true; });
-   ipcMain.handle("overlay:reset-layout", () => { overlayManager?.resetLayout(); return true; });
+   ipcMain.handle("overlay:reset-layout", () => {
+     const next = overlaySettingsStore?.resetLayout();
+     if (next) {
+       overlayManager?.applyPreferences(next.behavior);
+       overlayManager?.resetLayout();
+       broadcast("overlay:preferences", next);
+     } else {
+       overlayManager?.resetLayout();
+     }
+     return true;
+   });
    ipcMain.handle("overlay:toggle-shortcuts", () => { overlayManager?.toggleShortcuts(); return true; });
    ipcMain.handle("overlay:get-state", () => overlayManager?.hudState);
    ipcMain.handle("overlay:get-layout", () => overlayManager?.hudLayout);

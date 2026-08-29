@@ -160,7 +160,7 @@ describe("OverlaySettingsStore", () => {
       const preferences = new OverlaySettingsStore(database).getPreferences();
       expect(preferences.questionWindow).toMatchObject({ width: 900, height: 120, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
       expect(preferences.answerWindow).toMatchObject({ width: 900, height: 150, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
-      expect(preferences.behavior.interactionMode).toBe("interactive");
+      expect(preferences.behavior.interactionMode).toBe("click_through");
       expect(preferences.appearance.mode).toBe("glass");
       expect(new OverlaySettingsStore(database).setPreferences({ behavior: { mousePassthrough: true } }).behavior.interactionMode).toBe("click_through");
     } finally { database.close(); }
@@ -212,6 +212,27 @@ describe("OverlaySettingsStore", () => {
       expect(settings.setPreferences({ answerWindow: { x: 640 } }).layoutPreset).toBe("custom");
       expect(settings.setPreferences({ layoutPreset: "wide", answerWindow: { x: 700, width: 940 } }).layoutPreset).toBe("wide");
     } finally { database.close(); }
+  });
+
+  it("resets only the persisted overlay layout through the settings store", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      settings.setPreferences({
+        layoutPreset: "custom",
+        questionWindow: { x: 900, y: 500, width: 760, height: 800 },
+        answerWindow: { x: 20, y: 40, width: 1_200, height: 900 },
+        controlBar: { x: 20, y: 20, positionMode: "custom" }
+      });
+      const next = settings.resetLayout();
+      expect(next.layoutPreset).toBe("standard");
+      expect(next.questionWindow.x).toBeUndefined();
+      expect(next.answerWindow.x).toBeUndefined();
+      expect(next.controlBar.positionMode).toBe("top_center");
+      expect(next.behavior.lockLayout).toBe(true);
+    } finally {
+      database.close();
+    }
   });
 
   it("persists Tencent desktop and window validation independently", async () => {
