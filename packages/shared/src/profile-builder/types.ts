@@ -1,4 +1,4 @@
-export type ProfileBuilderSourceKind = "resume" | "project" | "interview" | "skill";
+export type ProfileBuilderSourceKind = "resume" | "job_target" | "project" | "interview" | "knowledge" | "skill";
 
 export interface ProfileBuilderSource {
   id: string;
@@ -6,6 +6,11 @@ export interface ProfileBuilderSource {
   title: string;
   text: string;
   updatedAt?: number;
+}
+
+export interface ProfileBuilderSourceSnapshot {
+  generatedAt: number;
+  sources: Array<Pick<ProfileBuilderSource, "id" | "kind" | "title" | "updatedAt"> & { fingerprint: string }>;
 }
 
 export interface ProfileBuilderInput {

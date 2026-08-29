@@ -1,6 +1,16 @@
 export interface Material {
   rawContent: string;
   summary: string;
+  filename?: string;
+  mimeType?: string;
+  uploadedAt?: number;
+  parseStatus?: "pending" | "parsed" | "failed";
+  analysisStatus?: "not_started" | "in_progress" | "completed" | "stale" | "failed";
+  analysisStats?: {
+    education: number;
+    projects: number;
+    skills: number;
+  };
 }
 
 export interface Skill {
@@ -9,6 +19,27 @@ export interface Skill {
   description: string;
   content: string;
   tags: string[];
+  source?: "manual" | "resume" | "project" | "interview";
+  evidenceRefs?: string[];
+  confirmedAt?: number;
+}
+
+export type SkillSuggestionStatus = "pending" | "confirmed" | "rejected";
+
+export interface SkillSuggestion {
+  id: string;
+  profileId: string;
+  name: string;
+  description: string;
+  confidence: number;
+  evidenceIds: string[];
+  evidenceQuotes: string[];
+  sourceKinds: Array<"resume" | "job_target" | "project" | "interview" | "knowledge" | "skill">;
+  status: SkillSuggestionStatus;
+  confirmedAt?: number;
+  rejectedAt?: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface SalaryExpectation {

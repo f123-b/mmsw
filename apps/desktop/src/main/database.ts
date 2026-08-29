@@ -20,6 +20,9 @@ import {
   inferKnowledgeDocumentType,
   type KnowledgeDocumentType,
   type ProfileBuilderOutput,
+  type ProfileBuilderSourceKind,
+  type SkillSuggestion,
+  type SkillSuggestionStatus,
   inferQuestionBankType,
   inferQuestionBankBankType,
   normalizeQuestionBankText,
@@ -784,6 +787,31 @@ export class SqliteDatabase {
         CREATE INDEX IF NOT EXISTS questions_group_idx ON questions(interview_id, group_id, detected_at);
         CREATE INDEX IF NOT EXISTS answers_group_idx ON answers(group_id, created_at);
       `],
+      [32, `
+        CREATE TABLE IF NOT EXISTS profile_skill_suggestions (
+          id TEXT PRIMARY KEY,
+          profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+          normalized_name TEXT NOT NULL,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          confidence REAL NOT NULL DEFAULT 0,
+          evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+          evidence_quotes_json TEXT NOT NULL DEFAULT '[]',
+          source_kinds_json TEXT NOT NULL DEFAULT '[]',
+          status TEXT NOT NULL DEFAULT 'pending',
+          confirmed_at INTEGER,
+          rejected_at INTEGER,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(profile_id, normalized_name)
+        );
+        CREATE INDEX IF NOT EXISTS profile_skill_suggestions_profile_idx ON profile_skill_suggestions(profile_id, status, updated_at DESC);
+      `],
+      [33, `
+        ALTER TABLE skills ADD COLUMN source TEXT;
+        ALTER TABLE skills ADD COLUMN evidence_refs_json TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE skills ADD COLUMN confirmed_at INTEGER;
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -833,7 +861,7 @@ export class SqliteProfileRepository {
     const incomingSkillIds = new Set(profile.skills.map((skill) => skill.id));
     const existingSkillIds = this.database.all<{ id: string }>("SELECT id FROM skills WHERE profile_id = ?", [profile.id]).map((skill) => skill.id);
     for (const skillId of existingSkillIds) if (!incomingSkillIds.has(skillId)) this.database.run("DELETE FROM skills WHERE id = ? AND profile_id = ?", [skillId, profile.id]);
-    profile.skills.forEach((skill) => this.database.run("INSERT INTO skills(id, profile_id, name, description, content, tags_json) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET profile_id=excluded.profile_id, name=excluded.name, description=excluded.description, content=excluded.content, tags_json=excluded.tags_json", [skill.id, profile.id, skill.name, skill.description, skill.content, JSON.stringify(skill.tags)]));
+    profile.skills.forEach((skill) => this.database.run("INSERT INTO skills(id, profile_id, name, description, content, tags_json, source, evidence_refs_json, confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET profile_id=excluded.profile_id, name=excluded.name, description=excluded.description, content=excluded.content, tags_json=excluded.tags_json, source=excluded.source, evidence_refs_json=excluded.evidence_refs_json, confirmed_at=excluded.confirmed_at", [skill.id, profile.id, skill.name, skill.description, skill.content, JSON.stringify(skill.tags), skill.source ?? null, JSON.stringify(skill.evidenceRefs ?? []), skill.confirmedAt ?? null]));
     this.database.run("DELETE FROM profile_knowledge WHERE profile_id = ?", [profile.id]);
     profile.knowledgeBaseIds.forEach((knowledgeBaseId) => this.database.run("INSERT INTO profile_knowledge(profile_id, knowledge_base_id) VALUES (?, ?)", [profile.id, knowledgeBaseId]));
     new SqliteJobTargetRepository(this.database).syncProfile(profile, now);
@@ -867,7 +895,7 @@ export class SqliteProfileRepository {
   }
 
   private hydrate(row: { id: string; name: string; language: string; resume_json: string | null; job_description_json: string | null; instructions: string | null; expression_level: string; explain_advanced_terms: number; company_context?: string | null; salary_expectation_json?: string | null; created_at: number; updated_at: number }): Profile {
-    const skills = this.database.all<{ id: string; name: string; description: string; content: string; tags_json: string }>("SELECT id, name, description, content, tags_json FROM skills WHERE profile_id = ? ORDER BY name", [row.id]).map((skill) => ({ id: skill.id, name: skill.name, description: skill.description, content: skill.content, tags: JSON.parse(skill.tags_json) as string[] }));
+    const skills = this.database.all<{ id: string; name: string; description: string; content: string; tags_json: string; source?: string | null; evidence_refs_json?: string | null; confirmed_at?: number | null }>("SELECT id, name, description, content, tags_json, source, evidence_refs_json, confirmed_at FROM skills WHERE profile_id = ? ORDER BY name", [row.id]).map((skill) => ({ id: skill.id, name: skill.name, description: skill.description, content: skill.content, tags: JSON.parse(skill.tags_json) as string[], ...(skill.source ? { source: skill.source as Profile["skills"][number]["source"] } : {}), ...(skill.evidence_refs_json ? { evidenceRefs: jsonArray<string>(skill.evidence_refs_json) } : {}), ...(skill.confirmed_at ? { confirmedAt: Number(skill.confirmed_at) } : {}) }));
     const knowledgeBaseIds = this.database.all<{ knowledge_base_id: string }>("SELECT knowledge_base_id FROM profile_knowledge WHERE profile_id = ?", [row.id]).map((item) => item.knowledge_base_id);
     return { id: row.id, name: row.name, language: row.language, resume: row.resume_json ? JSON.parse(row.resume_json) : undefined, jobDescription: row.job_description_json ? JSON.parse(row.job_description_json) : undefined, instructions: value<string>(row.instructions), expressionLevel: ["plain", "standard", "expert"].includes(row.expression_level) ? row.expression_level as Profile["expressionLevel"] : "plain", explainAdvancedTerms: Number(row.explain_advanced_terms) !== 0, ...(row.company_context ? { companyContext: row.company_context } : {}), ...(row.salary_expectation_json ? { salaryExpectation: JSON.parse(row.salary_expectation_json) } : {}), skills, knowledgeBaseIds, createdAt: row.created_at, updatedAt: row.updated_at };
   }
@@ -876,7 +904,7 @@ export class SqliteProfileRepository {
 export interface ProfileBuilderArtifactRecord {
   profileId: string;
   version: number;
-  status: "ready" | "partial" | "error";
+  status: "ready" | "partial" | "error" | "stale";
   sourceSnapshot: unknown;
   artifact?: ProfileBuilderOutput;
   error?: string;
@@ -923,6 +951,64 @@ export class SqliteProfileBuilderRepository {
   delete(profileId: string): void {
     this.database.run("DELETE FROM profile_builder_artifacts WHERE profile_id = ?", [profileId]);
     this.database.flushNow();
+  }
+}
+
+export class SqliteSkillSuggestionRepository {
+  constructor(private readonly database: SqliteDatabase) {}
+
+  list(profileId: string, status?: SkillSuggestionStatus): SkillSuggestion[] {
+    const where = status ? " AND status = ?" : "";
+    const params = status ? [profileId, status] : [profileId];
+    return this.database.all<Record<string, unknown>>(`SELECT id, profile_id AS profileId, name, description, confidence, evidence_ids_json AS evidenceIdsJson, evidence_quotes_json AS evidenceQuotesJson, source_kinds_json AS sourceKindsJson, status, confirmed_at AS confirmedAt, rejected_at AS rejectedAt, created_at AS createdAt, updated_at AS updatedAt FROM profile_skill_suggestions WHERE profile_id = ?${where} ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'confirmed' THEN 1 ELSE 2 END, updated_at DESC, name`, params).map((row) => this.hydrate(row));
+  }
+
+  upsertFromArtifact(profileId: string, nodes: ProfileBuilderOutput["skillGraph"]["nodes"], sourceSnapshot: unknown, now = Date.now()): SkillSuggestion[] {
+    const sources = Array.isArray((sourceSnapshot as { sources?: unknown } | undefined)?.sources) ? (sourceSnapshot as { sources: Array<Record<string, unknown>> }).sources : [];
+    const sourceById = new Map(sources.map((source) => [String(source.id), source]));
+    for (const node of nodes) {
+      const name = node.label.trim();
+      const normalizedName = normalizeSkillKey(name);
+      if (!normalizedName) continue;
+      const evidenceIds = [...new Set(node.evidenceIds.filter(Boolean))];
+      const evidenceQuotes = evidenceIds.map((evidenceId) => {
+        const source = sourceById.get(evidenceId);
+        return source?.title ? String(source.title) : evidenceId;
+      });
+      const sourceKinds = [...new Set(evidenceIds.map((evidenceId) => sourceById.get(evidenceId)?.kind).filter((kind): kind is ProfileBuilderSourceKind => typeof kind === "string"))];
+      const confidence = Math.min(0.95, 0.55 + Math.min(0.35, evidenceIds.length * 0.1));
+      const suggestionId = `skill-suggestion-${profileId}-${normalizedName.replace(/[^a-z0-9\u4e00-\u9fff]+/gi, "-").slice(0, 64)}`;
+      this.database.run("INSERT INTO profile_skill_suggestions(id, profile_id, normalized_name, name, description, confidence, evidence_ids_json, evidence_quotes_json, source_kinds_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?) ON CONFLICT(profile_id, normalized_name) DO UPDATE SET name=excluded.name, description=excluded.description, confidence=excluded.confidence, evidence_ids_json=excluded.evidence_ids_json, evidence_quotes_json=excluded.evidence_quotes_json, source_kinds_json=excluded.source_kinds_json, updated_at=excluded.updated_at", [suggestionId, profileId, normalizedName, name, node.description || "", confidence, JSON.stringify(evidenceIds), JSON.stringify(evidenceQuotes), JSON.stringify(sourceKinds), now, now]);
+    }
+    if (nodes.length > 0) this.database.flushNow();
+    return this.list(profileId);
+  }
+
+  review(id: string, status: SkillSuggestionStatus, now = Date.now()): SkillSuggestion | undefined {
+    if (!["pending", "confirmed", "rejected"].includes(status)) throw new Error("Invalid skill suggestion status");
+    this.database.run("UPDATE profile_skill_suggestions SET status = ?, confirmed_at = ?, rejected_at = ?, updated_at = ? WHERE id = ?", [status, status === "confirmed" ? now : null, status === "rejected" ? now : null, now, id]);
+    this.database.flushNow();
+    const row = this.database.first<Record<string, unknown>>("SELECT id, profile_id AS profileId, name, description, confidence, evidence_ids_json AS evidenceIdsJson, evidence_quotes_json AS evidenceQuotesJson, source_kinds_json AS sourceKindsJson, status, confirmed_at AS confirmedAt, rejected_at AS rejectedAt, created_at AS createdAt, updated_at AS updatedAt FROM profile_skill_suggestions WHERE id = ?", [id]);
+    return row ? this.hydrate(row) : undefined;
+  }
+
+  private hydrate(row: Record<string, unknown>): SkillSuggestion {
+    const status = ["pending", "confirmed", "rejected"].includes(String(row.status)) ? String(row.status) as SkillSuggestionStatus : "pending";
+    return {
+      id: String(row.id),
+      profileId: String(row.profileId),
+      name: String(row.name),
+      description: String(row.description ?? ""),
+      confidence: Math.max(0, Math.min(1, Number(row.confidence ?? 0))),
+      evidenceIds: jsonArray<string>(row.evidenceIdsJson),
+      evidenceQuotes: jsonArray<string>(row.evidenceQuotesJson),
+      sourceKinds: jsonArray<ProfileBuilderSourceKind>(row.sourceKindsJson),
+      status,
+      ...(row.confirmedAt ? { confirmedAt: Number(row.confirmedAt) } : {}),
+      ...(row.rejectedAt ? { rejectedAt: Number(row.rejectedAt) } : {}),
+      createdAt: Number(row.createdAt),
+      updatedAt: Number(row.updatedAt)
+    };
   }
 }
 

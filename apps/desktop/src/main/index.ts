@@ -14,7 +14,7 @@ import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session
 import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, analyzeQuestionNucleus, AnswerAgent, AgentToolRegistry, buildDynamicTechnicalLexicon, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectAliasResolver, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
-import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
+import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, SqliteSkillSuggestionRepository, type SqliteDatabase } from "./database";
 import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type OverlayPreferences, type OverlayPreferencesPatch, type ProviderSection } from "./settings-store";
 import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnection } from "./provider-preflight";
 import { discoverProviderModels } from "./model-catalog";
@@ -236,6 +236,7 @@ let historyRepository: SqliteInterviewHistoryRepository | undefined;
 let projectRepository: SqliteProjectRepository | undefined;
 let projectMemoryRepository: SqliteProjectMemoryRepository | undefined;
 let profileBuilderRepository: SqliteProfileBuilderRepository | undefined;
+let skillSuggestionRepository: SqliteSkillSuggestionRepository | undefined;
 let profileBuilderService: ProfileBuilderService | undefined;
 let projectMemoryService: ProjectMemoryService | undefined;
 let conversationRepository: SqliteConversationRepository | undefined;
@@ -849,6 +850,7 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   await nativeMouseClick(underlaySelfTestPoint.x, underlaySelfTestPoint.y);
   await waitForNativeCount(underlay, 1).catch(async (error) => { const state = await underlay.webContents.executeJavaScript("({ count: window.__nativeMouseClickCount, href: location.href, body: document.body.innerText })", true); throw new Error(`${String(error)}; underlayBounds=${JSON.stringify(underlay.getBounds())}; underlayPoint=${JSON.stringify(underlaySelfTestPoint)}; cursor=${JSON.stringify(screen.getCursorScreenPoint())}; displays=${JSON.stringify(screen.getAllDisplays().map((display) => ({ bounds: display.bounds, workArea: display.workArea, scaleFactor: display.scaleFactor }))) }; underlayState=${JSON.stringify(state)}`); });
   await underlay.webContents.executeJavaScript("window.__nativeMouseClickCount = 0", true);
+  main.hide();
   const questionWindow = manager.enterInterviewMode();
   await Promise.all(manager.currentWindows.map((window) => waitForRendererLoad(window)));
   await new Promise((resolve) => setTimeout(resolve, 250));
@@ -865,9 +867,6 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   for (const window of [questionWindow, answerWindow, controlWindow]) { window.show(); window.setAlwaysOnTop(true, "screen-saver"); window.moveTop(); }
   await nativeRaiseWindow(underlay);
   for (const window of [questionWindow, answerWindow, controlWindow]) await nativeRaiseWindow(window);
-  main.hide();
-  app.focus({ steal: true });
-  underlay.focus();
   underlay.setBounds(questionWindow.getBounds());
   underlay.show();
   underlay.focus();
@@ -1765,7 +1764,7 @@ function registerIpc(): void {
     // Keep upload local and deterministic. The user can explicitly run
     // Profile Builder from the profile page when a model call is desired.
     const summary = parsed.text.replace(/\s+/g, " ").trim().slice(0, 800);
-    const material = { rawContent: parsed.text, summary };
+    const material = { rawContent: parsed.text, summary, filename: input.filename, mimeType: input.mimeType, uploadedAt: Date.now(), parseStatus: "parsed" as const, analysisStatus: "not_started" as const };
     const saved = profileRepository.save({ ...profile, ...(input.kind === "resume" ? { resume: material } : { jobDescription: material }), updatedAt: Date.now() });
     return saved;
   });
@@ -1870,6 +1869,8 @@ function registerIpc(): void {
   ipcMain.handle("question-bank:generate-project-qa", (_event, projectId: string) => generateProjectQuestionBank(projectId));
   ipcMain.handle("question-bank:match", (_event, text: string) => questionBankRepository?.matchQuestion(text));
   ipcMain.handle("profile-builder:get", (_event, profileId: string) => profileBuilderService?.get(profileId));
+  ipcMain.handle("profile-builder:list-skill-suggestions", (_event, profileId: string, status?: import("@interview-copilot/shared").SkillSuggestionStatus) => skillSuggestionRepository?.list(profileId, status) ?? []);
+  ipcMain.handle("profile-builder:review-skill-suggestion", (_event, suggestionId: string, status: import("@interview-copilot/shared").SkillSuggestionStatus) => skillSuggestionRepository?.review(suggestionId, status));
   ipcMain.handle("profile-builder:rebuild", async (_event, profileId: string) => {
     if (!profileBuilderService) throw new Error("Profile Builder is still initializing");
     return profileBuilderService.rebuild(profileId);
@@ -2224,6 +2225,7 @@ if (hasSingleInstanceLock) {
     projectRepository = new SqliteProjectRepository(database);
     projectMemoryRepository = new SqliteProjectMemoryRepository(database);
     profileBuilderRepository = new SqliteProfileBuilderRepository(database);
+    skillSuggestionRepository = new SqliteSkillSuggestionRepository(database);
     conversationRepository = new SqliteConversationRepository(database);
     const recoveredChatMessages = conversationRepository.recoverInterruptedMessages();
     if (recoveredChatMessages > 0) appLogger.info("CHAT_INTERRUPTED_MESSAGES_RECOVERED", { count: recoveredChatMessages });
@@ -2249,6 +2251,7 @@ if (hasSingleInstanceLock) {
       knowledgeRepository,
       historyRepository,
       profileBuilderRepository,
+      skillSuggestionRepository,
       { generate: (input) => { const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings; return createProfileBuilderModel(answerProvider, { ...settings, model: taskModel(settings, "profileBuilderModel", "normalModel") }).generate(input); } },
       (record) => broadcast("profile-builder:updated", record)
     );

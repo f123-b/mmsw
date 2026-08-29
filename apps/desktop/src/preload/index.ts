@@ -14,7 +14,7 @@ import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayDisplayInfo, OverlayMode, OverlayNativeBounds } from "../main/overlay-manager";
 import type { OverlayPreferences, OverlayPreferencesPatch, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
-import type { ChatAction, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectQaGenerationResult, ProjectQuestionBankImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
+import type { ChatAction, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectQaGenerationResult, ProjectQuestionBankImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord, SkillSuggestion, SkillSuggestionStatus } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
 import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankRelationInput, QuestionBankRouteQuery, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
@@ -130,6 +130,8 @@ const api = {
   },
   profileBuilder: {
     get: (profileId: string): Promise<ProfileBuilderArtifactRecord | undefined> => ipcRenderer.invoke("profile-builder:get", profileId),
+    listSkillSuggestions: (profileId: string, status?: SkillSuggestionStatus): Promise<SkillSuggestion[]> => ipcRenderer.invoke("profile-builder:list-skill-suggestions", profileId, status),
+    reviewSkillSuggestion: (suggestionId: string, status: SkillSuggestionStatus): Promise<SkillSuggestion | undefined> => ipcRenderer.invoke("profile-builder:review-skill-suggestion", suggestionId, status),
     rebuild: (profileId: string): Promise<ProfileBuilderArtifactRecord> => ipcRenderer.invoke("profile-builder:rebuild", profileId)
   },
   projectMemory: {
