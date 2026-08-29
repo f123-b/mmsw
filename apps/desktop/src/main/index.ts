@@ -27,6 +27,7 @@ import { MiddleMouseShortcutManager, middleMouseHelperCandidates, shouldHandleMi
 import { NativeModifierShortcutManager } from "./native-modifier-shortcut";
 import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-service-manager";
 import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
+import { adaptProfileToInterviewContext } from "./profile-context-adapter";
 import { createProjectComprehensionModel, createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { parseRepositoryArchiveInWorker } from "./repository-import-worker-client";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
@@ -2307,6 +2308,8 @@ if (hasSingleInstanceLock) {
   });
   const answerContextProvider = async (question: { text: string }, profileId: string, recentTranscript: string[] = [], interviewContext?: InterviewContextSelection) => {
     const profile = profileRepository?.get(profileId);
+    const selectedJobTarget = interviewContext?.jobTargetId ? jobTargetRepository?.get(interviewContext.jobTargetId) : jobTargetRepository?.list(profileId).find((target) => target.status === "active");
+    const interviewProfile = profile ? adaptProfileToInterviewContext(profile, selectedJobTarget) : undefined;
     const normalizedQuestion = normalizeTechnicalTerms(question.text);
     const coreTechnicalQa = matchCoreTechnicalQa(normalizedQuestion);
     const projectSnapshot = projectMemoryService?.get(profileId) ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] };
@@ -2525,12 +2528,12 @@ if (hasSingleInstanceLock) {
       ]
     });
     return {
-      profileSummary: earlyProjectQaDirect ? undefined : profile?.resume?.summary,
-      jobDescriptionSummary: earlyProjectQaDirect ? undefined : profile?.jobDescription?.summary,
-      profileInstructions: earlyProjectQaDirect ? undefined : profile?.instructions,
-      expressionLevel: profile?.expressionLevel ?? "plain",
-      explainAdvancedTerms: profile?.explainAdvancedTerms ?? true,
-      skills: earlyProjectQaDirect ? [] : (profile?.skills ?? []).map((skill) => ({ id: skill.id, name: skill.name, content: `${skill.description}\n${skill.content}` })),
+      profileSummary: earlyProjectQaDirect ? undefined : interviewProfile?.candidate.resumeSummary,
+      jobDescriptionSummary: earlyProjectQaDirect ? undefined : interviewProfile?.target?.description,
+      profileInstructions: earlyProjectQaDirect ? undefined : interviewProfile?.candidate.instructions,
+      expressionLevel: interviewProfile?.candidate.expressionLevel ?? "plain",
+      explainAdvancedTerms: interviewProfile?.candidate.explainAdvancedTerms ?? true,
+      skills: earlyProjectQaDirect ? [] : (interviewProfile?.candidate.skills ?? []),
       experienceContext: earlyProjectQaDirect ? [] : experience,
       personalMemoryEvidence: earlyProjectQaDirect ? [] : personalEvidence,
       projectEvidence: earlyProjectQaDirect ? [] : trustedFactExperience.slice(0, 8),
@@ -2540,8 +2543,8 @@ if (hasSingleInstanceLock) {
       questionBankMatches: questionBankRoute?.hits ?? [],
       answerSourcePlan: sourcePlan,
       coreTechnicalQa,
-      companyContext: profile?.companyContext,
-      salaryExpectation: profile?.salaryExpectation,
+      companyContext: interviewProfile?.candidate.companyContext,
+      salaryExpectation: interviewProfile?.candidate.salaryExpectation,
       projectQaEvidence,
       retrievedKnowledge,
       recentTranscript: recentTranscript.slice(-8),
