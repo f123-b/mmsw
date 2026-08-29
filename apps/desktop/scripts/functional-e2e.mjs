@@ -258,7 +258,7 @@ function connectTarget(target) {
   return { socket, command, evaluate, rendererErrors };
 }
 
-const target = await waitForTarget((item) => item.type === "page" && item.url.includes("index.html"));
+const target = await waitForTarget((item) => item.type === "page" && item.url.includes("index.html") && !item.url.includes("window="));
 const main = connectTarget(target);
 await new Promise((resolve, reject) => { main.socket.once("open", resolve); main.socket.once("error", reject); });
 await main.command("Runtime.enable");
@@ -613,7 +613,7 @@ try {
   const controlSurface = await overlayControl.evaluate("(() => ({ surface: document.querySelector('.overlay-root')?.dataset.overlaySurface, buttons: document.querySelectorAll('button').length, contentPanels: document.querySelectorAll('.question-panel, .answer-panel').length }))()");
   const contentSurface = await overlay.evaluate("(() => ({ surface: document.querySelector('.overlay-root')?.dataset.overlaySurface, hasToolbar: Boolean(document.querySelector('.toolbar-panel')), hasQuestionPanel: Boolean(document.querySelector('.question-panel')), hasAnswerPanel: Boolean(document.querySelector('.answer-panel')) }))()");
   const answerSurface = await overlayAnswer.evaluate("(() => ({ surface: document.querySelector('.overlay-root')?.dataset.overlaySurface, hasToolbar: Boolean(document.querySelector('.toolbar-panel')), hasQuestionPanel: Boolean(document.querySelector('.question-panel')), hasAnswerPanel: Boolean(document.querySelector('.answer-panel')) }))()");
-  if (controlSurface?.surface !== "control" || controlSurface.buttons < 3 || controlSurface.contentPanels !== 0 || contentSurface?.surface !== "question" || contentSurface.hasToolbar || !contentSurface.hasQuestionPanel || contentSurface.hasAnswerPanel || answerSurface?.surface !== "answer" || answerSurface.hasToolbar || answerSurface.hasQuestionPanel || !answerSurface.hasAnswerPanel) throw new Error(`OVERLAY_SURFACE_SPLIT failed: ${JSON.stringify({ controlSurface, contentSurface, answerSurface })}`);
+  if (controlSurface?.surface !== "control" || controlSurface.buttons < 3 || controlSurface.contentPanels !== 0 || contentSurface?.surface !== "content" || contentSurface.hasToolbar || !contentSurface.hasQuestionPanel || contentSurface.hasAnswerPanel || answerSurface?.surface !== "content" || answerSurface.hasToolbar || answerSurface.hasQuestionPanel || !answerSurface.hasAnswerPanel) throw new Error(`OVERLAY_SURFACE_SPLIT failed: ${JSON.stringify({ controlSurface, contentSurface, answerSurface })}`);
   await nativeClick(".toolbar-shortcut-toggle", overlayControl);
   await waitFor(() => Boolean(document.querySelector(".shortcut-panel")), 5_000, overlay);
   await nativeClick(".toolbar-shortcut-toggle", overlayControl);

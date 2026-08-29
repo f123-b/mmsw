@@ -28,7 +28,7 @@ export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
         {!props.hudState.running || props.operationMode === "WRITTEN_TEST" ? null : <div className="toolbar-mode-switch" role="group" aria-label="回答模式"><button className={props.automationMode === "AUTO" ? "selected" : ""} onClick={() => { if (props.automationMode !== "AUTO") void props.onToggleAutomation(); }}>自动</button><button className={props.automationMode === "MANUAL" ? "selected" : ""} onClick={() => { if (props.automationMode !== "MANUAL") void props.onToggleAutomation(); }}>手动</button></div>}
         {preferences.showTranscript && <button className="toolbar-inline-action" onClick={props.onToggleTranscript} aria-label="显示或隐藏问题">问题</button>}
         {preferences.showAnswer && <button className="toolbar-inline-action" onClick={props.onToggleAnswer} aria-label="显示或隐藏回答">回答</button>}
-        <button className="toolbar-inline-action" onClick={props.onToggleShortcuts} aria-label="打开快捷操作">快捷</button>
+        <button className="toolbar-inline-action toolbar-shortcut-toggle" onClick={props.onToggleShortcuts} aria-label="打开快捷操作">快捷</button>
         <button className="toolbar-end-button" onClick={props.onRequestEndInterview} aria-label={modeLabel === "笔试" ? "结束笔试" : "结束面试"}>结束{modeLabel}</button>
       </div>
     </DraggableResizablePanel>}
