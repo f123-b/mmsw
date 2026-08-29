@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { RootErrorBoundary } from "./components/ErrorBoundary";
 import { installPreviewResizeFix } from "./overlay/preview-resize-fix";
+import { installOverlayRuntimeGuard } from "./overlay/runtime-guard";
 import "./styles.css";
 import "./overlay-simplified.css";
 
@@ -25,6 +26,7 @@ const isOverlayWindow = new URLSearchParams(window.location.search).get("window"
 if (isOverlayWindow) {
   document.documentElement.classList.add("overlay-window");
   document.body.classList.add("overlay-window");
+  if (window.interviewCopilot) installOverlayRuntimeGuard();
 } else if (window.interviewCopilot) {
   installPreviewResizeFix();
 }
