@@ -17,6 +17,7 @@ import { WrittenTestController, type WrittenTestStartOptions } from "./written-t
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, SqliteSkillSuggestionRepository, type SqliteDatabase } from "./database";
 import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type OverlayPreferences, type OverlayPreferencesPatch, type ProviderSection } from "./settings-store";
 import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnection } from "./provider-preflight";
+import { INTERVIEW_STARTUP_EVENTS, InterviewStartupTiming, type InterviewStartupEvent } from "./interview-startup-timing";
 import { discoverProviderModels } from "./model-catalog";
 import { isZipBytes, normalizeDocumentBytes, parseDocument } from "./document-parsers";
 import { SafeLogger } from "./logger";
@@ -246,6 +247,8 @@ let preparationAbortController: AbortController | undefined;
 const chatAbortControllers = new Map<string, { controller: AbortController; reason?: ChatCancelReason }>();
 const chatStreamPromises = new Set<Promise<void>>();
 const providerPreflightCache = new ProviderPreflightCache();
+let interviewStartupTiming: InterviewStartupTiming | undefined;
+let pendingStartupButtonClickAt: number | undefined;
 let appLogger: SafeLogger | undefined;
 let audioLogger: SafeLogger | undefined;
 let realtimeLogger: SafeLogger | undefined;
@@ -501,6 +504,11 @@ ipcMain.on("diagnostics:renderer-ready", (event) => {
   waiters?.forEach((resolve) => resolve());
 });
 
+ipcMain.on("diagnostics:startup-mark", (_event, event: InterviewStartupEvent) => {
+  if (!INTERVIEW_STARTUP_EVENTS.includes(event)) return;
+  markInterviewStartup(event);
+});
+
 async function waitForRendererReady(window: BrowserWindow): Promise<boolean> {
   const webContentsId = window.webContents.id;
   if (rendererAppReadyWindows.has(webContentsId)) return true;
@@ -523,6 +531,21 @@ async function waitForRendererReady(window: BrowserWindow): Promise<boolean> {
 function coordinator(): InterviewCoordinator {
   if (!interviewCoordinator) throw new Error("Interview runtime is still initializing");
   return interviewCoordinator;
+}
+
+function markInterviewStartup(event: InterviewStartupEvent): void {
+  interviewStartupTiming?.mark(event);
+  if (event === "START_BUTTON_CLICK" && !interviewStartupTiming) pendingStartupButtonClickAt = Date.now();
+}
+
+function finishInterviewStartupTrace(): void {
+  const timing = interviewStartupTiming;
+  if (!timing) return;
+  const snapshot = timing.complete();
+  appLogger?.info("INTERVIEW_STARTUP_TIMING", snapshot.durations);
+  appLogger?.info("INTERVIEW_STARTUP_TRACE", snapshot as unknown as Record<string, unknown>);
+  interviewStartupTiming = undefined;
+  pendingStartupButtonClickAt = undefined;
 }
 
 function screenshotSessionId(): string | undefined {
@@ -1642,6 +1665,8 @@ function registerIpc(): void {
   });
   ipcMain.handle("realtime:get-transcript", () => ({ ...realtimeTranscriptSnapshots }));
   ipcMain.handle("interview:start", async (_event, options: InterviewStartOptions) => {
+    interviewStartupTiming = new InterviewStartupTiming(Date.now as unknown as () => number, pendingStartupButtonClickAt ?? Date.now());
+    markInterviewStartup("START_BUTTON_CLICK");
     let coordinatorStarted = false;
     try {
       if (!profileRepository?.get(options.profileId)) throw new Error("PROFILE_NOT_FOUND: 面试档案不存在");
@@ -1658,15 +1683,21 @@ function registerIpc(): void {
           model: options.model ?? asr?.model
         });
       }
+      markInterviewStartup("PREFLIGHT_BEGIN");
       const preflight = await runProviderPreflight({ llm, asr: asr ?? { providerName: "ASR", providerType: "custom-gateway", baseUrl: options.url ?? "", apiKey: "", model: options.model ?? "", timeoutMs: 10_000, maxRetries: 0 }, embedding: providerConfigStore?.get("embedding") ?? { providerName: "Embedding", baseUrl: "", apiKey: "", model: "", timeoutMs: 10_000, maxRetries: 0 } }, true, providerPreflightCache);
+      markInterviewStartup("PREFLIGHT_END");
       if (!preflight.llm.reachable) throw new Error(`LLM_CONNECT_FAILED: ${preflight.llm.message ?? preflight.llm.status}`);
       if (!preflight.asr.reachable) throw new Error(`ASR_CONNECT_FAILED: ${preflight.asr.message ?? preflight.asr.status}`);
+      markInterviewStartup("COORDINATOR_START_BEGIN");
       const interviewId = await coordinator().start(options);
         // The main window must not remain underneath the transparent HUD. Keep
        // it available for restoration after an explicit or exceptional stop.
        mainWindow?.hide();
        overlayManager?.enterInterviewMode();
        coordinatorStarted = true;
+       markInterviewStartup("OVERLAY_SHOW_REQUEST");
+       markInterviewStartup("INTERVIEW_READY");
+       finishInterviewStartupTrace();
        return interviewId;
     } catch (error) {
       // If window creation fails after the coordinator has started, unwind the
@@ -1686,6 +1717,7 @@ function registerIpc(): void {
       const mappedCode = allowed.has(code) ? code : raw.includes("ASR") ? "ASR_CONNECT_FAILED" : raw.includes("LLM") ? "LLM_CONNECT_FAILED" : raw.includes("database") ? "DATABASE_ERROR" : "AUDIO_DEVICE_FAILED";
       const message = userFacingError(error);
       broadcast("runtime:error", { code: mappedCode, message, recoverable: mappedCode !== "PROFILE_NOT_FOUND" && mappedCode !== "SIDECAR_NOT_FOUND" });
+      finishInterviewStartupTrace();
       throw new Error(`${mappedCode}: ${message}`);
     }
   });
@@ -2568,6 +2600,7 @@ if (hasSingleInstanceLock) {
     answerAgent,
     questionDetector2,
     history: historyRepository,
+    onStartupTiming: (event) => markInterviewStartup(event),
     initialAutomationMode: overlaySettingsStore?.getAutomationMode() ?? "AUTO",
     asrSettingsProvider: (profileId) => {
       const settings = providerConfigStore?.get("asr");

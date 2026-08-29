@@ -1132,6 +1132,7 @@ export function App(): JSX.Element {
   };
   const startInterview = async () => {
     try {
+      window.interviewCopilot.diagnostics.markStartup("START_BUTTON_CLICK");
       const asrUrl = realtimeUrl.trim() || asrBaseUrl.trim();
       if (!profileId) throw new Error("PROFILE_NOT_FOUND: 请先创建或选择一个面试档案。");
       if (!currentProbeReady) throw new Error("AUDIO_PROBE_REQUIRED: 请先完成一次音频检测。");

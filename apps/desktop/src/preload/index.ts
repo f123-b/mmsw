@@ -21,6 +21,7 @@ import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provi
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 import type { ModelCatalogResult } from "../main/model-catalog";
 import type { InterviewExportResult } from "../main/history-export";
+import type { InterviewStartupEvent } from "../main/interview-startup-timing";
 
 function createRendererScreenshotRequestId(): string {
   return `screenshot-${Date.now()}-${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2, 10)}`;
@@ -36,7 +37,8 @@ function requestScreenshotAnalysis(channel: "interview:answer-screenshot" | "wri
 
 const api = {
   diagnostics: {
-    markRendererReady: () => ipcRenderer.send("diagnostics:renderer-ready")
+    markRendererReady: () => ipcRenderer.send("diagnostics:renderer-ready"),
+    markStartup: (event: InterviewStartupEvent) => ipcRenderer.send("diagnostics:startup-mark", event)
   },
   audio: {
     start: (options?: AudioStartOptions) => ipcRenderer.invoke("audio:start", options),

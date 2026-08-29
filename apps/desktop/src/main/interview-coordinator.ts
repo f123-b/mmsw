@@ -147,6 +147,8 @@ export interface InterviewCoordinatorOptions {
   contextTimeoutMs?: number;
   /** Hard boundary for local session cleanup after graceful cancellation. */
   stopTimeoutMs?: number;
+  /** Optional main-process startup trace hooks. They never affect runtime behavior. */
+  onStartupTiming?: (event: "AUDIO_READY" | "ASR_READY") => void;
 }
 
 export type InterviewCoordinatorEvent =
@@ -511,7 +513,9 @@ export class InterviewCoordinator extends EventEmitter {
       this.transition("CONNECTING");
       // The real interview path deliberately omits meterOnly so PCM reaches ASR.
       this.asr.connect({ ...startOptions, ...asrSettings, providerType, url: connectUrl, language: asrSettings?.language ?? (startOptions.language as AsrLanguage | undefined), autoReconnect: true });
+      this.options.onStartupTiming?.("ASR_READY");
       await this.options.audio.start({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true });
+      this.options.onStartupTiming?.("AUDIO_READY");
       return record.id;
     } catch (error) {
       await Promise.resolve(this.options.audio.stop()).catch(() => undefined);

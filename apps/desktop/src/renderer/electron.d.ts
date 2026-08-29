@@ -24,6 +24,7 @@ declare global {
     interviewCopilot: {
       diagnostics: {
         markRendererReady(): void;
+        markStartup(event: import("../main/interview-startup-timing").InterviewStartupEvent): void;
       };
       audio: {
         start(options?: AudioStartOptions): Promise<void>;
