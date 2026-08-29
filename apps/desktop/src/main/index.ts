@@ -587,7 +587,10 @@ async function runIndependentVisionAnswer(visionInput: ReturnType<typeof buildVi
         providerModel = event.model;
         screenshotOperations.transition(screenshotRequestId, "streaming", providerRequestId);
         recordScreenshotTrace("VISION_PROVIDER_REQUEST_RECEIVED", screenshotRequestId, { providerRequestId, answerId, providerModel: event.model, status: "streaming", messageShape: "multimodal" });
-        broadcast("realtime:message", { type: "answer_start", answerId, questionId, mode: event.mode, model: event.model });
+        // A screenshot answer is independent of the ASR question stream. Give
+        // it a stable transient group so the non-destructive answer stack can
+        // keep it visible instead of placing it in the collapsed history.
+        broadcast("realtime:message", { type: "answer_start", answerId, questionId, groupId: `screenshot-group-${screenshotRequestId}`, relation: "PRIMARY", mode: event.mode, model: event.model });
       } else if (event.type === "answer_delta") {
         answerText += event.delta;
         if (!answerText) continue;

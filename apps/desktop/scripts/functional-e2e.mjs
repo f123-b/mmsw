@@ -652,7 +652,10 @@ try {
   const screenshotButtonState = await overlay.evaluate("(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('截图回答') || (item.innerText || '').includes('附截图')); if (!button) return { found: false }; button.click(); return { found: true, disabled: button.disabled }; })()");
   if (!screenshotButtonState?.found || screenshotButtonState.disabled) throw new Error(`Screenshot button unavailable: ${JSON.stringify(screenshotButtonState)}`);
   await waitForNode(() => visionRequests.slice(beforeVisionRequests).some((request) => request.requestType === "vision" && request.hasImage && request.imageBytes > 0 && request.imageMimeType === "image/png"), 15_000);
-  await waitFor(() => (window.__e2eMainScreenshotCaptured ?? 0) > (window.__e2eMainScreenshotBaseline ?? 0), 15_000, main);
+  // The capture event is broadcast before the independent vision request and
+  // can be consumed while the renderer is between reloads. The runtime
+  // diagnostic is the authoritative end-to-end completion signal here.
+  await waitFor(() => window.interviewCopilot.screenshot.getDiagnostics().then((diagnostics) => diagnostics.lastLifecycleEvent === "SCREENSHOT_PIPELINE_COMPLETED"), 15_000, main);
   await waitFor(() => document.body.innerText.includes("Mock vision answer"), 15_000, overlay);
   evidence.push("Overlay Screenshot Button: PASS; Vision Request: PASS");
 

@@ -499,9 +499,9 @@ const useAudioStore = create<AudioStore>((set) => ({
     if (message.type === "answer_start") answerQuestionIds.set(message.answerId, message.questionId);
     const messageQuestionId = message.type === "answer_start" ? message.questionId : "answerId" in message ? answerQuestionIds.get(message.answerId) : undefined;
     const pairedQuestion = messageQuestionId ? questionsById.get(messageQuestionId) : undefined;
+    const answerGroupId = message.type === "answer_start" ? message.groupId ?? pairedQuestion?.groupId : pairedQuestion?.groupId;
     if (message.type === "answer_start") {
-      const groupId = message.groupId ?? pairedQuestion?.groupId;
-      answerThreadStore.start({ answerId: message.answerId, questionId: message.questionId, ...(groupId ? { groupId } : {}), title: groupId ? questionGroupsById.get(groupId)?.title : undefined, questionText: pairedQuestion?.text ?? "未记录问题", relation: message.relation ?? (pairedQuestion ? answerRelationForQuestion(pairedQuestion) : "PRIMARY") as OverlayAnswerRelation });
+      answerThreadStore.start({ answerId: message.answerId, questionId: message.questionId, ...(answerGroupId ? { groupId: answerGroupId } : {}), title: answerGroupId ? questionGroupsById.get(answerGroupId)?.title : undefined, questionText: pairedQuestion?.text ?? "截图识别的问题", relation: message.relation ?? (pairedQuestion ? answerRelationForQuestion(pairedQuestion) : "PRIMARY") as OverlayAnswerRelation });
     } else if (message.type === "answer_delta") {
       answerThreadStore.delta(message.answerId, message.delta);
     } else if (message.type === "answer_end") {
@@ -531,7 +531,7 @@ const useAudioStore = create<AudioStore>((set) => ({
         answerId: snapshot.displayedAnswerId,
         answerHistory: completed ? [...current.answerHistory.filter((entry) => entry.answerId !== completed.answerId), completed].slice(-8) : current.answerHistory,
         answerThreads: answerThreadStore.list(),
-        ...(pairedQuestion?.groupId ? { activeQuestionGroupId: pairedQuestion.groupId } : {}),
+        ...(answerGroupId ? { activeQuestionGroupId: answerGroupId } : {}),
         ...(pairedQuestion ? { question: pairedQuestion } : {}),
         ...(message.type === "answer_start" ? { answerMode: message.mode } : {})
       };
