@@ -22,6 +22,7 @@ interface ReplayResult {
   confirmed: string[];
   traceNames: string[];
   questionTraces: Array<Record<string, unknown>>;
+  groupUpdates: Array<{ primaryQuestion: string; items: Array<{ type: string; answerable: boolean }>; slots: Array<{ status: string }> }>;
 }
 
 async function settle(): Promise<void> {
@@ -34,6 +35,7 @@ async function replay(segments: Array<{ text: string; at: number; startMs: numbe
   const answers: string[] = [];
   const confirmed: string[] = [];
   const questionTraces: Array<Record<string, unknown>> = [];
+  const groupUpdates: ReplayResult["groupUpdates"] = [];
   const provider: AnswerProvider = {
     stream: async function* (request) {
       answers.push(request.sections.find((section) => section.name === "question")?.content ?? "");
@@ -50,6 +52,10 @@ async function replay(segments: Array<{ text: string; at: number; startMs: numbe
   coordinator.on("event", (event: { type: string; name?: string; fields?: Record<string, unknown>; event?: { type?: string; question?: { text: string } } }) => {
     if (event.type === "question" && event.event?.type === "question_confirmed") confirmed.push(event.event.question?.text ?? "");
     if (event.type === "telemetry" && event.name === "QUESTION_TRACE" && event.fields) questionTraces.push(event.fields);
+    if (event.type === "realtime_message" && "message" in event) {
+      const message = (event as { message?: { type?: string; primaryQuestion?: string; items?: Array<{ type: string; answerable: boolean }>; slots?: Array<{ status: string }> } }).message;
+      if (message?.type === "question_group_updated") groupUpdates.push({ primaryQuestion: message.primaryQuestion ?? "", items: message.items ?? [], slots: message.slots ?? [] });
+    }
   });
   await coordinator.start({ profileId: "replay-profile", url: "wss://replay.test", automationMode: "AUTO", answerMode: "NORMAL" });
   for (const [index, segment] of segments.entries()) {
@@ -61,7 +67,7 @@ async function replay(segments: Array<{ text: string; at: number; startMs: numbe
   await settle();
   const traceNames = coordinator.getRuntimeTrace(500).map((event) => event.name);
   await coordinator.stop();
-  return { answers, confirmed, traceNames, questionTraces };
+  return { answers, confirmed, traceNames, questionTraces, groupUpdates };
 }
 
 describe("2026-08-29 real interview runtime pipeline replay", () => {
@@ -193,6 +199,22 @@ describe("2026-08-29 real interview runtime pipeline replay", () => {
       answers: []
     };
     expect(formatInterviewMarkdown(nSnapshot, analyzeInterview(nSnapshot))).toContain("- 结束时间：—");
+    vi.useRealTimers();
+  });
+
+  it("keeps a continuous question and its explicit sub-questions in one runtime group", async () => {
+    vi.useFakeTimers();
+    const result = await replay([
+      { text: "C语言里，指针和数组。", at: 0, startMs: 0, endMs: 350 },
+      { text: "有什么区别？", at: 900, startMs: 900, endMs: 1_000 },
+      { text: "空间大小和常见风险这几个角度也说一下。", at: 1_800, startMs: 1_800, endMs: 2_300 },
+      { text: "下一个问题，讲CAN。", at: 2_700, startMs: 2_700, endMs: 3_100 }
+    ], 900);
+
+    expect(result.groupUpdates.some((group) => group.primaryQuestion.includes("指针和数组") && group.primaryQuestion.includes("有什么区别"))).toBe(true);
+    expect(result.groupUpdates.some((group) => group.items.some((item) => item.type === "ANSWER_CONSTRAINT" && item.answerable === false))).toBe(true);
+    expect([...result.groupUpdates].reverse().find((group: ReplayResult["groupUpdates"][number]) => group.primaryQuestion.includes("下一个问题，讲CAN"))?.primaryQuestion).toContain("下一个问题，讲CAN");
+    expect(result.traceNames.filter((name) => name === "ANSWER_REQUEST_CREATED")).toHaveLength(2);
     vi.useRealTimers();
   });
 });

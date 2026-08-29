@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
-import { AnswerAgent, InterviewHistoryStore, ModelRouter, QuestionDetector2, SessionStateMachine, type AnswerProvider } from "@interview-copilot/shared";
+import { AnswerAgent, InterviewHistoryStore, ModelRouter, QuestionDetector2, SessionStateMachine, type AnswerProvider, type QuestionCandidate } from "@interview-copilot/shared";
 import { InterviewCoordinator } from "./interview-coordinator";
 
 class FakeAudio extends EventEmitter {
@@ -369,6 +369,41 @@ describe("InterviewCoordinator software E2E", () => {
     expect(snapshot.questions.every((question) => question.status === "answered")).toBe(true);
     await coordinator.stop();
     vi.useRealTimers();
+  });
+
+  it("merges a same-group constraint before the provider request without starting a duplicate answer", async () => {
+    let releaseContext!: () => void;
+    const contextGate = new Promise<void>((resolve) => { releaseContext = resolve; });
+    let providerCalls = 0;
+    let requestedQuestion = "";
+    const provider: AnswerProvider = { stream: async function* (request) {
+      providerCalls += 1;
+      requestedQuestion = request.sections.find((section) => section.name === "question")?.content ?? "";
+      yield "合并后的回答";
+    } };
+    const coordinator = new InterviewCoordinator({
+      audio: new FakeAudio(),
+      realtime: new FakeRealtime(),
+      session: new SessionStateMachine(),
+      answerAgent: new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" })),
+      contextProvider: async () => { await contextGate; return {}; }
+    });
+    let baseQuestion: QuestionCandidate | undefined;
+    coordinator.on("event", (event: { type: string; event?: { type?: string; question?: QuestionCandidate } }) => {
+      if (event.type === "question" && event.event?.type === "question_confirmed") baseQuestion = event.event.question;
+    });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
+    const baseTask = coordinator.answerQuestionText("C语言里，指针和数组有什么区别？");
+    for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
+    expect(baseQuestion?.groupId).toBeDefined();
+    await coordinator.answer({ id: "constraint-before-token", text: "请从空间大小和常见风险这几个角度也说一下", confidence: "high", score: 1, source: "extractor", detectedAt: 1_100, status: "confirmed", groupId: baseQuestion?.groupId, relationType: "ANSWER_CONSTRAINT", answerable: false });
+    releaseContext();
+    await baseTask;
+
+    expect(providerCalls).toBe(1);
+    expect(requestedQuestion).toContain("C语言里，指针和数组有什么区别？");
+    expect(requestedQuestion).toContain("空间大小和常见风险这几个角度也说一下");
+    await coordinator.stop();
   });
 
   it("closes the answer state when the model fails after answer_start", async () => {

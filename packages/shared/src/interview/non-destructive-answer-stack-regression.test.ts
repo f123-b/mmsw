@@ -42,8 +42,10 @@ describe("Non-destructive Answer Stack real interview regressions", () => {
     state.start("answer-b");
     state.delta("answer-b", "sizeof 数组得到整个数组大小。");
 
-    expect(state.snapshot.displayedText).toContain("指针保存地址");
-    expect(state.snapshot.displayedText).toContain("sizeof 数组");
+    expect(state.snapshot.visibleAnswers.map((answer) => answer.text)).toEqual([
+      "指针保存地址，数组代表连续内存。",
+      "sizeof 数组得到整个数组大小。"
+    ]);
   });
 
   it("tracks explicit malloc/free sub-question slots instead of only answer count", () => {
@@ -56,5 +58,36 @@ describe("Non-destructive Answer Stack real interview regressions", () => {
 
     expect(group.slots).toHaveLength(3);
     expect(group.slots?.map((slot) => slot.status)).toEqual(["pending", "pending", "pending"]);
+  });
+
+  it("keeps conditional context, constraints, examples and explicit topic switches in the right groups", () => {
+    const builder = new TurnBuilder();
+    const manager = new QuestionGroupManager(builder);
+    const contextTurn = builder.build({ id: "conditional-context", text: "如果有多个任务同时访问设备状态。", startMs: 0, endMs: 400 });
+    const questionTurn = builder.build({ id: "conditional-question", text: "你怎么设计？", startMs: 500, endMs: 800 });
+    const context = manager.add({ turn: contextTurn, question: question("conditional-context-q", contextTurn.text), now: 1_000 });
+    const nucleus = manager.add({ turn: questionTurn, question: question("conditional-question-q", questionTurn.text), now: 1_100 });
+    const constraint = manager.add({ turn: questionTurn, question: question("constraint-q", "请从空间大小和常见风险这几个角度也说一下"), now: 1_200 });
+    const example = manager.add({ turn: questionTurn, question: question("example-q", "比如任务栈溢出和竞态条件"), now: 1_300 });
+    const nextTopic = manager.add({ turn: builder.build({ id: "new-topic", text: "下一个问题，讲CAN", startMs: 1_500, endMs: 1_800 }), question: question("new-topic-q", "下一个问题，讲CAN"), now: 1_800 });
+
+    expect(nucleus.group.id).toBe(context.group.id);
+    expect(nucleus.group.primaryQuestion).toBe("如果有多个任务同时访问设备状态你怎么设计？");
+    expect(constraint.group.constraints).toContain("请从空间大小和常见风险这几个角度也说一下");
+    expect(example.group.examples).toContain("比如任务栈溢出和竞态条件");
+    expect(nextTopic.group.id).not.toBe(context.group.id);
+    expect(nextTopic.relation?.type).toBe("NEW_TOPIC");
+  });
+
+  it("reports slot coverage independently from the number of generated answers", () => {
+    const builder = new TurnBuilder();
+    const manager = new QuestionGroupManager(builder);
+    const turn = builder.build({ id: "coverage", text: "malloc怎么用？free怎么配对？", startMs: 0, endMs: 500 });
+    const first = manager.add({ turn, question: question("coverage-1", "malloc怎么用？"), now: 1_000 });
+    const second = manager.add({ turn, question: question("coverage-2", "free怎么配对？"), now: 1_100 });
+    manager.mark(first.item.question.id, "answered");
+    manager.mark(second.item.question.id, "queued");
+
+    expect(manager.slotCoverage(first.group.id)).toMatchObject({ total: 2, covered: 2, answered: 1, pending: 0, rate: 1 });
   });
 });
