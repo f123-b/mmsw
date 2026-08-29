@@ -5,5 +5,6 @@ import type { OverlayRootProps } from "./OverlayRoot";
 
 /** Selects a native surface without sharing an all-purpose OverlayRoot tree. */
 export function OverlayWindowRoot(props: OverlayRootProps): JSX.Element {
-  return props.surface === "control" ? <ControlOverlayRoot {...props} /> : <ContentOverlayRoot {...props} />;
+  if (props.surface === "control") return <ControlOverlayRoot {...props} />;
+  return <ContentOverlayRoot {...props} panel={props.surface === "question" ? "question" : props.surface === "answer" ? "answer" : "all"} />;
 }

@@ -1,21 +1,26 @@
 import { useEffect, useState, type JSX } from "react";
 import type { OverlayPreferences } from "../../shared/overlay-preferences";
 import { DEFAULT_OVERLAY_PREFERENCES } from "../../shared/overlay-preferences";
-import type { OverlayRootProps } from "./OverlayRoot";
+import { DraggableResizablePanel, type OverlayPanelLayout, type OverlayRootProps } from "./OverlayRoot";
 
 /** ControlWindow deliberately renders only the always-clickable toolbar. */
 export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
   const [preferences, setPreferences] = useState<OverlayPreferences>(DEFAULT_OVERLAY_PREFERENCES);
+  const [layoutEditMode, setLayoutEditMode] = useState(false);
+  const [layout, setLayout] = useState<OverlayPanelLayout>(() => ({ x: 0, y: 0, width: window.innerWidth, height: window.innerHeight, visible: true, collapsed: false, locked: false, opacity: 1 }));
   useEffect(() => {
     let disposed = false;
     void window.interviewCopilot.overlay.getPreferences().then((next) => { if (!disposed && next) setPreferences(next); }).catch(() => undefined);
     const unsubscribe = window.interviewCopilot.events.onOverlayPreferences((next) => { if (!disposed) setPreferences(next); });
-    return () => { disposed = true; unsubscribe(); };
+    const unsubscribeLayoutEdit = window.interviewCopilot.events.onOverlayLayoutEditMode((enabled) => { if (!disposed) setLayoutEditMode(enabled); });
+    const onResize = () => setLayout((current) => ({ ...current, width: window.innerWidth, height: window.innerHeight }));
+    window.addEventListener("resize", onResize);
+    return () => { disposed = true; unsubscribe(); unsubscribeLayoutEdit(); window.removeEventListener("resize", onResize); };
   }, []);
   const modeLabel = props.operationMode === "WRITTEN_TEST" ? "笔试" : "面试";
   const statusLabel = !props.hudState.running ? "未开始" : props.answerStreaming ? "正在生成" : props.answerText ? "回答已就绪" : "正在听取";
   return <main className="overlay-root control-overlay-root" data-overlay-surface="control" data-hud-state={statusLabel}>
-    {preferences.showToolbar && <div className="floating-panel toolbar-panel" style={{ left: 0, top: 0, width: "100%", height: "100%" }}>
+    {preferences.showToolbar && <DraggableResizablePanel panel="toolbar" nativePanel="control" layout={layout} onChange={(_panel, patch) => setLayout((current) => ({ ...current, ...patch }))} onCommit={() => undefined} editMode={layoutEditMode} className="toolbar-panel">
       <div className="floating-toolbar hud-interactive-region" role="toolbar" aria-label={`${modeLabel}控制栏`}>
         <span className="toolbar-audio-mark" aria-hidden="true">≈</span>
         <div className="toolbar-runtime"><span>{statusLabel}</span></div>
@@ -26,6 +31,6 @@ export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
         <button className="toolbar-inline-action" onClick={props.onToggleShortcuts} aria-label="打开快捷操作">快捷</button>
         <button className="toolbar-end-button" onClick={props.onRequestEndInterview} aria-label={modeLabel === "笔试" ? "结束笔试" : "结束面试"}>结束{modeLabel}</button>
       </div>
-    </div>}
+    </DraggableResizablePanel>}
   </main>;
 }

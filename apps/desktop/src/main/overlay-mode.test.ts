@@ -11,16 +11,17 @@ function fakeWindow(): OverlayWindowLike & { setFocusable: ReturnType<typeof vi.
 }
 
 describe("applyOverlayMode", () => {
-  it("keeps the transparent fullscreen background click-through even in interactive mode", () => {
+  it("makes a bounded native panel interactive in interactive mode", () => {
     const window = fakeWindow();
-    applyOverlayMode(window, "interactive", false);
+    applyOverlayMode(window, "interactive");
     expect(window.setFocusable).toHaveBeenCalledWith(false);
-    expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(true, { forward: true });
+    expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(false, { forward: true });
   });
 
-  it("claims mouse input only while the renderer reports a concrete HUD hit region", () => {
+  it("keeps a passive native panel click-through", () => {
     const window = fakeWindow();
-    applyOverlayMode(window, "passive", true);
-    expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(false, { forward: true });
+    applyOverlayMode(window, "passive");
+    expect(window.setFocusable).toHaveBeenCalledWith(false);
+    expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(true, { forward: true });
   });
 });

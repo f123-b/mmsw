@@ -6,7 +6,7 @@ import { version as osVersion } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { AudioManager, type AudioStartOptions } from "./audio-manager";
-import { OverlayManager, type OverlayMode } from "./overlay-manager";
+import { OverlayManager, type OverlayMode, type OverlayNativeBounds, type OverlayNativePanel, type OverlayWindowSurface } from "./overlay-manager";
 import { createScreenshotFixtureResult, ScreenshotManager, type ScreenshotRegion } from "./screenshot-manager";
 import { createScreenshotRequestId, SCREENSHOT_PROMPT, ScreenshotOperationRegistry, ScreenshotTraceBuffer, withScreenshotTimeout, type ScreenshotTraceEvent, type ScreenshotTraceEventName } from "./screenshot-pipeline";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
@@ -24,6 +24,7 @@ import { buildConversationHistory } from "./chat-context";
 import { chatFailureText, classifyChatError, PROJECT_AGENT_TIMEOUT_MS } from "../shared/chat-errors";
 import { ShutdownController } from "./shutdown-controller";
 import { MiddleMouseShortcutManager, middleMouseHelperCandidates, shouldHandleMiddleMouseShortcut } from "./middle-mouse-shortcut";
+import { NativeModifierShortcutManager } from "./native-modifier-shortcut";
 import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-service-manager";
 import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
 import { createProjectComprehensionModel, createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
@@ -223,6 +224,7 @@ const questionDetector2 = new QuestionDetector2({
 let interviewCoordinator: InterviewCoordinator | undefined;
 let writtenTestController: WrittenTestController | undefined;
 let middleMouseShortcutManager: MiddleMouseShortcutManager | undefined;
+let nativeModifierShortcutManager: NativeModifierShortcutManager | undefined;
 let profileRepository: SqliteProfileRepository | undefined;
 let knowledgeRepository: SqliteKnowledgeRepository | undefined;
 let questionBankRepository: SqliteQuestionBankRepository | undefined;
@@ -269,6 +271,7 @@ const rendererAppReadyWaiters = new Map<number, Set<() => void>>();
 const shutdownController = new ShutdownController([
   { name: "unregister-shortcuts", run: () => globalShortcut.unregisterAll() },
   { name: "stop-middle-mouse-shortcut", run: () => middleMouseShortcutManager?.stop() },
+  { name: "stop-native-modifier-shortcut", run: () => nativeModifierShortcutManager?.stop() },
   { name: "abort-preparation", run: () => preparationAbortController?.abort() },
   { name: "abort-chat", run: () => chatAbortControllers.forEach((entry) => { entry.reason = "shutdown"; entry.controller.abort(); }) },
   { name: "wait-chat", run: async () => { await Promise.allSettled([...chatStreamPromises]); } },
@@ -326,7 +329,7 @@ function verifyPreload(): boolean {
   return exists;
 }
 
-function attachRendererDiagnostics(window: BrowserWindow, windowName: "main" | "overlay" | "overlay-control"): void {
+function attachRendererDiagnostics(window: BrowserWindow, windowName: "main" | "overlay" | "overlay-question" | "overlay-answer" | "overlay-control"): void {
   window.webContents.on("did-start-loading", () => {
     appLogger?.info("RENDERER_LOAD_STARTED", { window: windowName });
   });
@@ -408,9 +411,9 @@ async function captureVisibleWindow(window: BrowserWindow): Promise<Buffer> {
   throw new Error("Production screenshot contains no visible pixels");
 }
 
-async function loadRenderer(window: BrowserWindow, overlay: false | "content" | "control" = false): Promise<void> {
+async function loadRenderer(window: BrowserWindow, overlay: false | OverlayWindowSurface = false): Promise<void> {
   const isOverlay = overlay !== false;
-  const windowMode = overlay === "control" ? "overlay-control" : isOverlay ? "overlay" : "main";
+  const windowMode = overlay === "control" ? "overlay-control" : overlay === "question" ? "overlay-question" : overlay === "answer" ? "overlay-answer" : "main";
   const windowName = isOverlay ? windowMode : "main";
   attachRendererDiagnostics(window, windowName);
   appLogger?.info("RENDERER_LOAD_STARTED", { window: windowName });
@@ -477,9 +480,10 @@ function broadcast(channel: string, payload: unknown): void {
   broadcastToWindows(channel, payload);
 }
 
-function rendererWindowName(window: BrowserWindow | null): "main" | "overlay" | "overlay-control" | "unknown" {
+function rendererWindowName(window: BrowserWindow | null): "main" | "overlay-question" | "overlay-answer" | "overlay-control" | "unknown" {
   if (window && window === mainWindow) return "main";
-  if (window && window === overlayManager?.currentWindow) return "overlay";
+  if (window && window === overlayManager?.currentQuestionWindow) return "overlay-question";
+  if (window && window === overlayManager?.currentAnswerWindow) return "overlay-answer";
   if (window && window === overlayManager?.currentControlWindow) return "overlay-control";
   return "unknown";
 }
@@ -1411,16 +1415,13 @@ function registerIpc(): void {
    });
    ipcMain.handle("overlay:enter-layout-edit", () => { overlayManager?.setLayoutEditMode(true); return true; });
    ipcMain.handle("overlay:finish-layout-edit", () => { overlayManager?.finishLayoutEditMode(); return true; });
+   ipcMain.handle("overlay:set-window-bounds", (_event, panel: OverlayNativePanel, bounds: OverlayNativeBounds) => {
+     if (!["question", "answer", "control"].includes(panel) || !bounds || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)) return false;
+     overlayManager?.setNativeWindowBounds(panel, bounds);
+     return true;
+   });
    ipcMain.handle("overlay:set-share-mode", (_event, enabled: boolean) => { overlayManager?.setShareMode(Boolean(enabled)); return overlayManager?.hudState; });
    ipcMain.handle("overlay:toggle-share-mode", () => { overlayManager?.toggleShareMode(); return overlayManager?.hudState; });
-  ipcMain.handle("overlay:set-control-region", (_event, interactive: boolean) => {
-    overlayManager?.setControlRegion(Boolean(interactive));
-    return true;
-  });
-  ipcMain.handle("overlay:set-interaction-lock", (_event, locked: boolean) => {
-    overlayManager?.setInteractionLock(Boolean(locked));
-    return true;
-  });
   ipcMain.handle("overlay:set-mode", (_event, mode: OverlayMode) => {
     overlayManager?.setMode(mode);
     broadcast("overlay:mode", mode);
@@ -2454,12 +2455,17 @@ if (hasSingleInstanceLock) {
   const createdMainWindow = createMainWindow();
   overlayManager = new OverlayManager({
     preloadPath,
-    loadRenderer: (window, surface = "content") => loadRenderer(window, surface),
+    loadRenderer: (window, surface = "question") => loadRenderer(window, surface),
     getMainWindow: () => mainWindow,
     captureProtectionEnabled: overlaySettingsStore?.get().captureProtection ?? true,
     onCaptureProtectionDiagnostic: (event, fields) => {
       appLogger?.info(event, fields);
       broadcast("overlay:capture-protection-diagnostic", { event, fields });
+    },
+    onNativeBoundsChanged: (panel, bounds, display) => {
+      const key = panel === "question" ? "questionWindow" : panel === "answer" ? "answerWindow" : "controlBar";
+      const next = overlaySettingsStore?.setPreferences({ [key]: { x: bounds.x - display.workArea.x, y: bounds.y - display.workArea.y, width: bounds.width, height: bounds.height, displayId: display.id, scaleFactor: display.scaleFactor } });
+      if (next) broadcast("overlay:preferences", next);
     },
     onHUDStateChange: (state) => broadcast("overlay:state", state)
   });
@@ -2468,7 +2474,8 @@ if (hasSingleInstanceLock) {
     alwaysOnTop: true,
     interactionMode: "click_through",
     mousePassthrough: true,
-    wheelRouting: "overlay_under_cursor"
+    wheelRouting: "overlay_under_cursor",
+    temporaryInteractionModifier: "ctrl"
   });
   if (initialOverlayPreferences) overlayManager.applyLayoutPreferences(initialOverlayPreferences);
   appLogger?.info("OVERLAY_CAPTURE_PROTECTION_RUNTIME", {
@@ -2478,6 +2485,12 @@ if (hasSingleInstanceLock) {
   });
   registerIpc();
   registerShortcuts();
+  if (middleMouseHelper) {
+    nativeModifierShortcutManager = new NativeModifierShortcutManager(middleMouseHelper, (event) => {
+      overlayManager?.setTemporaryInteraction(event.modifier, event.pressed);
+    }, (message) => realtimeLogger?.warn(message));
+    if (!nativeModifierShortcutManager.start()) appLogger?.warn("NATIVE_MODIFIER_HELPER_NOT_STARTED");
+  }
 
   audioManager.on("event", (event) => { if (event.type === "audio_error") audioLogger?.error("audio error", { component: event.component, recoverable: event.recoverable }); broadcast("audio:event", event); });
   audioManager.on("process", (state) => broadcast("audio:process", state));

@@ -15,7 +15,7 @@ mod windows_capture {
     use std::mem::size_of;
     use std::path::Path;
     use std::ptr::null_mut;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{atomic::{AtomicU8, Ordering}, Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
@@ -46,8 +46,13 @@ mod windows_capture {
     const SM_CXVIRTUALSCREEN: i32 = 78;
     const SM_CYVIRTUALSCREEN: i32 = 79;
     const WH_MOUSE_LL: i32 = 14;
+    const WH_KEYBOARD_LL: i32 = 13;
     const WM_MBUTTONDOWN: usize = 0x0207;
     const WM_MOUSEWHEEL: usize = 0x020A;
+    const WM_KEYDOWN: usize = 0x0100;
+    const WM_KEYUP: usize = 0x0101;
+    const WM_SYSKEYDOWN: usize = 0x0104;
+    const WM_SYSKEYUP: usize = 0x0105;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -73,6 +78,16 @@ mod windows_capture {
     struct MouseHookStruct {
         pt: Point,
         mouseData: u32,
+        flags: u32,
+        time: u32,
+        dwExtraInfo: usize,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct KeyboardHookStruct {
+        vkCode: u32,
+        scanCode: u32,
         flags: u32,
         time: u32,
         dwExtraInfo: usize,
@@ -271,7 +286,7 @@ mod windows_capture {
             }
         }
         let mode = mode.ok_or_else(|| "missing --mode".to_string())?;
-        let output = if mode == "mouse-watch" {
+        let output = if mode == "mouse-watch" || mode == "keyboard-watch" {
             output.unwrap_or_default()
         } else {
             output.ok_or_else(|| "missing --output".to_string())?
@@ -689,9 +704,52 @@ mod windows_capture {
         CallNextHookEx(0, code, wparam, lparam)
     }
 
+    static MODIFIER_STATE: AtomicU8 = AtomicU8::new(0);
+
+    fn modifier_for_vk(vk_code: u32) -> Option<(&'static str, u8)> {
+        match vk_code {
+            0xA2 | 0xA3 | 0x11 => Some(("ctrl", 1)),
+            0xA0 | 0xA1 | 0x10 => Some(("shift", 2)),
+            0xA4 | 0xA5 | 0x12 => Some(("alt", 4)),
+            _ => None,
+        }
+    }
+
+    unsafe extern "system" fn keyboard_hook(code: i32, wparam: usize, lparam: isize) -> isize {
+        if code >= 0 && lparam != 0 && (wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN || wparam == WM_KEYUP || wparam == WM_SYSKEYUP) {
+            let keyboard = *(lparam as *const KeyboardHookStruct);
+            if let Some((modifier, bit)) = modifier_for_vk(keyboard.vkCode) {
+                let pressed = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
+                let previous = MODIFIER_STATE.load(Ordering::Relaxed);
+                let next = if pressed { previous | bit } else { previous & !bit };
+                if next != previous {
+                    MODIFIER_STATE.store(next, Ordering::Relaxed);
+                    println!(r#"{{"event":"modifier","modifier":"{}","pressed":{}}}"#, modifier, pressed);
+                    let _ = io::stdout().flush();
+                }
+            }
+        }
+        CallNextHookEx(0, code, wparam, lparam)
+    }
+
     fn watch_mouse() -> Result<(), String> {
         unsafe {
             let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), 0, 0);
+            if hook == 0 {
+                return Err(format!("SetWindowsHookExW failed: {}", GetLastError()));
+            }
+            println!(r#"{{"event":"ready"}}"#);
+            let _ = io::stdout().flush();
+            let mut message = std::mem::zeroed::<Msg>();
+            while GetMessageW(&mut message, 0, 0, 0) > 0 {}
+            UnhookWindowsHookEx(hook);
+        }
+        Ok(())
+    }
+
+    fn watch_keyboard() -> Result<(), String> {
+        unsafe {
+            let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), 0, 0);
             if hook == 0 {
                 return Err(format!("SetWindowsHookExW failed: {}", GetLastError()));
             }
@@ -717,6 +775,15 @@ mod windows_capture {
         };
         if args.mode == "mouse-watch" {
             return match watch_mouse() {
+                Ok(()) => 0,
+                Err(error) => {
+                    println!(r#"{{"event":"error","error":"{}"}}"#, json_string(&error));
+                    2
+                }
+            };
+        }
+        if args.mode == "keyboard-watch" {
+            return match watch_keyboard() {
                 Ok(()) => 0,
                 Err(error) => {
                     println!(r#"{{"event":"error","error":"{}"}}"#, json_string(&error));

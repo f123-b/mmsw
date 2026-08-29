@@ -21,7 +21,7 @@ function FatalStartupError() {
 
 const rootElement = document.getElementById("root");
 const overlayWindowMode = new URLSearchParams(window.location.search).get("window");
-const isOverlayWindow = overlayWindowMode === "overlay" || overlayWindowMode === "overlay-control";
+const isOverlayWindow = overlayWindowMode === "overlay" || overlayWindowMode === "overlay-question" || overlayWindowMode === "overlay-answer" || overlayWindowMode === "overlay-control";
 if (isOverlayWindow) {
   document.documentElement.classList.add("overlay-window");
   document.body.classList.add("overlay-window");

@@ -753,7 +753,7 @@ function TaskModelRoutingPanel({ values, onChange }: { values: Record<TaskModelK
 }
 
 export function App(): JSX.Element {
-  const overlaySurface = useMemo(() => { const mode = new URLSearchParams(window.location.search).get("window"); return mode === "overlay-control" ? "control" : mode === "overlay" ? "content" : undefined; }, []);
+  const overlaySurface = useMemo(() => { const mode = new URLSearchParams(window.location.search).get("window"); return mode === "overlay-control" ? "control" : mode === "overlay-question" ? "question" : mode === "overlay-answer" ? "answer" : mode === "overlay" ? "content" : undefined; }, []);
   const isOverlay = Boolean(overlaySurface);
   const captureTest = useMemo(() => new URLSearchParams(window.location.search).get("capture-test") === "1", []);
   const store = useAudioStore();

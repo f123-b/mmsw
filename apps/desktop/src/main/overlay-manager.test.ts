@@ -18,18 +18,18 @@ describe("applyOverlayMode", () => {
     expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(true, { forward: true });
   });
 
-  it("keeps the transparent fullscreen background click-through in interactive mode", () => {
+  it("makes a bounded native panel interactive in interactive mode", () => {
     const window = makeWindow();
     applyOverlayMode(window, "interactive");
     expect(window.setFocusable).toHaveBeenCalledWith(false);
-    expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(true, { forward: true });
+    expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(false, { forward: true });
   });
 
-  it("temporarily enables native hit testing only for a passive control region", () => {
+  it("keeps a passive native panel click-through", () => {
     const window = makeWindow();
-    applyOverlayMode(window, "passive", true);
+    applyOverlayMode(window, "passive");
     expect(window.setFocusable).toHaveBeenCalledWith(false);
-    expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(false, { forward: true });
+    expect(window.setIgnoreMouseEvents).toHaveBeenCalledWith(true, { forward: true });
   });
 
   it("toggles mode for the passive recovery shortcut", () => {
