@@ -328,6 +328,14 @@ async function clickSelector(selector, client = main) {
   await sleep(180);
 }
 
+async function nativeClick(selector, client) {
+  const point = await client.evaluate(`(() => { const element = document.querySelector(${JSON.stringify(selector)}); if (!element) return undefined; const rect = element.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }; })()`);
+  if (!point) throw new Error(`Native click target not found: ${selector}`);
+  await client.command("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1 });
+  await client.command("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", clickCount: 1 });
+  await sleep(250);
+}
+
 async function fillLabel(labelText, value, client = main) {
   const filled = await client.evaluate(`(() => { const label = [...document.querySelectorAll('label')].find((item) => (item.innerText || '').includes(${JSON.stringify(labelText)})); const control = label?.querySelector('input,textarea,select'); if (!control) return false; const setter = Object.getOwnPropertyDescriptor(control.constructor.prototype, 'value')?.set; setter?.call(control, ${JSON.stringify(value)}); control.dispatchEvent(new Event('input', { bubbles: true })); control.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
   if (!filled) throw new Error(`Form control not found: ${labelText}`);
@@ -354,6 +362,7 @@ async function screenshot(name, client = main) {
 
 const evidence = [];
 let overlay;
+let overlayControl;
 try {
   await waitFor(() => document.documentElement?.dataset.appReady === "true");
   if (answerRequests.length !== 0) throw new Error(`STARTUP_LLM_REQUEST_DETECTED: ${answerRequests.length}`);
@@ -582,13 +591,26 @@ try {
   evidence.push("Probe: PASS; PROBE_COMPLETES_BEFORE_INTERVIEW_START: PASS");
   await clickSelector(".setup-modal .dark-pill");
   await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "RUNNING"), 15_000);
-  const overlayTarget = await waitForTarget((item) => item.type === "page" && item.url.includes("window=overlay"), 15_000);
+  const overlayTarget = await waitForTarget((item) => { try { return item.type === "page" && new URL(item.url).searchParams.get("window") === "overlay"; } catch { return false; } }, 15_000);
   overlay = connectTarget(overlayTarget);
   await new Promise((resolve, reject) => { overlay.socket.once("open", resolve); overlay.socket.once("error", reject); });
   await overlay.command("Runtime.enable");
   await overlay.command("Log.enable");
+  const overlayControlTarget = await waitForTarget((item) => { try { return item.type === "page" && new URL(item.url).searchParams.get("window") === "overlay-control"; } catch { return false; } }, 15_000);
+  overlayControl = connectTarget(overlayControlTarget);
+  await new Promise((resolve, reject) => { overlayControl.socket.once("open", resolve); overlayControl.socket.once("error", reject); });
+  await overlayControl.command("Runtime.enable");
+  await overlayControl.command("Log.enable");
   await overlay.evaluate("window.__e2eScreenshotCaptured = 0; window.interviewCopilot.events.onScreenshot(() => { window.__e2eScreenshotCaptured += 1; });");
   await main.evaluate("window.__e2eMainScreenshotCaptured = 0; window.interviewCopilot.events.onScreenshot(() => { window.__e2eMainScreenshotCaptured += 1; });");
+  const controlSurface = await overlayControl.evaluate("(() => ({ surface: document.querySelector('.overlay-root')?.dataset.overlaySurface, buttons: document.querySelectorAll('button').length, contentPanels: document.querySelectorAll('.question-panel, .answer-panel').length }))()");
+  const contentSurface = await overlay.evaluate("(() => ({ surface: document.querySelector('.overlay-root')?.dataset.overlaySurface, hasToolbar: Boolean(document.querySelector('.toolbar-panel')) }))()");
+  if (controlSurface?.surface !== "control" || controlSurface.buttons < 3 || controlSurface.contentPanels !== 0 || contentSurface?.surface !== "content" || contentSurface.hasToolbar) throw new Error(`OVERLAY_SURFACE_SPLIT failed: ${JSON.stringify({ controlSurface, contentSurface })}`);
+  await nativeClick(".toolbar-shortcut-toggle", overlayControl);
+  await waitFor(() => Boolean(document.querySelector(".shortcut-panel")), 5_000, overlay);
+  await nativeClick(".toolbar-shortcut-toggle", overlayControl);
+  await waitFor(() => !document.querySelector(".shortcut-panel"), 5_000, overlay);
+  evidence.push("Overlay control surface: PASS; native first-click toolbar action: PASS; content surface remains panel-only: PASS");
   await screenshot("10-interview-running.png", overlay);
    const overlayStructure = await overlay.evaluate("(() => { const question = document.querySelector('.question-thread-panel'); const answer = document.querySelector('.answer-thread-panel'); const qPanel = document.querySelector('.question-panel')?.getBoundingClientRect(); const aPanel = document.querySelector('.answer-panel')?.getBoundingClientRect(); const bodyText = document.body.innerText; return { questionOverflow: question ? getComputedStyle(question).overflowY : '', answerOverflow: answer ? getComputedStyle(answer).overflowY : '', questionPointerEvents: question ? getComputedStyle(question).pointerEvents : '', answerPointerEvents: answer ? getComputedStyle(answer).pointerEvents : '', hasFullTranscript: Boolean(document.querySelector('.transcript-scroll, .transcript-bubble, .timeline-scroll')), hasNavigator: bodyText.includes('问题导航') || bodyText.includes('QUESTION NAVIGATOR'), hasReader: bodyText.includes('答案阅读器') || bodyText.includes('ANSWER READER'), independentPanels: Boolean(qPanel && aPanel && qPanel.width > 0 && aPanel.width > 0 && qPanel.left !== aPanel.left) }; })()");
   if (!overlayStructure || !['auto', 'scroll'].includes(overlayStructure.questionOverflow) || !['auto', 'scroll'].includes(overlayStructure.answerOverflow) || overlayStructure.questionPointerEvents !== 'auto' || overlayStructure.answerPointerEvents !== 'auto' || overlayStructure.hasFullTranscript || !overlayStructure.hasNavigator || !overlayStructure.hasReader || !overlayStructure.independentPanels) throw new Error(`OVERLAY_SCROLL_LAYOUT_REGRESSION failed: ${JSON.stringify(overlayStructure)}`);
@@ -709,7 +731,7 @@ try {
   const historyAfterDelete = await main.evaluate("window.interviewCopilot.history.list().then((records) => records.length)");
   if (historyAfterDelete !== historyBeforeDelete - 1) throw new Error(`History delete failed: ${historyBeforeDelete} -> ${historyAfterDelete}`);
   evidence.push("History deletion cascade: PASS");
-  if (main.rendererErrors.length || (overlay?.rendererErrors.length ?? 0)) throw new Error(`Critical renderer errors: ${[...main.rendererErrors, ...(overlay?.rendererErrors ?? [])].join(" | ")}`);
+  if (main.rendererErrors.length || (overlay?.rendererErrors.length ?? 0) || (overlayControl?.rendererErrors.length ?? 0)) throw new Error(`Critical renderer errors: ${[...main.rendererErrors, ...(overlay?.rendererErrors ?? []), ...(overlayControl?.rendererErrors ?? [])].join(" | ")}`);
   evidence.push("Critical Renderer Errors: 0");
 } catch (error) {
   evidence.push(`FUNCTIONAL_INTERVIEW_E2E: FAIL · ${String(error)}`);
@@ -719,6 +741,7 @@ try {
   const report = `# Functional Interview E2E Report\n\nDate: ${new Date().toISOString()}\n\n${evidence.map((item) => `- ${item}`).join("\n")}\n\n## Test providers\n\n- Mock Audio Sidecar: ${audioSidecar}\n- Mock ASR Gateway: ws://127.0.0.1:${asrPort}/realtime\n- Mock LLM Provider: http://127.0.0.1:${mockPort}\n- Real credentials used: none\n\n## Evidence\n\nScreenshots are generated from the running Electron application and the real renderer/IPC/coordinator/answer/history path.\n`;
   await writeFile(join(artifactDirectory, "FUNCTIONAL_TEST_REPORT.md"), report, "utf8");
   overlay?.socket.close();
+  overlayControl?.socket.close();
   main.socket.close();
   asrServer.close();
   mockServer.close();

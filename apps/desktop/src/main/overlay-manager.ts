@@ -4,7 +4,7 @@ import { applyOverlayMode, nextOverlayMode, type OverlayMode } from "./overlay-m
 import { applyCaptureProtection, getCaptureProtectionCapabilities, type CaptureProtectionCapabilities, type CaptureProtectionState } from "./overlay-capture-protection";
 import { initialHUDState, reduceHUDState, type HUDAction, type HUDState } from "./hud-state";
 import { calculateHUDLayout, type HUDLayout, type HUDWorkArea } from "./hud-layout";
-import type { MouseInteractionMode, OverlayBehaviorPreferences, WheelRoutingMode } from "../shared/overlay-preferences";
+import type { MouseInteractionMode, OverlayBehaviorPreferences, OverlayPreferences, WheelRoutingMode } from "../shared/overlay-preferences";
 import { initialOverlayLifecycleState, isOverlayLayoutEditing, reduceOverlayLifecycle, type OverlayLifecycleState } from "./overlay-lifecycle";
 
 export { applyOverlayMode, nextOverlayMode } from "./overlay-mode";
@@ -27,7 +27,7 @@ export interface OverlayDisplayInfo {
 
 export interface OverlayManagerOptions {
   preloadPath?: string;
-  loadRenderer: (window: BrowserWindow) => Promise<void>;
+  loadRenderer: (window: BrowserWindow, surface?: "content" | "control") => Promise<void>;
   getMainWindow?: () => BrowserWindow | undefined;
   captureProtectionEnabled?: boolean;
   onCaptureProtectionDiagnostic?: (event: string, fields: Record<string, unknown>) => void;
@@ -38,6 +38,7 @@ export type OverlayPanelCommand = "show-all" | "hide-all" | "toggle-all" | "rese
 
 export class OverlayManager {
   private window: BrowserWindow | undefined;
+  private controlWindow: BrowserWindow | undefined;
   private mode: OverlayMode = "passive";
   private alwaysOnTop = true;
   private interactionMode: MouseInteractionMode = "click_through";
@@ -49,6 +50,11 @@ export class OverlayManager {
   private captureProtectionEnabled: boolean;
   private captureProtectionState: CaptureProtectionState;
   private readonly capabilities: CaptureProtectionCapabilities;
+  private controlBarLayout: Pick<OverlayPreferences["controlBar"], "x" | "y" | "width" | "height" | "positionMode"> = {
+    width: 680,
+    height: 50,
+    positionMode: "top_center"
+  };
 
   constructor(private readonly options: OverlayManagerOptions) {
     this.captureProtectionEnabled = options.captureProtectionEnabled ?? true;
@@ -80,6 +86,14 @@ export class OverlayManager {
 
   get currentWindow(): BrowserWindow | undefined {
     return this.window && !this.window.isDestroyed() ? this.window : undefined;
+  }
+
+  get currentControlWindow(): BrowserWindow | undefined {
+    return this.controlWindow && !this.controlWindow.isDestroyed() ? this.controlWindow : undefined;
+  }
+
+  get currentWindows(): BrowserWindow[] {
+    return [this.currentWindow, this.currentControlWindow].filter((item): item is BrowserWindow => Boolean(item));
   }
 
   get captureProtection(): boolean {
@@ -117,6 +131,7 @@ export class OverlayManager {
     this.mode = this.interactionMode === "interactive" ? "interactive" : "passive";
     const window = this.show();
     this.coverCurrentMonitor();
+    this.ensureControlWindow().showInactive();
     window.showInactive();
     return window;
   }
@@ -147,6 +162,17 @@ export class OverlayManager {
   resetLayout(): void {
     this.refreshLayout(this.currentWindow?.getBounds() ?? this.targetMonitorBounds());
   }
+  applyLayoutPreferences(preferences: Pick<OverlayPreferences, "controlBar">): void {
+    this.controlBarLayout = {
+      x: preferences.controlBar.x,
+      y: preferences.controlBar.y,
+      width: preferences.controlBar.width,
+      height: preferences.controlBar.height,
+      positionMode: preferences.controlBar.positionMode
+    };
+    const controlWindow = this.currentControlWindow;
+    if (controlWindow) controlWindow.setBounds(this.controlWindowBounds(), false);
+  }
   toggleShortcuts(): void { this.transition({ type: "toggle-shortcuts" }); }
   requestEndInterviewConfirmation(): void { this.sendPanelCommand("confirm-end"); }
   setShareMode(enabled: boolean): void {
@@ -164,6 +190,7 @@ export class OverlayManager {
       this.interactionClaim = "none";
       this.applyMode();
       this.show().showInactive();
+      this.ensureControlWindow().showInactive();
     }
   }
   toggleShareMode(): void { this.setShareMode(!this.hudState.shareMode); }
@@ -200,12 +227,12 @@ export class OverlayManager {
     this.alwaysOnTop = Boolean(preferences.alwaysOnTop);
     this.interactionMode = preferences.interactionMode ?? (preferences.mousePassthrough ? "click_through" : "interactive");
     this.wheelRouting = preferences.wheelRouting ?? "overlay_under_cursor";
-    const window = this.currentWindow;
-    if (window) {
+    for (const window of this.currentWindows) {
       window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
       if (!this.isLayoutEditMode) this.mode = this.interactionMode === "interactive" ? "interactive" : "passive";
-      this.applyMode();
     }
+    if (this.currentControlWindow) this.currentControlWindow.setBounds(this.controlWindowBounds(), false);
+    this.applyMode();
   }
 
   get currentInteractionMode(): MouseInteractionMode { return this.interactionMode; }
@@ -242,6 +269,7 @@ export class OverlayManager {
       this.interactionClaim = "none";
       this.applyMode();
       window.showInactive();
+      this.currentControlWindow?.hide();
     } else {
       this.lifecycleState = this.hudStateValue.running
         ? reduceOverlayLifecycle(this.lifecycleState, { type: "start-interview" })
@@ -249,6 +277,7 @@ export class OverlayManager {
       this.mode = this.hudStateValue.running && this.interactionMode === "interactive" ? "interactive" : "passive";
       this.interactionClaim = "none";
       this.applyMode();
+      if (this.hudStateValue.running) this.ensureControlWindow().showInactive();
     }
     this.sendLayoutEditMode();
   }
@@ -311,7 +340,7 @@ export class OverlayManager {
       }
     });
     this.window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
-    void this.options.loadRenderer(this.window);
+    void this.options.loadRenderer(this.window, "content");
     this.window.once("ready-to-show", () => {
       // Chromium may only expose the final native HWND after the first compositor frame.
       // Re-apply and re-check here so packaged and dev windows use the same native handle.
@@ -335,11 +364,15 @@ export class OverlayManager {
 
   hide(): void {
     this.window?.hide();
+    this.controlWindow?.hide();
   }
 
   toggle(): void {
     if (this.window?.isVisible()) this.hide();
-    else this.show();
+    else {
+      this.show();
+      if (this.hudStateValue.running && !this.isLayoutEditMode && !this.hudStateValue.shareMode) this.ensureControlWindow().showInactive();
+    }
   }
 
   setMode(mode: OverlayMode): void {
@@ -361,8 +394,8 @@ export class OverlayManager {
 
   applyCaptureProtection(): void {
     this.captureProtectionState = applyCaptureProtection(this.currentWindow, this.captureProtectionEnabled, this.capabilities, this.options.onCaptureProtectionDiagnostic);
-    const window = this.currentWindow;
-    if (window) window.webContents.send("overlay:capture-protection", this.captureProtectionState);
+    applyCaptureProtection(this.currentControlWindow, this.captureProtectionEnabled, this.capabilities, this.options.onCaptureProtectionDiagnostic);
+    this.sendToWindows("overlay:capture-protection", this.captureProtectionState);
   }
 
   recordExternalCaptureVerification(mode: "window" | "display", verified: boolean, fields: Record<string, unknown> = {}): void {
@@ -377,27 +410,39 @@ export class OverlayManager {
         : `CAPTURE_PROTECTION_EXTERNAL_${mode === "window" ? "WINDOW" : "DISPLAY"}_FAIL`,
       { mode, verified, ...fields }
     );
-    const window = this.currentWindow;
-    if (window) window.webContents.send("overlay:capture-protection", this.captureProtectionState);
+    this.sendToWindows("overlay:capture-protection", this.captureProtectionState);
   }
 
   destroy(): void {
     this.lifecycleState = initialOverlayLifecycleState;
     this.interactionClaim = "none";
     this.window?.destroy();
+    this.controlWindow?.destroy();
     this.window = undefined;
+    this.controlWindow = undefined;
     this.hudStateValue = { ...initialHUDState };
   }
 
   private applyMode(): void {
-    if (!this.window || this.window.isDestroyed()) return;
+    const contentWindow = this.currentWindow;
+    const controlWindow = this.currentControlWindow;
+    if (!contentWindow && !controlWindow) return;
     // A single transparent window must never make its blank area clickable
     // while the designer is open. Outside designer mode, preserve the
     // existing whole-window interactive mode; click-through/full-passthrough
     // still promote only a reported region or an active drag.
     const interactiveRegion = this.interactionClaim !== "none";
-    applyOverlayMode(this.window, isOverlayLayoutEditing(this.lifecycleState) ? "passive" : this.mode, interactiveRegion);
-    this.window.webContents.send("overlay:mode", this.mode);
+    if (contentWindow) {
+      applyOverlayMode(contentWindow, isOverlayLayoutEditing(this.lifecycleState) ? "passive" : this.mode, interactiveRegion);
+      contentWindow.webContents.send("overlay:mode", this.mode);
+    }
+    if (controlWindow) {
+      // The control surface is a small native window, so its transparent
+      // padding cannot cover the desktop. Keep it hit-testable at all times;
+      // the content surface remains the only surface that reports regions.
+      applyOverlayMode(controlWindow, "interactive", true);
+      controlWindow.webContents.send("overlay:mode", "interactive");
+    }
     this.sendHudState();
   }
 
@@ -409,26 +454,108 @@ export class OverlayManager {
   }
 
   private sendHudState(): void {
-    const window = this.currentWindow;
-    if (window) window.webContents.send("overlay:state", this.hudStateValue);
+    this.sendToWindows("overlay:state", this.hudStateValue);
   }
 
   private refreshLayout(bounds: Electron.Rectangle): void {
     const workArea: HUDWorkArea = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
     const display = screen.getDisplayNearestPoint({ x: bounds.x + Math.round(bounds.width / 2), y: bounds.y + Math.round(bounds.height / 2) });
     this.hudLayoutValue = { ...calculateHUDLayout(workArea), displayId: display.id, scaleFactor: display.scaleFactor };
-    const window = this.currentWindow;
-    if (window) window.webContents.send("overlay:layout", this.hudLayoutValue);
+    const controlWindow = this.currentControlWindow;
+    this.currentWindow?.webContents.send("overlay:layout", this.hudLayoutValue);
+    if (controlWindow) controlWindow.webContents.send("overlay:layout", this.controlHUDLayout(controlWindow.getBounds()));
   }
 
   private sendPanelCommand(command: OverlayPanelCommand): void {
-    const window = this.currentWindow;
-    if (window) window.webContents.send("overlay:command", command);
+    this.sendToWindows("overlay:command", command);
   }
 
   private sendLayoutEditMode(): void {
-    const window = this.currentWindow;
-    if (window) window.webContents.send("overlay:layout-edit-mode", this.isLayoutEditMode);
+    this.sendToWindows("overlay:layout-edit-mode", this.isLayoutEditMode);
+  }
+
+  private sendToWindows(channel: string, payload: unknown): void {
+    for (const window of this.currentWindows) window.webContents.send(channel, payload);
+  }
+
+  private ensureControlWindow(): BrowserWindow {
+    const existing = this.currentControlWindow;
+    if (existing) {
+      existing.setBounds(this.controlWindowBounds(), false);
+      this.applyMode();
+      this.applyCaptureProtection();
+      return existing;
+    }
+
+    const bounds = this.controlWindowBounds();
+    const controlWindow = new BrowserWindow({
+      ...bounds,
+      title: "Interview Copilot Overlay Controls",
+      frame: false,
+      transparent: true,
+      backgroundColor: "#00000000",
+      resizable: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      show: false,
+      focusable: false,
+      webPreferences: {
+        preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false
+      }
+    });
+    this.controlWindow = controlWindow;
+    controlWindow.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
+    void this.options.loadRenderer(controlWindow, "control");
+    controlWindow.once("ready-to-show", () => {
+      this.applyCaptureProtection();
+      this.sendHudState();
+      this.sendLayoutEditMode();
+      controlWindow.webContents.send("overlay:layout", this.controlHUDLayout(controlWindow.getBounds()));
+      controlWindow.showInactive();
+    });
+    controlWindow.on("closed", () => {
+      this.controlWindow = undefined;
+    });
+    this.applyMode();
+    this.applyCaptureProtection();
+    return controlWindow;
+  }
+
+  private controlWindowBounds(): Electron.Rectangle {
+    const workArea = this.targetMonitorBounds();
+    const width = Math.max(120, Math.min(this.controlBarLayout.width, workArea.width));
+    const height = Math.max(36, Math.min(this.controlBarLayout.height, workArea.height));
+    const gap = 24;
+    const customX = this.controlBarLayout.x ?? Math.round((workArea.width - width) / 2);
+    const customY = this.controlBarLayout.y ?? gap;
+    let x = customX;
+    let y = customY;
+    switch (this.controlBarLayout.positionMode) {
+      case "top_left": x = gap; y = gap; break;
+      case "top_center": x = Math.round((workArea.width - width) / 2); y = gap; break;
+      case "top_right": x = workArea.width - width - gap; y = gap; break;
+      case "bottom_left": x = gap; y = workArea.height - height - gap; break;
+      case "bottom_center": x = Math.round((workArea.width - width) / 2); y = workArea.height - height - gap; break;
+      case "bottom_right": x = workArea.width - width - gap; y = workArea.height - height - gap; break;
+      case "custom": break;
+    }
+    return {
+      x: workArea.x + Math.max(0, Math.min(x, workArea.width - width)),
+      y: workArea.y + Math.max(0, Math.min(y, workArea.height - height)),
+      width,
+      height
+    };
+  }
+
+  private controlHUDLayout(bounds: Electron.Rectangle): HUDLayout {
+    return {
+      ...this.hudLayoutValue,
+      toolbar: { x: 0, y: 0, width: bounds.width, height: bounds.height },
+      shortcuts: { x: 0, y: 0, width: 0, height: 0 }
+    };
   }
 
   private targetMonitorBounds(): Electron.Rectangle {

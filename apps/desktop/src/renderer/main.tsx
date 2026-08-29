@@ -20,7 +20,8 @@ function FatalStartupError() {
 }
 
 const rootElement = document.getElementById("root");
-const isOverlayWindow = new URLSearchParams(window.location.search).get("window") === "overlay";
+const overlayWindowMode = new URLSearchParams(window.location.search).get("window");
+const isOverlayWindow = overlayWindowMode === "overlay" || overlayWindowMode === "overlay-control";
 if (isOverlayWindow) {
   document.documentElement.classList.add("overlay-window");
   document.body.classList.add("overlay-window");

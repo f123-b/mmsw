@@ -143,7 +143,7 @@ try {
   await main.evaluate("window.interviewCopilot.audio.probe({ inputDeviceId: 'mock-mic', outputDeviceId: 'mock-system' })");
   await main.evaluate(`window.interviewCopilot.interview.start(${JSON.stringify({ profileId, url: `ws://127.0.0.1:${asrPort}/realtime`, providerType: "custom-gateway", model: "mock-asr", inputDeviceId: "mock-mic", outputDeviceId: "mock-system", automationMode: "MANUAL", answerMode: "NORMAL" })})`);
   await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "RUNNING"), main);
-  const overlayTarget = await waitForTarget((item) => item.type === "page" && item.url.includes("window=overlay"));
+  const overlayTarget = await waitForTarget((item) => { try { return item.type === "page" && new URL(item.url).searchParams.get("window") === "overlay"; } catch { return false; } });
   overlay = connectTarget(overlayTarget);
   await new Promise((resolve, reject) => { overlay.socket.once("open", resolve); overlay.socket.once("error", reject); });
   await overlay.command("Runtime.enable");

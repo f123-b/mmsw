@@ -326,7 +326,7 @@ function verifyPreload(): boolean {
   return exists;
 }
 
-function attachRendererDiagnostics(window: BrowserWindow, windowName: "main" | "overlay"): void {
+function attachRendererDiagnostics(window: BrowserWindow, windowName: "main" | "overlay" | "overlay-control"): void {
   window.webContents.on("did-start-loading", () => {
     appLogger?.info("RENDERER_LOAD_STARTED", { window: windowName });
   });
@@ -408,17 +408,19 @@ async function captureVisibleWindow(window: BrowserWindow): Promise<Buffer> {
   throw new Error("Production screenshot contains no visible pixels");
 }
 
-async function loadRenderer(window: BrowserWindow, overlay = false): Promise<void> {
-  const windowName = overlay ? "overlay" : "main";
+async function loadRenderer(window: BrowserWindow, overlay: false | "content" | "control" = false): Promise<void> {
+  const isOverlay = overlay !== false;
+  const windowMode = overlay === "control" ? "overlay-control" : isOverlay ? "overlay" : "main";
+  const windowName = isOverlay ? windowMode : "main";
   attachRendererDiagnostics(window, windowName);
   appLogger?.info("RENDERER_LOAD_STARTED", { window: windowName });
   try {
     if (isDevelopment()) {
       const url = process.env.ELECTRON_RENDERER_URL ?? "http://localhost:5173";
-      const search = new URLSearchParams({ ...(overlay ? { window: "overlay" } : {}), ...(overlay && (captureProtectionSmokeRequested || captureTestRequested) ? { "capture-test": "1" } : {}) }).toString();
+      const search = new URLSearchParams({ ...(isOverlay ? { window: windowMode } : {}), ...(isOverlay && (captureProtectionSmokeRequested || captureTestRequested) ? { "capture-test": "1" } : {}) }).toString();
       await window.loadURL(`${url}${search ? `?${search}` : ""}`);
     } else {
-      const search = new URLSearchParams({ ...(overlay ? { window: "overlay" } : {}), ...(overlay && (captureProtectionSmokeRequested || captureTestRequested) ? { "capture-test": "1" } : {}) }).toString();
+      const search = new URLSearchParams({ ...(isOverlay ? { window: windowMode } : {}), ...(isOverlay && (captureProtectionSmokeRequested || captureTestRequested) ? { "capture-test": "1" } : {}) }).toString();
       await window.loadFile(rendererFile, search ? { search } : undefined);
     }
     if (!overlay) {
@@ -436,7 +438,7 @@ async function loadRenderer(window: BrowserWindow, overlay = false): Promise<voi
 }
 
 function broadcastToWindows(channel: string, payload: unknown): void {
-  for (const window of [mainWindow, overlayManager?.currentWindow]) {
+  for (const window of [mainWindow, ...(overlayManager?.currentWindows ?? [])]) {
     if (!window || window.isDestroyed()) continue;
     try {
       window.webContents.send(channel, payload);
@@ -475,9 +477,10 @@ function broadcast(channel: string, payload: unknown): void {
   broadcastToWindows(channel, payload);
 }
 
-function rendererWindowName(window: BrowserWindow | null): "main" | "overlay" | "unknown" {
+function rendererWindowName(window: BrowserWindow | null): "main" | "overlay" | "overlay-control" | "unknown" {
   if (window && window === mainWindow) return "main";
   if (window && window === overlayManager?.currentWindow) return "overlay";
+  if (window && window === overlayManager?.currentControlWindow) return "overlay-control";
   return "unknown";
 }
 
@@ -1387,6 +1390,7 @@ function registerIpc(): void {
      const next = overlaySettingsStore?.resetLayout();
      if (next) {
        overlayManager?.applyPreferences(next.behavior);
+       overlayManager?.applyLayoutPreferences(next);
        overlayManager?.resetLayout();
        broadcast("overlay:preferences", next);
      } else {
@@ -1401,7 +1405,7 @@ function registerIpc(): void {
    ipcMain.handle("overlay:get-preferences", () => overlaySettingsStore?.getPreferences());
    ipcMain.handle("overlay:set-preferences", (_event, input: OverlayPreferencesPatch) => {
      const next = overlaySettingsStore?.setPreferences(input);
-     if (next) { overlayManager?.applyPreferences(next.behavior); broadcast("overlay:preferences", next); }
+     if (next) { overlayManager?.applyPreferences(next.behavior); overlayManager?.applyLayoutPreferences(next); broadcast("overlay:preferences", next); }
      return next;
    });
    ipcMain.handle("overlay:enter-layout-edit", () => { overlayManager?.setLayoutEditMode(true); return true; });
@@ -2449,7 +2453,7 @@ if (hasSingleInstanceLock) {
   const createdMainWindow = createMainWindow();
   overlayManager = new OverlayManager({
     preloadPath,
-    loadRenderer: (window) => loadRenderer(window, true),
+    loadRenderer: (window, surface = "content") => loadRenderer(window, surface),
     getMainWindow: () => mainWindow,
     captureProtectionEnabled: overlaySettingsStore?.get().captureProtection ?? true,
     onCaptureProtectionDiagnostic: (event, fields) => {
@@ -2458,12 +2462,14 @@ if (hasSingleInstanceLock) {
     },
     onHUDStateChange: (state) => broadcast("overlay:state", state)
   });
-  overlayManager.applyPreferences(overlaySettingsStore?.getPreferences().behavior ?? {
+  const initialOverlayPreferences = overlaySettingsStore?.getPreferences();
+  overlayManager.applyPreferences(initialOverlayPreferences?.behavior ?? {
     alwaysOnTop: true,
     interactionMode: "click_through",
     mousePassthrough: true,
     wheelRouting: "overlay_under_cursor"
   });
+  if (initialOverlayPreferences) overlayManager.applyLayoutPreferences(initialOverlayPreferences);
   appLogger?.info("OVERLAY_CAPTURE_PROTECTION_RUNTIME", {
     platform: process.platform,
     windowsVersion: process.platform === "win32" ? osVersion() : undefined,
