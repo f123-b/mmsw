@@ -17,4 +17,16 @@ describe("TopicBoundaryDetector", () => {
     expect(hasStandaloneTopicSubject("讲一下 ARM 架构")).toBe(true);
     expect(hasStandaloneTopicSubject("具体怎么做？")).toBe(false);
   });
+
+  it("does not treat the active old topic as an entity in the new turn", () => {
+    const decision = detectTopicBoundary({
+      previousText: "中断是怎么触发的？",
+      previousTopic: "实时采样与中断",
+      currentTopic: "实时采样与中断",
+      currentText: "说一下 CAN 总线"
+    });
+    expect(decision.relation).toBe("NEW_TOPIC");
+    expect(decision.currentEntities).toEqual(["CAN"]);
+    expect(decision.previousEntities).toContain("中断");
+  });
 });

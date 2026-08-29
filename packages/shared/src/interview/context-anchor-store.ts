@@ -19,6 +19,7 @@ export interface ContextAnchorSnapshot {
   latestAnchor?: ContextAnchor;
   lastConfirmedQuestion?: ContextAnchor;
   currentTopic?: string;
+  currentTopicAnchor?: { topic: string; sourceAnchorId: string; createdAt: number; expiresAt: number };
   pendingCodeContext?: ContextAnchor;
   anchors: ContextAnchor[];
 }
@@ -110,6 +111,7 @@ export class ContextAnchorStore {
       ...(this.latest ? { latestAnchor: { ...this.latest } } : {}),
       ...(this.lastConfirmedQuestion ? { lastConfirmedQuestion: { ...this.lastConfirmedQuestion } } : {}),
       ...(this.currentTopic ? { currentTopic: this.currentTopic } : {}),
+      ...(activeTopicAnchor?.topic ? { currentTopicAnchor: { topic: activeTopicAnchor.topic, sourceAnchorId: activeTopicAnchor.id, createdAt: activeTopicAnchor.createdAt, expiresAt: activeTopicAnchor.expiresAt } } : {}),
       ...(this.pendingCodeContext ? { pendingCodeContext: { ...this.pendingCodeContext } } : {}),
       anchors: active.map((anchor) => ({ ...anchor }))
     };

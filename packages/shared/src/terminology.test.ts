@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTerminologyDictionary, normalizeSkillKey, normalizeTechnicalTerms, normalizeTechnicalTermsWithCorrections } from "./terminology";
+import { buildDynamicTechnicalLexicon, createTerminologyDictionary, normalizeSkillKey, normalizeTechnicalTerms, normalizeTechnicalTermsWithCorrections, resolveContextualTerminology } from "./terminology";
 import { QuestionDetector2 } from "./question-detector-2";
 
 describe("technical terminology normalization", () => {
@@ -53,5 +53,32 @@ describe("technical terminology normalization", () => {
     expect(normalizeSkillKey("IIC")).toBe("i2c");
     expect(normalizeSkillKey("FOC")).toBe("foc");
     expect(normalizeSkillKey("PID")).toBe("pid");
+  });
+
+  it("repairs high-confidence interview homophones only with the right context", () => {
+    const c = resolveContextualTerminology("C 语言里 study 关键字和 count 关键字有什么作用？", { contextText: "C 语言 关键字" });
+    expect(c.text).toContain("static");
+    expect(c.text).toContain("const");
+    expect(c.corrections.map((item) => item.canonical)).toEqual(expect.arrayContaining(["static", "const"]));
+    expect(resolveContextualTerminology("我在 study 计划里统计 count 值").text).toBe("我在 study 计划里统计 count 值");
+    expect(resolveContextualTerminology("study 关键字作用是什么？").text).toContain("study");
+    expect(resolveContextualTerminology("study 和 count 的含义？").possibleTerms).toEqual(expect.arrayContaining([{ value: "static", score: 0.64 }, { value: "const", score: 0.64 }]));
+  });
+
+  it("repairs motor and stack homophones without rewriting unrelated speech", () => {
+    expect(resolveContextualTerminology("FOC 里的绝对是怎么计算？", { contextText: "FOC 电机控制 编码器" }).text).toContain("极对数");
+    expect(resolveContextualTerminology("这和站怎么分配？", { contextText: "堆栈 内存管理" }).text).toContain("栈");
+    expect(resolveContextualTerminology("这和站怎么分配？", { contextText: "项目介绍" }).text).toContain("这和站");
+  });
+
+  it("builds scoped dynamic rules from profile/project/question-bank vocabulary", () => {
+    const lexicon = buildDynamicTechnicalLexicon({
+      profileSkills: [{ name: "STM32G431", aliases: ["stm 32 g 431"] }],
+      projectFacts: ["FOC 电流环"],
+      projectQa: [{ question: "STM32G431 的 ADC 采样" }]
+    });
+    const result = normalizeTechnicalTermsWithCorrections("stm 32 g 431 的 ADC 采样", lexicon);
+    expect(result.text).toContain("STM32G431");
+    expect(result.corrections.at(0)).toMatchObject({ canonical: "STM32G431", source: "profile" });
   });
 });

@@ -64,7 +64,10 @@ function lexicalOverlap(left: string, right: string): number {
  */
 export function detectTopicBoundary(input: { previousText?: string; previousTopic?: string; currentText: string; currentTopic?: string }): TopicBoundaryDecision {
   const previousEntities = extractTopicEntities(`${input.previousTopic ?? ""} ${input.previousText ?? ""}`);
-  const currentEntities = extractTopicEntities(`${input.currentTopic ?? ""} ${input.currentText}`);
+  // The current turn must be judged from what was actually said now. Mixing
+  // the active topic into currentEntities makes every new question appear to
+  // overlap with the previous topic and silently leaks context.
+  const currentEntities = extractTopicEntities(input.currentText);
   const current = normalizeTechnicalTerms(input.currentText).trim();
   if (!input.previousText && !input.previousTopic) {
     return { relation: currentEntities.length || hasStandaloneTopicSubject(current) ? "NEW_TOPIC" : "AMBIGUOUS", confidence: currentEntities.length ? 0.96 : 0.52, previousEntities, currentEntities, reason: "no-previous-topic" };

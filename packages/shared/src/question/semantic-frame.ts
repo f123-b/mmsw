@@ -37,11 +37,12 @@ export function classifyQuestionSemanticFrame(text: string, kind?: string): Ques
   if (/为什么不用|怎么选|如何选择|选型|权衡|取舍|优缺点|适合什么场景|差异/.test(normalized)) return "selection_tradeoff";
   if (/为什么|为何|原因|导致|影响因素/.test(normalized)) return "cause";
   if (/错误|错误码|现象|故障|会发生什么|有什么后果|风险|副作用/.test(normalized)) return "failure_effect";
+  if (/区别|对比|比较|不同/.test(normalized)) return "comparison";
+  if (/(?:是否|还是|都是|属于)[^。！？?]*[？?]/.test(normalized)) return "definition";
   if (/关键字|关键点|注意事项|常见误区|volatile|static|const|指针|自增|自减|\+\+p|p\+\+/.test(normalized)) return "keyword";
   if (/流程|步骤|顺序|从.+到|进入|触发|生命周期|执行过程/.test(normalized)) return "process";
-  if (/原理|机制|仲裁|为什么能|底层|怎么工作的/.test(normalized)) return "mechanism";
+  if (/原理|机制|仲裁|为什么能|底层|怎么工作的|有什么好处|优势/.test(normalized)) return "mechanism";
   if (/有哪些|哪几个|列举|分别|包括|常见的/.test(normalized)) return "enumeration";
-  if (/区别|对比|比较|不同/.test(normalized)) return "comparison";
   if (/什么是|是什么|定义|含义|作用|介绍|讲一下|说一下/.test(normalized)) return "definition";
   return "general";
 }
