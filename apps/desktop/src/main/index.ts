@@ -335,7 +335,7 @@ function verifyPreload(): boolean {
   return exists;
 }
 
-function attachRendererDiagnostics(window: BrowserWindow, windowName: "main" | "overlay" | "overlay-question" | "overlay-answer" | "overlay-control"): void {
+function attachRendererDiagnostics(window: BrowserWindow, windowName: "main" | "overlay" | "overlay-question" | "overlay-answer" | "overlay-control" | "overlay-confirm"): void {
   window.webContents.on("did-start-loading", () => {
     appLogger?.info("RENDERER_LOAD_STARTED", { window: windowName });
   });
@@ -419,7 +419,7 @@ async function captureVisibleWindow(window: BrowserWindow): Promise<Buffer> {
 
 async function loadRenderer(window: BrowserWindow, overlay: false | OverlayWindowSurface = false): Promise<void> {
   const isOverlay = overlay !== false;
-  const windowMode = overlay === "control" ? "overlay-control" : overlay === "question" ? "overlay-question" : overlay === "answer" ? "overlay-answer" : "main";
+  const windowMode = overlay === "control" ? "overlay-control" : overlay === "question" ? "overlay-question" : overlay === "answer" ? "overlay-answer" : overlay === "confirm" ? "overlay-confirm" : "main";
   const windowName = isOverlay ? windowMode : "main";
   attachRendererDiagnostics(window, windowName);
   appLogger?.info("RENDERER_LOAD_STARTED", { window: windowName });
@@ -440,6 +440,9 @@ async function loadRenderer(window: BrowserWindow, overlay: false | OverlayWindo
         appLogger?.error("RENDERER_APP_NOT_READY", { window: windowName, ...readiness });
         if (!readiness.bridgeAvailable) appLogger?.error("PRELOAD_BRIDGE_UNAVAILABLE", { window: windowName });
       }
+    } else {
+      const ready = await waitForRendererReady(window);
+      if (!ready) appLogger?.warn("OVERLAY_RENDERER_READY_TIMEOUT", { window: windowName });
     }
   } catch (error) {
     appLogger?.error("RENDERER_LOAD_FAILED", { window: windowName, error: String(error) });
@@ -486,11 +489,12 @@ function broadcast(channel: string, payload: unknown): void {
   broadcastToWindows(channel, payload);
 }
 
-function rendererWindowName(window: BrowserWindow | null): "main" | "overlay-question" | "overlay-answer" | "overlay-control" | "unknown" {
+function rendererWindowName(window: BrowserWindow | null): "main" | "overlay-question" | "overlay-answer" | "overlay-control" | "overlay-confirm" | "unknown" {
   if (window && window === mainWindow) return "main";
   if (window && window === overlayManager?.currentQuestionWindow) return "overlay-question";
   if (window && window === overlayManager?.currentAnswerWindow) return "overlay-answer";
   if (window && window === overlayManager?.currentControlWindow) return "overlay-control";
+  if (window && window === overlayManager?.currentConfirmWindow) return "overlay-confirm";
   return "unknown";
 }
 
@@ -2682,7 +2686,11 @@ if (hasSingleInstanceLock) {
       const next = overlaySettingsStore?.setPreferences({ [key]: { x: bounds.x - display.workArea.x, y: bounds.y - display.workArea.y, width: bounds.width, height: bounds.height, displayId: display.id, scaleFactor: display.scaleFactor } });
       if (next) broadcast("overlay:preferences", next);
     },
-    onHUDStateChange: (state) => broadcast("overlay:state", state)
+    onHUDStateChange: (state) => broadcast("overlay:state", state),
+    onStartupTiming: (event) => {
+      markInterviewStartup(event);
+      if (!interviewStartupTiming) appLogger?.info("OVERLAY_STARTUP_PHASE", { event });
+    }
   });
   const initialOverlayPreferences = overlaySettingsStore?.getPreferences();
   overlayManager.applyPreferences(initialOverlayPreferences?.behavior ?? {
@@ -2693,6 +2701,7 @@ if (hasSingleInstanceLock) {
     temporaryInteractionModifier: "ctrl"
   });
   if (initialOverlayPreferences) overlayManager.applyLayoutPreferences(initialOverlayPreferences);
+  void mainRendererLoad?.then(() => overlayManager?.prepare()).catch((error) => appLogger?.warn("OVERLAY_PREPARE_FAILED", { error: String(error) }));
   appLogger?.info("OVERLAY_CAPTURE_PROTECTION_RUNTIME", {
     platform: process.platform,
     windowsVersion: process.platform === "win32" ? osVersion() : undefined,

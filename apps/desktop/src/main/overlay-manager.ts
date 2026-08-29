@@ -7,6 +7,7 @@ import { calculateHUDLayout, type HUDLayout, type HUDWorkArea } from "./hud-layo
 import { DEFAULT_OVERLAY_PREFERENCES, type MouseInteractionMode, type OverlayBehaviorPreferences, type OverlayPreferences, type WheelRoutingMode } from "../shared/overlay-preferences";
 import { initialOverlayLifecycleState, isOverlayLayoutEditing, reduceOverlayLifecycle, type OverlayLifecycleState } from "./overlay-lifecycle";
 import { clampOverlayPanelBounds, resolveOverlayNativeBounds, type OverlayNativeBounds, type OverlayNativePanel } from "./overlay-layout-controller";
+import type { InterviewStartupEvent } from "./interview-startup-timing";
 
 export { applyOverlayMode, nextOverlayMode } from "./overlay-mode";
 export type { OverlayMode, OverlayWindowLike } from "./overlay-mode";
@@ -27,7 +28,7 @@ export interface OverlayDisplayInfo {
   scaleFactor: number;
 }
 
-export type OverlayWindowSurface = "question" | "answer" | "control";
+export type OverlayWindowSurface = "question" | "answer" | "control" | "confirm";
 
 export interface OverlayManagerOptions {
   preloadPath?: string;
@@ -37,6 +38,7 @@ export interface OverlayManagerOptions {
   onCaptureProtectionDiagnostic?: (event: string, fields: Record<string, unknown>) => void;
   onNativeBoundsChanged?: (panel: OverlayNativePanel, bounds: OverlayNativeBounds, display: OverlayDisplayInfo) => void;
   onHUDStateChange?: (state: HUDState) => void;
+  onStartupTiming?: (event: InterviewStartupEvent) => void;
 }
 
 export type OverlayPanelCommand = "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end";
@@ -45,6 +47,9 @@ type OverlayWindowMap = Record<OverlayNativePanel, BrowserWindow | undefined>;
 /** Owns the native overlay windows and their lifecycle. Renderers only render their panel. */
 export class OverlayManager {
   private windows: OverlayWindowMap = { question: undefined, answer: undefined, control: undefined };
+  private confirmWindowValue: BrowserWindow | undefined;
+  private readonly rendererLoads = new Map<OverlayWindowSurface, Promise<void>>();
+  private endInterviewConfirmOpenValue = false;
   private mode: OverlayMode = "passive";
   private alwaysOnTop = true;
   private interactionMode: MouseInteractionMode = "click_through";
@@ -87,6 +92,8 @@ export class OverlayManager {
   get currentQuestionWindow(): BrowserWindow | undefined { return this.getWindow("question"); }
   get currentAnswerWindow(): BrowserWindow | undefined { return this.getWindow("answer"); }
   get currentControlWindow(): BrowserWindow | undefined { return this.getWindow("control"); }
+  get currentConfirmWindow(): BrowserWindow | undefined { const window = this.confirmWindowValue; return window && !window.isDestroyed() ? window : undefined; }
+  get endInterviewConfirmOpen(): boolean { return this.endInterviewConfirmOpenValue; }
   get currentWindows(): BrowserWindow[] { return (["question", "answer", "control"] as const).map((panel) => this.getWindow(panel)).filter((window): window is BrowserWindow => Boolean(window)); }
   get captureProtection(): boolean { return this.captureProtectionEnabled; }
   get captureProtectionSupported(): boolean { return this.capabilities.captureProtectionSupported; }
@@ -119,8 +126,33 @@ export class OverlayManager {
   toggleTranscript(): void { this.transition({ type: "toggle-transcript" }); }
   toggleAnswer(): void { this.transition({ type: "toggle-answer" }); }
   toggleShortcuts(): void { this.transition({ type: "toggle-shortcuts" }); }
-  /** End confirmation is intentionally delivered to the question/content owner only. */
-  requestEndInterviewConfirmation(): void { this.currentQuestionWindow?.webContents.send("overlay:command", "confirm-end"); }
+  /** The confirmation dialog has its own native interactive owner. */
+  requestEndInterviewConfirmation(): void {
+    const window = this.ensureConfirmWindow();
+    this.endInterviewConfirmOpenValue = true;
+    window.setBounds(this.confirmBounds(), false);
+    window.setFocusable(true);
+    window.setIgnoreMouseEvents(false);
+    window.show();
+    window.focus();
+    window.webContents.send("overlay:dialog-state", { endInterviewConfirmOpen: true });
+  }
+
+  cancelEndInterviewConfirmation(): void { this.setEndInterviewConfirmation(false); }
+  confirmEndInterviewConfirmation(): void { this.setEndInterviewConfirmation(false); }
+
+  async prepare(): Promise<void> {
+    this.options.onStartupTiming?.("OVERLAY_PREPARE_BEGIN");
+    this.ensureWindow("question");
+    this.ensureWindow("answer");
+    this.ensureWindow("control");
+    await Promise.all([...this.rendererLoads.values()]);
+    this.applyNativeBounds();
+    this.applyMode();
+    this.applyCaptureProtection();
+    this.hide();
+    this.setEndInterviewConfirmation(false);
+  }
 
   resetLayout(): void { this.applyNativeBounds(); }
 
@@ -156,6 +188,7 @@ export class OverlayManager {
     this.wheelRouting = preferences.wheelRouting ?? "overlay_under_cursor";
     this.temporaryInteractionModifier = preferences.temporaryInteractionModifier ?? "ctrl";
     for (const window of this.currentWindows) window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
+    this.currentConfirmWindow?.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
     if (!this.isLayoutEditMode) this.mode = this.interactionMode === "interactive" ? "interactive" : "passive";
     this.applyMode();
   }
@@ -204,17 +237,24 @@ export class OverlayManager {
   coverCurrentMonitor(): void { this.applyNativeBounds(); }
 
   show(): BrowserWindow {
+    this.options.onStartupTiming?.("OVERLAY_SHOW_REQUEST");
     const questionWindow = this.ensureWindow("question");
     this.ensureWindow("answer");
     this.ensureWindow("control");
     this.applyNativeBounds();
     this.applyMode();
     this.applyCaptureProtection();
-    if (!this.hudStateValue.shareMode) for (const window of this.currentWindows) window.showInactive();
+    if (!this.hudStateValue.shareMode) {
+      for (const [panel, window] of [["question", this.currentQuestionWindow], ["answer", this.currentAnswerWindow], ["control", this.currentControlWindow]] as const) {
+        if (!window) continue;
+        window.showInactive();
+        this.options.onStartupTiming?.(panel === "question" ? "QUESTION_VISIBLE" : panel === "answer" ? "ANSWER_VISIBLE" : "CONTROL_VISIBLE");
+      }
+    }
     return questionWindow;
   }
 
-  hide(): void { for (const window of this.currentWindows) window.hide(); }
+  hide(): void { for (const window of this.currentWindows) window.hide(); this.currentConfirmWindow?.hide(); }
   toggle(): void { if (this.currentWindows.some((window) => window.isVisible())) this.hide(); else this.show(); }
   setMode(mode: OverlayMode): void {
     this.mode = this.hudStateValue.shareMode ? "passive" : mode;
@@ -240,6 +280,10 @@ export class OverlayManager {
     this.lifecycleState = initialOverlayLifecycleState;
     for (const panel of ["question", "answer", "control"] as const) this.getWindow(panel)?.destroy();
     this.windows = { question: undefined, answer: undefined, control: undefined };
+    this.currentConfirmWindow?.destroy();
+    this.confirmWindowValue = undefined;
+    this.rendererLoads.clear();
+    this.endInterviewConfirmOpenValue = false;
     this.hudStateValue = { ...initialHUDState };
   }
 
@@ -277,10 +321,41 @@ export class OverlayManager {
     const window = new BrowserWindow({ ...bounds, title: panel === "control" ? "Interview Copilot Overlay Controls" : `Interview Copilot ${panel} Overlay`, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, show: false, focusable: false, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false } });
     this.windows[panel] = window;
     window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
-    void this.options.loadRenderer(window, panel);
-    window.once("ready-to-show", () => { this.applyMode(); this.applyCaptureProtection(); this.sendHudState(); this.sendLayoutEditMode(); this.refreshLayout(window.getBounds()); if (!this.hudStateValue.shareMode) window.showInactive(); });
+    const load = Promise.resolve(this.options.loadRenderer(window, panel)).then(() => {
+      this.options.onStartupTiming?.(panel === "question" ? "QUESTION_RENDERER_READY" : panel === "answer" ? "ANSWER_RENDERER_READY" : "CONTROL_RENDERER_READY");
+    }).catch(() => undefined);
+    this.rendererLoads.set(panel, load);
+    window.once("ready-to-show", () => { this.applyMode(); this.applyCaptureProtection(); this.sendHudState(); this.sendLayoutEditMode(); this.refreshLayout(window.getBounds()); });
     window.on("closed", () => { if (this.windows[panel] === window) this.windows[panel] = undefined; });
     return window;
+  }
+
+  private ensureConfirmWindow(): BrowserWindow {
+    const existing = this.currentConfirmWindow;
+    if (existing) return existing;
+    const window = new BrowserWindow({ ...this.confirmBounds(), title: "Interview Copilot Confirm", frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, show: false, focusable: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false } });
+    this.confirmWindowValue = window;
+    window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
+    const load = Promise.resolve(this.options.loadRenderer(window, "confirm")).catch(() => undefined);
+    this.rendererLoads.set("confirm", load);
+    window.once("ready-to-show", () => { window.setFocusable(true); window.setIgnoreMouseEvents(false); window.webContents.send("overlay:dialog-state", { endInterviewConfirmOpen: this.endInterviewConfirmOpenValue }); });
+    window.on("closed", () => { if (this.confirmWindowValue === window) this.confirmWindowValue = undefined; });
+    return window;
+  }
+
+  private setEndInterviewConfirmation(open: boolean): void {
+    this.endInterviewConfirmOpenValue = open;
+    const window = this.currentConfirmWindow;
+    if (!window) return;
+    window.webContents.send("overlay:dialog-state", { endInterviewConfirmOpen: open });
+    if (open) { window.show(); window.focus(); } else window.hide();
+  }
+
+  private confirmBounds(): Electron.Rectangle {
+    const workArea = this.targetDisplay().workArea;
+    const width = 420;
+    const height = 220;
+    return { x: workArea.x + Math.round((workArea.width - width) / 2), y: workArea.y + Math.round((workArea.height - height) / 2), width, height };
   }
 
   private getWindow(panel: OverlayNativePanel): BrowserWindow | undefined { const window = this.windows[panel]; return window && !window.isDestroyed() ? window : undefined; }
