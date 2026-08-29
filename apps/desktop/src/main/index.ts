@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, screen } from "electron";
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, screen } from "electron";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
@@ -29,6 +29,7 @@ import { createProfileBuilderModel, ProfileBuilderService } from "./profile-buil
 import { createProjectComprehensionModel, createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { parseRepositoryArchiveInWorker } from "./repository-import-worker-client";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
+import { formatInterviewMarkdown, type InterviewExportResult } from "./history-export";
 import { deriveProjectProblemChains, deriveProjectTechnicalDecisions, formatProjectFactValue, inferProjectSourceRole, isFactEligible, isFactReviewRequired, normalizeProjectOwnershipMode, resolveProjectAnswerPerspective } from "@interview-copilot/shared";
 import type { ChatAction, ChatCancelReason, ChatResponse } from "@interview-copilot/shared";
 import type { QuestionBankBulkPatch, QuestionBankListOptions } from "./database";
@@ -1701,6 +1702,27 @@ function registerIpc(): void {
   ipcMain.handle("history:analyze", (_event, interviewId: string) => { const snapshot = historyRepository?.snapshot(interviewId); return snapshot ? analyzeInterview(snapshot) : undefined; });
   ipcMain.handle("history:get-analysis", (_event, interviewId: string) => historyRepository?.getAnalysis(interviewId));
   ipcMain.handle("history:delete", (_event, interviewId: string) => { historyRepository?.deleteInterview(interviewId); return true; });
+  ipcMain.handle("history:export", async (_event, interviewId: string): Promise<InterviewExportResult> => {
+    if (!historyRepository) throw new Error("History database is unavailable");
+    const snapshot = historyRepository.snapshot(interviewId);
+    const content = formatInterviewMarkdown(snapshot, analyzeInterview(snapshot));
+    const startedAt = new Date(snapshot.interview.startedAt);
+    const stamp = [startedAt.getFullYear(), String(startedAt.getMonth() + 1).padStart(2, "0"), String(startedAt.getDate()).padStart(2, "0")].join("")
+      + "-"
+      + [String(startedAt.getHours()).padStart(2, "0"), String(startedAt.getMinutes()).padStart(2, "0"), String(startedAt.getSeconds()).padStart(2, "0")].join("");
+    const options = {
+      title: "导出面试记录",
+      defaultPath: join(app.getPath("documents"), `面试记录-${stamp}.md`),
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+      properties: ["createDirectory", "showOverwriteConfirmation"] as Array<"createDirectory" | "showOverwriteConfirmation">
+    };
+    const owner = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+    const result = owner ? await dialog.showSaveDialog(owner, options) : await dialog.showSaveDialog(options);
+    if (result.canceled || !result.filePath) return { canceled: true };
+    const filePath = result.filePath.toLowerCase().endsWith(".md") ? result.filePath : `${result.filePath}.md`;
+    await writeFile(filePath, content, "utf8");
+    return { canceled: false, path: filePath, bytes: Buffer.byteLength(content, "utf8") };
+  });
   ipcMain.handle("preparation:start", async (_event, goal: string) => {
     if (!profileRepository) throw new Error("Profile database is still initializing");
     if (preparationRuntime) throw new Error("A preparation run is already active");

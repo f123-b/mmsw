@@ -17,6 +17,7 @@ import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, Kn
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 import type { ModelCatalogResult } from "../main/model-catalog";
+import type { InterviewExportResult } from "../main/history-export";
 
 declare global {
   interface Window {
@@ -208,6 +209,7 @@ declare global {
         analyze(interviewId: string): Promise<{ durationMs: number; questionCount: number; answeredQuestionCount: number; answerRate: number; averageFirstTokenMs?: number; averageAnswerLatencyMs?: number } | undefined>;
         getAnalysis(interviewId: string): Promise<unknown>;
         delete(interviewId: string): Promise<boolean>;
+        export(interviewId: string): Promise<InterviewExportResult>;
       };
       preparation: {
         start(goal: string): Promise<boolean>;

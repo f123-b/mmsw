@@ -1121,7 +1121,8 @@ body { background: #f1f1ee; color: var(--text-primary); }
 .history-detail-sheet { min-width: 0; }
 .history-detail-actions { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #edf0f3; padding-bottom: 12px; color: #8a94a3; font-size: 11px; }
 .history-detail-actions > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.history-detail-actions > button { flex: 0 0 auto; margin-left: 14px; }
+.history-detail-action-buttons { display: flex; flex: 0 0 auto; gap: 8px; margin-left: 14px; }
+.history-detail-action-buttons button { white-space: nowrap; }
 .history-empty-detail { display: grid; min-height: 280px; place-content: center; gap: 8px; text-align: center; color: #8a94a3; }
 @media (max-width: 900px) { .project-agent-panel > header,.project-agent-composer { grid-template-columns: 1fr; display: grid; }.history-record-list { min-width: 0; }.history-summary { flex-wrap: wrap; } }
 .project-overview-v2 { display: grid; grid-template-columns: 1.1fr 1fr 1fr; gap: 15px; }

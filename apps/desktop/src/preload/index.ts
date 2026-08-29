@@ -20,6 +20,7 @@ import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, Kn
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 import type { ModelCatalogResult } from "../main/model-catalog";
+import type { InterviewExportResult } from "../main/history-export";
 
 function createRendererScreenshotRequestId(): string {
   return `screenshot-${Date.now()}-${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2, 10)}`;
@@ -222,7 +223,8 @@ const api = {
     get: (interviewId: string) => ipcRenderer.invoke("history:get", interviewId),
     analyze: (interviewId: string) => ipcRenderer.invoke("history:analyze", interviewId),
     getAnalysis: (interviewId: string) => ipcRenderer.invoke("history:get-analysis", interviewId),
-    delete: (interviewId: string) => ipcRenderer.invoke("history:delete", interviewId) as Promise<boolean>
+    delete: (interviewId: string) => ipcRenderer.invoke("history:delete", interviewId) as Promise<boolean>,
+    export: (interviewId: string) => ipcRenderer.invoke("history:export", interviewId) as Promise<InterviewExportResult>
   },
   preparation: {
     start: (goal: string) => ipcRenderer.invoke("preparation:start", goal),
