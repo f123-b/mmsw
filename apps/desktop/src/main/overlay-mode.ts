@@ -12,15 +12,17 @@ export function nextOverlayMode(mode: OverlayMode): OverlayMode {
 }
 
 /**
- * Apply the native hit-test state for the HUD.
+ * Apply native hit testing for the full-screen transparent HUD window.
  *
- * The overlay is deliberately never focusable. `setIgnoreMouseEvents` is
- * enough to switch between pass-through and a clickable control region, while
- * `setFocusable(true)` would let the HUD steal focus from a meeting/browser
- * window and appear as a normal Windows window.
+ * The BrowserWindow covers the monitor so it must never become a normal
+ * full-window mouse target: doing so blocks every application underneath the
+ * transparent pixels. Renderer-side hit testing reports only the concrete HUD
+ * region currently under the pointer (toolbar, reader, dialog, resize handle),
+ * and `interactiveRegion` temporarily promotes that region at the native
+ * window level. `mode` remains a renderer/display policy and must not change
+ * the native full-window hit target.
  */
-export function applyOverlayMode(window: OverlayWindowLike, mode: OverlayMode, interactiveRegion = false): void {
-  const interactive = mode === "interactive" || interactiveRegion;
+export function applyOverlayMode(window: OverlayWindowLike, _mode: OverlayMode, interactiveRegion = false): void {
   window.setFocusable(false);
-  window.setIgnoreMouseEvents(!interactive, { forward: true });
+  window.setIgnoreMouseEvents(!interactiveRegion, { forward: true });
 }
