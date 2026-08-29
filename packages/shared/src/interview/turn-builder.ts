@@ -4,6 +4,8 @@ import type { QuestionCandidate } from "../index";
 export type QuestionRelationType =
   | "ASR_REVISION"
   | "SAME_QUESTION_AUGMENTATION"
+  | "ANSWER_CONSTRAINT"
+  | "EXAMPLE"
   | "PARALLEL_SUBQUESTION"
   | "FOLLOW_UP"
   | "NEW_TOPIC";

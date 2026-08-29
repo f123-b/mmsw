@@ -291,7 +291,14 @@ export interface QuestionCandidate {
   segmentIds?: string[];
   turnId?: string;
   groupId?: string;
-  relationType?: "ASR_REVISION" | "SAME_QUESTION_AUGMENTATION" | "PARALLEL_SUBQUESTION" | "FOLLOW_UP" | "NEW_TOPIC";
+  relationType?: "ASR_REVISION" | "SAME_QUESTION_AUGMENTATION" | "ANSWER_CONSTRAINT" | "EXAMPLE" | "PARALLEL_SUBQUESTION" | "FOLLOW_UP" | "NEW_TOPIC";
+  /** Semantic item type used by the non-destructive overlay question panel. */
+  threadItemType?: "TOPIC_FRAGMENT" | "QUESTION_NUCLEUS" | "ANSWER_CONSTRAINT" | "EXAMPLE" | "SAME_QUESTION_AUGMENTATION" | "PARALLEL_SUBQUESTION" | "FOLLOW_UP" | "NEW_TOPIC" | "ASR_REVISION";
+  /** Canonical group-level question shown to the user. */
+  primaryQuestion?: string;
+  groupTitle?: string;
+  answerable?: boolean;
+  questionSlotIds?: string[];
 }
 
 export type QuestionEvent =
@@ -591,8 +598,10 @@ export * from "./interview/context-anchor-store";
 export * from "./interview/context-anchor-resolver";
 export * from "./interview/topic-boundary-detector";
 export * from "./interview/turn-builder";
-export * from "./interview/question-group";
+export { QuestionGroupManager } from "./interview/question-group";
+export type { AddQuestionInput, AddQuestionResult, OverlayQuestionGroupView, QuestionGroup, QuestionItem, QuestionItemState, QuestionRelation, QuestionSlotCoverage, QuestionSlotStatus, QuestionThreadItemType } from "./interview/question-group";
 export * from "./interview/answer-scheduler";
+export * from "./answer/answer-thread-store";
 export * from "./question-trace";
 export * from "./question";
 export * from "./profile-builder";
