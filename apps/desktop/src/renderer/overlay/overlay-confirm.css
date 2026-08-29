@@ -1,0 +1,9 @@
+html.overlay-window, html.overlay-window body, html.overlay-window #root { width: 100%; min-width: 0; height: 100%; min-height: 100%; margin: 0; overflow: hidden; background: transparent; }
+.overlay-confirm-root { display: grid; width: 100%; height: 100%; place-items: center; padding: 10px; color: #f8fafc; font-family: system-ui, sans-serif; }
+.overlay-confirm-card { display: flex; width: 100%; height: 100%; min-height: 0; flex-direction: column; justify-content: center; box-sizing: border-box; border: 1px solid rgba(255, 255, 255, .18); border-radius: 14px; padding: 16px 18px; background: rgba(20, 26, 38, .98); }
+.overlay-confirm-card > strong { display: block; font-size: 18px; }
+.overlay-confirm-card > p { margin: 8px 0 14px; color: #b8c1d1; font-size: 13px; line-height: 1.45; }
+.overlay-confirm-actions { display: flex; justify-content: flex-end; gap: 9px; }
+.overlay-confirm-actions button { min-width: 78px; border-radius: 8px; padding: 8px 12px; color: #e6ebf4; }
+.overlay-confirm-actions button:first-child { border: 1px solid #58657b; background: transparent; }
+.overlay-confirm-actions button:last-child { background: #e66a5c; color: #fff; }

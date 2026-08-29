@@ -25,9 +25,27 @@ describe("ProfileBuilderService freshness", () => {
       const profiles = new SqliteProfileRepository(database);
       const profile = profiles.save(createProfile({ name: "Candidate", resume: { rawContent: "candidate evidence", summary: "candidate evidence", uploadedAt: 100 } }), 100);
       const artifacts = new SqliteProfileBuilderRepository(database);
-      const sourceText = "标题：Resume\n摘要：candidate evidence\ncandidate evidence";
+      const sourceText = "标题：Resume\ncandidate evidence";
       const fingerprint = createHash("sha256").update(`resume-${profile.id}\nresume\n${sourceText}`).digest("hex").slice(0, 16);
-      artifacts.save({ profileId: profile.id, status: "ready", sourceSnapshot: { generatedAt: 100, sources: [{ id: `resume-${profile.id}`, kind: "resume", title: "Resume", fingerprint }] }, now: 200 });
+      artifacts.save({
+        profileId: profile.id,
+        status: "ready",
+        sourceSnapshot: { generatedAt: 100, sources: [{ id: `resume-${profile.id}`, kind: "resume", title: "Resume", fingerprint }] },
+        artifact: {
+          version: 2,
+          profileId: profile.id,
+          generatedAt: 100,
+          status: "ready",
+          analysisQuality: "fallback",
+          sourceIds: [`resume-${profile.id}`],
+          skillGraph: { nodes: [], edges: [] },
+          projectGraph: { nodes: [], edges: [] },
+          answerMaterials: [],
+          faqs: [],
+          warnings: []
+        },
+        now: 200
+      });
       const service = new ProfileBuilderService(
         profiles,
         { list: () => [] } as unknown as SqliteProjectRepository,

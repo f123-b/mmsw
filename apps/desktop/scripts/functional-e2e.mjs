@@ -611,6 +611,8 @@ try {
   await overlayAnswer.evaluate("window.__e2eScreenshotCaptured = 0; window.interviewCopilot.events.onScreenshot(() => { window.__e2eScreenshotCaptured += 1; });");
   await main.evaluate("window.__e2eMainScreenshotCaptured = 0; window.interviewCopilot.events.onScreenshot(() => { window.__e2eMainScreenshotCaptured += 1; });");
   const controlSurface = await overlayControl.evaluate("(() => ({ surface: document.querySelector('.overlay-root')?.dataset.overlaySurface, buttons: document.querySelectorAll('button').length, contentPanels: document.querySelectorAll('.question-panel, .answer-panel').length }))()");
+  const controlGeometry = await overlayControl.evaluate("(() => { const root = document.querySelector('.control-overlay-root'); const toolbar = document.querySelector('.floating-toolbar'); const rootRect = root?.getBoundingClientRect(); const toolbarRect = toolbar?.getBoundingClientRect(); return { viewport: { width: window.innerWidth, height: window.innerHeight }, root: rootRect ? { width: rootRect.width, height: rootRect.height } : undefined, toolbar: toolbarRect ? { width: toolbarRect.width, height: toolbarRect.height } : undefined }; })()");
+  if (controlGeometry?.viewport?.width !== 680 || controlGeometry?.viewport?.height !== 58 || Math.round(controlGeometry?.toolbar?.width ?? 0) !== 680 || Math.round(controlGeometry?.toolbar?.height ?? 0) !== 58) throw new Error(`CONTROL_GEOMETRY_REGRESSION failed: ${JSON.stringify(controlGeometry)}`);
   const contentSurface = await overlay.evaluate("(() => ({ surface: document.querySelector('.overlay-root')?.dataset.overlaySurface, hasToolbar: Boolean(document.querySelector('.toolbar-panel')), hasQuestionPanel: Boolean(document.querySelector('.question-panel')), hasAnswerPanel: Boolean(document.querySelector('.answer-panel')) }))()");
   const answerSurface = await overlayAnswer.evaluate("(() => ({ surface: document.querySelector('.overlay-root')?.dataset.overlaySurface, hasToolbar: Boolean(document.querySelector('.toolbar-panel')), hasQuestionPanel: Boolean(document.querySelector('.question-panel')), hasAnswerPanel: Boolean(document.querySelector('.answer-panel')) }))()");
   if (controlSurface?.surface !== "control" || controlSurface.buttons < 3 || controlSurface.contentPanels !== 0 || contentSurface?.surface !== "content" || contentSurface.hasToolbar || !contentSurface.hasQuestionPanel || contentSurface.hasAnswerPanel || answerSurface?.surface !== "content" || answerSurface.hasToolbar || answerSurface.hasQuestionPanel || !answerSurface.hasAnswerPanel) throw new Error(`OVERLAY_SURFACE_SPLIT failed: ${JSON.stringify({ controlSurface, contentSurface, answerSurface })}`);
@@ -716,8 +718,9 @@ try {
   await overlayConfirm.command("Runtime.enable");
   await overlayConfirm.command("Log.enable");
   await waitFor(() => Boolean(document.querySelector("[data-testid='confirm-end']")), 5_000, overlayConfirm);
-  const confirmedEnd = await overlayConfirm.evaluate("(() => { const button = document.querySelector('[data-testid=\"confirm-end\"]'); if (!button) return false; button.click(); return true; })()");
-  if (!confirmedEnd) throw new Error("End interview confirmation button was not rendered");
+  const confirmGeometry = await overlayConfirm.evaluate("(() => { const card = document.querySelector('.overlay-confirm-card')?.getBoundingClientRect(); return { viewport: { width: window.innerWidth, height: window.innerHeight }, card: card ? { width: card.width, height: card.height } : undefined }; })()");
+  if (confirmGeometry?.viewport?.width !== 420 || confirmGeometry?.viewport?.height !== 170 || (confirmGeometry?.card?.width ?? 0) < 390 || (confirmGeometry?.card?.height ?? 0) < 140) throw new Error(`CONFIRM_GEOMETRY_REGRESSION failed: ${JSON.stringify(confirmGeometry)}`);
+  await nativeClick("[data-testid='confirm-end']", overlayConfirm);
   await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "ENDED"), 15_000);
   evidence.push("Native end-interview click: PASS; independent confirmation dialog: PASS; dialog action: PASS; session shutdown: PASS");
   overlayConfirm.socket.close();

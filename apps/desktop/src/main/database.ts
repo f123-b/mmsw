@@ -20,6 +20,9 @@ import {
   inferKnowledgeDocumentType,
   type KnowledgeDocumentType,
   type ProfileBuilderOutput,
+  type ResumeAnalysis,
+  RESUME_ANALYSIS_VERSION,
+  PROFILE_BUILDER_VERSION,
   type ProfileBuilderSourceKind,
   type SkillSuggestion,
   type SkillSuggestionStatus,
@@ -812,6 +815,23 @@ export class SqliteDatabase {
         ALTER TABLE skills ADD COLUMN evidence_refs_json TEXT NOT NULL DEFAULT '[]';
         ALTER TABLE skills ADD COLUMN confirmed_at INTEGER;
       `],
+      [34, `
+        ALTER TABLE profile_skill_suggestions ADD COLUMN analysis_version INTEGER NOT NULL DEFAULT 1;
+        CREATE INDEX IF NOT EXISTS profile_skill_suggestions_version_idx ON profile_skill_suggestions(profile_id, analysis_version, status, updated_at DESC);
+      `],
+      [35, `
+        CREATE TABLE IF NOT EXISTS resume_analyses (
+          profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+          resume_hash TEXT NOT NULL,
+          analyzer_version INTEGER NOT NULL,
+          analysis_quality TEXT NOT NULL,
+          artifact_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(profile_id, resume_hash, analyzer_version)
+        );
+        CREATE INDEX IF NOT EXISTS resume_analyses_profile_idx ON resume_analyses(profile_id, updated_at DESC);
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -944,7 +964,7 @@ export class SqliteProfileBuilderRepository {
   invalidate(profileId: string, now = Date.now()): void {
     const current = this.get(profileId);
     if (!current) return;
-    this.database.run("UPDATE profile_builder_artifacts SET status = 'partial', error = ?, updated_at = ? WHERE profile_id = ?", ["资料已更新，等待 Profile Builder 重建", now, profileId]);
+    this.database.run("UPDATE profile_builder_artifacts SET status = 'stale', error = ?, updated_at = ? WHERE profile_id = ?", ["资料已更新，等待 Profile Builder 重建", now, profileId]);
     this.database.flush();
   }
 
@@ -954,13 +974,52 @@ export class SqliteProfileBuilderRepository {
   }
 }
 
+export interface ResumeAnalysisRecord {
+  profileId: string;
+  resumeHash: string;
+  analyzerVersion: number;
+  analysisQuality: ResumeAnalysis["analysisQuality"];
+  artifact?: ResumeAnalysis;
+  status: "current" | "stale";
+  createdAt: number;
+  updatedAt: number;
+}
+
+export class SqliteResumeAnalysisRepository {
+  constructor(private readonly database: SqliteDatabase) {}
+
+  get(profileId: string, resumeHash?: string, analyzerVersion = RESUME_ANALYSIS_VERSION): ResumeAnalysisRecord | undefined {
+    const row = resumeHash
+      ? this.database.first<Record<string, unknown>>("SELECT profile_id AS profileId, resume_hash AS resumeHash, analyzer_version AS analyzerVersion, analysis_quality AS analysisQuality, artifact_json AS artifactJson, created_at AS createdAt, updated_at AS updatedAt FROM resume_analyses WHERE profile_id = ? AND resume_hash = ? AND analyzer_version = ?", [profileId, resumeHash, analyzerVersion])
+      : this.database.first<Record<string, unknown>>("SELECT profile_id AS profileId, resume_hash AS resumeHash, analyzer_version AS analyzerVersion, analysis_quality AS analysisQuality, artifact_json AS artifactJson, created_at AS createdAt, updated_at AS updatedAt FROM resume_analyses WHERE profile_id = ? ORDER BY updated_at DESC LIMIT 1", [profileId]);
+    if (!row) return undefined;
+    return this.hydrate(row, Boolean(resumeHash && String(row.resumeHash) === resumeHash && Number(row.analyzerVersion) === analyzerVersion));
+  }
+
+  save(input: { profileId: string; resumeHash: string; artifact: ResumeAnalysis; now?: number }): ResumeAnalysisRecord {
+    const now = input.now ?? Date.now();
+    this.database.run("INSERT INTO resume_analyses(profile_id, resume_hash, analyzer_version, analysis_quality, artifact_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(profile_id, resume_hash, analyzer_version) DO UPDATE SET analysis_quality=excluded.analysis_quality, artifact_json=excluded.artifact_json, updated_at=excluded.updated_at", [input.profileId, input.resumeHash, input.artifact.version, input.artifact.analysisQuality, JSON.stringify(input.artifact), now, now]);
+    this.database.flushNow();
+    return this.get(input.profileId, input.resumeHash, input.artifact.version) as ResumeAnalysisRecord;
+  }
+
+  private hydrate(row: Record<string, unknown>, current: boolean): ResumeAnalysisRecord {
+    let artifact: ResumeAnalysis | undefined;
+    try {
+      const parsed = JSON.parse(String(row.artifactJson)) as ResumeAnalysis;
+      if (parsed && parsed.version === RESUME_ANALYSIS_VERSION) artifact = parsed;
+    } catch { artifact = undefined; }
+    return { profileId: String(row.profileId), resumeHash: String(row.resumeHash), analyzerVersion: Number(row.analyzerVersion), analysisQuality: String(row.analysisQuality) === "structured" ? "structured" : "fallback", ...(artifact ? { artifact } : {}), status: current && Boolean(artifact) ? "current" : "stale", createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
+  }
+}
+
 export class SqliteSkillSuggestionRepository {
   constructor(private readonly database: SqliteDatabase) {}
 
   list(profileId: string, status?: SkillSuggestionStatus): SkillSuggestion[] {
     const where = status ? " AND status = ?" : "";
     const params = status ? [profileId, status] : [profileId];
-    return this.database.all<Record<string, unknown>>(`SELECT id, profile_id AS profileId, name, description, confidence, evidence_ids_json AS evidenceIdsJson, evidence_quotes_json AS evidenceQuotesJson, source_kinds_json AS sourceKindsJson, status, confirmed_at AS confirmedAt, rejected_at AS rejectedAt, created_at AS createdAt, updated_at AS updatedAt FROM profile_skill_suggestions WHERE profile_id = ?${where} ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'confirmed' THEN 1 ELSE 2 END, updated_at DESC, name`, params).map((row) => this.hydrate(row));
+    return this.database.all<Record<string, unknown>>(`SELECT id, profile_id AS profileId, name, description, confidence, evidence_ids_json AS evidenceIdsJson, evidence_quotes_json AS evidenceQuotesJson, source_kinds_json AS sourceKindsJson, analysis_version AS analysisVersion, status, confirmed_at AS confirmedAt, rejected_at AS rejectedAt, created_at AS createdAt, updated_at AS updatedAt FROM profile_skill_suggestions WHERE profile_id = ? AND analysis_version = ${PROFILE_BUILDER_VERSION}${where} ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'confirmed' THEN 1 ELSE 2 END, updated_at DESC, name`, params).map((row) => this.hydrate(row));
   }
 
   upsertFromArtifact(profileId: string, nodes: ProfileBuilderOutput["skillGraph"]["nodes"], sourceSnapshot: unknown, now = Date.now()): SkillSuggestion[] {
@@ -973,12 +1032,15 @@ export class SqliteSkillSuggestionRepository {
       const evidenceIds = [...new Set(node.evidenceIds.filter(Boolean))];
       const evidenceQuotes = evidenceIds.map((evidenceId) => {
         const source = sourceById.get(evidenceId);
-        return source?.title ? String(source.title) : evidenceId;
+        const sourceText = source?.text ? String(source.text) : "";
+        const normalizedText = sourceText.toLocaleLowerCase();
+        const index = normalizedText.indexOf(name.toLocaleLowerCase());
+        return index >= 0 ? sourceText.slice(Math.max(0, index - 80), index + Math.min(160, name.length + 80)).trim() : source?.title ? String(source.title) : evidenceId;
       });
       const sourceKinds = [...new Set(evidenceIds.map((evidenceId) => sourceById.get(evidenceId)?.kind).filter((kind): kind is ProfileBuilderSourceKind => typeof kind === "string"))];
       const confidence = Math.min(0.95, 0.55 + Math.min(0.35, evidenceIds.length * 0.1));
       const suggestionId = `skill-suggestion-${profileId}-${normalizedName.replace(/[^a-z0-9\u4e00-\u9fff]+/gi, "-").slice(0, 64)}`;
-      this.database.run("INSERT INTO profile_skill_suggestions(id, profile_id, normalized_name, name, description, confidence, evidence_ids_json, evidence_quotes_json, source_kinds_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?) ON CONFLICT(profile_id, normalized_name) DO UPDATE SET name=excluded.name, description=excluded.description, confidence=excluded.confidence, evidence_ids_json=excluded.evidence_ids_json, evidence_quotes_json=excluded.evidence_quotes_json, source_kinds_json=excluded.source_kinds_json, updated_at=excluded.updated_at", [suggestionId, profileId, normalizedName, name, node.description || "", confidence, JSON.stringify(evidenceIds), JSON.stringify(evidenceQuotes), JSON.stringify(sourceKinds), now, now]);
+       this.database.run("INSERT INTO profile_skill_suggestions(id, profile_id, normalized_name, name, description, confidence, evidence_ids_json, evidence_quotes_json, source_kinds_json, analysis_version, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?) ON CONFLICT(profile_id, normalized_name) DO UPDATE SET name=excluded.name, description=excluded.description, confidence=excluded.confidence, evidence_ids_json=excluded.evidence_ids_json, evidence_quotes_json=excluded.evidence_quotes_json, source_kinds_json=excluded.source_kinds_json, analysis_version=excluded.analysis_version, updated_at=excluded.updated_at", [suggestionId, profileId, normalizedName, name, node.description || "", confidence, JSON.stringify(evidenceIds), JSON.stringify(evidenceQuotes), JSON.stringify(sourceKinds), PROFILE_BUILDER_VERSION, now, now]);
     }
     if (nodes.length > 0) this.database.flushNow();
     return this.list(profileId);
@@ -988,7 +1050,7 @@ export class SqliteSkillSuggestionRepository {
     if (!["pending", "confirmed", "rejected"].includes(status)) throw new Error("Invalid skill suggestion status");
     this.database.run("UPDATE profile_skill_suggestions SET status = ?, confirmed_at = ?, rejected_at = ?, updated_at = ? WHERE id = ?", [status, status === "confirmed" ? now : null, status === "rejected" ? now : null, now, id]);
     this.database.flushNow();
-    const row = this.database.first<Record<string, unknown>>("SELECT id, profile_id AS profileId, name, description, confidence, evidence_ids_json AS evidenceIdsJson, evidence_quotes_json AS evidenceQuotesJson, source_kinds_json AS sourceKindsJson, status, confirmed_at AS confirmedAt, rejected_at AS rejectedAt, created_at AS createdAt, updated_at AS updatedAt FROM profile_skill_suggestions WHERE id = ?", [id]);
+    const row = this.database.first<Record<string, unknown>>("SELECT id, profile_id AS profileId, name, description, confidence, evidence_ids_json AS evidenceIdsJson, evidence_quotes_json AS evidenceQuotesJson, source_kinds_json AS sourceKindsJson, analysis_version AS analysisVersion, status, confirmed_at AS confirmedAt, rejected_at AS rejectedAt, created_at AS createdAt, updated_at AS updatedAt FROM profile_skill_suggestions WHERE id = ? AND analysis_version = ?", [id, PROFILE_BUILDER_VERSION]);
     return row ? this.hydrate(row) : undefined;
   }
 
@@ -1003,6 +1065,7 @@ export class SqliteSkillSuggestionRepository {
       evidenceIds: jsonArray<string>(row.evidenceIdsJson),
       evidenceQuotes: jsonArray<string>(row.evidenceQuotesJson),
       sourceKinds: jsonArray<ProfileBuilderSourceKind>(row.sourceKindsJson),
+      analysisVersion: Number(row.analysisVersion ?? PROFILE_BUILDER_VERSION),
       status,
       ...(row.confirmedAt ? { confirmedAt: Number(row.confirmedAt) } : {}),
       ...(row.rejectedAt ? { rejectedAt: Number(row.rejectedAt) } : {}),

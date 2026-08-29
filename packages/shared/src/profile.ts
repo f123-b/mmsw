@@ -40,6 +40,8 @@ export interface SkillSuggestion {
   rejectedAt?: number;
   createdAt: number;
   updatedAt: number;
+  /** Profile Builder generation that produced this suggestion. */
+  analysisVersion?: number;
 }
 
 export interface SalaryExpectation {

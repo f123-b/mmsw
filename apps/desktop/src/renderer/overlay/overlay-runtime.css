@@ -1,0 +1,45 @@
+html.overlay-window,
+html.overlay-window body,
+html.overlay-window #root {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+* { box-sizing: border-box; }
+button, input, textarea, select { font: inherit; }
+button { border: 0; cursor: pointer; }
+button:focus-visible { outline: 2px solid #9bd2ff; outline-offset: 2px; }
+
+.overlay-root {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  color: rgba(255, 255, 255, .94);
+  font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.overlay-root[data-hud-mode="HIDDEN"]:not([data-layout-edit-mode="on"]) { visibility: hidden; }
+.floating-panel { position: absolute; top: 0; left: 0; pointer-events: auto; user-select: none; }
+.floating-panel.dragging { cursor: grabbing; }
+.resize-handle { position: absolute; z-index: 4; pointer-events: auto; }
+.resize-handle-n, .resize-handle-s { right: 12px; left: 12px; height: 12px; }
+.resize-handle-n { top: -6px; cursor: ns-resize; }
+.resize-handle-s { bottom: -6px; cursor: ns-resize; }
+.resize-handle-e, .resize-handle-w { top: 12px; bottom: 12px; width: 12px; }
+.resize-handle-e { right: -6px; cursor: ew-resize; }
+.resize-handle-w { left: -6px; cursor: ew-resize; }
+.resize-handle-ne, .resize-handle-se, .resize-handle-sw, .resize-handle-nw { width: 16px; height: 16px; }
+.resize-handle-ne { top: -8px; right: -8px; cursor: nesw-resize; }
+.resize-handle-se { right: -8px; bottom: -8px; cursor: nwse-resize; }
+.resize-handle-sw { bottom: -8px; left: -8px; cursor: nesw-resize; }
+.resize-handle-nw { top: -8px; left: -8px; cursor: nwse-resize; }
+.overlay-root[data-layout-edit-mode="on"] .floating-panel { outline: 1px solid rgba(112, 181, 232, .72); outline-offset: 3px; }
+.hud-interactive-region { pointer-events: auto; }
+.capture-test-marker { position: fixed; z-index: 50; left: 50px; top: 50px; display: grid; width: 200px; height: 120px; place-items: center; background: #ff00ff; color: #000; font: 700 10px/1.1 "Segoe UI", sans-serif; text-align: center; }
+.hud-protection-indicator { position: fixed; right: 12px; bottom: 10px; color: #8b97a8; font-size: 12px; pointer-events: none; }

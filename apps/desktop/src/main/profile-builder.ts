@@ -1,7 +1,7 @@
-import type { AnswerProvider, KnowledgeDocumentType, ProfileBuilderInput, ProfileBuilderModel, ProfileBuilderOutput, ProfileBuilderSource, ProfileBuilderSourceSnapshot, ResumeAnalysis } from "@interview-copilot/shared";
-import { ProfileBuilderAgent } from "@interview-copilot/shared";
+import type { AnswerProvider, KnowledgeDocumentType, ProfileBuilderInput, ProfileBuilderModel, ProfileBuilderOutput, ProfileBuilderSource, ProfileBuilderSourceSnapshot, ResumeAnalysis, ResumeAnalysisModel } from "@interview-copilot/shared";
+import { ProfileBuilderAgent, RESUME_ANALYSIS_VERSION, ResumeAnalyzer } from "@interview-copilot/shared";
 import { createHash } from "node:crypto";
-import { SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectRepository, SqliteSkillSuggestionRepository, type ProfileBuilderArtifactRecord } from "./database";
+import { SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectRepository, SqliteResumeAnalysisRepository, SqliteSkillSuggestionRepository, type ProfileBuilderArtifactRecord, type ResumeAnalysisRecord } from "./database";
 import { ProfileAnalysisJobManager, type ProfileAnalysisJob } from "./profile-analysis-job";
 
 function sourceFingerprint(source: ProfileBuilderSource): string {
@@ -14,6 +14,8 @@ export const MAX_KNOWLEDGE_DOCS = 6;
 export const MAX_INTERVIEW_HISTORY = 4;
 export const MAX_PROJECTS = 8;
 export const MAX_CONFIRMED_SKILLS = 12;
+
+export function resumeAnalysisHash(rawText: string): string { return createHash("sha256").update(rawText).digest("hex"); }
 
 function sourceText(title: string, raw: string, summary?: string): string {
   return [`标题：${title}`, summary ? `摘要：${summary}` : "", raw].filter(Boolean).join("\n").slice(0, MAX_SOURCE_CHARS);
@@ -55,8 +57,6 @@ function sourceSnapshotsMatch(left: unknown, right: ProfileBuilderSourceSnapshot
 export class ProfileBuilderService {
   private readonly pending = new Map<string, Promise<ProfileBuilderArtifactRecord>>();
   private readonly jobs: ProfileAnalysisJobManager;
-  private readonly resumeAnalyses = new Map<string, ResumeAnalysis>();
-  private readonly resumeAnalysisFingerprints = new Map<string, string>();
 
   constructor(
     private readonly profiles: SqliteProfileRepository,
@@ -67,14 +67,16 @@ export class ProfileBuilderService {
     private readonly suggestions?: SqliteSkillSuggestionRepository,
     private readonly model?: ProfileBuilderModel,
     private readonly onUpdated?: (record: ProfileBuilderArtifactRecord) => void,
-    private readonly onJobUpdated?: (job: ProfileAnalysisJob) => void
+    private readonly onJobUpdated?: (job: ProfileAnalysisJob) => void,
+    private readonly resumeAnalysisRepository?: SqliteResumeAnalysisRepository,
+    private readonly resumeModel?: ResumeAnalysisModel
   ) { this.jobs = new ProfileAnalysisJobManager((job) => this.onJobUpdated?.(job)); }
 
   get(profileId: string): ProfileBuilderArtifactRecord | undefined {
     const record = this.artifacts.get(profileId);
     if (!record) return undefined;
     const current = sourceSnapshot(this.collectSources(profileId), 0);
-    return sourceSnapshotsMatch(record.sourceSnapshot, current) ? record : { ...record, status: "stale" };
+    return sourceSnapshotsMatch(record.sourceSnapshot, current) && record.version === 2 && record.artifact?.version === 2 ? record : { ...record, status: "stale" };
   }
 
   async rebuild(profileId: string): Promise<ProfileBuilderArtifactRecord> {
@@ -92,10 +94,18 @@ export class ProfileBuilderService {
   startResumeAnalysis(profileId: string): ProfileAnalysisJob {
     const profile = this.profiles.get(profileId);
     if (!profile?.resume) throw new Error("RESUME_NOT_FOUND: 请先上传 Resume");
-    return this.jobs.start(profileId, "resume", { sourceId: `resume-${profileId}`, filename: profile.resume.filename, rawText: profile.resume.rawContent }, async (result) => {
-      this.resumeAnalyses.set(profileId, result as ResumeAnalysis);
-      this.resumeAnalysisFingerprints.set(profileId, createHash("sha256").update(profile.resume?.rawContent ?? "").digest("hex"));
+    const document = { sourceId: `resume-${profileId}`, filename: profile.resume.filename, rawText: profile.resume.rawContent };
+    return this.jobs.start(profileId, "resume", document, async (result) => {
+      const fallback = result as ResumeAnalysis;
+      const analysis = this.resumeModel ? await new ResumeAnalyzer().analyzeWithModel(document, this.resumeModel) : fallback;
+      this.resumeAnalysisRepository?.save({ profileId, resumeHash: resumeAnalysisHash(document.rawText), artifact: analysis });
     });
+  }
+
+  getResumeAnalysis(profileId: string): ResumeAnalysisRecord | undefined {
+    const profile = this.profiles.get(profileId);
+    if (!profile?.resume) return undefined;
+    return this.resumeAnalysisRepository?.get(profileId, resumeAnalysisHash(profile.resume.rawContent), RESUME_ANALYSIS_VERSION) ?? this.resumeAnalysisRepository?.get(profileId);
   }
 
   start(profileId: string): ProfileAnalysisJob {
@@ -114,8 +124,9 @@ export class ProfileBuilderService {
   private buildInput(profileId: string): ProfileBuilderInput {
     const profile = this.profiles.get(profileId);
     if (!profile) throw new Error(`Profile not found: ${profileId}`);
-    const resumeFingerprint = profile.resume ? createHash("sha256").update(profile.resume.rawContent).digest("hex") : undefined;
-    const resumeAnalysis = resumeFingerprint && this.resumeAnalysisFingerprints.get(profileId) === resumeFingerprint ? this.resumeAnalyses.get(profileId) : undefined;
+    const resumeFingerprint = profile.resume ? resumeAnalysisHash(profile.resume.rawContent) : undefined;
+    const storedResumeAnalysis = resumeFingerprint ? this.resumeAnalysisRepository?.get(profileId, resumeFingerprint, RESUME_ANALYSIS_VERSION) : undefined;
+    const resumeAnalysis = storedResumeAnalysis?.status === "current" ? storedResumeAnalysis.artifact : undefined;
     return { profileId, profileName: profile.name, sources: this.collectSources(profileId), resumeAnalysis };
   }
 
@@ -146,7 +157,7 @@ export class ProfileBuilderService {
     if (!profile) return [];
     const sources: ProfileBuilderSource[] = [];
     const add = (source: ProfileBuilderSource): void => { sources.push(source); };
-    if (profile.resume) add({ id: `resume-${profileId}`, kind: "resume", title: profile.resume.filename ?? "Resume", text: sourceText(profile.resume.filename ?? "Resume", profile.resume.rawContent, profile.resume.summary), updatedAt: profile.resume.uploadedAt ?? profile.updatedAt });
+    if (profile.resume) add({ id: `resume-${profileId}`, kind: "resume", title: profile.resume.filename ?? "Resume", text: sourceText(profile.resume.filename ?? "Resume", profile.resume.rawContent), updatedAt: profile.resume.uploadedAt ?? profile.updatedAt });
     if (profile.jobDescription) add({ id: `job-${profileId}`, kind: "job_target", title: profile.jobDescription.filename ?? "Job Description", text: sourceText(profile.jobDescription.filename ?? "Job Description", profile.jobDescription.rawContent, profile.jobDescription.summary), updatedAt: profile.jobDescription.uploadedAt ?? profile.updatedAt });
     for (const skill of profile.skills.filter((item) => item.confirmedAt).slice(0, MAX_CONFIRMED_SKILLS)) add({ id: `skill-${skill.id}`, kind: "skill", title: skill.name, text: `${skill.name}\n${skill.description}\n${skill.content}\n${skill.tags.join("、")}`, updatedAt: skill.confirmedAt ?? profile.updatedAt });
     for (const project of this.projects.list().filter((item) => item.profileId === profileId).sort((left, right) => right.updatedAt - left.updatedAt).slice(0, MAX_PROJECTS)) add({ id: `project-${project.id}`, kind: "project", title: project.name, text: `项目名称：${project.name}`, updatedAt: project.updatedAt });
@@ -174,6 +185,25 @@ export function createProfileBuilderModel(answerProvider: AnswerProvider, settin
           { name: "profile-context", content: JSON.stringify({ profileId: input.profile.profileId, profileName: input.profile.profileName, sources }) },
           { name: "output-format", content: "输出 JSON：{skillGraph:{nodes:[{id,label,description,evidenceIds}],edges:[]},projectGraph:{nodes:[{id,name,summary,highlights,skills,evidenceIds}],edges:[]},answerMaterials:[{id,question,answerPoints,topic,evidenceIds}],faqs:[{id,question,category,answerMaterialId,frequency,evidenceIds}]}。不要 Markdown。" },
           { name: "question", content: "请生成可以直接支持面试回答的个人技能图谱、项目知识图谱、回答素材库和常见问题库；技能建议必须能回溯到候选人证据，岗位要求只用于标注目标上下文。" }
+        ]
+      })) output += delta;
+      return output;
+    }
+  };
+}
+
+export function createResumeAnalysisModel(answerProvider: AnswerProvider, settings: { model: string; apiKey?: string }): ResumeAnalysisModel {
+  return {
+    async generate(input) {
+      if (!settings.apiKey) throw new Error("LLM_NOT_CONFIGURED");
+      let output = "";
+      for await (const delta of answerProvider.stream({
+        model: settings.model,
+        sections: [
+          { name: "system/base", content: "你是 Resume 结构化抽取器。只根据当前 Resume 原文输出 JSON，禁止使用岗位 JD、项目库、知识库、面试记录或任何外部上下文。每个 projects 项目必须提供 evidence：sourceId、startOffset、endOffset、rawExcerpt，rawExcerpt 必须是原文连续片段。不能定位证据的项目不要输出。skills 只能输出原文中明确出现的技能或常见别名。" },
+          { name: "profile-context", content: JSON.stringify(input.document) },
+          { name: "evidence-context", content: JSON.stringify(input.fallback) },
+          { name: "output-format", content: "只输出 JSON：{basicInfo:{name,email,phone},education:[],workExperience:[],internships:[],projects:[{id,name,period,role,description,responsibilities,technologies,evidence:{sourceId,startOffset,endOffset,rawExcerpt},confidence}],skills:[],awards:[],summary,warnings:[]}。" }
         ]
       })) output += delta;
       return output;

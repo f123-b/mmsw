@@ -23,7 +23,7 @@ export interface HUDLayout {
 }
 
 const TOPBAR_MAX_WIDTH = 680;
-const TOPBAR_HEIGHT = 50;
+const TOPBAR_HEIGHT = 58;
 const TOPBAR_TOP_RATIO = 0.08;
 const SHORTCUT_WIDTH = 320;
 const SHORTCUT_HEIGHT = 360;

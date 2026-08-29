@@ -1,4 +1,4 @@
-import { BrowserWindow, screen } from "electron";
+import { BrowserWindow, screen, type BrowserWindowConstructorOptions } from "electron";
 import { join } from "node:path";
 import { applyOverlayMode, nextOverlayMode, type OverlayMode } from "./overlay-mode";
 import { applyCaptureProtection, getCaptureProtectionCapabilities, type CaptureProtectionCapabilities, type CaptureProtectionState } from "./overlay-capture-protection";
@@ -39,6 +39,15 @@ export interface OverlayManagerOptions {
   onNativeBoundsChanged?: (panel: OverlayNativePanel, bounds: OverlayNativeBounds, display: OverlayDisplayInfo) => void;
   onHUDStateChange?: (state: HUDState) => void;
   onStartupTiming?: (event: InterviewStartupEvent) => void;
+}
+
+export interface ConfirmWindowConfiguration {
+  frame: false;
+  transparent: true;
+  skipTaskbar: true;
+  alwaysOnTop: true;
+  hasShadow: false;
+  focusable: true;
 }
 
 export type OverlayPanelCommand = "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end";
@@ -94,6 +103,7 @@ export class OverlayManager {
   get currentAnswerWindow(): BrowserWindow | undefined { return this.getWindow("answer"); }
   get currentControlWindow(): BrowserWindow | undefined { return this.getWindow("control"); }
   get currentConfirmWindow(): BrowserWindow | undefined { const window = this.confirmWindowValue; return window && !window.isDestroyed() ? window : undefined; }
+  get confirmWindowConfiguration(): ConfirmWindowConfiguration { return { frame: false, transparent: true, skipTaskbar: true, alwaysOnTop: true, hasShadow: false, focusable: true }; }
   get endInterviewConfirmOpen(): boolean { return this.endInterviewConfirmOpenValue; }
   get currentWindows(): BrowserWindow[] { return (["question", "answer", "control"] as const).map((panel) => this.getWindow(panel)).filter((window): window is BrowserWindow => Boolean(window)); }
   get captureProtection(): boolean { return this.captureProtectionEnabled; }
@@ -134,8 +144,7 @@ export class OverlayManager {
     window.setBounds(this.confirmBounds(), false);
     window.setFocusable(true);
     window.setIgnoreMouseEvents(false);
-    window.show();
-    window.focus();
+    window.showInactive();
     window.webContents.send("overlay:dialog-state", { endInterviewConfirmOpen: true });
   }
 
@@ -340,7 +349,8 @@ export class OverlayManager {
   private ensureConfirmWindow(): BrowserWindow {
     const existing = this.currentConfirmWindow;
     if (existing) return existing;
-    const window = new BrowserWindow({ ...this.confirmBounds(), title: "Interview Copilot Confirm", frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, show: false, focusable: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false } });
+    const configuration: BrowserWindowConstructorOptions = { ...this.confirmBounds(), title: "Interview Copilot Confirm", frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false } };
+    const window = new BrowserWindow(configuration);
     this.confirmWindowValue = window;
     window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
     const load = Promise.resolve(this.options.loadRenderer(window, "confirm")).then(() => { this.rendererReady.add("confirm"); }).catch(() => undefined);
@@ -355,13 +365,13 @@ export class OverlayManager {
     const window = this.currentConfirmWindow;
     if (!window) return;
     window.webContents.send("overlay:dialog-state", { endInterviewConfirmOpen: open });
-    if (open) { window.show(); window.focus(); } else window.hide();
+    if (open) window.showInactive(); else window.hide();
   }
 
   private confirmBounds(): Electron.Rectangle {
     const workArea = this.targetDisplay().workArea;
     const width = 420;
-    const height = 220;
+    const height = 170;
     return { x: workArea.x + Math.round((workArea.width - width) / 2), y: workArea.y + Math.round((workArea.height - height) / 2), width, height };
   }
 

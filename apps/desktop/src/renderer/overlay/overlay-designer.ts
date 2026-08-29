@@ -183,7 +183,7 @@ export function resolveOverlayLayoutPreset(preset: OverlayLayoutPreset, display:
   const question = clampDesignerRect(panels.question, canvas, QUESTION_DESIGNER_BOUNDS);
   const answer = clampDesignerRect(panels.answer, canvas, ANSWER_DESIGNER_BOUNDS);
   const orientation = preset === "dual_screen" ? "vertical" : current?.controlBarOrientation ?? "horizontal";
-  const controlSize = orientation === "vertical" ? { width: 54, height: 260 } : { width: Math.min(680, Math.max(360, canvas.width - 2 * margin)), height: 50 };
+  const controlSize = orientation === "vertical" ? { width: 54, height: 260 } : { width: Math.min(680, Math.max(360, canvas.width - 2 * margin)), height: 58 };
   const positionMode = preset === "custom" ? current?.controlBarPositionMode ?? "custom" : preset === "compact" ? "top_right" : preset === "wide" ? "bottom_center" : "top_center";
   const customPoint = preset === "custom" && current?.controlBar ? { x: current.controlBar.x, y: current.controlBar.y } : undefined;
   const controlPoint = controlBarPosition(positionMode, orientation, canvas, controlSize, customPoint);

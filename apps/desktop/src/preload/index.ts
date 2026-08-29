@@ -16,13 +16,26 @@ import type { OverlayPreferences, OverlayPreferencesPatch, TencentValidationStat
 import type { SessionState } from "@interview-copilot/shared";
 import type { ChatAction, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectQaGenerationResult, ProjectQuestionBankImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord, SkillSuggestion, SkillSuggestionStatus } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankRelationInput, QuestionBankRouteQuery, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
+import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankRelationInput, QuestionBankRouteQuery, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord, ResumeAnalysisRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 import type { ModelCatalogResult } from "../main/model-catalog";
 import type { InterviewExportResult } from "../main/history-export";
 import type { ProfileAnalysisJob } from "../main/profile-analysis-job";
 import type { InterviewStartupEvent } from "../main/interview-startup-timing";
+
+let latestOverlayDialogState: { endInterviewConfirmOpen: boolean } = { endInterviewConfirmOpen: false };
+ipcRenderer.on("overlay:dialog-state", (_event, state: { endInterviewConfirmOpen: boolean }) => {
+  latestOverlayDialogState = { endInterviewConfirmOpen: Boolean(state.endInterviewConfirmOpen) };
+});
+let latestOverlayLayoutEditMode: boolean | undefined;
+ipcRenderer.on("overlay:layout-edit-mode", (_event, enabled: boolean) => {
+  latestOverlayLayoutEditMode = Boolean(enabled);
+});
+let latestOverlayState: HUDState | undefined;
+ipcRenderer.on("overlay:state", (_event, state: HUDState) => {
+  latestOverlayState = state;
+});
 
 function createRendererScreenshotRequestId(): string {
   return `screenshot-${Date.now()}-${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2, 10)}`;
@@ -144,6 +157,7 @@ const api = {
   },
   resumeAnalysis: {
     start: (profileId: string): Promise<ProfileAnalysisJob> => ipcRenderer.invoke("resume-analysis:start", profileId),
+    get: (profileId: string): Promise<ResumeAnalysisRecord | undefined> => ipcRenderer.invoke("resume-analysis:get", profileId),
     getJob: (jobId: string): Promise<ProfileAnalysisJob | undefined> => ipcRenderer.invoke("resume-analysis:get-job", jobId),
     cancel: (jobId: string): Promise<ProfileAnalysisJob | undefined> => ipcRenderer.invoke("resume-analysis:cancel", jobId)
   },
@@ -280,6 +294,7 @@ const api = {
     onOverlayState: (listener: (state: HUDState) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, state: HUDState) => listener(state);
       ipcRenderer.on("overlay:state", handler);
+      if (latestOverlayState) listener(latestOverlayState);
       return () => ipcRenderer.removeListener("overlay:state", handler);
     },
     onOverlayLayout: (listener: (layout: HUDLayout) => void) => {
@@ -290,6 +305,7 @@ const api = {
     onOverlayLayoutEditMode: (listener: (enabled: boolean) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, enabled: boolean) => listener(Boolean(enabled));
       ipcRenderer.on("overlay:layout-edit-mode", handler);
+      if (latestOverlayLayoutEditMode !== undefined) listener(latestOverlayLayoutEditMode);
       return () => ipcRenderer.removeListener("overlay:layout-edit-mode", handler);
     },
     onOverlayGlobalWheel: (listener: (event: { x: number; y: number; deltaY: number; dual: boolean }) => void) => {
@@ -310,6 +326,7 @@ const api = {
     onOverlayDialogState: (listener: (state: { endInterviewConfirmOpen: boolean }) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, state: { endInterviewConfirmOpen: boolean }) => listener(state);
       ipcRenderer.on("overlay:dialog-state", handler);
+      listener(latestOverlayDialogState);
       return () => ipcRenderer.removeListener("overlay:dialog-state", handler);
     },
     onShortcut: (listener: (shortcut: string) => void) => {

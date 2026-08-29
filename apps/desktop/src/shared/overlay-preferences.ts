@@ -179,7 +179,7 @@ export const DEFAULT_OVERLAY_PREFERENCES: OverlayPreferences = {
   },
   controlBar: {
     width: 680,
-    height: 50,
+    height: 58,
     fontSize: 13,
     ...sharedWindowDefaults,
     titleFontSize: 13,

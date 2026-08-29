@@ -6,9 +6,8 @@ interface ProfileAnalysisPanelProps {
   artifact?: ProfileBuilderArtifactRecord;
   suggestions: SkillSuggestion[];
   running: boolean;
-  resumeAnalysisRunning: boolean;
+  canBuildProfile: boolean;
   onRebuild: () => void;
-  onAnalyzeResume: () => void;
   onReviewSuggestion: (id: string, status: SkillSuggestionStatus) => void;
 }
 
@@ -21,13 +20,13 @@ function statusLabel(artifact: ProfileBuilderArtifactRecord | undefined, running
   return "待分析";
 }
 
-export function ProfileAnalysisPanel({ artifact, suggestions, running, resumeAnalysisRunning, onRebuild, onAnalyzeResume, onReviewSuggestion }: ProfileAnalysisPanelProps): JSX.Element {
-  const output = artifact?.artifact;
+export function ProfileAnalysisPanel({ artifact, suggestions, running, canBuildProfile, onRebuild, onReviewSuggestion }: ProfileAnalysisPanelProps): JSX.Element {
+  const output = artifact?.status === "ready" || artifact?.status === "partial" ? artifact.artifact : undefined;
   const pending = suggestions.filter((suggestion) => suggestion.status === "pending");
   return <section className="profile-subsection profile-builder-panel">
-    <div className="profile-builder-heading"><div><span className="page-kicker">AI PROFILE ANALYSIS</span><h3>AI 结构化分析</h3><p className="page-note">只把可回溯到候选人资料的内容纳入建议；岗位要求仅作为目标上下文。</p></div><span className="profile-builder-status">{statusLabel(artifact, running)}</span></div>
-    <div className="detail-actions"><button className="outline-pill" disabled={running} onClick={onRebuild}>{running ? "分析中…" : artifact?.status === "stale" ? "重新分析" : "开始分析"}</button><button className="outline-pill" disabled={resumeAnalysisRunning} onClick={onAnalyzeResume}>{resumeAnalysisRunning ? "简历解析中…" : "解析简历项目"}</button><span className="page-note">{output ? `技能 ${output.skillGraph.nodes.length} · 项目 ${output.projectGraph.nodes.length} · 回答素材 ${output.answerMaterials.length} · FAQ ${output.faqs.length}` : "先解析简历项目，再生成个人档案；岗位要求只作为独立上下文"}</span></div>
-    {artifact?.error && <small className="page-note profile-builder-error">本次分析失败：{artifact.error}；上次结果仍可查看。</small>}
+    <div className="profile-builder-heading"><div><span className="page-kicker">AI INTERVIEW PROFILE</span><h3>AI 面试画像</h3><p className="page-note">只把已通过证据校验的候选人资料生成技能、项目和回答素材；JD 仅作为独立岗位上下文。</p></div><span className="profile-builder-status">{statusLabel(artifact, running)}</span></div>
+    <div className="detail-actions"><button className="outline-pill" disabled={running || !canBuildProfile} onClick={onRebuild}>{running ? "画像生成中…" : artifact?.status === "stale" ? "重新生成画像" : "生成 AI 面试画像"}</button><span className="page-note">{!canBuildProfile ? "请先完成当前 Resume 解析" : output ? `技能 ${output.skillGraph.nodes.length} · 项目 ${output.projectGraph.nodes.length} · 回答素材 ${output.answerMaterials.length} · FAQ ${output.faqs.length}` : "画像结果会保存在当前 Profile Builder 版本下"}</span></div>
+    {artifact?.error && <small className="page-note profile-builder-error">本次分析失败：{artifact.error}；旧结果不会冒充当前画像。</small>}
     {output?.warnings.map((warning) => <small className="page-note" key={warning}>{warning}</small>)}
     <div className="profile-builder-grid">
       <div className="profile-builder-card"><h4>技能建议 · 待审核 {pending.length}</h4>{pending.length === 0 && <p className="page-note">暂无待审核技能。分析结果不会自动写入正式技能。</p>}{pending.map((suggestion) => <article className="profile-suggestion-card" key={suggestion.id}><div className="profile-suggestion-heading"><strong>{suggestion.name}</strong><span>{Math.round(suggestion.confidence * 100)}% 可信度</span></div><p>{suggestion.description || "未提供描述"}</p><small>来源：{suggestion.sourceKinds.join("、") || "未标注"}</small><details><summary>查看证据</summary><ul>{suggestion.evidenceQuotes.map((quote, index) => <li key={`${suggestion.id}-evidence-${index}`}>{quote}</li>)}</ul></details><div className="detail-actions"><button className="text-button" onClick={() => onReviewSuggestion(suggestion.id, "confirmed")}>确认加入技能</button><button className="text-button danger-text" onClick={() => onReviewSuggestion(suggestion.id, "rejected")}>拒绝</button></div></article>)}</div>

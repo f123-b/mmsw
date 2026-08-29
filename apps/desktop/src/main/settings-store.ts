@@ -282,7 +282,7 @@ export interface OverlayCaptureProtectionSettings {
   captureProtection: boolean;
 }
 
-export const OVERLAY_PREFERENCES_SCHEMA_VERSION = 2;
+export const OVERLAY_PREFERENCES_SCHEMA_VERSION = 3;
 
 export function migrateOverlayPreferences(input: unknown): { value: OverlayPreferencesPatch; migrated: boolean } {
   const source = input && typeof input === "object" ? { ...(input as Record<string, unknown>) } : {};
@@ -292,6 +292,11 @@ export function migrateOverlayPreferences(input: unknown): { value: OverlayPrefe
   // v1 allowed the old interactive default to survive in app_state. The v2
   // migration intentionally changes only legacy data; subsequent user edits
   // are never overwritten on startup.
+  const controlBar = source.controlBar && typeof source.controlBar === "object" ? { ...(source.controlBar as Record<string, unknown>) } : undefined;
+  if (controlBar && source.layoutPreset !== "custom" && controlBar.width === 680 && controlBar.height === 50) {
+    controlBar.height = 58;
+    source.controlBar = controlBar;
+  }
   source.schemaVersion = OVERLAY_PREFERENCES_SCHEMA_VERSION;
   source.behavior = { ...behavior, interactionMode: "click_through", mousePassthrough: true, lockLayout: true, lockPosition: true };
   return { value: source as OverlayPreferencesPatch, migrated: true };

@@ -463,6 +463,7 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
     });
     const unsubscribePreferences = window.interviewCopilot.events.onOverlayPreferences((next) => { if (!disposed) setPreferences(next); });
     const unsubscribeCommands = window.interviewCopilot.events.onOverlayCommand((command: OverlayCommand) => { if (command === "reset-layout") clearSavedLayout(); });
+    window.interviewCopilot.diagnostics.markRendererReady();
     return () => { disposed = true; unsubscribeProtection(); unsubscribeLayout(); unsubscribeLayoutEdit(); unsubscribeGlobalWheel(); unsubscribePreferences(); unsubscribeCommands(); };
   }, [applyMainLayout, clearSavedLayout, nativeSurface]);
   const status = hudState({ state, sessionState, realtimeState, operationMode, question, answerText, answerStreaming });

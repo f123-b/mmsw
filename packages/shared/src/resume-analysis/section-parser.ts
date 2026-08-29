@@ -56,8 +56,10 @@ function bullet(text: string): string | undefined {
 function projectHeader(text: string): boolean {
   if (!text || bullet(text)) return false;
   if (/^(?:项目名称|project)\s*[:：]/i.test(text)) return true;
-  if (/\b20\d{2}\b|\d{4}[./-]\d{1,2}/.test(text)) return true;
-  return text.length >= 2 && text.length <= 72 && !/^(?:职责|负责内容|技术栈|tools?|technologies?)\s*[:：]/i.test(text);
+  const hasDate = /(?:19|20)\d{2}\s*[./-]\s*\d{1,2}|(?:19|20)\d{2}\s*[-~至到]\s*(?:(?:19|20)\d{2}|至今)/.test(text);
+  const hasRoleOrTechnology = /(?:角色|职位|担任|负责(?:人)?|技术栈|tools?|technologies?|role)\s*[:：]/i.test(text);
+  const hasProjectMetadata = /[|｜]/.test(text) && (hasDate || hasRoleOrTechnology);
+  return text.length >= 2 && text.length <= 96 && hasProjectMetadata && !/^(?:职责|负责内容|技术栈|tools?|technologies?)\s*[:：]/i.test(text);
 }
 
 function projectName(header: string): string {

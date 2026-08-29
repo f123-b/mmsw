@@ -25,7 +25,7 @@ export interface ResumeProject {
 }
 
 export interface ResumeAnalysis {
-  version: 1;
+  version: 2;
   sourceId: string;
   filename?: string;
   analysisQuality: "structured" | "fallback";
@@ -38,4 +38,8 @@ export interface ResumeAnalysis {
   awards: string[];
   summary: string;
   warnings: string[];
+}
+
+export interface ResumeAnalysisModel {
+  generate(input: { document: ResumeDocument; fallback: ResumeAnalysis }): Promise<string>;
 }

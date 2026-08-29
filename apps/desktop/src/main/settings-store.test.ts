@@ -172,14 +172,24 @@ describe("OverlaySettingsStore", () => {
       database.run("INSERT INTO app_state(key, value) VALUES (?, ?)", ["overlay.preferences", JSON.stringify({ behavior: { interactionMode: "interactive", mousePassthrough: false, lockLayout: false }, questionWindow: { width: 500 } })]);
       const settings = new OverlaySettingsStore(database);
       const migrated = settings.getPreferences();
-      expect(migrated.schemaVersion).toBe(2);
+      expect(migrated.schemaVersion).toBe(3);
       expect(migrated.behavior).toMatchObject({ interactionMode: "click_through", mousePassthrough: true, lockLayout: true });
       const storedAfterMigration = database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", ["overlay.preferences"]);
-      expect(JSON.parse(storedAfterMigration?.value ?? "{}").schemaVersion).toBe(2);
+      expect(JSON.parse(storedAfterMigration?.value ?? "{}").schemaVersion).toBe(3);
 
       const edited = settings.setPreferences({ behavior: { interactionMode: "interactive", lockLayout: false } });
       expect(edited.behavior).toMatchObject({ interactionMode: "interactive", mousePassthrough: false, lockLayout: false });
       expect(new OverlaySettingsStore(database).getPreferences().behavior).toMatchObject({ interactionMode: "interactive", mousePassthrough: false, lockLayout: false });
+    } finally { database.close(); }
+  });
+
+  it("migrates the legacy standard control-bar height to the canonical 58px geometry", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      database.run("INSERT INTO app_state(key, value) VALUES (?, ?)", ["overlay.preferences", JSON.stringify({ schemaVersion: 2, layoutPreset: "standard", controlBar: { width: 680, height: 50 } })]);
+      const preferences = new OverlaySettingsStore(database).getPreferences();
+      expect(preferences.schemaVersion).toBe(3);
+      expect(preferences.controlBar).toMatchObject({ width: 680, height: 58 });
     } finally { database.close(); }
   });
 

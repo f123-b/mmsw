@@ -15,6 +15,7 @@ export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
     const unsubscribeLayoutEdit = window.interviewCopilot.events.onOverlayLayoutEditMode((enabled) => { if (!disposed) setLayoutEditMode(enabled); });
     const onResize = () => setLayout((current) => ({ ...current, width: window.innerWidth, height: window.innerHeight }));
     window.addEventListener("resize", onResize);
+    window.interviewCopilot.diagnostics.markRendererReady();
     return () => { disposed = true; unsubscribe(); unsubscribeLayoutEdit(); window.removeEventListener("resize", onResize); };
   }, []);
   const modeLabel = props.operationMode === "WRITTEN_TEST" ? "笔试" : "面试";

@@ -1,6 +1,8 @@
 export type ProfileBuilderSourceKind = "resume" | "job_target" | "project" | "interview" | "knowledge" | "skill";
 import type { ResumeAnalysis } from "../resume-analysis";
 
+export const PROFILE_BUILDER_VERSION = 2;
+
 export interface ProfileBuilderSource {
   id: string;
   kind: ProfileBuilderSourceKind;
@@ -73,7 +75,8 @@ export interface ProfileFAQ {
 }
 
 export interface ProfileBuilderOutput {
-  version: 1;
+  /** Version 2 is current; older persisted artifacts remain readable only as stale records. */
+  version: number;
   profileId: string;
   generatedAt: number;
   status: "ready" | "partial" | "error";

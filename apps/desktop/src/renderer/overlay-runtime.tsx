@@ -79,14 +79,15 @@ function useOverlayRuntime(surface: OverlaySurface): RuntimeState {
   const answerStore = useMemo(() => new AnswerThreadStore(), []);
   useEffect(() => {
     let disposed = false;
+    let observedOverlayState = false;
     const update = (patch: Partial<RuntimeState>) => { if (!disposed) setState((current) => ({ ...current, ...patch })); };
-    void Promise.all([window.interviewCopilot.overlay.getState(), window.interviewCopilot.overlay.getPreferences(), window.interviewCopilot.overlay.getCaptureProtection()]).then(([hudState, preferences, captureProtection]) => update({ hudState: hudState ?? initialHUDState, preferences, captureProtection })).catch(() => undefined);
+    void Promise.all([window.interviewCopilot.overlay.getState(), window.interviewCopilot.overlay.getPreferences(), window.interviewCopilot.overlay.getCaptureProtection()]).then(([hudState, preferences, captureProtection]) => update({ ...(observedOverlayState ? {} : { hudState: hudState ?? initialHUDState }), preferences, captureProtection })).catch(() => undefined);
     const cleanups = [
       window.interviewCopilot.events.onAudio((event) => { if (event.type === "meter") update({ mic: Math.max(0, Math.min(1, event.mic)), system: Math.max(0, Math.min(1, event.system)) }); else if (event.type === "audio_state") update({ state: event.state }); }),
       window.interviewCopilot.events.onSessionState((sessionState: SessionState) => update({ sessionState, operationMode: sessionState === "IDLE" || sessionState === "ENDED" ? "IDLE" : "INTERVIEW" })),
       window.interviewCopilot.events.onRealtimeState((realtimeState) => update({ realtimeState })),
       window.interviewCopilot.events.onOverlayMode((overlayMode) => update({ overlayMode })),
-      window.interviewCopilot.events.onOverlayState((hudState) => update({ hudState })),
+      window.interviewCopilot.events.onOverlayState((hudState) => { observedOverlayState = true; update({ hudState }); }),
       window.interviewCopilot.events.onOverlayPreferences((preferences) => update({ preferences })),
       window.interviewCopilot.events.onOverlayCaptureProtection((captureProtection) => update({ captureProtection })),
       window.interviewCopilot.events.onOverlayLayoutEditMode((layoutEditMode) => update({ layoutEditMode })),
@@ -99,7 +100,6 @@ function useOverlayRuntime(surface: OverlaySurface): RuntimeState {
       window.interviewCopilot.events.onRealtimeMessage((message) => setState((current) => applyRealtimeMessage(message, current, answerStore))),
       window.interviewCopilot.events.onOverlayGlobalWheel(({ deltaY }) => { const selector = surface === "answer" ? ".answer-thread-panel" : ".question-thread-panel"; const element = document.querySelector(selector) as HTMLElement | null; if (element) element.scrollTop += deltaY; })
     ];
-    window.interviewCopilot.diagnostics.markRendererReady();
     return () => { disposed = true; cleanups.forEach((cleanup) => cleanup()); };
   }, [answerStore, surface]);
   return state;

@@ -78,7 +78,7 @@ export function normalizeProfileBuilderArtifact(raw: unknown, context: { profile
   if (parseError && !warnings.includes("Profile Builder artifact 无法解析，已使用安全空结构")) warnings.push("Profile Builder artifact 无法解析，已使用安全空结构");
   const status = parseError ? "error" : ["ready", "partial", "error"].includes(stringValue(source.status)) ? stringValue(source.status) as ProfileBuilderOutput["status"] : context.status ?? "partial";
   const normalized: ProfileBuilderOutput = {
-    version: 1,
+    version: Math.max(1, Math.round(finiteNumber(source.version, 1))),
     profileId: stringValue(source.profileId, context.profileId ?? ""),
     generatedAt: finiteNumber(source.generatedAt, Date.now()),
     status,

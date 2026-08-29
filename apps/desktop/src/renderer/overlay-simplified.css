@@ -7,23 +7,6 @@
  * stays next to the visual preview where it is easier to understand.
  */
 
-/* Runtime: no window frame/chrome outside explicit layout edit mode. */
-#root .overlay-root:not([data-layout-edit-mode="on"]) .floating-toolbar,
-#root .overlay-root:not([data-layout-edit-mode="on"]) .question-card,
-#root .overlay-root:not([data-layout-edit-mode="on"]) .answer-card {
-  border-color: transparent !important;
-  outline: 0 !important;
-}
-
-/* Keep layout editing discoverable without turning the panels into thick boxes. */
-#root .overlay-root[data-layout-edit-mode="on"] .floating-panel {
-  outline: 1px solid rgba(112, 181, 232, .72) !important;
-  outline-offset: 3px !important;
-}
-#root .overlay-root[data-layout-edit-mode="on"] .floating-panel::after {
-  border-color: transparent !important;
-}
-
 /* Settings: quieter hierarchy and a larger editor. */
 .overlay-designer-card {
   border: 0 !important;

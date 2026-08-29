@@ -1,4 +1,5 @@
-import "./styles.css";
-import "./overlay-simplified.css";
+import "./overlay/overlay-runtime.css";
+import "./overlay/overlay-toolbar.css";
+import "./overlay/overlay-panels.css";
 import { mountOverlayRenderer } from "./overlay-runtime";
 mountOverlayRenderer("question");

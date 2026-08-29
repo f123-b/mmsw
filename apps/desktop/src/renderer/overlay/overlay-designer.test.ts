@@ -5,7 +5,7 @@ const canvas = { width: 1920, height: 1080 };
 const layout: DesignerLayout = {
   question: { x: 120, y: 180, width: 430, height: 500 },
   answer: { x: 570, y: 180, width: 680, height: 500 },
-  controlBar: { x: 620, y: 24, width: 680, height: 50 }
+  controlBar: { x: 620, y: 24, width: 680, height: 58 }
 };
 
 describe("overlay designer geometry", () => {
@@ -35,7 +35,7 @@ describe("overlay designer geometry", () => {
 
   it("maps preview pixels and control bar presets to logical display coordinates", () => {
     expect(mapPreviewPointToCanvas({ x: 360, y: 202.5 }, { width: 720, height: 405 }, canvas)).toEqual({ x: 960, y: 540 });
-    expect(controlBarPosition("bottom_center", "horizontal", canvas, { width: 680, height: 50 })).toEqual({ x: 620, y: 1006 });
+    expect(controlBarPosition("bottom_center", "horizontal", canvas, { width: 680, height: 58 })).toEqual({ x: 620, y: 998 });
     expect(controlBarPosition("top_center", "vertical", canvas, { width: 50, height: 260 })).toEqual({ x: 18, y: 410 });
   });
 

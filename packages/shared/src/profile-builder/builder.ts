@@ -11,6 +11,7 @@ import type {
   ProfileProjectNode,
   ProfileSkillGraph
 } from "./types";
+import { PROFILE_BUILDER_VERSION } from "./types";
 import { normalizeTechnicalTerms } from "../terminology";
 
 const SKILL_CATALOG = [
@@ -19,6 +20,15 @@ const SKILL_CATALOG = [
   "SQLite", "RAG", "Embedding", "ASR", "VAD", "LLM", "Docker", "Git", "WebSocket",
   "消息队列", "异步消息", "微服务", "Linux", "Windows"
 ];
+
+const SKILL_ALIASES: Record<string, string[]> = {
+  "C/C++": ["c++", "c/c++", "cpp"],
+  IIC: ["iic", "i2c"],
+  I2C: ["iic", "i2c"],
+  RTOS: ["rtos", "freertos"],
+  FreeRTOS: ["freertos", "rtos"]
+};
+const CANDIDATE_SOURCE_KINDS = new Set<ProfileBuilderSource["kind"]>(["resume", "project", "interview", "skill"]);
 
 function normalize(text: string): string {
   return normalizeTechnicalTerms(text);
@@ -40,9 +50,10 @@ function excerpt(source: ProfileBuilderSource, term?: string, max = 220): string
   return text.slice(start, start + max).trim();
 }
 
-function evidenceFor(sources: ProfileBuilderSource[], term: string): { ids: string[]; excerpts: string[] } {
-  const matches = sources.filter((source) => normalize(source.text).toLowerCase().includes(normalize(term).toLowerCase()));
-  return { ids: matches.map((source) => source.id), excerpts: matches.slice(0, 2).map((source) => excerpt(source, term)).filter(Boolean) };
+function containsSkillEvidence(source: ProfileBuilderSource, skill: string): boolean {
+  const text = normalize(source.text).toLocaleLowerCase();
+  const aliases = [skill, ...(SKILL_ALIASES[skill] ?? [])].map((item) => normalize(item).toLocaleLowerCase());
+  return aliases.some((alias) => alias && text.includes(alias));
 }
 
 function projectSummary(name: string, sources: ProfileBuilderSource[], evidenceIds: string[], parsedSummary?: string): string {
@@ -55,7 +66,8 @@ function buildSkillGraph(input: ProfileBuilderInput): ProfileSkillGraph {
   const nodes: ProfileGraphNode[] = [];
   const candidateSources = input.sources.filter((source) => ["resume", "project", "skill", "interview"].includes(source.kind));
   for (const skill of SKILL_CATALOG) {
-    const evidence = evidenceFor(candidateSources, skill);
+    const matchingSources = candidateSources.filter((source) => containsSkillEvidence(source, skill));
+    const evidence = { ids: matchingSources.map((source) => source.id), excerpts: matchingSources.slice(0, 2).map((source) => excerpt(source, skill)).filter(Boolean) };
     if (evidence.ids.length === 0) continue;
     nodes.push({ id: `skill-${slug(skill)}`, label: skill, description: evidence.excerpts[0] || `资料中提到${skill}。`, evidenceIds: evidence.ids });
   }
@@ -127,7 +139,7 @@ export function buildDeterministicProfile(input: ProfileBuilderInput, generatedA
   if (!input.sources.some((source) => source.kind === "resume")) warnings.push("尚未上传 Resume，技能提取可能不完整");
   if (!projectGraph.nodes.length) warnings.push("尚未识别到项目经历，请补充项目资料");
   warnings.push("AI 分析不可用，当前仅显示基础文本提取结果；项目数量来自已确认的 ResumeAnalysis");
-  return { version: 1, profileId: input.profileId, generatedAt, status: "partial", analysisQuality: "fallback", sourceIds: input.sources.map((source) => source.id), skillGraph, projectGraph, answerMaterials: [], faqs: [], warnings };
+  return { version: PROFILE_BUILDER_VERSION, profileId: input.profileId, generatedAt, status: "partial", analysisQuality: "fallback", sourceIds: input.sources.map((source) => source.id), skillGraph, projectGraph, answerMaterials: [], faqs: [], warnings };
 }
 
 function parseJson(text: string): unknown {
@@ -141,15 +153,17 @@ function validEvidence(ids: unknown, sourceIds: Set<string>): string[] {
 
 function mergeModelOutput(fallback: ProfileBuilderOutput, candidate: unknown, input: ProfileBuilderInput): ProfileBuilderOutput {
   if (!candidate || typeof candidate !== "object") return fallback;
-  const sourceIds = new Set(input.sources.map((source) => source.id));
   const model = candidate as Partial<ProfileBuilderOutput>;
-  const skillNodes = Array.isArray(model.skillGraph?.nodes) ? model.skillGraph.nodes.map((node) => ({ id: String(node.id ?? `skill-${slug(String(node.label ?? ""))}`), label: String(node.label ?? ""), description: String(node.description ?? ""), evidenceIds: validEvidence(node.evidenceIds, sourceIds) })).filter((node) => node.label && node.evidenceIds.length) : [];
-  const projectNodes = Array.isArray(model.projectGraph?.nodes) ? model.projectGraph.nodes.map((node) => ({ id: String(node.id ?? `project-${slug(String(node.name ?? ""))}`), name: String(node.name ?? ""), summary: String(node.summary ?? ""), highlights: Array.isArray(node.highlights) ? node.highlights.map(String).slice(0, 5) : [], skills: Array.isArray(node.skills) ? node.skills.map(String).slice(0, 12) : [], evidenceIds: validEvidence(node.evidenceIds, sourceIds) })).filter((node) => node.name && node.evidenceIds.length) : [];
+  const candidateSourceIds = new Set(input.sources.filter((source) => CANDIDATE_SOURCE_KINDS.has(source.kind)).map((source) => source.id));
+  const sourceById = new Map(input.sources.map((source) => [source.id, source]));
+  const candidateEvidence = (ids: unknown): string[] => validEvidence(ids, candidateSourceIds);
+  const skillNodes = Array.isArray(model.skillGraph?.nodes) ? model.skillGraph.nodes.map((node) => ({ id: String(node.id ?? `skill-${slug(String(node.label ?? ""))}`), label: String(node.label ?? "").trim(), description: String(node.description ?? ""), evidenceIds: candidateEvidence(node.evidenceIds) })).filter((node) => node.label && node.evidenceIds.length && node.evidenceIds.some((id) => { const source = sourceById.get(id); return source ? containsSkillEvidence(source, node.label) : false; })) : [];
+  const projectNodes = Array.isArray(model.projectGraph?.nodes) ? model.projectGraph.nodes.map((node) => ({ id: String(node.id ?? `project-${slug(String(node.name ?? ""))}`), name: String(node.name ?? "").trim(), summary: String(node.summary ?? ""), highlights: Array.isArray(node.highlights) ? node.highlights.map(String).slice(0, 5) : [], skills: Array.isArray(node.skills) ? node.skills.map(String).slice(0, 12) : [], evidenceIds: candidateEvidence(node.evidenceIds) })).filter((node) => node.name && node.evidenceIds.length) : [];
   const allowedResumeProjects = new Set((input.resumeAnalysis?.projects ?? []).map((project) => project.name.trim().toLowerCase()));
   const resumeSourceIds = new Set(input.sources.filter((source) => source.kind === "resume").map((source) => source.id));
   const groundedProjectNodes = projectNodes.filter((node) => !node.evidenceIds.some((id) => resumeSourceIds.has(id)) || allowedResumeProjects.has(node.name.trim().toLowerCase()));
-  const answerMaterials = Array.isArray(model.answerMaterials) ? model.answerMaterials.map((item) => ({ id: String(item.id ?? `answer-${slug(String(item.question ?? ""))}`), question: String(item.question ?? ""), answerPoints: Array.isArray(item.answerPoints) ? item.answerPoints.map(String).slice(0, 6) : [], topic: item.topic ? String(item.topic) : undefined, evidenceIds: validEvidence(item.evidenceIds, sourceIds) })).filter((item) => item.question && item.answerPoints.length && item.evidenceIds.length) : [];
-  const faqs = Array.isArray(model.faqs) ? model.faqs.map((item) => ({ id: String(item.id ?? `faq-${slug(String(item.question ?? ""))}`), question: String(item.question ?? ""), category: ["technical", "project", "behavior", "general"].includes(String(item.category)) ? String(item.category) as ProfileFAQ["category"] : "general", answerMaterialId: item.answerMaterialId ? String(item.answerMaterialId) : undefined, frequency: Math.max(1, Number(item.frequency ?? 1)), evidenceIds: validEvidence(item.evidenceIds, sourceIds) })).filter((item) => item.question && item.evidenceIds.length) : [];
+  const answerMaterials = Array.isArray(model.answerMaterials) ? model.answerMaterials.map((item) => ({ id: String(item.id ?? `answer-${slug(String(item.question ?? ""))}`), question: String(item.question ?? ""), answerPoints: Array.isArray(item.answerPoints) ? item.answerPoints.map(String).slice(0, 6) : [], topic: item.topic ? String(item.topic) : undefined, evidenceIds: candidateEvidence(item.evidenceIds) })).filter((item) => item.question && item.answerPoints.length && item.evidenceIds.length) : [];
+  const faqs = Array.isArray(model.faqs) ? model.faqs.map((item) => ({ id: String(item.id ?? `faq-${slug(String(item.question ?? ""))}`), question: String(item.question ?? ""), category: ["technical", "project", "behavior", "general"].includes(String(item.category)) ? String(item.category) as ProfileFAQ["category"] : "general", answerMaterialId: item.answerMaterialId ? String(item.answerMaterialId) : undefined, frequency: Math.max(1, Number(item.frequency ?? 1)), evidenceIds: candidateEvidence(item.evidenceIds) })).filter((item) => item.question && item.evidenceIds.length) : [];
   if (!skillNodes.length && !groundedProjectNodes.length && !answerMaterials.length) return fallback;
   return {
     ...fallback,

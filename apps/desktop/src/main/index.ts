@@ -14,7 +14,7 @@ import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session
 import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, analyzeQuestionNucleus, AnswerAgent, AgentToolRegistry, buildDynamicTechnicalLexicon, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectAliasResolver, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
-import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, SqliteSkillSuggestionRepository, type SqliteDatabase } from "./database";
+import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteResumeAnalysisRepository, SqliteRetrievalRepository, SqliteSkillSuggestionRepository, type SqliteDatabase } from "./database";
 import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type OverlayPreferences, type OverlayPreferencesPatch, type ProviderSection } from "./settings-store";
 import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnection } from "./provider-preflight";
 import { INTERVIEW_STARTUP_EVENTS, InterviewStartupTiming, type InterviewStartupEvent } from "./interview-startup-timing";
@@ -27,7 +27,7 @@ import { ShutdownController } from "./shutdown-controller";
 import { MiddleMouseShortcutManager, middleMouseHelperCandidates, shouldHandleMiddleMouseShortcut } from "./middle-mouse-shortcut";
 import { NativeModifierShortcutManager } from "./native-modifier-shortcut";
 import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-service-manager";
-import { createProfileBuilderModel, ProfileBuilderService } from "./profile-builder";
+import { createProfileBuilderModel, createResumeAnalysisModel, ProfileBuilderService } from "./profile-builder";
 import { adaptProfileToInterviewContext } from "./profile-context-adapter";
 import { createProjectComprehensionModel, createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { parseRepositoryArchiveInWorker } from "./repository-import-worker-client";
@@ -238,6 +238,7 @@ let historyRepository: SqliteInterviewHistoryRepository | undefined;
 let projectRepository: SqliteProjectRepository | undefined;
 let projectMemoryRepository: SqliteProjectMemoryRepository | undefined;
 let profileBuilderRepository: SqliteProfileBuilderRepository | undefined;
+let resumeAnalysisRepository: SqliteResumeAnalysisRepository | undefined;
 let skillSuggestionRepository: SqliteSkillSuggestionRepository | undefined;
 let profileBuilderService: ProfileBuilderService | undefined;
 let projectMemoryService: ProjectMemoryService | undefined;
@@ -835,9 +836,18 @@ async function nativeWindowAt(point: { x: number; y: number }): Promise<string> 
   return (await runNativeMouseCommand(command)).trim();
 }
 
+async function nativeForegroundWindow(): Promise<string> {
+  const definition = `using System; using System.Runtime.InteropServices; public static class NativeForegroundProbe { [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr window, System.Text.StringBuilder text, int length); }`;
+  const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${definition}\n'@; $window = [NativeForegroundProbe]::GetForegroundWindow(); $text = New-Object System.Text.StringBuilder 256; [NativeForegroundProbe]::GetWindowText($window, $text, 256) | Out-Null; Write-Output ("hwnd=" + $window.ToInt64() + " title=" + $text.ToString());`;
+  return (await runNativeMouseCommand(command)).trim();
+}
+
 function nativePoint(window: BrowserWindow, point: { x: number; y: number }): { x: number; y: number } {
   const bounds = window.getBounds();
-  return screen.dipToScreenPoint({ x: bounds.x + point.x, y: bounds.y + point.y });
+  // BrowserWindow.getBounds() already uses the desktop coordinate space that
+  // Win32 input APIs consume on Windows. Applying dipToScreenPoint here
+  // double-scales coordinates on high-DPI displays.
+  return { x: Math.round(bounds.x + point.x), y: Math.round(bounds.y + point.y) };
 }
 
 async function elementCenter(window: BrowserWindow, selector: string): Promise<{ x: number; y: number }> {
@@ -880,6 +890,24 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   await underlay.webContents.executeJavaScript("window.__nativeMouseClickCount = 0", true);
   main.hide();
   await manager.prepare();
+
+  // Exercise the desktop layout editor while the HUD is not running. The
+  // lifecycle deliberately disallows entering layout edit during an active
+  // interview, so this keeps the smoke assertion aligned with product rules.
+  const editableQuestionWindow = manager.currentQuestionWindow;
+  if (!editableQuestionWindow) throw new Error("Native question window was not created");
+  underlay.hide();
+  manager.setLayoutEditMode(true);
+  await waitForRendererPaint(editableQuestionWindow);
+  const beforeEditBounds = editableQuestionWindow.getBounds();
+  const dragStart = await elementCenter(editableQuestionWindow, ".question-card > header");
+  await nativeMouseDrag(dragStart, { x: dragStart.x + 40, y: dragStart.y + 30 });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const afterEditBounds = editableQuestionWindow.getBounds();
+  manager.setLayoutEditMode(false);
+  const dragged = afterEditBounds.x !== beforeEditBounds.x || afterEditBounds.y !== beforeEditBounds.y;
+  if (!dragged) throw new Error(`Native layout drag did not move the question window: before=${JSON.stringify(beforeEditBounds)} after=${JSON.stringify(afterEditBounds)}`);
+
   const questionWindow = manager.enterInterviewMode();
   await Promise.all(manager.currentWindows.map((window) => waitForRendererLoad(window)));
   await new Promise((resolve) => setTimeout(resolve, 250));
@@ -915,23 +943,42 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   await waitForNativeCount(underlay, 1).catch(async (error) => { const hit = await nativeWindowAt(questionCenter); throw new Error(`${String(error)}; questionBounds=${JSON.stringify(questionWindow.getBounds())}; questionId=${nativeWindowId(questionWindow)}; underlayId=${nativeWindowId(underlay)}; questionPoint=${JSON.stringify(questionCenter)}; nativeHit=${hit}; display=${JSON.stringify(smokeWorkArea)}`); });
 
   underlay.setBounds(answerWindow.getBounds());
+  underlay.setAlwaysOnTop(true, "screen-saver");
+  underlay.show();
+  underlay.moveTop();
+  underlay.focus();
+  await nativeRaiseWindow(underlay);
   const answerCenter = nativePoint(answerWindow, { x: answerWindow.getBounds().width / 2, y: answerWindow.getBounds().height / 2 });
   await nativeMouseClick(answerCenter.x, answerCenter.y);
-  await waitForNativeCount(underlay, 2);
+  await waitForNativeCount(underlay, 2).catch(async (error) => {
+    const hit = await nativeWindowAt(answerCenter);
+    const state = await underlay.webContents.executeJavaScript("({ count: window.__nativeMouseClickCount, href: location.href, body: document.body.innerText })", true);
+    throw new Error(`${String(error)}; answerBounds=${JSON.stringify(answerWindow.getBounds())}; answerPoint=${JSON.stringify(answerCenter)}; nativeHit=${hit}; cursor=${JSON.stringify(screen.getCursorScreenPoint())}; underlayState=${JSON.stringify(state)}`);
+  });
 
   const controlTarget = await elementCenter(controlWindow, "button[aria-label='显示或隐藏问题']");
   const beforeControl = manager.hudState.transcriptVisible;
+  controlWindow.showInactive();
+  controlWindow.moveTop();
+  await nativeRaiseWindow(controlWindow);
   await nativeMouseClick(controlTarget.x, controlTarget.y);
   await new Promise((resolve) => setTimeout(resolve, 180));
   if (manager.hudState.transcriptVisible === beforeControl) throw new Error("ControlWindow native click did not toggle question visibility");
 
   const endTarget = await elementCenter(controlWindow, ".toolbar-end-button");
+  controlWindow.showInactive();
+  controlWindow.moveTop();
+  await nativeRaiseWindow(controlWindow);
+  const foregroundBeforeConfirm = await nativeForegroundWindow();
   await nativeMouseClick(endTarget.x, endTarget.y);
   const confirmWindow = manager.currentConfirmWindow;
   if (!confirmWindow) throw new Error("End confirmation window was not created after native ControlWindow click");
   await waitForRendererLoad(confirmWindow);
   await waitForRendererReady(confirmWindow);
   await waitForWindowVisible(confirmWindow);
+  confirmWindow.showInactive();
+  confirmWindow.moveTop();
+  await nativeRaiseWindow(confirmWindow);
   const dialogDeadline = Date.now() + 5_000;
   let dialogVisible = false;
   while (Date.now() < dialogDeadline) {
@@ -940,6 +987,10 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   if (!dialogVisible) throw new Error("End dialog did not open after native ControlWindow click");
+  const foregroundAfterConfirm = await nativeForegroundWindow();
+  const confirmConfig = manager.confirmWindowConfiguration;
+  const confirmForegroundPreserved = !/Interview Copilot Confirm/i.test(foregroundAfterConfirm);
+  if (!confirmConfig.skipTaskbar || confirmConfig.frame || confirmConfig.hasShadow || !confirmForegroundPreserved) throw new Error(`ConfirmWindow native configuration changed: ${JSON.stringify({ confirmConfig, foregroundBeforeConfirm, foregroundAfterConfirm })}`);
   const dialogCancel = await elementCenter(confirmWindow, "[data-testid='confirm-cancel']");
   await nativeMouseClick(dialogCancel.x, dialogCancel.y);
   await new Promise((resolve) => setTimeout(resolve, 180));
@@ -949,21 +1000,15 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 180));
   if (manager.hudState.transcriptVisible === beforeCancelControl) throw new Error("ControlWindow stopped responding after end-dialog cancel");
 
-  const beforeEditBounds = questionWindow.getBounds();
-  manager.setLayoutEditMode(true);
-  await new Promise((resolve) => setTimeout(resolve, 180));
-  const dragStart = nativePoint(questionWindow, { x: 100, y: 100 });
-  const dragEnd = nativePoint(questionWindow, { x: 140, y: 130 });
-  await nativeMouseDrag(dragStart, dragEnd);
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  const afterEditBounds = questionWindow.getBounds();
-  manager.setLayoutEditMode(false);
   const finalEndTarget = await elementCenter(controlWindow, ".toolbar-end-button");
   await nativeMouseClick(finalEndTarget.x, finalEndTarget.y);
   const finalConfirmWindow = manager.currentConfirmWindow;
   if (!finalConfirmWindow) throw new Error("Final end confirmation window was not created");
   await waitForRendererReady(finalConfirmWindow);
   await waitForWindowVisible(finalConfirmWindow);
+  finalConfirmWindow.showInactive();
+  finalConfirmWindow.moveTop();
+  await nativeRaiseWindow(finalConfirmWindow);
   const finalEndButton = await elementCenter(finalConfirmWindow, "[data-testid='confirm-end']");
   await nativeMouseClick(finalEndButton.x, finalEndButton.y);
   const stopDeadline = Date.now() + 5_000;
@@ -971,8 +1016,7 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   if (manager.hudState.running || finalConfirmWindow.isVisible()) throw new Error("End confirmation did not stop the interview after native confirm click");
   underlay.destroy();
   manager.exitInterviewMode();
-  const dragged = afterEditBounds.x !== beforeEditBounds.x || afterEditBounds.y !== beforeEditBounds.y;
-  const result = { ok: dragged, result: dragged ? "PASS" : "FAIL", questionClickThrough: true, answerClickThrough: true, controlClick: true, endDialogSingleOwner: true, confirmDialogInteractive: true, cancelRestoresPassthrough: true, endClickStopsInterview: true, layoutEditDrag: dragged, questionWindow: beforeEditBounds, questionWindowAfterDrag: afterEditBounds, mainWindow: !main.isDestroyed() };
+  const result = { ok: dragged, result: dragged ? "PASS" : "FAIL", questionClickThrough: true, answerClickThrough: true, controlClick: true, endDialogSingleOwner: true, confirmDialogInteractive: true, confirmTaskbarHidden: confirmConfig.skipTaskbar, confirmHasNoHeavyShadow: !confirmConfig.hasShadow, confirmForegroundPreserved, cancelRestoresPassthrough: true, endClickStopsInterview: true, layoutEditDrag: dragged, questionWindow: beforeEditBounds, questionWindowAfterDrag: afterEditBounds, mainWindow: !main.isDestroyed() };
   process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify(result)}\n`);
   app.exit(result.ok ? 0 : 1);
 }
@@ -1930,6 +1974,7 @@ function registerIpc(): void {
   ipcMain.handle("profile-builder:get", (_event, profileId: string) => profileBuilderService?.get(profileId));
   ipcMain.handle("profile-builder:list-skill-suggestions", (_event, profileId: string, status?: import("@interview-copilot/shared").SkillSuggestionStatus) => skillSuggestionRepository?.list(profileId, status) ?? []);
   ipcMain.handle("profile-builder:review-skill-suggestion", (_event, suggestionId: string, status: import("@interview-copilot/shared").SkillSuggestionStatus) => skillSuggestionRepository?.review(suggestionId, status));
+  ipcMain.handle("resume-analysis:get", (_event, profileId: string) => profileBuilderService?.getResumeAnalysis(profileId));
   ipcMain.handle("resume-analysis:start", (_event, profileId: string) => profileBuilderService?.startResumeAnalysis(profileId));
   ipcMain.handle("resume-analysis:get-job", (_event, jobId: string) => profileBuilderService?.getJob(jobId));
   ipcMain.handle("resume-analysis:cancel", (_event, jobId: string) => profileBuilderService?.cancelJob(jobId));
@@ -2293,6 +2338,7 @@ if (hasSingleInstanceLock) {
     projectRepository = new SqliteProjectRepository(database);
     projectMemoryRepository = new SqliteProjectMemoryRepository(database);
     profileBuilderRepository = new SqliteProfileBuilderRepository(database);
+    resumeAnalysisRepository = new SqliteResumeAnalysisRepository(database);
     skillSuggestionRepository = new SqliteSkillSuggestionRepository(database);
     conversationRepository = new SqliteConversationRepository(database);
     const recoveredChatMessages = conversationRepository.recoverInterruptedMessages();
@@ -2322,7 +2368,9 @@ if (hasSingleInstanceLock) {
       skillSuggestionRepository,
       { generate: (input) => { const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings; return createProfileBuilderModel(answerProvider, { ...settings, model: taskModel(settings, "profileBuilderModel", "normalModel") }).generate(input); } },
       (record) => broadcast("profile-builder:updated", record),
-      (job) => broadcast(job.kind === "resume" ? "resume-analysis:job" : "profile-builder:job", job)
+      (job) => broadcast(job.kind === "resume" ? "resume-analysis:job" : "profile-builder:job", job),
+      resumeAnalysisRepository,
+      createResumeAnalysisModel(answerProvider, { ...((providerConfigStore?.get("llm") ?? environmentLlmSettings)), model: taskModel(providerConfigStore?.get("llm") ?? environmentLlmSettings, "profileBuilderModel", "normalModel") })
     );
   }
   if (profileRepository && knowledgeRepository && historyRepository && projectMemoryRepository) {

@@ -4,7 +4,7 @@ import { calculateHUDLayout } from "./hud-layout";
 describe("HUD layout", () => {
   it("keeps the toolbar centered and panels inside a work area", () => {
     const layout = calculateHUDLayout({ x: 100, y: 40, width: 1920, height: 1040 });
-    expect(layout.toolbar).toEqual({ x: 620, y: 83, width: 680, height: 50 });
+    expect(layout.toolbar).toEqual({ x: 620, y: 83, width: 680, height: 58 });
     expect(layout.shortcuts).toEqual({ x: 24, y: 656, width: 320, height: 360 });
     expect(layout.transcript.width).toBe(456);
     expect(layout.answer.width).toBe(872);
