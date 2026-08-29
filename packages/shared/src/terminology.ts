@@ -338,8 +338,9 @@ export function resolveContextualTerminology(text: string, options: ContextualTe
   const cppContext = /C\+\+|面向对象|多态|继承|虚函数|override|virtual|类|对象/i.test(context);
   if (cppContext) resolved = resolved.replace(/(?:约|余)\s*函数/g, (raw) => { add(raw, "虚函数", "cpp-oop-context", "contextual"); return "虚函数"; });
 
-  const explicitCContext = /\bC\+\+?\b|C语言|C 语言|C\/C\+\+/i.test(context);
-  const cKeywordContext = /关键字|存储类|限定符|修饰符|常量/i.test(context) && /volatile|static|const|指针/i.test(context);
+  const explicitCContext = /C\+\+|C语言|C 语言|C\/C\+\+/i.test(context);
+  const cSignalText = `${context} ${resolved}`;
+  const cKeywordContext = /关键字|存储类|限定符|修饰符|常量/i.test(cSignalText) && /volatile|static|const|指针/i.test(cSignalText);
   const cContext = explicitCContext || cKeywordContext;
   if (cContext) {
     resolved = resolved.replace(/\bstudy\b/gi, (raw, offset: number, whole: string) => {

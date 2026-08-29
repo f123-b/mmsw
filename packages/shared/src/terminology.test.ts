@@ -65,6 +65,12 @@ describe("technical terminology normalization", () => {
     expect(resolveContextualTerminology("study 和 count 的含义？").possibleTerms).toEqual(expect.arrayContaining([{ value: "static", score: 0.64 }, { value: "const", score: 0.64 }]));
   });
 
+  it("combines question and context signals for split C++ keyword questions", () => {
+    const resolution = resolveContextualTerminology("C++ 里 count 关键字和 static 有什么区别？", { contextText: "C++ 关键字 限定符" });
+    expect(resolution.text).toContain("const");
+    expect(resolution.corrections.map((item) => item.canonical)).toContain("const");
+  });
+
   it("repairs motor and stack homophones without rewriting unrelated speech", () => {
     expect(resolveContextualTerminology("FOC 里的绝对是怎么计算？", { contextText: "FOC 电机控制 编码器" }).text).toContain("极对数");
     expect(resolveContextualTerminology("这和站怎么分配？", { contextText: "堆栈 内存管理" }).text).toContain("栈");

@@ -94,6 +94,7 @@ describe("real interview regression 2026-08-28", () => {
         const contains = expected.canonicalContains ? resolution.canonicalText.includes(expected.canonicalContains) : !resolution.canonicalText.includes(expected.canonicalNotContains ?? "\u0000");
         const correction = expected.correction ? resolution.corrections.some((item) => item.canonical === expected.correction) : !resolution.corrections.some((item) => item.canonical === expected.noCorrection);
         if (contains && correction) terminologyCorrect += 1;
+        if (!(contains && correction)) failures.push({ id: fixture.id, actual: { canonicalText: resolution.canonicalText, corrections: resolution.corrections }, expected });
         if (expected.noCorrection && resolution.corrections.some((item) => item.canonical === expected.noCorrection)) falseCorrections += 1;
       }
       if (expected.semanticFrame) {
