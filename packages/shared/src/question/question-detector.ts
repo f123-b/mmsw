@@ -278,7 +278,7 @@ function buildAnalysisWithClassifier(
   const explicitQuestionLabel = /(?:问题|题目)\s*[:：]/.test(normalized);
   const labeledQuestionRescue = classification.isQuestion && explicitQuestionLabel && classification.confidence >= 0.72;
   const followUpRescue = shortFollowUpQuestion;
-  const finalScore = robustRuleQuestion || followUpRescue ? Math.max(rawFinalScore, 0.86) : rawFinalScore;
+  const finalScore = robustRuleQuestion || labeledQuestionRescue || followUpRescue ? Math.max(rawFinalScore, 0.86) : rawFinalScore;
   const candidateQuestion = !FILLER_ONLY.test(normalized) && !SMALL_TALK.test(normalized) && !META_PROMPT_ONLY.test(normalized);
   const llmRescue = Boolean(llm?.isQuestion && llm.confidence >= 0.82 && (ruleScore >= 0.35 || contextualFollowUp));
   const decision = decideQuestion({
