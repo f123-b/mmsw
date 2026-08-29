@@ -11,7 +11,7 @@ import type { InterviewRuntimeDiagnostics, RuntimeTraceEvent } from "../main/run
 import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
 import type { HistoryChangedEvent, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
-import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
+import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayDisplayInfo, OverlayMode } from "../main/overlay-manager";
 import type { OverlayPreferences, OverlayPreferencesPatch, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
 import type { ChatAction, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectQaGenerationResult, ProjectQuestionBankImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
@@ -56,6 +56,7 @@ const api = {
     toggleShortcuts: () => ipcRenderer.invoke("overlay:toggle-shortcuts"),
     getState: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:get-state"),
     getLayout: (): Promise<HUDLayout | undefined> => ipcRenderer.invoke("overlay:get-layout"),
+    getDisplays: (): Promise<OverlayDisplayInfo[]> => ipcRenderer.invoke("overlay:get-displays"),
     getPreferences: (): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:get-preferences"),
     setPreferences: (input: OverlayPreferencesPatch): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:set-preferences", input),
     enterLayoutEditMode: (): Promise<boolean> => ipcRenderer.invoke("overlay:enter-layout-edit"),
@@ -64,6 +65,7 @@ const api = {
     toggleShareMode: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:toggle-share-mode"),
     setMode: (mode: OverlayMode) => ipcRenderer.invoke("overlay:set-mode", mode),
     setControlRegion: (interactive: boolean) => ipcRenderer.invoke("overlay:set-control-region", interactive),
+    setInteractionLock: (locked: boolean) => ipcRenderer.invoke("overlay:set-interaction-lock", locked),
     getCaptureProtection: (): Promise<CaptureProtectionState> => ipcRenderer.invoke("overlay:get-capture-protection"),
     setCaptureProtection: (enabled: boolean): Promise<CaptureProtectionState | undefined> => ipcRenderer.invoke("overlay:set-capture-protection", enabled),
     getCapabilities: (): Promise<CaptureProtectionCapabilities> => ipcRenderer.invoke("overlay:get-capabilities"),

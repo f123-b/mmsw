@@ -1,4 +1,4 @@
-import type { MouseInteractionMode, OverlayControlBarPositionMode, OverlayControlBarOrientation, WheelRoutingMode } from "../../shared/overlay-preferences";
+import type { MouseInteractionMode, OverlayControlBarPositionMode, OverlayControlBarOrientation, OverlayLayoutPreset, WheelRoutingMode } from "../../shared/overlay-preferences";
 
 export type DesignerPanel = "question" | "answer" | "controlBar";
 
@@ -30,6 +30,23 @@ export interface DesignerLayout {
 export interface DesignerPoint {
   x: number;
   y: number;
+}
+
+export interface DesignerDisplay {
+  id?: number;
+  bounds?: DesignerCanvas & { x?: number; y?: number };
+  workArea: DesignerCanvas & { x?: number; y?: number };
+  scaleFactor?: number;
+}
+
+export interface ResolvedOverlayLayout {
+  questionWindow: DesignerRect;
+  answerWindow: DesignerRect;
+  controlBar: DesignerRect;
+  controlBarOrientation: OverlayControlBarOrientation;
+  controlBarPositionMode: OverlayControlBarPositionMode;
+  displayId?: number;
+  scaleFactor?: number;
 }
 
 export type ResizeHandle = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
@@ -103,12 +120,75 @@ export function controlBarPosition(mode: OverlayControlBarPositionMode, orientat
   return { x: horizontalCenter, y: top };
 }
 
+function fitPresetPanels(canvas: DesignerCanvas, questionSize: Pick<DesignerRect, "width" | "height">, answerSize: Pick<DesignerRect, "width" | "height">, gap: number, margin: number): { question: DesignerRect; answer: DesignerRect } {
+  const availableWidth = Math.max(QUESTION_DESIGNER_BOUNDS.minimumWidth + gap + ANSWER_DESIGNER_BOUNDS.minimumWidth, canvas.width - margin * 2);
+  const preferredWidth = questionSize.width + gap + answerSize.width;
+  const scale = Math.min(1, availableWidth / Math.max(1, preferredWidth));
+  const question: DesignerRect = { x: 0, y: 0, width: Math.round(questionSize.width * scale), height: Math.round(Math.min(questionSize.height, canvas.height - 2 * margin)) };
+  const answer: DesignerRect = { x: 0, y: 0, width: Math.round(answerSize.width * scale), height: Math.round(Math.min(answerSize.height, canvas.height - 2 * margin)) };
+  const totalWidth = question.width + gap + answer.width;
+  const left = Math.max(margin, Math.round((canvas.width - totalWidth) / 2));
+  const top = Math.max(margin, Math.round((canvas.height - Math.max(question.height, answer.height)) / 2));
+  question.x = left;
+  question.y = top;
+  answer.x = left + question.width + gap;
+  answer.y = top;
+  return { question, answer };
+}
+
+/**
+ * Resolve a named layout into real display-pixel geometry. The renderer and
+ * the settings designer both use this function so changing a preset cannot
+ * silently leave the previous coordinates in place.
+ */
+export function resolveOverlayLayoutPreset(preset: OverlayLayoutPreset, display: DesignerDisplay, current?: Partial<ResolvedOverlayLayout>): ResolvedOverlayLayout {
+  const canvas = { width: Math.max(1, Math.round(display.workArea.width)), height: Math.max(1, Math.round(display.workArea.height)) };
+  const margin = preset === "dual_screen" ? 28 : 40;
+  const sizes = preset === "compact"
+    ? { question: { width: 320, height: 360 }, answer: { width: 520, height: 360 }, gap: 12 }
+    : preset === "wide"
+      ? { question: { width: 600, height: 680 }, answer: { width: 940, height: 680 }, gap: 18 }
+      : preset === "dual_screen"
+        ? { question: { width: 520, height: 620 }, answer: { width: 820, height: 620 }, gap: 24 }
+        : { question: { width: 430, height: 500 }, answer: { width: 680, height: 500 }, gap: 16 };
+  const panels = preset === "custom" && current?.questionWindow && current.answerWindow
+    ? { question: { ...current.questionWindow }, answer: { ...current.answerWindow } }
+    : fitPresetPanels(canvas, sizes.question, sizes.answer, sizes.gap, margin);
+  const question = clampDesignerRect(panels.question, canvas, QUESTION_DESIGNER_BOUNDS);
+  const answer = clampDesignerRect(panels.answer, canvas, ANSWER_DESIGNER_BOUNDS);
+  const orientation = preset === "dual_screen" ? "vertical" : current?.controlBarOrientation ?? "horizontal";
+  const controlSize = orientation === "vertical" ? { width: 54, height: 260 } : { width: Math.min(680, Math.max(360, canvas.width - 2 * margin)), height: 50 };
+  const positionMode = preset === "custom" ? current?.controlBarPositionMode ?? "custom" : preset === "compact" ? "top_right" : preset === "wide" ? "bottom_center" : "top_center";
+  const customPoint = preset === "custom" && current?.controlBar ? { x: current.controlBar.x, y: current.controlBar.y } : undefined;
+  const controlPoint = controlBarPosition(positionMode, orientation, canvas, controlSize, customPoint);
+  const controlBar = clampDesignerRect({ ...controlPoint, ...controlSize }, canvas, CONTROL_BAR_DESIGNER_BOUNDS);
+  return {
+    questionWindow: question,
+    answerWindow: answer,
+    controlBar,
+    controlBarOrientation: orientation,
+    controlBarPositionMode: positionMode,
+    ...(display.id !== undefined ? { displayId: display.id } : {}),
+    ...(display.scaleFactor !== undefined ? { scaleFactor: display.scaleFactor } : {})
+  };
+}
+
+export const applyLayoutPreset = resolveOverlayLayoutPreset;
+
 export function mapPreviewPointToCanvas(point: DesignerPoint, preview: DesignerCanvas, canvas: DesignerCanvas): DesignerPoint {
   return { x: Math.round(point.x * canvas.width / Math.max(1, preview.width)), y: Math.round(point.y * canvas.height / Math.max(1, preview.height)) };
 }
 
-export function interactionModeAllowsOverlayInput(mode: MouseInteractionMode, temporaryInteractive: boolean, layoutEditMode: boolean): boolean {
-  return layoutEditMode || temporaryInteractive || mode === "interactive";
+export function interactionModeAllowsOverlayInput(mode: MouseInteractionMode, temporaryInteractive: boolean, layoutEditMode: boolean, hitRegion = true): boolean {
+  return temporaryInteractive || (hitRegion && (layoutEditMode || mode === "interactive"));
+}
+
+export type OverlayHitRegion = "modal" | "layout_toolbar" | "control_bar" | "resize_handle" | "content" | "background";
+
+export function overlayHitRegionAllowsInput(region: OverlayHitRegion, mode: MouseInteractionMode, contentInteractive: boolean): boolean {
+  if (region === "modal" || region === "layout_toolbar" || region === "control_bar" || region === "resize_handle") return true;
+  if (region === "content") return contentInteractive && mode !== "full_passthrough";
+  return false;
 }
 
 export function wheelTargetAtPoint(point: DesignerPoint, layout: DesignerLayout, mode: WheelRoutingMode): "question" | "answer" | "underlying_app" | "none" {

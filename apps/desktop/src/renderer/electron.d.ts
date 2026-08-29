@@ -9,7 +9,7 @@ import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
 import type { HistoryChangedEvent, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
-import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
+import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayDisplayInfo, OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
 import type { ChatAction, KnowledgeDocumentType, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectMemorySnapshot, ProjectQaGenerationResult, ProjectQuestionBankImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, OverlayPreferences, OverlayPreferencesPatch, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
@@ -43,6 +43,7 @@ declare global {
         toggleShortcuts(): Promise<boolean>;
         getState(): Promise<HUDState | undefined>;
         getLayout(): Promise<HUDLayout | undefined>;
+        getDisplays(): Promise<OverlayDisplayInfo[]>;
         getPreferences(): Promise<OverlayPreferences>;
         setPreferences(input: OverlayPreferencesPatch): Promise<OverlayPreferences>;
         enterLayoutEditMode(): Promise<boolean>;
@@ -51,6 +52,7 @@ declare global {
         toggleShareMode(): Promise<HUDState | undefined>;
         setMode(mode: OverlayMode): Promise<void>;
         setControlRegion(interactive: boolean): Promise<boolean>;
+        setInteractionLock(locked: boolean): Promise<boolean>;
         getCaptureProtection(): Promise<CaptureProtectionState>;
         setCaptureProtection(enabled: boolean): Promise<CaptureProtectionState | undefined>;
         getCapabilities(): Promise<CaptureProtectionCapabilities>;

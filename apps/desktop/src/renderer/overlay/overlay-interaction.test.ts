@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { followModeAfterScroll, isNearBottom, newContentBadgeLabel, shouldAutoFollowLatest } from "./overlay-interaction";
+import { followModeAfterScroll, interactionLockAfterEvent, isNearBottom, newContentBadgeLabel, shouldAutoFollowLatest } from "./overlay-interaction";
 
 describe("overlay scroll interaction policy", () => {
   it("detects the native scroll boundary without intercepting wheel events", () => {
@@ -18,5 +18,15 @@ describe("overlay scroll interaction policy", () => {
     expect(newContentBadgeLabel(1)).toBe("1 条新内容");
     expect(newContentBadgeLabel(4)).toBe("4 条新内容");
     expect(newContentBadgeLabel(0)).toBe("");
+  });
+
+  it("keeps drag and resize locked until pointerup or cancellation", () => {
+    let active = interactionLockAfterEvent(false, "pointerdown");
+    active = interactionLockAfterEvent(active, "pointermove");
+    expect(active).toBe(true);
+    expect(interactionLockAfterEvent(active, "pointerup")).toBe(false);
+    expect(interactionLockAfterEvent(active, "pointercancel")).toBe(false);
+    expect(interactionLockAfterEvent(active, "blur")).toBe(false);
+    expect(interactionLockAfterEvent(active, "unmount")).toBe(false);
   });
 });

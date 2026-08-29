@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ANSWER_DESIGNER_BOUNDS, clampDesignerRect, controlBarPosition, interactionModeAllowsOverlayInput, mapPreviewPointToCanvas, modifierPressed, resizeDesignerRect, snapDesignerRect, wheelTargetAtPoint, type DesignerLayout } from "./overlay-designer";
+import { ANSWER_DESIGNER_BOUNDS, applyLayoutPreset, clampDesignerRect, controlBarPosition, interactionModeAllowsOverlayInput, mapPreviewPointToCanvas, modifierPressed, overlayHitRegionAllowsInput, resizeDesignerRect, snapDesignerRect, wheelTargetAtPoint, type DesignerLayout } from "./overlay-designer";
 
 const canvas = { width: 1920, height: 1080 };
 const layout: DesignerLayout = {
@@ -37,6 +37,23 @@ describe("overlay designer geometry", () => {
     expect(interactionModeAllowsOverlayInput("full_passthrough", false, false)).toBe(false);
     expect(interactionModeAllowsOverlayInput("full_passthrough", true, false)).toBe(true);
     expect(interactionModeAllowsOverlayInput("click_through", false, true)).toBe(true);
+    expect(interactionModeAllowsOverlayInput("interactive", false, true, false)).toBe(false);
     expect(modifierPressed("ctrl_shift", { ctrlKey: true, altKey: false, shiftKey: true })).toBe(true);
+  });
+
+  it("resolves visibly different geometry for named presets", () => {
+    const display = { id: 1, workArea: canvas, scaleFactor: 1 };
+    const compact = applyLayoutPreset("compact", display);
+    const standard = applyLayoutPreset("standard", display);
+    const wide = applyLayoutPreset("wide", display);
+    expect(compact.questionWindow).not.toEqual(standard.questionWindow);
+    expect(standard.answerWindow).not.toEqual(wide.answerWindow);
+    expect(compact.controlBar).not.toEqual(standard.controlBar);
+  });
+
+  it("keeps control-bar hit testing independent from content passthrough", () => {
+    expect(overlayHitRegionAllowsInput("control_bar", "full_passthrough", false)).toBe(true);
+    expect(overlayHitRegionAllowsInput("content", "full_passthrough", true)).toBe(false);
+    expect(overlayHitRegionAllowsInput("background", "interactive", true)).toBe(false);
   });
 });

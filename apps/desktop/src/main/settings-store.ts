@@ -459,13 +459,15 @@ export class OverlaySettingsStore {
 
   setPreferences(input: OverlayPreferencesPatch): OverlayPreferences {
     const current = this.getPreferences();
+    const geometryPatch = [input.questionWindow, input.answerWindow, input.controlBar].some((value) => value && ["x", "y", "width", "height"].some((key) => Object.prototype.hasOwnProperty.call(value, key)));
+    const manualLayoutPatch = input.layoutPreset === undefined && geometryPatch ? { layoutPreset: "custom" as const } : {};
     const legacyBehaviorPatch = input.behavior && !Object.prototype.hasOwnProperty.call(input.behavior, "interactionMode") && Object.prototype.hasOwnProperty.call(input.behavior, "mousePassthrough")
       ? { interactionMode: input.behavior.mousePassthrough ? "click_through" as const : "interactive" as const }
       : {};
     const legacyLockPatch = input.behavior && !Object.prototype.hasOwnProperty.call(input.behavior, "lockLayout") && Object.prototype.hasOwnProperty.call(input.behavior, "lockPosition")
       ? { lockLayout: input.behavior.lockPosition }
       : {};
-    const next = normalizeOverlayPreferences({ ...current, ...input, questionWindow: { ...current.questionWindow, ...(input.questionWindow ?? {}) }, answerWindow: { ...current.answerWindow, ...(input.answerWindow ?? {}) }, controlBar: { ...current.controlBar, ...(input.controlBar ?? {}) }, behavior: { ...current.behavior, ...legacyBehaviorPatch, ...legacyLockPatch, ...(input.behavior ?? {}) }, appearance: { ...current.appearance, ...(input.appearance ?? {}) }, screenshot: { ...current.screenshot, ...(input.screenshot ?? {}) } });
+    const next = normalizeOverlayPreferences({ ...current, ...manualLayoutPatch, ...input, questionWindow: { ...current.questionWindow, ...(input.questionWindow ?? {}) }, answerWindow: { ...current.answerWindow, ...(input.answerWindow ?? {}) }, controlBar: { ...current.controlBar, ...(input.controlBar ?? {}) }, behavior: { ...current.behavior, ...legacyBehaviorPatch, ...legacyLockPatch, ...(input.behavior ?? {}) }, appearance: { ...current.appearance, ...(input.appearance ?? {}) }, screenshot: { ...current.screenshot, ...(input.screenshot ?? {}) } });
     this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.preferencesKey, JSON.stringify(next)]);
     this.database.flushNow();
     return next;

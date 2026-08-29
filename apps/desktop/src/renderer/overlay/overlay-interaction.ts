@@ -20,6 +20,15 @@ export function shouldAutoFollowLatest(mode: OverlayFollowMode): boolean {
   return mode === "following";
 }
 
+export type InteractionLockEvent = "pointerdown" | "pointermove" | "pointerup" | "pointercancel" | "blur" | "unmount";
+
+/** Renderer-side model for the native hit-test lock used by drag/resize. */
+export function interactionLockAfterEvent(active: boolean, event: InteractionLockEvent): boolean {
+  if (event === "pointerdown") return true;
+  if (event === "pointerup" || event === "pointercancel" || event === "blur" || event === "unmount") return false;
+  return active;
+}
+
 export function newContentBadgeLabel(count: number): string {
   const safeCount = Math.max(0, Math.floor(count));
   return safeCount ? `${safeCount} 条新内容` : "";

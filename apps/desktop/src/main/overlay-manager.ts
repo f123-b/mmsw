@@ -15,6 +15,13 @@ export type { HUDAction, HUDMode, HUDMouseMode, HUDState } from "./hud-state";
 export { calculateHUDLayout } from "./hud-layout";
 export type { HUDLayout, HUDPanelLayout, HUDWorkArea } from "./hud-layout";
 
+export interface OverlayDisplayInfo {
+  id: number;
+  bounds: HUDWorkArea;
+  workArea: HUDWorkArea;
+  scaleFactor: number;
+}
+
 export interface OverlayManagerOptions {
   preloadPath?: string;
   loadRenderer: (window: BrowserWindow) => Promise<void>;
@@ -34,6 +41,8 @@ export class OverlayManager {
   private interactionMode: MouseInteractionMode = "interactive";
   private wheelRouting: WheelRoutingMode = "overlay_under_cursor";
   private layoutEditMode = false;
+  private interactionLock = false;
+  private layoutEditRestore: { mode: OverlayMode; interactiveRegion: boolean } | undefined;
   private hudStateValue: HUDState = { ...initialHUDState };
   private hudLayoutValue: HUDLayout = calculateHUDLayout({ x: 0, y: 0, width: 1440, height: 900 });
   private captureProtectionEnabled: boolean;
@@ -163,6 +172,12 @@ export class OverlayManager {
     this.applyMode();
   }
 
+  /** Keep native hit testing enabled while a renderer drag crosses its DOM edge. */
+  setInteractionLock(locked: boolean): void {
+    this.interactionLock = Boolean(locked);
+    this.applyMode();
+  }
+
   applyPreferences(preferences: Pick<OverlayBehaviorPreferences, "alwaysOnTop" | "interactionMode" | "mousePassthrough" | "wheelRouting">): void {
     this.alwaysOnTop = Boolean(preferences.alwaysOnTop);
     this.interactionMode = preferences.interactionMode ?? (preferences.mousePassthrough ? "click_through" : "interactive");
@@ -181,20 +196,49 @@ export class OverlayManager {
 
   get isLayoutEditMode(): boolean { return this.layoutEditMode; }
 
+  get isInteractionLocked(): boolean { return this.interactionLock; }
+
+  getDisplays(): OverlayDisplayInfo[] {
+    return screen.getAllDisplays().map((display) => ({
+      id: display.id,
+      bounds: { ...display.bounds },
+      workArea: { ...display.workArea },
+      scaleFactor: display.scaleFactor
+    }));
+  }
+
   setLayoutEditMode(enabled: boolean): void {
-    this.layoutEditMode = Boolean(enabled);
+    const nextEnabled = Boolean(enabled);
+    if (nextEnabled === this.layoutEditMode) {
+      if (!nextEnabled) this.setInteractionLock(false);
+      this.sendLayoutEditMode();
+      return;
+    }
+    if (nextEnabled) this.layoutEditRestore = { mode: this.mode, interactiveRegion: this.interactiveRegion };
+    this.layoutEditMode = nextEnabled;
     if (this.layoutEditMode) {
       const window = this.show();
-      this.mode = "interactive";
-      this.interactiveRegion = true;
+      // The full-screen BrowserWindow stays passive. Renderer hit testing
+      // promotes only the toolbar/panels/handles, and interactionLock keeps
+      // a drag alive after it leaves the original element.
+      this.mode = "passive";
+      this.interactiveRegion = false;
+      this.interactionLock = false;
       this.applyMode();
       window.showInactive();
     } else {
-      this.mode = this.interactionMode === "interactive" ? "interactive" : "passive";
-      this.interactiveRegion = false;
+      const restore = this.layoutEditRestore;
+      this.layoutEditRestore = undefined;
+      this.mode = restore?.mode ?? (this.interactionMode === "interactive" ? "interactive" : "passive");
+      this.interactiveRegion = restore?.interactiveRegion ?? false;
+      this.interactionLock = false;
       this.applyMode();
     }
     this.sendLayoutEditMode();
+  }
+
+  finishLayoutEditMode(): void {
+    this.setLayoutEditMode(false);
   }
 
   handleGlobalWheel(x: number, y: number, deltaY: number): void {
@@ -261,7 +305,15 @@ export class OverlayManager {
       this.refreshLayout(this.window?.getBounds() ?? bounds);
       this.window?.showInactive();
     });
-    this.window.on("closed", () => { this.window = undefined; });
+    this.window.on("closed", () => {
+      // A renderer can disappear without delivering pointerup/blur. Never
+      // carry a stale native hit-test lock into a future overlay instance.
+      this.interactionLock = false;
+      this.layoutEditMode = false;
+      this.layoutEditRestore = undefined;
+      this.interactiveRegion = false;
+      this.window = undefined;
+    });
     this.applyMode();
     this.applyCaptureProtection();
     return this.window;
@@ -316,6 +368,10 @@ export class OverlayManager {
   }
 
   destroy(): void {
+    this.interactionLock = false;
+    this.layoutEditMode = false;
+    this.layoutEditRestore = undefined;
+    this.interactiveRegion = false;
     this.window?.destroy();
     this.window = undefined;
     this.hudStateValue = { ...initialHUDState };
@@ -323,8 +379,12 @@ export class OverlayManager {
 
   private applyMode(): void {
     if (!this.window || this.window.isDestroyed()) return;
-    const interactiveRegion = this.layoutEditMode || this.mode === "interactive" || (this.interactionMode === "click_through" && this.interactiveRegion);
-    applyOverlayMode(this.window, this.mode, interactiveRegion);
+    // A single transparent window must never make its blank area clickable
+    // while the designer is open. Outside designer mode, preserve the
+    // existing whole-window interactive mode; click-through/full-passthrough
+    // still promote only a reported region or an active drag.
+    const interactiveRegion = this.interactionLock || this.interactiveRegion;
+    applyOverlayMode(this.window, this.layoutEditMode ? "passive" : this.mode, interactiveRegion);
     this.window.webContents.send("overlay:mode", this.mode);
     this.sendHudState();
   }

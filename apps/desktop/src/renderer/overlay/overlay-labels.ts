@@ -1,0 +1,50 @@
+export const OVERLAY_LABELS = {
+  layout: "布局",
+  controlBar: "控制栏",
+  questionNavigator: "问题导航",
+  answerReader: "答案阅读器",
+  interaction: "交互",
+  appearance: "外观",
+  interactionMode: "内容窗口交互模式",
+  wheelRouting: "滚轮作用目标",
+  temporaryModifier: "临时交互键",
+  interactive: "可交互",
+  clickThrough: "点击穿透",
+  fullPassthrough: "完全穿透",
+  overlayUnderCursor: "鼠标下方悬浮窗",
+  underlyingApp: "下层应用",
+  dual: "同时作用（高级）",
+  alwaysOnTop: "始终置顶",
+  lockLayout: "锁定布局",
+  followLatestQuestion: "自动跟随最新问题",
+  followLatestAnswer: "自动跟随最新回答",
+  rememberPosition: "记住位置",
+  rememberSize: "记住大小",
+  glass: "玻璃效果",
+  translucent: "半透明",
+  textOnly: "纯文字",
+  custom: "自定义",
+  blur: "背景模糊",
+  radius: "圆角",
+  textShadow: "文字阴影",
+  textOutline: "文字描边",
+  border: "显示边框",
+  shadow: "显示阴影",
+  liveApply: "实时应用",
+  currentDisplay: "当前显示器",
+  preset: {
+    compact: "紧凑",
+    standard: "标准",
+    wide: "宽屏",
+    dual_screen: "双屏",
+    transparent: "透明纯文字",
+    custom: "自定义"
+  },
+  panel: {
+    question: "问题导航",
+    answer: "答案阅读器",
+    controlBar: "控制栏"
+  }
+} as const;
+
+export type OverlayLabelKey = keyof typeof OVERLAY_LABELS;

@@ -1387,6 +1387,7 @@ function registerIpc(): void {
    ipcMain.handle("overlay:toggle-shortcuts", () => { overlayManager?.toggleShortcuts(); return true; });
    ipcMain.handle("overlay:get-state", () => overlayManager?.hudState);
    ipcMain.handle("overlay:get-layout", () => overlayManager?.hudLayout);
+   ipcMain.handle("overlay:get-displays", () => overlayManager?.getDisplays() ?? []);
    ipcMain.handle("overlay:get-preferences", () => overlaySettingsStore?.getPreferences());
    ipcMain.handle("overlay:set-preferences", (_event, input: OverlayPreferencesPatch) => {
      const next = overlaySettingsStore?.setPreferences(input);
@@ -1394,11 +1395,15 @@ function registerIpc(): void {
      return next;
    });
    ipcMain.handle("overlay:enter-layout-edit", () => { overlayManager?.setLayoutEditMode(true); return true; });
-   ipcMain.handle("overlay:finish-layout-edit", () => { overlayManager?.setLayoutEditMode(false); return true; });
+   ipcMain.handle("overlay:finish-layout-edit", () => { overlayManager?.finishLayoutEditMode(); return true; });
    ipcMain.handle("overlay:set-share-mode", (_event, enabled: boolean) => { overlayManager?.setShareMode(Boolean(enabled)); return overlayManager?.hudState; });
    ipcMain.handle("overlay:toggle-share-mode", () => { overlayManager?.toggleShareMode(); return overlayManager?.hudState; });
   ipcMain.handle("overlay:set-control-region", (_event, interactive: boolean) => {
     overlayManager?.setControlRegion(Boolean(interactive));
+    return true;
+  });
+  ipcMain.handle("overlay:set-interaction-lock", (_event, locked: boolean) => {
+    overlayManager?.setInteractionLock(Boolean(locked));
     return true;
   });
   ipcMain.handle("overlay:set-mode", (_event, mode: OverlayMode) => {
@@ -1983,7 +1988,10 @@ function registerShortcuts(): void {
      [GLOBAL_SHORTCUTS.endInterview]: () => {
        if (coordinator().running) overlayManager?.requestEndInterviewConfirmation();
        else if (writtenTestController?.running) overlayManager?.requestEndInterviewConfirmation();
-     }
+     },
+     // Layout editing is the only consumer of Esc; it is deliberately
+     // scoped here so the existing interview shortcut meanings are unchanged.
+     Esc: () => { if (overlayManager?.isLayoutEditMode) overlayManager.finishLayoutEditMode(); }
   };
   for (const [accelerator, handler] of Object.entries(shortcuts)) {
     if (!globalShortcut.register(accelerator, handler)) {

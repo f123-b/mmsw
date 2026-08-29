@@ -204,6 +204,16 @@ describe("OverlaySettingsStore", () => {
     }
   });
 
+  it("marks a manual geometry edit as custom while preserving preset-generated saves", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      expect(settings.setPreferences({ layoutPreset: "standard" }).layoutPreset).toBe("standard");
+      expect(settings.setPreferences({ answerWindow: { x: 640 } }).layoutPreset).toBe("custom");
+      expect(settings.setPreferences({ layoutPreset: "wide", answerWindow: { x: 700, width: 940 } }).layoutPreset).toBe("wide");
+    } finally { database.close(); }
+  });
+
   it("persists Tencent desktop and window validation independently", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
