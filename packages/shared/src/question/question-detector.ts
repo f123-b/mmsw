@@ -272,6 +272,11 @@ function buildAnalysisWithClassifier(
   // the robust path accept the classifier's 0.60+ confidence here.
   const robustRuleQuestion = classification.isQuestion && classification.confidence >= 0.52 && ruleScore >= 0.35
     && (ROBUST_QUESTION_FORM.test(normalized) || /有什么|什么作用|常见误区|怎么做的/.test(normalized));
+  // Interview harnesses and some ASR integrations use an explicit label such
+  // as “问题：……” without a trailing particle. Preserve that question
+  // signal instead of requiring a second interrogative form.
+  const explicitQuestionLabel = /(?:问题|题目)\s*[:：]/.test(normalized);
+  const labeledQuestionRescue = classification.isQuestion && explicitQuestionLabel && classification.confidence >= 0.72;
   const followUpRescue = shortFollowUpQuestion;
   const finalScore = robustRuleQuestion || followUpRescue ? Math.max(rawFinalScore, 0.86) : rawFinalScore;
   const candidateQuestion = !FILLER_ONLY.test(normalized) && !SMALL_TALK.test(normalized) && !META_PROMPT_ONLY.test(normalized);
@@ -290,7 +295,7 @@ function buildAnalysisWithClassifier(
     final,
     candidateQuestion,
     contextualFollowUp,
-    robustRuleQuestion,
+    robustRuleQuestion: robustRuleQuestion || labeledQuestionRescue,
     followUpRescue: followUpRescue || llmRescue
   });
   const isQuestion = decision.shouldAnswer;

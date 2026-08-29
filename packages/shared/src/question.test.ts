@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { QuestionDetector, QuestionDetector2, classifyQuestion, questionFingerprint, questionSimilarity, scoreQuestion } from "./index";
+import { QuestionDetector as SemanticQuestionDetector } from "./question/question-detector";
 
 describe("QuestionDetector", () => {
   it("waits for silence before confirming a complete remote question", () => {
@@ -102,6 +103,8 @@ describe("question scoring", () => {
   it("keeps short semantic questions and contextual follow-ups", () => {
     expect(classifyQuestion("为什么？", "", true)).toMatchObject({ isQuestion: true, category: "followup" });
     expect(classifyQuestion("然后呢？", "前面的问题已经解释了同步采样和缓存策略。", true)).toMatchObject({ isQuestion: true, category: "followup" });
+    const labeled = new SemanticQuestionDetector().analyzeSync("手动模式问题：不要自动回答", "", true);
+    expect(labeled).toMatchObject({ isQuestion: true, shouldAnswer: true });
     expect(scoreQuestion("手动模式问题：不要自动回答", true).score).toBeGreaterThanOrEqual(0.82);
   });
 
