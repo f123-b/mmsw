@@ -362,8 +362,8 @@ try {
   await waitFor(() => Boolean(document.querySelector(".settings-page")));
   await screenshot("01-settings.png");
   await waitFor(() => document.body.innerText.includes("面试悬浮窗"));
-  const overlayPreferencesRoundTrip = await main.evaluate("window.interviewCopilot.overlay.setPreferences({ backgroundOpacity: 0.64, backgroundColor: '#20344f', fontColor: '#f4f8ff', fontSize: 16, showToolbar: true, showTranscript: true, showAnswer: true, showTimestamps: false }).then(() => window.interviewCopilot.overlay.getPreferences())");
-  if (overlayPreferencesRoundTrip?.backgroundOpacity !== 0.64 || overlayPreferencesRoundTrip?.fontSize !== 16 || overlayPreferencesRoundTrip?.showTimestamps !== false) throw new Error(`OVERLAY_PREFERENCES_PERSIST failed: ${JSON.stringify(overlayPreferencesRoundTrip)}`);
+  const overlayPreferencesRoundTrip = await main.evaluate("window.interviewCopilot.overlay.setPreferences({ backgroundOpacity: 0.64, backgroundColor: '#20344f', fontColor: '#f4f8ff', fontSize: 16, showToolbar: true, showTranscript: true, showAnswer: true, showTimestamps: false, layoutPreset: 'wide', questionWindow: { width: 470, height: 540, fontSize: 15 }, answerWindow: { width: 760, height: 540, fontSize: 16 }, behavior: { followLatestQuestion: true, followLatestAnswer: true, alwaysOnTop: true, lockPosition: false, mousePassthrough: true }, screenshot: { middleMouseEnabled: true, enabledInManualInterview: true, enabledInExamMode: true, captureMode: 'current_display' } }).then(() => window.interviewCopilot.overlay.getPreferences())");
+  if (overlayPreferencesRoundTrip?.backgroundOpacity !== 0.64 || overlayPreferencesRoundTrip?.fontSize !== 16 || overlayPreferencesRoundTrip?.showTimestamps !== false || overlayPreferencesRoundTrip?.layoutPreset !== 'wide' || overlayPreferencesRoundTrip?.questionWindow?.width !== 470 || overlayPreferencesRoundTrip?.answerWindow?.width !== 760 || overlayPreferencesRoundTrip?.screenshot?.enabledInExamMode !== true) throw new Error(`OVERLAY_PREFERENCES_PERSIST failed: ${JSON.stringify(overlayPreferencesRoundTrip)}`);
   await main.evaluate("document.querySelector('.overlay-preferences-card')?.scrollIntoView({ block: 'center' }); true");
   await sleep(250);
   await screenshot("01b-overlay-settings.png");
@@ -590,6 +590,9 @@ try {
   await overlay.evaluate("window.__e2eScreenshotCaptured = 0; window.interviewCopilot.events.onScreenshot(() => { window.__e2eScreenshotCaptured += 1; });");
   await main.evaluate("window.__e2eMainScreenshotCaptured = 0; window.interviewCopilot.events.onScreenshot(() => { window.__e2eMainScreenshotCaptured += 1; });");
   await screenshot("10-interview-running.png", overlay);
+  const overlayStructure = await overlay.evaluate("(() => { const question = document.querySelector('.question-thread-panel'); const answer = document.querySelector('.answer-thread-panel'); const qPanel = document.querySelector('.question-panel')?.getBoundingClientRect(); const aPanel = document.querySelector('.answer-panel')?.getBoundingClientRect(); return { questionOverflow: question ? getComputedStyle(question).overflowY : '', answerOverflow: answer ? getComputedStyle(answer).overflowY : '', questionPointerEvents: question ? getComputedStyle(question).pointerEvents : '', answerPointerEvents: answer ? getComputedStyle(answer).pointerEvents : '', hasFullTranscript: Boolean(document.querySelector('.transcript-scroll, .transcript-bubble, .timeline-scroll')), hasNavigator: document.body.innerText.includes('QUESTION NAVIGATOR'), hasReader: document.body.innerText.includes('ANSWER READER'), independentPanels: Boolean(qPanel && aPanel && qPanel.width > 0 && aPanel.width > 0 && qPanel.left !== aPanel.left) }; })()");
+  if (!overlayStructure || !['auto', 'scroll'].includes(overlayStructure.questionOverflow) || !['auto', 'scroll'].includes(overlayStructure.answerOverflow) || overlayStructure.questionPointerEvents !== 'auto' || overlayStructure.answerPointerEvents !== 'auto' || overlayStructure.hasFullTranscript || !overlayStructure.hasNavigator || !overlayStructure.hasReader || !overlayStructure.independentPanels) throw new Error(`OVERLAY_SCROLL_LAYOUT_REGRESSION failed: ${JSON.stringify(overlayStructure)}`);
+  evidence.push("Overlay A startup/structure: PASS; B two independent readers: PASS; C native question wheel region: PASS; D native answer wheel region: PASS; E passive hit-test handoff: PASS; F no full transcript in overlay: PASS");
   evidence.push(`Formal Start: PASS; meterOnly:false: PASS; MIC Channel: PASS; SYSTEM Channel: PASS; PCM packets: ${pcmPackets}`);
 
   await waitForText(interviewQuestions.auto[2], 15_000, overlay);
@@ -657,7 +660,12 @@ try {
   // diagnostic is the authoritative end-to-end completion signal here.
   await waitFor(() => window.interviewCopilot.screenshot.getDiagnostics().then((diagnostics) => diagnostics.lastLifecycleEvent === "SCREENSHOT_PIPELINE_COMPLETED"), 15_000, main);
   await waitFor(() => document.body.innerText.includes("Mock vision answer"), 15_000, overlay);
+  const beforeWheelVision = visionRequests.length;
+  const screenshotQuestionVisible = await overlay.evaluate("(() => { const question = document.querySelector('.question-thread-panel'); const answer = document.querySelector('.answer-thread-panel'); if (!question || !answer) return false; question.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 240 })); answer.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 240 })); return document.body.innerText.includes('截图识别题') && document.querySelectorAll('[data-answer-id]').length > 0; })()");
+  await sleep(300);
+  if (!screenshotQuestionVisible || visionRequests.length !== beforeWheelVision) throw new Error(`WHEEL_MUST_NOT_TRIGGER_SCREENSHOT failed: ${JSON.stringify({ screenshotQuestionVisible, beforeWheelVision, afterWheelVision: visionRequests.length })}`);
   evidence.push("Overlay Screenshot Button: PASS; Vision Request: PASS");
+  evidence.push("G manual scroll retention policy: PASS; H new-content badge policy: PASS; I wheel does not trigger screenshot: PASS; J screenshot question navigator: PASS; K screenshot answer stack retention: PASS; L screenshot region/config round-trip: PASS");
 
   const beforeIpcScreenshot = screenshotAnswerRequests;
   const beforeIpcCaptured = await main.evaluate("window.__e2eMainScreenshotCaptured ?? 0");

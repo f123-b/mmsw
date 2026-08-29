@@ -2412,7 +2412,7 @@ if (hasSingleInstanceLock) {
       const writtenTestRunning = Boolean(writtenTestController?.running);
       const preferences = overlaySettingsStore?.getPreferences();
       if (!shouldHandleMiddleMouseShortcut({ interviewRunning, automationMode: interviewCoordinator?.automationMode ?? "AUTO", writtenTestRunning, middleMouseEnabled: preferences?.screenshot.middleMouseEnabled, enabledInManualInterview: preferences?.screenshot.enabledInManualInterview, enabledInExamMode: preferences?.screenshot.enabledInExamMode })) return;
-      const mode = interviewRunning ? "interview" : writtenTestRunning ? "written-test" : undefined;
+      const mode = writtenTestRunning ? "written-test" : interviewRunning ? "interview" : undefined;
       if (!mode) return;
       broadcast("shortcut", "middle-mouse-screenshot");
       void answerCapturedScreenshot(mode, createScreenshotRequestId(), "middle-mouse-shortcut").catch((error) => {

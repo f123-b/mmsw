@@ -104,7 +104,11 @@ export class WrittenTestController extends EventEmitter {
         }
       )) {
         if (controller.signal.aborted) return;
-        if (event.type === "answer_start") this.emitEvent({ type: "realtime_message", message: { type: "answer_start", answerId: event.answerId, questionId: event.questionId, mode: event.mode, model: event.model } });
+        if (event.type === "answer_start") {
+          const groupId = `written-test-screenshot-group-${question.id}`;
+          this.emitEvent({ type: "realtime_message", message: { type: "question_group_updated", groupId, title: "笔试截图题", primaryQuestion: "截图识别题（以图片为准）", items: [{ id: question.id, questionId: question.id, text: "截图识别题（以图片为准）", type: "NEW_TOPIC", answerable: true, state: "answering" }], slots: [{ id: `question-slot-${question.id}`, text: "截图识别题（以图片为准）", status: "covered" }], updatedAt: this.now() } });
+          this.emitEvent({ type: "realtime_message", message: { type: "answer_start", answerId: event.answerId, questionId: event.questionId, groupId, relation: "PRIMARY", mode: event.mode, model: event.model } });
+        }
         else if (event.type === "answer_delta") this.emitEvent({ type: "realtime_message", message: { type: "answer_delta", answerId: event.answerId, delta: event.delta } });
         else this.emitEvent({ type: "realtime_message", message: { type: "answer_end", answerId: event.answerId, text: event.text, quality: event.quality } });
       }

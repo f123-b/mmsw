@@ -28,7 +28,7 @@ describe("WrittenTestController", () => {
 
     expect(controller.running).toBe(true);
     expect(states).toEqual([true]);
-    expect(messages.map((message) => message.type)).toEqual(["answer_start", "answer_delta", "answer_delta", "answer_end"]);
+    expect(messages.map((message) => message.type)).toEqual(["question_group_updated", "answer_start", "answer_delta", "answer_delta", "answer_end"]);
     expect(messages.at(-1)?.text).toContain("复杂度");
     expect(requests[0]?.attachments?.[0]?.dataUrl).toBe("data:image/png;base64,abc");
     expect(requests[0]?.maxOutputTokens).toBe(2_400);
