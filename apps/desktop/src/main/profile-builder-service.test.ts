@@ -1,11 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { createProfile } from "@interview-copilot/shared";
-import { ProfileBuilderService } from "./profile-builder";
+import { boundProfileBuilderSources, MAX_SOURCE_CHARS, MAX_TOTAL_CHARS, ProfileBuilderService } from "./profile-builder";
 import { SqliteDatabase, SqliteProfileBuilderRepository, SqliteProfileRepository } from "./database";
 import type { SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProjectRepository } from "./database";
 
 describe("ProfileBuilderService freshness", () => {
+  it("bounds source count payloads per source and in aggregate", () => {
+    const bounded = boundProfileBuilderSources([
+      { id: "a", kind: "resume", title: "A", text: "a".repeat(MAX_SOURCE_CHARS + 100), updatedAt: 1 },
+      { id: "b", kind: "knowledge", title: "B", text: "b".repeat(MAX_SOURCE_CHARS + 100), updatedAt: 2 },
+      { id: "c", kind: "knowledge", title: "C", text: "c".repeat(MAX_TOTAL_CHARS), updatedAt: 3 },
+      { id: "d", kind: "knowledge", title: "D", text: "d".repeat(MAX_SOURCE_CHARS), updatedAt: 4 }
+    ]);
+
+    expect(bounded).toHaveLength(4);
+    expect(Math.max(...bounded.map((source) => source.text.length))).toBe(MAX_SOURCE_CHARS);
+    expect(bounded.reduce((total, source) => total + source.text.length, 0)).toBe(MAX_TOTAL_CHARS);
+  });
+
   it("marks an artifact stale when its source fingerprint no longer matches", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {

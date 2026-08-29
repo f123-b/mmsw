@@ -8,8 +8,29 @@ function sourceFingerprint(source: ProfileBuilderSource): string {
   return createHash("sha256").update(`${source.id}\n${source.kind}\n${source.text}`).digest("hex").slice(0, 16);
 }
 
+export const MAX_SOURCE_CHARS = 12_000;
+export const MAX_TOTAL_CHARS = 48_000;
+export const MAX_KNOWLEDGE_DOCS = 6;
+export const MAX_INTERVIEW_HISTORY = 4;
+export const MAX_PROJECTS = 8;
+export const MAX_CONFIRMED_SKILLS = 12;
+
 function sourceText(title: string, raw: string, summary?: string): string {
-  return [`标题：${title}`, summary ? `摘要：${summary}` : "", raw].filter(Boolean).join("\n").slice(0, 16_000);
+  return [`标题：${title}`, summary ? `摘要：${summary}` : "", raw].filter(Boolean).join("\n").slice(0, MAX_SOURCE_CHARS);
+}
+
+export function boundProfileBuilderSources(sources: ProfileBuilderSource[]): ProfileBuilderSource[] {
+  const bounded: ProfileBuilderSource[] = [];
+  let totalChars = 0;
+  for (const source of sources) {
+    if (totalChars >= MAX_TOTAL_CHARS) break;
+    const remaining = MAX_TOTAL_CHARS - totalChars;
+    const text = source.text.slice(0, Math.min(MAX_SOURCE_CHARS, remaining));
+    if (!text.trim()) continue;
+    bounded.push({ ...source, text });
+    totalChars += text.length;
+  }
+  return bounded;
 }
 
 function profileBuilderSourceKind(documentType: KnowledgeDocumentType): ProfileBuilderSource["kind"] {
@@ -35,6 +56,7 @@ export class ProfileBuilderService {
   private readonly pending = new Map<string, Promise<ProfileBuilderArtifactRecord>>();
   private readonly jobs: ProfileAnalysisJobManager;
   private readonly resumeAnalyses = new Map<string, ResumeAnalysis>();
+  private readonly resumeAnalysisFingerprints = new Map<string, string>();
 
   constructor(
     private readonly profiles: SqliteProfileRepository,
@@ -72,6 +94,7 @@ export class ProfileBuilderService {
     if (!profile?.resume) throw new Error("RESUME_NOT_FOUND: 请先上传 Resume");
     return this.jobs.start(profileId, "resume", { sourceId: `resume-${profileId}`, filename: profile.resume.filename, rawText: profile.resume.rawContent }, async (result) => {
       this.resumeAnalyses.set(profileId, result as ResumeAnalysis);
+      this.resumeAnalysisFingerprints.set(profileId, createHash("sha256").update(profile.resume?.rawContent ?? "").digest("hex"));
     });
   }
 
@@ -91,7 +114,9 @@ export class ProfileBuilderService {
   private buildInput(profileId: string): ProfileBuilderInput {
     const profile = this.profiles.get(profileId);
     if (!profile) throw new Error(`Profile not found: ${profileId}`);
-    return { profileId, profileName: profile.name, sources: this.collectSources(profileId), resumeAnalysis: this.resumeAnalyses.get(profileId) };
+    const resumeFingerprint = profile.resume ? createHash("sha256").update(profile.resume.rawContent).digest("hex") : undefined;
+    const resumeAnalysis = resumeFingerprint && this.resumeAnalysisFingerprints.get(profileId) === resumeFingerprint ? this.resumeAnalyses.get(profileId) : undefined;
+    return { profileId, profileName: profile.name, sources: this.collectSources(profileId), resumeAnalysis };
   }
 
   private saveArtifact(profileId: string, input: ProfileBuilderInput, artifact: ProfileBuilderOutput): ProfileBuilderArtifactRecord {
@@ -120,18 +145,19 @@ export class ProfileBuilderService {
     const profile = this.profiles.get(profileId);
     if (!profile) return [];
     const sources: ProfileBuilderSource[] = [];
-    if (profile.resume) sources.push({ id: `resume-${profileId}`, kind: "resume", title: profile.resume.filename ?? "Resume", text: sourceText(profile.resume.filename ?? "Resume", profile.resume.rawContent, profile.resume.summary), updatedAt: profile.resume.uploadedAt ?? profile.updatedAt });
-    if (profile.jobDescription) sources.push({ id: `job-${profileId}`, kind: "job_target", title: profile.jobDescription.filename ?? "Job Description", text: sourceText(profile.jobDescription.filename ?? "Job Description", profile.jobDescription.rawContent, profile.jobDescription.summary), updatedAt: profile.jobDescription.uploadedAt ?? profile.updatedAt });
-    for (const skill of profile.skills) sources.push({ id: `skill-${skill.id}`, kind: "skill", title: skill.name, text: `${skill.name}\n${skill.description}\n${skill.content}\n${skill.tags.join("、")}`, updatedAt: skill.confirmedAt ?? profile.updatedAt });
-    for (const project of this.projects.list().filter((item) => item.profileId === profileId)) sources.push({ id: `project-${project.id}`, kind: "project", title: project.name, text: `项目名称：${project.name}`, updatedAt: project.updatedAt });
-    for (const document of this.knowledge.listDocuments().filter((item) => profile.knowledgeBaseIds.includes(item.knowledgeBaseId) && item.status === "ready")) sources.push({ id: `document-${document.id}`, kind: profileBuilderSourceKind(document.documentType), title: `${document.filename} · ${document.documentType}`, text: document.text, updatedAt: document.updatedAt });
-    for (const interview of this.history.listInterviews().filter((item) => item.profileId === profileId)) {
+    const add = (source: ProfileBuilderSource): void => { sources.push(source); };
+    if (profile.resume) add({ id: `resume-${profileId}`, kind: "resume", title: profile.resume.filename ?? "Resume", text: sourceText(profile.resume.filename ?? "Resume", profile.resume.rawContent, profile.resume.summary), updatedAt: profile.resume.uploadedAt ?? profile.updatedAt });
+    if (profile.jobDescription) add({ id: `job-${profileId}`, kind: "job_target", title: profile.jobDescription.filename ?? "Job Description", text: sourceText(profile.jobDescription.filename ?? "Job Description", profile.jobDescription.rawContent, profile.jobDescription.summary), updatedAt: profile.jobDescription.uploadedAt ?? profile.updatedAt });
+    for (const skill of profile.skills.filter((item) => item.confirmedAt).slice(0, MAX_CONFIRMED_SKILLS)) add({ id: `skill-${skill.id}`, kind: "skill", title: skill.name, text: `${skill.name}\n${skill.description}\n${skill.content}\n${skill.tags.join("、")}`, updatedAt: skill.confirmedAt ?? profile.updatedAt });
+    for (const project of this.projects.list().filter((item) => item.profileId === profileId).sort((left, right) => right.updatedAt - left.updatedAt).slice(0, MAX_PROJECTS)) add({ id: `project-${project.id}`, kind: "project", title: project.name, text: `项目名称：${project.name}`, updatedAt: project.updatedAt });
+    for (const document of this.knowledge.listDocuments().filter((item) => profile.knowledgeBaseIds.includes(item.knowledgeBaseId) && item.status === "ready").sort((left, right) => right.updatedAt - left.updatedAt).slice(0, MAX_KNOWLEDGE_DOCS)) add({ id: `document-${document.id}`, kind: profileBuilderSourceKind(document.documentType), title: `${document.filename} · ${document.documentType}`, text: document.text, updatedAt: document.updatedAt });
+    for (const interview of this.history.listInterviews().filter((item) => item.profileId === profileId).sort((left, right) => right.createdAt - left.createdAt).slice(0, MAX_INTERVIEW_HISTORY)) {
       const snapshot = this.history.snapshot(interview.id);
       const answers = new Map(snapshot.answers.map((answer) => [answer.questionId, answer.text]));
       const pairs = snapshot.questions.map((question) => `问题：${question.text}\n回答：${answers.get(question.id) ?? ""}`).filter((pair) => !pair.endsWith("回答："));
-      if (pairs.length) sources.push({ id: `interview-${interview.id}`, kind: "interview", title: `面试记录 ${new Date(interview.createdAt).toLocaleDateString("zh-CN")}`, text: pairs.join("\n\n"), updatedAt: interview.endedAt ?? interview.createdAt });
+      if (pairs.length) add({ id: `interview-${interview.id}`, kind: "interview", title: `面试记录 ${new Date(interview.createdAt).toLocaleDateString("zh-CN")}`, text: pairs.join("\n\n"), updatedAt: interview.endedAt ?? interview.createdAt });
     }
-    return sources;
+    return boundProfileBuilderSources(sources);
   }
 }
 
