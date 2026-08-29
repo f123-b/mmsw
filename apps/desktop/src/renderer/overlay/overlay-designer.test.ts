@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ANSWER_DESIGNER_BOUNDS, applyLayoutPreset, clampDesignerRect, controlBarPosition, interactionModeAllowsOverlayInput, mapPreviewPointToCanvas, modifierPressed, overlayHitRegionAllowsInput, resizeDesignerRect, snapDesignerRect, wheelTargetAtPoint, type DesignerLayout } from "./overlay-designer";
+import { ANSWER_DESIGNER_BOUNDS, applyLayoutPreset, clampDesignerRect, controlBarPosition, interactionModeAllowsOverlayInput, mapPreviewPointToCanvas, modifierPressed, overlayHitRegionAllowsInput, resizeDesignerRect, resizeDesignerRectFromPointer, snapDesignerRect, wheelTargetAtPoint, type DesignerLayout } from "./overlay-designer";
 
 const canvas = { width: 1920, height: 1080 };
 const layout: DesignerLayout = {
@@ -22,6 +22,15 @@ describe("overlay designer geometry", () => {
   it("resizes from all edges without violating limits", () => {
     expect(resizeDesignerRect(layout.answer, "nw", { x: -200, y: -200 }, canvas, ANSWER_DESIGNER_BOUNDS)).toMatchObject({ width: 880, height: 700, x: 370, y: -20 });
     expect(resizeDesignerRect(layout.answer, "se", { x: -900, y: -900 }, canvas, ANSWER_DESIGNER_BOUNDS)).toMatchObject({ width: 300, height: 150 });
+  });
+
+  it("always applies preview resize delta to the pointer-down rectangle", () => {
+    const start = layout.answer;
+    const first = resizeDesignerRectFromPointer(start, "se", { x: 100, y: 100 }, { x: 110, y: 120 }, { width: 500, height: 250 }, canvas, ANSWER_DESIGNER_BOUNDS);
+    const second = resizeDesignerRectFromPointer(start, "se", { x: 100, y: 100 }, { x: 120, y: 140 }, { width: 500, height: 250 }, canvas, ANSWER_DESIGNER_BOUNDS);
+    expect(first.width).toBeCloseTo(start.width + 38.4);
+    expect(second.width).toBeCloseTo(start.width + 76.8);
+    expect(second.width).toBeLessThan(first.width + 76.8);
   });
 
   it("maps preview pixels and control bar presets to logical display coordinates", () => {

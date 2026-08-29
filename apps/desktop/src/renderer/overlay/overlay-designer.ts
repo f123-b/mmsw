@@ -102,6 +102,32 @@ export function resizeDesignerRect(rect: DesignerRect, handle: ResizeHandle, del
   return clampDesignerRect(next, canvas, bounds, 40);
 }
 
+/**
+ * Resize from an immutable pointer-down rectangle. The delta is always derived
+ * from the original pointer position, so repeated pointermove events do not
+ * compound an already-applied resize.
+ */
+export function resizeDesignerRectFromPointer(
+  startRect: DesignerRect,
+  handle: ResizeHandle,
+  startPointer: DesignerPoint,
+  currentPointer: DesignerPoint,
+  preview: DesignerCanvas,
+  canvas: DesignerCanvas,
+  bounds: DesignerBounds
+): DesignerRect {
+  return resizeDesignerRect(
+    startRect,
+    handle,
+    {
+      x: (currentPointer.x - startPointer.x) * canvas.width / Math.max(1, preview.width),
+      y: (currentPointer.y - startPointer.y) * canvas.height / Math.max(1, preview.height)
+    },
+    canvas,
+    bounds
+  );
+}
+
 export function controlBarPosition(mode: OverlayControlBarPositionMode, orientation: OverlayControlBarOrientation, canvas: DesignerCanvas, size: Pick<DesignerRect, "width" | "height">, custom?: DesignerPoint): DesignerPoint {
   if (mode === "custom" && custom) return custom;
   const horizontalCenter = Math.round((canvas.width - size.width) / 2);

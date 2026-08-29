@@ -25,7 +25,7 @@ import { AppDialog, type DialogState } from "./dialogs/AppDialog";
 import { PageErrorBoundary } from "./components/ErrorBoundary";
 import { ProjectLibraryPage } from "./project-library/ProjectLibraryPage";
 import { KNOWLEDGE_DOCUMENT_TYPES, KNOWLEDGE_DOCUMENT_TYPE_LABELS, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption } from "@interview-copilot/shared";
-import { ANSWER_DESIGNER_BOUNDS, CONTROL_BAR_DESIGNER_BOUNDS, QUESTION_DESIGNER_BOUNDS, applyLayoutPreset, clampDesignerRect, resizeDesignerRect, type DesignerCanvas, type DesignerLayout, type DesignerPanel, type DesignerRect, type ResizeHandle } from "./overlay/overlay-designer";
+import { ANSWER_DESIGNER_BOUNDS, CONTROL_BAR_DESIGNER_BOUNDS, QUESTION_DESIGNER_BOUNDS, applyLayoutPreset, clampDesignerRect, resizeDesignerRect, resizeDesignerRectFromPointer, type DesignerCanvas, type DesignerLayout, type DesignerPanel, type DesignerRect, type ResizeHandle } from "./overlay/overlay-designer";
 import { OVERLAY_LABELS } from "./overlay/overlay-labels";
 
 interface ChatMessage {
@@ -802,7 +802,7 @@ function previewBackgroundStyle(background: OverlayPreferences["previewBackgroun
   return { background: "linear-gradient(135deg,#182333 0%,#27364b 48%,#101722 100%)" };
 }
 
-function PreviewWindow({ panel, rect, canvas, selected, onSelect, onMove, onResize, onCommit, orientation, children }: { panel: DesignerPanel; rect: DesignerRect; canvas: DesignerCanvas; selected: boolean; onSelect: () => void; onMove: (rect: DesignerRect) => void; onResize: (handle: ResizeHandle, delta: { x: number; y: number }) => void; onCommit: () => void; orientation?: OverlayControlBarOrientation; children: JSX.Element }): JSX.Element {
+function PreviewWindow({ panel, rect, canvas, selected, onSelect, onMove, onResize, onCommit, orientation, children }: { panel: DesignerPanel; rect: DesignerRect; canvas: DesignerCanvas; selected: boolean; onSelect: () => void; onMove: (rect: DesignerRect) => void; onResize: (rect: DesignerRect) => void; onCommit: () => void; orientation?: OverlayControlBarOrientation; children: JSX.Element }): JSX.Element {
   const frameRef = useRef<HTMLDivElement>(null);
   const startRef = useRef<{ clientX: number; clientY: number; rect: DesignerRect; handle?: ResizeHandle } | undefined>(undefined);
   const cleanupRef = useRef<(() => void) | undefined>(undefined);
@@ -820,7 +820,7 @@ function PreviewWindow({ panel, rect, canvas, selected, onSelect, onMove, onResi
   };
   const beginResize = (handle: ResizeHandle, event: React.PointerEvent<HTMLDivElement>) => {
     event.stopPropagation(); onSelect(); try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* best effort */ } startRef.current = { clientX: event.clientX, clientY: event.clientY, rect: { ...rect }, handle };
-    const move = (next: PointerEvent) => { const frame = frameRef.current?.parentElement; if (!frame || !startRef.current?.handle) return; const delta = { x: (next.clientX - startRef.current.clientX) * canvas.width / Math.max(1, frame.clientWidth), y: (next.clientY - startRef.current.clientY) * canvas.height / Math.max(1, frame.clientHeight) }; onResize(startRef.current.handle, delta); };
+    const move = (next: PointerEvent) => { const frame = frameRef.current?.parentElement; const start = startRef.current; if (!frame || !start?.handle) return; const bounds = panel === "question" ? QUESTION_DESIGNER_BOUNDS : panel === "answer" ? ANSWER_DESIGNER_BOUNDS : CONTROL_BAR_DESIGNER_BOUNDS; onResize(resizeDesignerRectFromPointer(start.rect, start.handle, { x: start.clientX, y: start.clientY }, { x: next.clientX, y: next.clientY }, { width: frame.clientWidth, height: frame.clientHeight }, canvas, bounds)); };
     const end = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end); window.removeEventListener("blur", end); cleanupRef.current = undefined; startRef.current = undefined; onCommit(); };
     cleanupRef.current = end;
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", end, { once: true }); window.addEventListener("pointercancel", end, { once: true }); window.addEventListener("blur", end, { once: true });
@@ -853,7 +853,7 @@ function DesktopPreview({ value, onChange, displays = [], activeDisplay }: { val
     onChange({ layoutPreset: "custom", questionWindow: { x: next.question.x, y: next.question.y, width: next.question.width, height: next.question.height }, answerWindow: { x: next.answer.x, y: next.answer.y, width: next.answer.width, height: next.answer.height }, controlBar: { x: next.controlBar.x, y: next.controlBar.y, width: next.controlBar.width, height: next.controlBar.height, positionMode: "custom" } });
   };
   const movePanel = (panel: DesignerPanel, next: DesignerRect) => updateLayout({ ...layoutRef.current, [panel]: next });
-  const resizePanel = (panel: DesignerPanel, handle: ResizeHandle, delta: { x: number; y: number }) => { const rect = layoutRef.current[panel]; const bounds = panel === "question" ? QUESTION_DESIGNER_BOUNDS : panel === "answer" ? ANSWER_DESIGNER_BOUNDS : CONTROL_BAR_DESIGNER_BOUNDS; updateLayout({ ...layoutRef.current, [panel]: resizeDesignerRect(rect, handle, delta, screenSize, bounds) }); };
+  const resizePanel = (panel: DesignerPanel, next: DesignerRect) => updateLayout({ ...layoutRef.current, [panel]: next });
   const frameChildren = (panel: DesignerPanel): JSX.Element => panel === "question" ? <><span className="preview-window-kicker">{OVERLAY_LABELS.questionNavigator}</span><strong>CAN 总线是什么？</strong><small>点击或拖动阅读问题组</small></> : panel === "answer" ? <><span className="preview-window-kicker">{OVERLAY_LABELS.answerReader}</span><strong>AI 回答</strong><p>CAN 采用基于 ID 的逐位仲裁，显性位会覆盖隐性位。</p><p>拖动边缘可以调整阅读窗大小。</p></> : <><span className="preview-control-dot">◈</span><span>00:24</span><span>回答中</span><button type="button" onClick={() => setSelected("controlBar")}>设置</button></>;
   const selectedRect = layout[selected];
   const selectedBounds = selected === "question" ? QUESTION_DESIGNER_BOUNDS : selected === "answer" ? ANSWER_DESIGNER_BOUNDS : CONTROL_BAR_DESIGNER_BOUNDS;
@@ -864,9 +864,9 @@ function DesktopPreview({ value, onChange, displays = [], activeDisplay }: { val
     return <div className={`desktop-preview-frame ${large ? "desktop-preview-frame-large" : ""}`} style={previewBackgroundStyle(background, value.previewCustomColor)} data-preview-background={background}>
       <div className="desktop-preview-browser-chrome"><span /><span /><span /><small>{screenSize.width} × {screenSize.height} · 设计坐标</small></div>
       <div className="desktop-preview-canvas-viewport"><div className="desktop-preview-canvas" style={{ aspectRatio: `${screenSize.width} / ${screenSize.height}`, width: `${zoomScale * 100}%` }} data-preview-zoom={zoom === "fit" ? "fit" : `${zoom * 100}%`}>
-        <PreviewWindow panel="question" rect={layout.question} canvas={screenSize} selected={selected === "question"} onSelect={() => setSelected("question")} onMove={(rect) => movePanel("question", rect)} onResize={(handle, delta) => resizePanel("question", handle, delta)} onCommit={commit}>{frameChildren("question")}</PreviewWindow>
-        <PreviewWindow panel="answer" rect={layout.answer} canvas={screenSize} selected={selected === "answer"} onSelect={() => setSelected("answer")} onMove={(rect) => movePanel("answer", rect)} onResize={(handle, delta) => resizePanel("answer", handle, delta)} onCommit={commit}>{frameChildren("answer")}</PreviewWindow>
-        <PreviewWindow panel="controlBar" rect={layout.controlBar} canvas={screenSize} selected={selected === "controlBar"} onSelect={() => setSelected("controlBar")} onMove={(rect) => movePanel("controlBar", rect)} onResize={(handle, delta) => resizePanel("controlBar", handle, delta)} onCommit={commit} orientation={value.controlBar.orientation}>{frameChildren("controlBar")}</PreviewWindow>
+        <PreviewWindow panel="question" rect={layout.question} canvas={screenSize} selected={selected === "question"} onSelect={() => setSelected("question")} onMove={(rect) => movePanel("question", rect)} onResize={(rect) => resizePanel("question", rect)} onCommit={commit}>{frameChildren("question")}</PreviewWindow>
+        <PreviewWindow panel="answer" rect={layout.answer} canvas={screenSize} selected={selected === "answer"} onSelect={() => setSelected("answer")} onMove={(rect) => movePanel("answer", rect)} onResize={(rect) => resizePanel("answer", rect)} onCommit={commit}>{frameChildren("answer")}</PreviewWindow>
+        <PreviewWindow panel="controlBar" rect={layout.controlBar} canvas={screenSize} selected={selected === "controlBar"} onSelect={() => setSelected("controlBar")} onMove={(rect) => movePanel("controlBar", rect)} onResize={(rect) => resizePanel("controlBar", rect)} onCommit={commit} orientation={value.controlBar.orientation}>{frameChildren("controlBar")}</PreviewWindow>
       </div></div>
     </div>;
   };
