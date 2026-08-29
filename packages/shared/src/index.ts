@@ -605,6 +605,7 @@ export * from "./answer/answer-thread-store";
 export * from "./question-trace";
 export * from "./question";
 export * from "./profile-builder";
+export * from "./resume-analysis";
 export * from "./interview-brain";
 export * from "./terminology";
 export * from "./chat-intent";
