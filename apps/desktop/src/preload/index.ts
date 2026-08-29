@@ -21,6 +21,7 @@ import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provi
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 import type { ModelCatalogResult } from "../main/model-catalog";
 import type { InterviewExportResult } from "../main/history-export";
+import type { ProfileAnalysisJob } from "../main/profile-analysis-job";
 import type { InterviewStartupEvent } from "../main/interview-startup-timing";
 
 function createRendererScreenshotRequestId(): string {
@@ -136,7 +137,15 @@ const api = {
     get: (profileId: string): Promise<ProfileBuilderArtifactRecord | undefined> => ipcRenderer.invoke("profile-builder:get", profileId),
     listSkillSuggestions: (profileId: string, status?: SkillSuggestionStatus): Promise<SkillSuggestion[]> => ipcRenderer.invoke("profile-builder:list-skill-suggestions", profileId, status),
     reviewSkillSuggestion: (suggestionId: string, status: SkillSuggestionStatus): Promise<SkillSuggestion | undefined> => ipcRenderer.invoke("profile-builder:review-skill-suggestion", suggestionId, status),
+    start: (profileId: string): Promise<ProfileAnalysisJob> => ipcRenderer.invoke("profile-builder:start", profileId),
+    getJob: (jobId: string): Promise<ProfileAnalysisJob | undefined> => ipcRenderer.invoke("profile-builder:get-job", jobId),
+    cancel: (jobId: string): Promise<ProfileAnalysisJob | undefined> => ipcRenderer.invoke("profile-builder:cancel", jobId),
     rebuild: (profileId: string): Promise<ProfileBuilderArtifactRecord> => ipcRenderer.invoke("profile-builder:rebuild", profileId)
+  },
+  resumeAnalysis: {
+    start: (profileId: string): Promise<ProfileAnalysisJob> => ipcRenderer.invoke("resume-analysis:start", profileId),
+    getJob: (jobId: string): Promise<ProfileAnalysisJob | undefined> => ipcRenderer.invoke("resume-analysis:get-job", jobId),
+    cancel: (jobId: string): Promise<ProfileAnalysisJob | undefined> => ipcRenderer.invoke("resume-analysis:cancel", jobId)
   },
   projectMemory: {
     get: (profileId: string) => ipcRenderer.invoke("project-memory:get", profileId),
@@ -427,6 +436,16 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, payload: ProfileBuilderArtifactRecord) => listener(payload);
       ipcRenderer.on("profile-builder:updated", handler);
       return () => ipcRenderer.removeListener("profile-builder:updated", handler);
+    },
+    onProfileBuilderJob: (listener: (event: ProfileAnalysisJob) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: ProfileAnalysisJob) => listener(payload);
+      ipcRenderer.on("profile-builder:job", handler);
+      return () => ipcRenderer.removeListener("profile-builder:job", handler);
+    },
+    onResumeAnalysisJob: (listener: (event: ProfileAnalysisJob) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: ProfileAnalysisJob) => listener(payload);
+      ipcRenderer.on("resume-analysis:job", handler);
+      return () => ipcRenderer.removeListener("resume-analysis:job", handler);
     },
     onProjectAnalysisJob: (listener: (event: ProjectAnalysisJob) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, payload: ProjectAnalysisJob) => listener(payload);

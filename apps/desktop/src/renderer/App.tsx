@@ -1091,7 +1091,7 @@ export function App(): JSX.Element {
     void Promise.all([window.interviewCopilot.projectMemory.get(profileId), window.interviewCopilot.projectMemory.stats(profileId)]).then(([memory, stats]) => { setProjectMemory(memory); setProjectMemoryStats(stats); }).catch(() => undefined);
      void Promise.all([window.interviewCopilot.projectMemory.listFacts(profileId), window.interviewCopilot.jobTargets.list(profileId), window.interviewCopilot.projectMemory.analysisRuns(profileId), window.interviewCopilot.retrieval.list(profileId, 20), window.interviewCopilot.projectMemory.analysisJobs(profileId)]).then(([facts, targets, analyses, retrievals, analysisJobs]) => { setProjectFacts(facts); setJobTargets(targets); setKnowledgeAnalysisRuns(analyses); setRetrievalRuns(retrievals); setProjectAnalysisJobs(analysisJobs); }).catch(() => undefined);
     void window.interviewCopilot.projectMemory.listFacts(profileId, undefined, { includeStale: true, includeRejected: true }).then((facts) => setStaleProjectFacts(facts.filter((fact) => fact.stale))).catch(() => setStaleProjectFacts([]));
-    return window.interviewCopilot.events.onProfileBuilderUpdated((record) => {
+    const cleanupArtifact = window.interviewCopilot.events.onProfileBuilderUpdated((record) => {
       if (record.profileId === profileId) {
         setProfileBuilderArtifact(record);
         void window.interviewCopilot.profileBuilder.listSkillSuggestions(profileId).then(setSkillSuggestions).catch(() => setSkillSuggestions([]));
@@ -1103,6 +1103,14 @@ export function App(): JSX.Element {
         });
       }
     });
+    const cleanupJob = window.interviewCopilot.events.onProfileBuilderJob((job) => {
+      if (job.profileId !== profileId) return;
+      setProfileBuilderRunning(["queued", "running"].includes(job.status));
+      if (job.status === "failed") store.setNotice(`个人档案分析失败：${job.error ?? "Worker 异常"}`);
+      if (job.status === "cancelled") store.setNotice("个人档案分析已取消");
+      if (job.status === "completed") store.setNotice("个人档案分析已完成：技能、项目和回答素材已更新");
+    });
+    return () => { cleanupArtifact(); cleanupJob(); };
   }, [profileId]);
 
   useEffect(() => {
@@ -1445,15 +1453,12 @@ export function App(): JSX.Element {
   const removeProfileMaterial = async (kind: "resume" | "jobDescription") => { if (!selectedProfile) return; const updated = await window.interviewCopilot.profiles.removeMaterial(selectedProfile.id, kind); if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); };
   const rebuildProfileBuilder = async () => {
     if (!selectedProfile || profileBuilderRunning) return;
-    setProfileBuilderRunning(true);
     try {
-      const artifact = await window.interviewCopilot.profileBuilder.rebuild(selectedProfile.id);
-      setProfileBuilderArtifact(artifact);
-      store.setNotice("个人档案分析已完成：技能、项目和回答素材已更新");
+      const job = await window.interviewCopilot.profileBuilder.start(selectedProfile.id);
+      setProfileBuilderRunning(["queued", "running"].includes(job.status));
+      store.setNotice("个人档案分析已排队，页面仍可继续操作");
     } catch (error) {
       store.setNotice(`个人档案分析失败：${userFacingError(error)}`);
-    } finally {
-      setProfileBuilderRunning(false);
     }
   };
   const rebuildProjectMemory = async (projectId?: string) => {

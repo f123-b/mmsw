@@ -178,7 +178,7 @@ describe("SQLite persistence", () => {
       const profiles = new SqliteProfileRepository(database);
       const profile = profiles.save({ name: "画像测试", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
       const builder = new SqliteProfileBuilderRepository(database);
-      const artifact = { version: 1 as const, profileId: profile.id, generatedAt: 10, status: "ready" as const, sourceIds: ["resume-1"], skillGraph: { nodes: [], edges: [] }, projectGraph: { nodes: [], edges: [] }, answerMaterials: [], faqs: [], warnings: [] };
+      const artifact = { version: 1 as const, profileId: profile.id, generatedAt: 10, status: "ready" as const, analysisQuality: "model" as const, sourceIds: ["resume-1"], skillGraph: { nodes: [], edges: [] }, projectGraph: { nodes: [], edges: [] }, answerMaterials: [], faqs: [], warnings: [] };
       builder.save({ profileId: profile.id, status: "ready", sourceSnapshot: { sources: ["resume-1"] }, artifact, now: 10 });
       expect(builder.get(profile.id)?.artifact?.profileId).toBe(profile.id);
       expect(profiles.get(profile.id)?.name).toBe("画像测试");

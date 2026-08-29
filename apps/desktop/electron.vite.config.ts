@@ -8,7 +8,8 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve(__dirname, "src/main/index.ts"),
-          "repository-import-worker": resolve(__dirname, "src/main/repository-import-worker.ts")
+          "repository-import-worker": resolve(__dirname, "src/main/repository-import-worker.ts"),
+          "profile-analysis-worker": resolve(__dirname, "src/main/profile-analysis-worker.ts")
         },
         output: { entryFileNames: "[name].js" }
       }

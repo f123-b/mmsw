@@ -168,6 +168,10 @@ export class ProfileBuilderAgent {
 
   async build(input: ProfileBuilderInput, generatedAt = Date.now()): Promise<ProfileBuilderOutput> {
     const fallback = buildDeterministicProfile(input, generatedAt);
+    return this.buildWithFallback(input, fallback);
+  }
+
+  async buildWithFallback(input: ProfileBuilderInput, fallback: ProfileBuilderOutput): Promise<ProfileBuilderOutput> {
     if (!this.model || input.sources.length === 0) return fallback;
     try {
       const raw = await this.model.generate({ profile: input, fallback });

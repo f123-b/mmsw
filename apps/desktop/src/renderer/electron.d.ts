@@ -14,6 +14,7 @@ import type { SessionState } from "@interview-copilot/shared";
 import type { ChatAction, KnowledgeDocumentType, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectMemorySnapshot, ProjectQaGenerationResult, ProjectQuestionBankImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord, SkillSuggestion, SkillSuggestionStatus } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, OverlayPreferences, OverlayPreferencesPatch, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectAnalysisState, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankRelationInput, QuestionBankRouteQuery, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
+import type { ProfileAnalysisJob } from "../main/profile-analysis-job";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 import type { ModelCatalogResult } from "../main/model-catalog";
@@ -120,7 +121,15 @@ declare global {
         get(profileId: string): Promise<ProfileBuilderArtifactRecord | undefined>;
         listSkillSuggestions(profileId: string, status?: SkillSuggestionStatus): Promise<SkillSuggestion[]>;
         reviewSkillSuggestion(suggestionId: string, status: SkillSuggestionStatus): Promise<SkillSuggestion | undefined>;
+        start(profileId: string): Promise<ProfileAnalysisJob>;
+        getJob(jobId: string): Promise<ProfileAnalysisJob | undefined>;
+        cancel(jobId: string): Promise<ProfileAnalysisJob | undefined>;
         rebuild(profileId: string): Promise<ProfileBuilderArtifactRecord>;
+      };
+      resumeAnalysis: {
+        start(profileId: string): Promise<ProfileAnalysisJob>;
+        getJob(jobId: string): Promise<ProfileAnalysisJob | undefined>;
+        cancel(jobId: string): Promise<ProfileAnalysisJob | undefined>;
       };
       projectMemory: {
         get(profileId: string): Promise<ProjectMemorySnapshot | undefined>;
@@ -263,6 +272,8 @@ declare global {
         onChatError(listener: (event: unknown) => void): () => void;
         onChatCancelled(listener: (event: unknown) => void): () => void;
         onProfileBuilderUpdated(listener: (event: ProfileBuilderArtifactRecord) => void): () => void;
+        onProfileBuilderJob(listener: (event: ProfileAnalysisJob) => void): () => void;
+        onResumeAnalysisJob(listener: (event: ProfileAnalysisJob) => void): () => void;
         onProjectAnalysisJob(listener: (event: ProjectAnalysisJob) => void): () => void;
         onQuestionBankAnswerGenerationProgress(listener: (event: { status: "started" | "running" | "completed"; total: number; completed: number; generated: number; skipped: number; failed: number; questionId?: string; error?: string }) => void): () => void;
       };

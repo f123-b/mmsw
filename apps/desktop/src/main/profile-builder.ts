@@ -1,7 +1,8 @@
-import type { AnswerProvider, KnowledgeDocumentType, ProfileBuilderInput, ProfileBuilderModel, ProfileBuilderOutput, ProfileBuilderSource, ProfileBuilderSourceSnapshot } from "@interview-copilot/shared";
+import type { AnswerProvider, KnowledgeDocumentType, ProfileBuilderInput, ProfileBuilderModel, ProfileBuilderOutput, ProfileBuilderSource, ProfileBuilderSourceSnapshot, ResumeAnalysis } from "@interview-copilot/shared";
 import { ProfileBuilderAgent } from "@interview-copilot/shared";
 import { createHash } from "node:crypto";
 import { SqliteInterviewHistoryRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectRepository, SqliteSkillSuggestionRepository, type ProfileBuilderArtifactRecord } from "./database";
+import { ProfileAnalysisJobManager, type ProfileAnalysisJob } from "./profile-analysis-job";
 
 function sourceFingerprint(source: ProfileBuilderSource): string {
   return createHash("sha256").update(`${source.id}\n${source.kind}\n${source.text}`).digest("hex").slice(0, 16);
@@ -32,6 +33,8 @@ function sourceSnapshotsMatch(left: unknown, right: ProfileBuilderSourceSnapshot
 
 export class ProfileBuilderService {
   private readonly pending = new Map<string, Promise<ProfileBuilderArtifactRecord>>();
+  private readonly jobs: ProfileAnalysisJobManager;
+  private readonly resumeAnalyses = new Map<string, ResumeAnalysis>();
 
   constructor(
     private readonly profiles: SqliteProfileRepository,
@@ -41,8 +44,9 @@ export class ProfileBuilderService {
     private readonly artifacts: SqliteProfileBuilderRepository,
     private readonly suggestions?: SqliteSkillSuggestionRepository,
     private readonly model?: ProfileBuilderModel,
-    private readonly onUpdated?: (record: ProfileBuilderArtifactRecord) => void
-  ) {}
+    private readonly onUpdated?: (record: ProfileBuilderArtifactRecord) => void,
+    private readonly onJobUpdated?: (job: ProfileAnalysisJob) => void
+  ) { this.jobs = new ProfileAnalysisJobManager((job) => this.onJobUpdated?.(job)); }
 
   get(profileId: string): ProfileBuilderArtifactRecord | undefined {
     const record = this.artifacts.get(profileId);
@@ -54,7 +58,7 @@ export class ProfileBuilderService {
   async rebuild(profileId: string): Promise<ProfileBuilderArtifactRecord> {
     const existing = this.pending.get(profileId);
     if (existing) return existing;
-    const task = this.build(profileId).finally(() => this.pending.delete(profileId));
+    const task = this.waitForRebuild(profileId).finally(() => this.pending.delete(profileId));
     this.pending.set(profileId, task);
     return task;
   }
@@ -63,21 +67,52 @@ export class ProfileBuilderService {
     this.artifacts.invalidate(profileId);
   }
 
-  private async build(profileId: string): Promise<ProfileBuilderArtifactRecord> {
+  startResumeAnalysis(profileId: string): ProfileAnalysisJob {
+    const profile = this.profiles.get(profileId);
+    if (!profile?.resume) throw new Error("RESUME_NOT_FOUND: 请先上传 Resume");
+    return this.jobs.start(profileId, "resume", { sourceId: `resume-${profileId}`, filename: profile.resume.filename, rawText: profile.resume.rawContent }, async (result) => {
+      this.resumeAnalyses.set(profileId, result as ResumeAnalysis);
+    });
+  }
+
+  start(profileId: string): ProfileAnalysisJob {
+    const input = this.buildInput(profileId);
+    return this.jobs.start(profileId, "profile", input, async (result) => {
+      let artifact = result as ProfileBuilderOutput;
+      if (this.model) artifact = await new ProfileBuilderAgent(this.model).buildWithFallback(input, artifact);
+      this.saveArtifact(profileId, input, artifact);
+    });
+  }
+
+  getJob(jobId: string): ProfileAnalysisJob | undefined { return this.jobs.get(jobId); }
+  getJobs(profileId: string, kind?: "resume" | "profile"): ProfileAnalysisJob[] { return this.jobs.list(profileId, kind); }
+  cancelJob(jobId: string): ProfileAnalysisJob | undefined { return this.jobs.cancel(jobId); }
+
+  private buildInput(profileId: string): ProfileBuilderInput {
     const profile = this.profiles.get(profileId);
     if (!profile) throw new Error(`Profile not found: ${profileId}`);
-    const input: ProfileBuilderInput = { profileId, profileName: profile.name, sources: this.collectSources(profileId) };
+    return { profileId, profileName: profile.name, sources: this.collectSources(profileId), resumeAnalysis: this.resumeAnalyses.get(profileId) };
+  }
+
+  private saveArtifact(profileId: string, input: ProfileBuilderInput, artifact: ProfileBuilderOutput): ProfileBuilderArtifactRecord {
     const sourceSnapshot = sourceSnapshotForBuild(input.sources);
-    try {
-      const artifact = await new ProfileBuilderAgent(this.model).build(input);
-      this.suggestions?.upsertFromArtifact(profileId, artifact.skillGraph.nodes, sourceSnapshot);
-      const record = this.artifacts.save({ profileId, status: artifact.status, sourceSnapshot, artifact });
-      this.onUpdated?.(record);
-      return record;
-    } catch (error) {
-      const record = this.artifacts.save({ profileId, status: "error", sourceSnapshot, error: String(error) });
-      this.onUpdated?.(record);
-      return record;
+    this.suggestions?.upsertFromArtifact(profileId, artifact.skillGraph.nodes, sourceSnapshot);
+    const record = this.artifacts.save({ profileId, status: artifact.status, sourceSnapshot, artifact });
+    this.onUpdated?.(record);
+    return record;
+  }
+
+  private async waitForRebuild(profileId: string): Promise<ProfileBuilderArtifactRecord> {
+    const job = this.start(profileId);
+    while (true) {
+      const current = this.jobs.get(job.id);
+      if (!current || current.status === "completed") {
+        const record = this.artifacts.get(profileId);
+        if (record) return record;
+        throw new Error("Profile Builder completed without an artifact");
+      }
+      if (["failed", "cancelled"].includes(current.status)) throw new Error(current.error ?? `Profile Builder ${current.status}`);
+      await new Promise((resolve) => setTimeout(resolve, 40));
     }
   }
 

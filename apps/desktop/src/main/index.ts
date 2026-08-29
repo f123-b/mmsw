@@ -1910,6 +1910,15 @@ function registerIpc(): void {
   ipcMain.handle("profile-builder:get", (_event, profileId: string) => profileBuilderService?.get(profileId));
   ipcMain.handle("profile-builder:list-skill-suggestions", (_event, profileId: string, status?: import("@interview-copilot/shared").SkillSuggestionStatus) => skillSuggestionRepository?.list(profileId, status) ?? []);
   ipcMain.handle("profile-builder:review-skill-suggestion", (_event, suggestionId: string, status: import("@interview-copilot/shared").SkillSuggestionStatus) => skillSuggestionRepository?.review(suggestionId, status));
+  ipcMain.handle("resume-analysis:start", (_event, profileId: string) => profileBuilderService?.startResumeAnalysis(profileId));
+  ipcMain.handle("resume-analysis:get-job", (_event, jobId: string) => profileBuilderService?.getJob(jobId));
+  ipcMain.handle("resume-analysis:cancel", (_event, jobId: string) => profileBuilderService?.cancelJob(jobId));
+  ipcMain.handle("profile-builder:start", (_event, profileId: string) => {
+    if (!profileBuilderService) throw new Error("Profile Builder is still initializing");
+    return profileBuilderService.start(profileId);
+  });
+  ipcMain.handle("profile-builder:get-job", (_event, jobId: string) => profileBuilderService?.getJob(jobId));
+  ipcMain.handle("profile-builder:cancel", (_event, jobId: string) => profileBuilderService?.cancelJob(jobId));
   ipcMain.handle("profile-builder:rebuild", async (_event, profileId: string) => {
     if (!profileBuilderService) throw new Error("Profile Builder is still initializing");
     return profileBuilderService.rebuild(profileId);
@@ -2292,7 +2301,8 @@ if (hasSingleInstanceLock) {
       profileBuilderRepository,
       skillSuggestionRepository,
       { generate: (input) => { const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings; return createProfileBuilderModel(answerProvider, { ...settings, model: taskModel(settings, "profileBuilderModel", "normalModel") }).generate(input); } },
-      (record) => broadcast("profile-builder:updated", record)
+      (record) => broadcast("profile-builder:updated", record),
+      (job) => broadcast(job.kind === "resume" ? "resume-analysis:job" : "profile-builder:job", job)
     );
   }
   if (profileRepository && knowledgeRepository && historyRepository && projectMemoryRepository) {
