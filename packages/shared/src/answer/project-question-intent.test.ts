@@ -24,6 +24,10 @@ describe("project question intent gate", () => {
     expect(decision("你这个 FOC 项目里 ADC 怎么保证实时性？")).toMatchObject({ projectAnchorAvailable: true, projectQuestionRequested: true, explicitProjectMention: true });
   });
 
+  it("opens the project route for a direct personal engineering metric", () => {
+    expect(decision("你的电流环频率多少？")).toMatchObject({ projectAnchorAvailable: true, projectQuestionRequested: true });
+  });
+
   it("hard-blocks a standalone technical prefix even if the legacy analyzer says project", () => {
     expect(analyzeProjectQuestionIntent({ question: "RTOS 优先级反转怎么解决？", targetProjectId: projectId, answerIntent: analyzeAnswerIntent("RTOS 优先级反转怎么解决？"), questionAnalysisType: "project" })).toMatchObject({ projectAnchorAvailable: true, projectQuestionRequested: false });
   });

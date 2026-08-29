@@ -31,4 +31,10 @@ describe("AnswerIntent", () => {
     expect(requiresPersonalClaimEvidence(intent)).toBe(false);
     expect(intent.asksGeneralTechnicalKnowledge).toBe(true);
   });
+
+  it("recognizes direct personal engineering metric questions", () => {
+    const intent = analyzeAnswerIntent("你的电流环频率多少？");
+    expect(intent.requiresPersonalMetric).toBe(true);
+    expect(intent.allowsProjectEvidence).toBe(true);
+  });
 });
