@@ -64,7 +64,7 @@ export interface QuestionAnalysis extends QuestionDetectionResult {
   codeContext?: boolean;
   topicAnchor?: boolean;
   anchorUsedId?: string;
-  contextRelation?: "standalone" | "follow_up" | "continuation" | "repair";
+  contextRelation?: "standalone" | "follow_up" | "continuation" | "repair" | "topic_announcement" | "instruction_modifier";
   inheritedTopic?: string;
   topic?: string;
   semanticFrame?: QuestionSemanticFrame;

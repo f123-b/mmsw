@@ -98,7 +98,7 @@ export interface QuestionDecision {
 }
 
 const ANSWERABLE_SPEECH_ACTS = new Set<QuestionSpeechAct>(["QUESTION", "ANSWER_REQUEST", "CODE_REQUEST", "FOLLOW_UP"]);
-const HARD_REJECT_SPEECH_ACTS = new Set<QuestionSpeechAct>(["ACKNOWLEDGEMENT", "CONTROL", "META_CONVERSATION", "SMALL_TALK", "INSTRUCTION"]);
+const HARD_REJECT_SPEECH_ACTS = new Set<QuestionSpeechAct>(["ACKNOWLEDGEMENT", "CONTROL", "META_CONVERSATION", "SMALL_TALK", "INSTRUCTION", "TOPIC_ANNOUNCEMENT", "INSTRUCTION_MODIFIER"]);
 
 /**
  * Combines speech act, rule, semantic, local/LLM and context signals into one
@@ -235,7 +235,7 @@ function buildAnalysisWithClassifier(
   }
   if (shouldHardRejectSpeechAct(speech)) {
     const nonQuestionClassification = { ...classification, isQuestion: false, confidence: 0, reason: speech.reason };
-    const isFiller = speech.speechAct === "ACKNOWLEDGEMENT" || speech.speechAct === "CONTROL" || speech.speechAct === "META_CONVERSATION";
+    const isFiller = speech.speechAct === "ACKNOWLEDGEMENT" || speech.speechAct === "CONTROL" || speech.speechAct === "META_CONVERSATION" || speech.speechAct === "TOPIC_ANNOUNCEMENT" || speech.speechAct === "INSTRUCTION_MODIFIER";
     const ruleScore = isFiller ? 0 : ruleScoreFor(normalized, final);
     return {
       text: normalized,

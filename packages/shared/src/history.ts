@@ -47,7 +47,7 @@ export interface QuestionRecord {
   rawTranscript?: string;
   normalizedQuestion?: string;
   canonicalQuestion?: string;
-  contextRelation?: "standalone" | "follow_up" | "continuation" | "repair";
+  contextRelation?: "standalone" | "follow_up" | "continuation" | "repair" | "topic_announcement" | "instruction_modifier";
   inheritedTopic?: string;
   topic?: string;
   terminologyCorrections?: TerminologyCorrection[];

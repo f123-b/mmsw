@@ -87,4 +87,12 @@ describe("technical terminology normalization", () => {
     expect(result.text).toContain("STM32G431");
     expect(result.corrections.at(0)).toMatchObject({ canonical: "STM32G431", source: "profile" });
   });
+
+  it("uses runtime context to repair the real interview terminology cases", () => {
+    expect(resolveContextualTerminology("电炉环通常放最高优先级。", { contextText: "FOC 电机控制" }).text).toContain("电流环");
+    expect(resolveContextualTerminology("T O S相关的问题", { contextText: "RTOS 任务 FreeRTOS 调度 优先级" }).text).toContain("RTOS");
+    expect(resolveContextualTerminology("季度战", { contextText: "自我介绍 求职 熟悉 技术" }).text).toBe("技术栈");
+    expect(resolveContextualTerminology("比如针头长度、命令字、序号、CRC。", { contextText: "数据帧格式 协议帧" }).text).toContain("帧头、长度");
+    expect(resolveContextualTerminology("Woodloader版本。", { contextText: "固件版本 App 升级 版本管理" }).text).toContain("Bootloader");
+  });
 });

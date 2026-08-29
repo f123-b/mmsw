@@ -61,6 +61,11 @@ export interface TerminologyDictionary {
  * path. Project-specific terms can be layered on top by callers later.
  */
 export const EMBEDDED_TERMINOLOGY_RULES: readonly TerminologyRule[] = [
+  { canonical: "电流环", pattern: /电炉环/g, context: /FOC|电机|电流环|控制环/i, priority: 125, source: "contextual" },
+  { canonical: "RTOS", pattern: /(?<!R)T\s*O\s*S/gi, context: /RTOS|FreeRTOS|任务|调度|实时/i, priority: 124, source: "contextual" },
+  { canonical: "技术栈", pattern: /季度战/g, context: /项目|简历|自我介绍|技术|使用|负责|开发/i, priority: 124, source: "contextual" },
+  { canonical: "帧头、长度", pattern: /针头长度/g, context: /协议|帧|报文|解析|字段/i, priority: 124, source: "contextual" },
+  { canonical: "Bootloader", pattern: /Woodloader/gi, context: /固件|启动|引导|升级|烧录|Bootloader/i, priority: 124, source: "contextual" },
   { canonical: "堆和栈", pattern: /(?:杯和盏|杯和栈|堆和盏|追和栈)/g, priority: 120 },
   { canonical: "堆和栈", pattern: /(?:追|堆)\s*(?:和|与|跟)\s*栈/g },
   { canonical: "堆", pattern: /追(?=\s*(?:栈|和|与|、)?\s*(?:栈|内存|管理|溢出|分配|malloc|free))/gi },
@@ -221,13 +226,13 @@ function sourceConfidence(source: TerminologySource, priority = 0): number {
   return 0.9;
 }
 
-function applyRules(text: string, rules: readonly TerminologyRule[], source: TerminologyCorrection["source"], corrections: TerminologyCorrection[]): string {
+function applyRules(text: string, rules: readonly TerminologyRule[], source: TerminologyCorrection["source"], corrections: TerminologyCorrection[], contextOverride?: string): string {
   let normalized = text;
   for (const rule of [...rules].sort((left, right) => (right.priority ?? 0) - (left.priority ?? 0))) {
     normalized = normalized.replace(rule.pattern, (raw) => {
       if (rule.context) {
         const flags = rule.context.flags.replace(/g/g, "");
-        if (!new RegExp(rule.context.source, flags).test(normalized)) return raw;
+        if (!new RegExp(rule.context.source, flags).test(contextOverride ?? normalized)) return raw;
       }
       if (raw !== rule.canonical) corrections.push({
         raw,
@@ -330,6 +335,10 @@ export function resolveContextualTerminology(text: string, options: ContextualTe
   const context = [options.contextText, options.previousQuestion, options.semanticFrame, ...(options.entities ?? []), ...(options.topics ?? [])].filter(Boolean).join(" ");
   let resolved = base.text;
   const corrections = [...base.corrections];
+  // Built-in contextual rules also need the surrounding interview context;
+  // the plain normalizer intentionally only sees the current segment.
+  resolved = applyRules(resolved, EMBEDDED_TERMINOLOGY_RULES.filter((rule) => Boolean(rule.context)), "contextual", corrections, context);
+  resolved = resolved.replace(/\bRTOS\s*的\s*RTOS\b/giu, "RTOS 的");
   const add = (raw: string, canonical: string, reason: string, source: TerminologySource = "phonetic", confidence = 0.97): void => {
     if (raw === canonical) return;
     corrections.push({ raw, canonical, source, confidence, reason, context: context.slice(0, 160) });

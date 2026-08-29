@@ -7,6 +7,8 @@ export type InterviewSpeechAct =
   | "CODE_REQUEST"
   | "FOLLOW_UP"
   | "TOPIC_ANCHOR"
+  | "TOPIC_ANNOUNCEMENT"
+  | "INSTRUCTION_MODIFIER"
   | "ACKNOWLEDGEMENT"
   | "CONTROL"
   | "META_CONVERSATION"
@@ -58,6 +60,9 @@ const STRONG_TOPIC = /(?:STL|TCP|UDP|HTTP|MQTT|CoAP|LwIP|IIC|I2C|SPI|UART|CAN(?:
 const ASSERTIVE_STATEMENT = /^(?:我|我们|系统|项目|这个项目|当前项目|当前|这个方案|这次优化|它|该模块).*(?:是|为|通过|使用|采用|完成|下降|提升|增加|减少|切换|实现了|负责了)[^？?]*[。！!]$/;
 const SMALL_TALK = /^(?:你好|您好|谢谢|辛苦了|哈哈|嗨)[。！？?！\s]*$/i;
 const CANDIDATE_SPEECH = /^(?:我|我们|本人|候选人).*(?:负责|做过|参与|实现|采用|使用|认为|觉得|已经|目前|先|会|可以).*[。！!]$/;
+const TOPIC_ANNOUNCEMENT = /^(?:(?:(?:下面聊(?:一下)?|接下来问一个|继续问一个|我们先聊(?:一下)?|先聊(?:一下)?|再聊(?:一下)?|我换个(?:更底层的)?|换个(?:话题|方向)?)(?:\s*(?:RTOS|FreeRTOS|C\+\+基础|底层驱动|通信协议|系统设计|项目经验|异常恢复|CAN|UART|DMA|FOC)(?:这个|相关)?(?:话题|部分|问题)?|(?:更?底层|技术|方向)?(?:的)?(?:话题|问题)?))|(?:RTOS|FreeRTOS|C\+\+基础|底层驱动|通信协议|系统设计|项目经验|异常恢复|CAN|UART|DMA|FOC)(?:这个|相关)?(?:话题|部分|问题)?)[。！？?！\s，,、]*$/iu;
+const INSTRUCTION_MODIFIER = /^(?!.*(?:什么|为什么|为何|怎么|如何|怎样|哪些|哪种|哪个|是否|有没有|吗|呢|[？?]))(?:请你|请)?(?:(?:重点|着重)(?:讲|说|说明|展开)(?:一下|一点)?(?:\s*[^\n。！？?！]{0,30})?|展开一点|具体一点|简单说|控制在\s*\d+\s*(?:秒|分钟)|结合项目(?:说|讲)|只讲)(?:[。！？?！\s，,、]*)$/iu;
+const SELF_INTRODUCTION = /^(?:请你|请|能否|可以)?(?:先)?(?:做|进行|来)(?:一下)?(?:一分钟|一段|个)?自我介绍[。！？?！\s，,、]*$/iu;
 
 const KNOWN_ENTITIES = [
   "STL", "TCP", "UDP", "HTTP", "MQTT", "CoAP", "LwIP", "IIC", "I2C", "SPI", "UART", "CAN FD", "CAN", "LIN", "FlexRay", "Modbus", "FOC", "DMA", "PWM", "ADC", "DAC", "GPIO", "NVIC", "SysTick", "MPU", "MMU", "FreeRTOS", "RT-Thread", "Zephyr", "Linux", "RTOS", "RISC-V", "Cortex-M", "Cortex-A", "C++", "虚函数", "堆", "栈", "EEPROM", "Flash", "链表", "字符串", "进程间通信", "三次握手", "四次挥手"
@@ -72,8 +77,7 @@ function normalizeText(text: string): string {
 function topicFor(text: string): string | undefined {
   const topic = KNOWN_ENTITIES.find((entity) => text.toLowerCase().includes(entity.toLowerCase()));
   if (topic) return topic;
-  const compact = text.replace(/[？?。！!，,、]/g, "").trim();
-  return compact.length >= 2 && compact.length <= 28 ? compact : undefined;
+  return undefined;
 }
 
 function entitiesFor(text: string): string[] {
@@ -93,8 +97,9 @@ function hasCompleteQuestion(text: string): boolean {
 function isFollowUp(text: string, context: SpeechActContext): boolean {
   const compact = text.replace(/[？?。！!\s]/g, "");
   const hasAnchor = Boolean(context.latestAnchor?.text || context.currentTopic || context.memory?.currentTopic);
-  if (!hasAnchor) return false;
-  if (hasStandaloneTopicSubject(text)) return false;
+  const hasEmbeddedAnchor = /(?:围绕|关于|针对|基于).*(?:项目|系统|模块|FOC|RTOS|CAN|UART|DMA)/i.test(text);
+  if (!hasAnchor && !hasEmbeddedAnchor) return false;
+  if (hasStandaloneTopicSubject(text) && !hasEmbeddedAnchor) return false;
   if (context.latestAnchor?.text && detectTopicBoundary({ previousText: context.latestAnchor.text, previousTopic: context.currentTopic, currentText: text }).relation === "NEW_TOPIC") return false;
   if (ELLIPTICAL_FOLLOW_UP.test(text) || ELLIPTICAL_ANSWER_REQUEST.test(text) || TRAILING_ANSWER_REQUEST.test(text)) return true;
   const completeStandaloneForm = /(?:在哪|哪里|是什么|哪些|哪种|哪个|多少|几个|几路|上限|容量)/.test(text);
@@ -111,7 +116,7 @@ function isFollowUp(text: string, context: SpeechActContext): boolean {
  * ASR frequently drops the interrogative tail.
  */
 export function shouldHardRejectSpeechAct(classification: SpeechActClassification): boolean {
-  if (["ACKNOWLEDGEMENT", "CONTROL", "META_CONVERSATION"].includes(classification.speechAct)) return true;
+  if (["ACKNOWLEDGEMENT", "CONTROL", "META_CONVERSATION", "TOPIC_ANNOUNCEMENT", "INSTRUCTION_MODIFIER"].includes(classification.speechAct)) return true;
   if (SMALL_TALK.test(classification.normalizedText)) return true;
   return classification.speechAct === "STATEMENT" && classification.candidateSpeech === true;
 }
@@ -127,6 +132,9 @@ export class SpeechActClassifier {
     if (META_CONVERSATION.test(normalizedText)) return { speechAct: "META_CONVERSATION", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "environment-conversation", topic, entities };
     if (CONTROL.test(normalizedText)) return { speechAct: "CONTROL", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "interview-control", topic, entities };
     if (ACKNOWLEDGEMENT.test(normalizedText) || /^(?:那个)[。！？?！\s]*$/i.test(normalizedText)) return { speechAct: "ACKNOWLEDGEMENT", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "acknowledgement", topic, entities };
+    if (INSTRUCTION_MODIFIER.test(normalizedText)) return { speechAct: "INSTRUCTION_MODIFIER", shouldAnswer: false, confidence: 0.97, normalizedText, reason: "instruction-modifier", topic, entities };
+    if (TOPIC_ANNOUNCEMENT.test(normalizedText) && !QUESTION_FORM.test(normalizedText)) return { speechAct: "TOPIC_ANNOUNCEMENT", shouldAnswer: false, confidence: 0.96, normalizedText, reason: "topic-announcement", topic, entities };
+    if (SELF_INTRODUCTION.test(normalizedText)) return { speechAct: "ANSWER_REQUEST", shouldAnswer: true, confidence: 0.98, normalizedText, reason: "self-introduction", topic, entities };
     if (CODE_CONTEXT.test(normalizedText) && !CODE_REQUEST.test(normalizedText)) return { speechAct: "TOPIC_ANCHOR", shouldAnswer: false, confidence: 0.98, normalizedText, reason: "code-context", topic: "代码题", entities, codeContext: true };
     if (CODE_REQUEST.test(normalizedText) || (context.pendingCodeContext && ALGORITHM_TASK.test(normalizedText))) return { speechAct: "CODE_REQUEST", shouldAnswer: true, confidence: 0.98, normalizedText, reason: CODE_REQUEST.test(normalizedText) ? "code-request" : "code-context-algorithm-request", topic, entities };
     if (ANSWER_REQUEST.test(normalizedText) || TRAILING_ANSWER_REQUEST.test(normalizedText)) return { speechAct: isFollowUp(normalizedText, context) ? "FOLLOW_UP" : "ANSWER_REQUEST", shouldAnswer: true, confidence: 0.96, normalizedText, reason: "answer-request", topic, entities };

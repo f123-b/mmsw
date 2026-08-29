@@ -4,6 +4,10 @@ export interface QuestionTraceInput {
   textLength?: number;
   textHash?: string;
   speechAct?: string;
+  speechActReason?: string;
+  turnCompletionState?: string;
+  turnCompletionConfidence?: number;
+  turnCompletionReason?: string;
   ruleScore?: number;
   semanticScore?: number;
   localClassifierScore?: number;
@@ -13,9 +17,15 @@ export interface QuestionTraceInput {
   topicRelation?: string;
   semanticFrame?: string;
   terminologyCorrectionCount?: number;
+  terminologyPossibleTerms?: string[];
   terminologyConfidence?: number;
+  unresolvedAsr?: boolean;
+  asrUnderstandingQuality?: string;
   projectAnchorAvailable?: boolean;
   projectQuestionRequested?: boolean;
+  projectQuestionMode?: string;
+  projectAutoAnchorId?: string;
+  projectAutoAnchorConfidence?: number;
   parentQuestionId?: string;
   isFollowUp?: boolean;
   finalScore?: number;
@@ -38,6 +48,9 @@ export interface QuestionTraceInput {
   answerSource?: "llm" | "question-bank" | "project-qa" | "project-memory" | "other";
   answerSourceMode?: string;
   qaMatchLevel?: string;
+  coreQaQuestionId?: string;
+  coreQaScore?: number;
+  projectQaQuestionId?: string;
   claimGateDecision?: "allow" | "rewrite" | "partial" | "abstain";
   blockedClaimCount?: number;
   llmRequestAt?: number;

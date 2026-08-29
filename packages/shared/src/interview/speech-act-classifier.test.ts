@@ -40,4 +40,11 @@ describe("interview speech acts", () => {
     const result = classifier.classify(text, { currentTopic: "FOC" });
     expect(shouldHardRejectSpeechAct(result)).toBe(false);
   });
+
+  it("separates topic announcements, instruction modifiers and self-introduction", () => {
+    expect(classifier.classify("下面聊一下 RTOS").speechAct).toBe("TOPIC_ANNOUNCEMENT");
+    expect(classifier.classify("请重点讲一下异常恢复").speechAct).toBe("INSTRUCTION_MODIFIER");
+    expect(classifier.classify("请你先做一分钟自我介绍")).toMatchObject({ speechAct: "ANSWER_REQUEST", shouldAnswer: true });
+    expect(classifier.classify("好的开始面试").topic).toBeUndefined();
+  });
 });

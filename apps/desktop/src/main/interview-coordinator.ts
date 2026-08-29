@@ -16,6 +16,7 @@ import {
   ContextAnchorResolver,
   ContextAnchorStore,
   AnswerScheduler,
+  analyzeQuestionNucleus,
   QuestionGroupManager,
   TurnBuilder,
   ContextLock,
@@ -29,6 +30,8 @@ import {
   QuestionDetector2,
   SessionStateMachine,
   TranscriptAggregator,
+  TurnCompletionGate,
+  UnresolvedAsrGate,
   type AnswerContextInput,
   type AnswerTelemetry,
   type DynamicTechnicalLexicon,
@@ -127,7 +130,7 @@ export interface InterviewCoordinatorOptions {
   aggregator?: TranscriptAggregator;
   history?: InterviewHistoryPort;
   contextProvider?: (question: QuestionCandidate, profileId: string, recentTranscript: string[], context?: InterviewContextSelection) => AnswerContextInput | Promise<AnswerContextInput>;
-  terminologyLexiconProvider?: (profileId: string, projectId?: string) => DynamicTechnicalLexicon | Promise<DynamicTechnicalLexicon>;
+  terminologyLexiconProvider?: (profileId: string, projectId?: string, jobTargetId?: string) => DynamicTechnicalLexicon | Promise<DynamicTechnicalLexicon>;
   asrSettingsProvider?: (profileId: string) => Pick<RealtimeConnectOptions, "providerType" | "providerName" | "model" | "language" | "url">;
   interviewBrain?: InterviewBrain;
   now?: () => number;
@@ -187,6 +190,8 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly history: InterviewHistoryPort;
   private readonly now: () => number;
   private readonly speechActClassifier = new SpeechActClassifier();
+  private readonly turnCompletionGate = new TurnCompletionGate();
+  private readonly unresolvedAsrGate = new UnresolvedAsrGate();
   private readonly anchorResolver = new ContextAnchorResolver();
   private readonly anchorStore: ContextAnchorStore;
   private sessionTerminologyLexicon: DynamicTechnicalLexicon = buildDynamicTechnicalLexicon();
@@ -467,7 +472,7 @@ export class InterviewCoordinator extends EventEmitter {
       this.runtimeSessionStartedAt = startedAt;
       this.activeOptions = { ...startOptions, automationMode };
       this.activeProfileId = startOptions.profileId;
-      const providedLexicon = startOptions.terminologyLexicon ?? this.options.terminologyLexiconProvider?.(startOptions.profileId, startOptions.projectId);
+      const providedLexicon = startOptions.terminologyLexicon ?? this.options.terminologyLexiconProvider?.(startOptions.profileId, startOptions.projectId, startOptions.jobTargetId);
       if (providedLexicon && typeof (providedLexicon as PromiseLike<DynamicTechnicalLexicon>).then === "function") this.sessionTerminologyLexicon = await (providedLexicon as Promise<DynamicTechnicalLexicon>);
       else this.sessionTerminologyLexicon = (providedLexicon as DynamicTechnicalLexicon | undefined) ?? buildDynamicTechnicalLexicon({ recentTopics: [startOptions.projectId].filter((value): value is string => Boolean(value)) });
       this.detector.reset();
@@ -1254,19 +1259,13 @@ export class InterviewCoordinator extends EventEmitter {
     const elapsed = Math.max(0, this.now() - this.remoteAssemblyStartedAt);
     const remaining = Math.max(120, 1_800 - elapsed);
     const text = utterance.text.trim();
-    const incomplete = /(?:比如|例如|包括|以及|并且|而且|尤其|关于|针对|问题是|最后|然后|怎么|如何|哪些|什么|是否|能否)[。！？?！；;，,、\s]*$/.test(text);
-    const notPunctuated = !/[?？!！。；;]$/.test(text);
-    // Completed questions stay fast; unfinished or continuation-shaped text
-    // gets a little more time for the next stable ASR segment.
-    const normalizedLength = text.replace(/[\s，。！？、,.!?；;:：]/g, "").length;
-    const shortContinuation = normalizedLength <= 8 && /(?:为什么|为何|怎么|如何|什么|哪个|哪里|能否|是否|说说|展开|继续|然后|最后|好|那|行|可以|嗯)[?？。.!！]?$/i.test(text);
-    const delay = shortContinuation
-      ? 460
-      : incomplete
-        ? 600
-      : /^(?:比如|例如|然后|最后|接着|隔离|以及|包括|在|其中)/.test(latest.text.trim())
-        ? 480
-        : notPunctuated ? 420 : 360;
+    const completion = this.turnCompletionGate.decide(text, {
+      previousText: latest.text,
+      currentTopic: this.anchorStore.snapshot(this.now()).currentTopic
+    });
+    // The semantic gate owns the completion horizon. A punctuation mark must
+    // not shorten an open conditional/setup clause.
+    const delay = completion.recommendedWaitMs;
     this.runtimeTimers.set("remote-assembly", () => {
       this.remoteAssemblyTimer = undefined;
       this.remoteAssemblyStartedAt = undefined;
@@ -1320,6 +1319,38 @@ export class InterviewCoordinator extends EventEmitter {
       lexicon: this.sessionTerminologyLexicon
     });
     const correctedText = terminology.text;
+    const completion = this.turnCompletionGate.decide(correctedText, { currentTopic: anchorSnapshot.currentTopic });
+    trace.update({
+      turnCompletionState: completion.state,
+      turnCompletionConfidence: completion.confidence,
+      turnCompletionReason: completion.reason,
+      terminologyCorrectionCount: terminology.corrections.length,
+      terminologyPossibleTerms: terminology.possibleTerms.map((item) => item.value),
+      terminologyConfidence: terminology.confidence,
+      unresolvedAsr: false
+    });
+    if (["incomplete", "topic_announcement", "instruction_modifier", "filler"].includes(completion.state)) {
+      trace.update({ finalScore: 0, decision: "reject", decisionReason: completion.reason }).mark("questionDetected", this.now());
+      this.currentQuestionTrace = trace;
+      if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
+      this.emitQuestionTrace();
+      return;
+    }
+    const asrUnderstanding = this.unresolvedAsrGate.assess(correctedText, terminology);
+    trace.update({ asrUnderstandingQuality: asrUnderstanding.quality, unresolvedAsr: !asrUnderstanding.shouldAnswer });
+    if (!asrUnderstanding.shouldAnswer) {
+      this.emitTelemetry("ASR_UNDERSTANDING_QUALITY", {
+        quality: asrUnderstanding.quality,
+        confidence: asrUnderstanding.confidence,
+        reason: asrUnderstanding.reason,
+        text: correctedText.slice(0, 120)
+      });
+      trace.update({ unresolvedAsr: true, asrUnderstandingQuality: asrUnderstanding.quality, finalScore: 0, decision: "reject", decisionReason: asrUnderstanding.reason }).mark("questionDetected", this.now());
+      this.currentQuestionTrace = trace;
+      if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
+      this.emitQuestionTrace();
+      return;
+    }
     const speech = this.speechActClassifier.classify(correctedText, {
       memory: this.memory.snapshot(),
       recentTranscript: previousTranscript,
@@ -1332,6 +1363,7 @@ export class InterviewCoordinator extends EventEmitter {
       source: utterance.source,
       ...questionTraceTextMetadata(utterance.text),
       speechAct: speech.speechAct,
+      speechActReason: speech.reason,
       contextTopic: anchorSnapshot.currentTopic,
       terminologyCorrectionCount: terminology.corrections.length,
       terminologyConfidence: terminology.confidence,
@@ -1420,6 +1452,7 @@ export class InterviewCoordinator extends EventEmitter {
       semanticScore: analysis.score.semanticScore,
       ...(analysis.score.localClassifierScore !== undefined ? { localClassifierScore: analysis.score.localClassifierScore } : {}),
       llmScore: analysis.score.llmScore,
+      speechActReason: analysis.reason,
       finalScore: analysis.score.finalScore,
       contextTopic: anchorSnapshot.currentTopic,
       contextRelation: resolved.contextRelation,
@@ -1662,13 +1695,23 @@ export class InterviewCoordinator extends EventEmitter {
 
   private buildAnswerTelemetry(question: QuestionCandidate, extra: Partial<AnswerTelemetry> = {}): AnswerTelemetry {
     const projectQuestionRequested = /项目|简历|经历|负责|做过|成果|业绩|个人|你的实现|你的方案/.test(question.text);
+    const trace = this.activeQuestionTrace?.snapshot();
+    const nucleus = analyzeQuestionNucleus(question.canonicalText ?? question.text);
     return {
       rawText: question.rawText,
       normalizedText: question.normalizedText ?? question.text,
       canonicalText: question.canonicalText ?? question.text,
       terminologyCorrectionCount: question.terminologyCorrections?.length ?? 0,
+      terminologyPossibleTerms: trace?.terminologyPossibleTerms,
       terminologyConfidence: question.terminologyCorrections?.length ? Math.min(...question.terminologyCorrections.map((item) => item.confidence ?? 0.9)) : 1,
+      unresolvedAsr: trace?.unresolvedAsr ?? false,
+      asrUnderstandingQuality: trace?.asrUnderstandingQuality ?? "resolved",
       speechAct: question.speechAct,
+      speechActReason: trace?.speechActReason,
+      turnCompletionState: trace?.turnCompletionState,
+      turnCompletionConfidence: trace?.turnCompletionConfidence,
+      turnCompletionReason: trace?.turnCompletionReason,
+      questionNucleus: nucleus.nucleus,
       semanticFrame: question.semanticFrame,
       contextRelation: question.contextRelation,
       topicRelation: question.relationType,
@@ -1678,13 +1721,16 @@ export class InterviewCoordinator extends EventEmitter {
       projectQuestionRequested,
       historyRevision: this.activeInterviewId ? this.history.getRevision?.(this.activeInterviewId) : undefined,
       timings: {
+        aggregationWaitMs: trace?.metrics.asrFinalToUtteranceMs,
         terminologyMs: undefined,
+        questionDetectionMs: trace?.metrics.utteranceToDetectionMs,
         topicBoundaryMs: undefined,
         semanticFrameMs: undefined,
         coreQaRouteMs: undefined,
         projectQaRouteMs: undefined,
         retrievalMs: this.activeQuestionTrace?.snapshot().metrics.retrievalMs,
         firstTokenMs: this.activeQuestionTrace?.snapshot().metrics.llmFirstTokenMs,
+        answerTotalMs: this.activeQuestionTrace?.snapshot().metrics.answerTotalMs,
         totalAnswerMs: this.activeQuestionTrace?.snapshot().metrics.answerTotalMs
       },
       ...extra
