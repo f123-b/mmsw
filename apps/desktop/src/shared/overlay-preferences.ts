@@ -134,13 +134,13 @@ const sharedWindowDefaults = {
   itemGap: 8,
   padding: 14,
   textOpacity: 1,
-  borderOpacity: 0.22,
+  borderOpacity: 0,
   backgroundColor: "#1d304a",
   textColor: "#f8fbff",
   blur: 10,
   radius: 12,
   shadow: true,
-  border: true
+  border: false
 };
 
 export const DEFAULT_OVERLAY_PREFERENCES: OverlayPreferences = {
@@ -215,7 +215,7 @@ export const DEFAULT_OVERLAY_PREFERENCES: OverlayPreferences = {
     blur: 18,
     radius: 12,
     shadow: true,
-    border: true,
+    border: false,
     textShadow: "soft",
     textOutline: 0
   },
