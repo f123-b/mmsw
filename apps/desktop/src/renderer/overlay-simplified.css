@@ -1,0 +1,254 @@
+/*
+ * Overlay UX reset.
+ *
+ * The interview HUD is a content layer, not a second desktop window. Normal
+ * runtime surfaces therefore have no visible frame. The settings page keeps
+ * only the choices that are useful during ordinary setup; detailed geometry
+ * stays next to the visual preview where it is easier to understand.
+ */
+
+/* Runtime: no window frame/chrome outside explicit layout edit mode. */
+#root .overlay-root:not([data-layout-edit-mode="on"]) .floating-toolbar,
+#root .overlay-root:not([data-layout-edit-mode="on"]) .question-card,
+#root .overlay-root:not([data-layout-edit-mode="on"]) .answer-card {
+  border-color: transparent !important;
+  outline: 0 !important;
+}
+
+/* Keep layout editing discoverable without turning the panels into thick boxes. */
+#root .overlay-root[data-layout-edit-mode="on"] .floating-panel {
+  outline: 1px solid rgba(112, 181, 232, .72) !important;
+  outline-offset: 3px !important;
+}
+#root .overlay-root[data-layout-edit-mode="on"] .floating-panel::after {
+  border-color: transparent !important;
+}
+
+/* Settings: quieter hierarchy and a larger editor. */
+.overlay-designer-card {
+  border: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+.overlay-designer-header {
+  margin-bottom: 18px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #edf0f3;
+}
+.overlay-designer-header .step-number,
+.overlay-designer-header .page-kicker {
+  display: none !important;
+}
+.overlay-designer-header h2 {
+  margin-top: 0 !important;
+  font-size: 20px !important;
+}
+.overlay-designer-header p {
+  max-width: 560px;
+  margin-top: 6px !important;
+  color: #8995a4 !important;
+}
+.overlay-designer-header-actions .outline-pill,
+.overlay-designer-header-actions .dark-pill {
+  min-height: 32px;
+  padding-inline: 11px;
+  box-shadow: none;
+  font-size: 11px;
+}
+
+.overlay-designer-layout {
+  grid-template-columns: minmax(260px, 310px) minmax(0, 1fr) !important;
+  gap: 30px !important;
+}
+.overlay-designer-controls {
+  gap: 4px !important;
+}
+.designer-section {
+  gap: 11px !important;
+  border-top: 0 !important;
+  padding: 13px 0 !important;
+}
+.designer-section + .designer-section {
+  border-top: 1px solid #edf0f3 !important;
+}
+.designer-section-heading > div:first-child > span {
+  width: 20px !important;
+  height: 20px !important;
+  border-radius: 6px !important;
+  background: #f1f4f7 !important;
+  color: #75859a !important;
+  font-size: 9px !important;
+}
+.designer-section-heading h3 {
+  font-size: 13px !important;
+}
+.designer-section-heading p {
+  max-width: 220px;
+  margin-top: 3px !important;
+  line-height: 1.45;
+}
+.designer-preset-field select {
+  min-height: 38px !important;
+  border-color: #dfe5eb !important;
+  border-radius: 10px !important;
+  font-size: 12px !important;
+}
+
+/* Geometry belongs beside the preview, not duplicated three times in the left rail. */
+.overlay-designer-controls > .designer-section:first-child .designer-section-card,
+.overlay-designer-controls > .designer-section:first-child > .designer-check-row,
+.overlay-designer-controls > .designer-section:first-child > .designer-number-field {
+  display: none !important;
+}
+.overlay-designer-controls > .designer-section:first-child .designer-edit-real-button {
+  width: 100%;
+  min-height: 38px;
+  justify-content: center;
+  border-radius: 10px;
+}
+
+/* Interaction internals are implementation detail now. Keep screenshot options
+   available under their existing disclosure but remove the matrix of knobs. */
+.overlay-designer-controls > .designer-section:nth-child(4) > .designer-fields-grid,
+.overlay-designer-controls > .designer-section:nth-child(4) > .designer-toggle-grid {
+  display: none !important;
+}
+.designer-advanced-details {
+  border-top: 0 !important;
+  padding-top: 0 !important;
+}
+.designer-advanced-details summary {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  border-radius: 9px;
+  padding: 0 10px;
+  background: #f7f9fb;
+}
+
+/* Appearance starts with four understandable presets. Fine-grained values are
+   intentionally removed from the primary surface. */
+.overlay-designer-controls > .designer-section:nth-child(5) > .designer-fields-grid,
+.overlay-designer-controls > .designer-section:nth-child(5) > .designer-toggle-grid {
+  display: none !important;
+}
+.designer-appearance-mode-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 7px !important;
+}
+.designer-appearance-mode-grid button {
+  min-height: 58px !important;
+  border-radius: 10px !important;
+  box-shadow: none !important;
+}
+
+/* Compact question/answer switches. */
+.designer-check-row {
+  border-radius: 9px;
+  padding: 7px 9px;
+  background: #fafbfc;
+}
+.designer-check-row small {
+  line-height: 1.35 !important;
+}
+
+/* Preview is the main editor. */
+.overlay-settings-preview-sticky {
+  top: 12px !important;
+}
+.desktop-preview-shell {
+  gap: 9px !important;
+}
+.desktop-preview-heading strong {
+  font-size: 16px !important;
+}
+.desktop-preview-heading small {
+  max-width: 470px !important;
+}
+.desktop-preview-frame {
+  border: 1px solid #d9e0e7 !important;
+  border-radius: 14px !important;
+  padding: 6px !important;
+  box-shadow: 0 12px 32px rgba(35, 50, 68, .10) !important;
+}
+.desktop-preview-canvas {
+  min-height: 430px !important;
+  border-radius: 10px !important;
+}
+.desktop-preview-window {
+  border-color: transparent !important;
+  border-radius: 8px !important;
+  box-shadow: 0 8px 20px rgba(18, 31, 48, .18) !important;
+}
+.desktop-preview-window.is-selected {
+  outline: 2px solid rgba(66, 126, 174, .78) !important;
+  outline-offset: 2px;
+}
+
+/* Large, forgiving resize hit targets; the visible marker stays small. */
+.desktop-preview-resize-handle {
+  width: 32px !important;
+  height: 32px !important;
+}
+.desktop-preview-resize-handle::after {
+  top: 11px !important;
+  right: 11px !important;
+  bottom: 11px !important;
+  left: 11px !important;
+  border: 0 !important;
+  border-radius: 3px !important;
+  background: #4b7fa6 !important;
+}
+.desktop-preview-resize-n,
+.desktop-preview-resize-s {
+  left: calc(50% - 16px) !important;
+  width: 32px !important;
+}
+.desktop-preview-resize-n { top: -16px !important; }
+.desktop-preview-resize-s { bottom: -16px !important; }
+.desktop-preview-resize-e,
+.desktop-preview-resize-w {
+  top: calc(50% - 16px) !important;
+  width: 32px !important;
+  height: 32px !important;
+}
+.desktop-preview-resize-e { right: -16px !important; }
+.desktop-preview-resize-w { left: -16px !important; }
+.desktop-preview-resize-ne { top: -16px !important; right: -16px !important; }
+.desktop-preview-resize-se { right: -16px !important; bottom: -16px !important; }
+.desktop-preview-resize-sw { bottom: -16px !important; left: -16px !important; }
+.desktop-preview-resize-nw { top: -16px !important; left: -16px !important; }
+
+.desktop-preview-geometry {
+  grid-template-columns: 92px repeat(4, minmax(72px, 1fr)) !important;
+  gap: 7px !important;
+  border-radius: 11px;
+  padding: 9px;
+  background: #f7f9fb;
+}
+.desktop-preview-geometry .designer-number-field input[type="number"] {
+  min-height: 32px;
+  background: #fff;
+}
+.desktop-preview-legend {
+  display: none !important;
+}
+.desktop-preview-background-switcher button {
+  padding: 5px 9px !important;
+  box-shadow: none !important;
+}
+
+@media (max-width: 1180px) {
+  .overlay-designer-layout {
+    grid-template-columns: minmax(240px, 285px) minmax(0, 1fr) !important;
+    gap: 20px !important;
+  }
+}
+@media (max-width: 960px) {
+  .overlay-designer-layout {
+    grid-template-columns: 1fr !important;
+  }
+  .overlay-settings-preview-sticky {
+    position: static !important;
+  }
+}
