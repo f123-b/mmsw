@@ -51,6 +51,40 @@ describe("SQLite persistence", () => {
     }
   });
 
+  it("round-trips question groups and answer thread relations without losing legacy history", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const history = new SqliteInterviewHistoryRepository(database);
+      const interview = history.createInterview({ profileId: "profile-thread", startedAt: 2_000, status: "running", language: "zh-CN", automationMode: "AUTO" }, 2_000);
+      const question = history.addQuestion({
+        interviewId: interview.id,
+        text: "C语言里，指针和数组有什么区别？",
+        confidence: "high",
+        source: "extractor",
+        detectedAt: 2_100,
+        status: "confirmed",
+        groupId: "question-group-1",
+        relationType: "SAME_QUESTION_AUGMENTATION",
+        threadItemType: "QUESTION_NUCLEUS"
+      });
+      history.addAnswer({
+        questionId: question.id,
+        text: "指针是对象，数组是连续元素集合。",
+        model: "thread-model",
+        groupId: "question-group-1",
+        relation: "PRIMARY",
+        answerRunId: "answer-run-1",
+        createdAt: 2_200
+      });
+
+      const snapshot = history.snapshot(interview.id);
+      expect(snapshot.questions[0]).toMatchObject({ groupId: "question-group-1", relationType: "SAME_QUESTION_AUGMENTATION", threadItemType: "QUESTION_NUCLEUS" });
+      expect(snapshot.answers[0]).toMatchObject({ groupId: "question-group-1", relation: "PRIMARY", answerRunId: "answer-run-1" });
+    } finally {
+      database.close();
+    }
+  });
+
   it("reopens a real database file after debounced writes", async () => {
     const directory = await mkdtemp(join(tmpdir(), "interview-copilot-db-"));
     const filePath = join(directory, "reopen.sqlite");
@@ -206,7 +240,7 @@ describe("SQLite persistence", () => {
   it("applies migration 23 ownership and technical memory semantics", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(30);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(31);
       expect(database.all<{ name: string }>("PRAGMA table_info(projects)").map((row) => row.name)).toEqual(expect.arrayContaining(["ownership_mode", "ownership_note"]));
       expect(database.all<{ name: string }>("PRAGMA table_info(project_facts)").map((row) => row.name)).toEqual(expect.arrayContaining(["experience_relation", "value_json"]));
       new SqliteProfileRepository(database).save({ id: "profile-v4", name: "V4", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
@@ -419,7 +453,7 @@ describe("SQLite persistence", () => {
       first.close();
       const second = await SqliteDatabase.open(filePath);
       try {
-        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(30);
+      expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(31);
         const repaired = new SqliteProjectMemoryRepository(second);
         repaired.repairProjectTechnicalSemantics("project-migration");
         expect(repaired.listFacts(profile.id, "project-migration", { includeStale: true, includeRejected: true })).toHaveLength(2);
@@ -458,7 +492,7 @@ describe("SQLite persistence", () => {
       expect(memory.getUnderstandingSnapshot(project.id, "hash-a")?.understanding.summary).toContain("可缓存");
       expect(memory.getSnapshot(profile.id).understandings?.[0]?.projectId).toBe(project.id);
       expect(memory.getUnderstandingSnapshot(project.id, "different-hash")).toBeUndefined();
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(30);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(31);
     } finally { database.close(); }
   });
 

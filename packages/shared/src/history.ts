@@ -52,6 +52,9 @@ export interface QuestionRecord {
   topic?: string;
   terminologyCorrections?: TerminologyCorrection[];
   semanticFrame?: QuestionSemanticFrame;
+  groupId?: string;
+  relationType?: "ASR_REVISION" | "SAME_QUESTION_AUGMENTATION" | "ANSWER_CONSTRAINT" | "EXAMPLE" | "PARALLEL_SUBQUESTION" | "FOLLOW_UP" | "NEW_TOPIC";
+  threadItemType?: string;
 }
 
 export interface HistoryChangedEvent {
@@ -74,6 +77,9 @@ export interface AnswerRecord {
   finishedAt?: number;
   cancelReason?: "user" | "superseded" | "timeout";
   telemetry?: AnswerTelemetry;
+  groupId?: string;
+  relation?: "PRIMARY" | "AUGMENTATION" | "FOLLOW_UP" | "PARALLEL_SUBQUESTION";
+  answerRunId?: string;
   createdAt: number;
 }
 

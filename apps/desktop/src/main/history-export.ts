@@ -147,7 +147,7 @@ export function formatInterviewMarkdown(snapshot: InterviewSnapshot, metrics: In
     }
 
     const record = entry.record;
-    lines.push(`### AI 回答 · ${dateTime(record.finishedAt ?? record.createdAt)}`, "", `- 针对问题：${inline(questions.get(record.questionId)?.text, record.questionId)}`, `- 模型：${inline(record.model)}`, `- 模式：${inline(record.mode)}`, `- 状态：${answerStatus(record)}`, `- 首 token：${record.latencyFirstToken === undefined ? "—" : `${record.latencyFirstToken} ms`}`, `- 总耗时：${record.latencyTotal === undefined ? "—" : `${record.latencyTotal} ms`}`, "", blockquote(record.text || "未生成完整回答"), "");
+    lines.push(`### AI 回答 · ${dateTime(record.finishedAt ?? record.createdAt)}`, "", `- 针对问题：${inline(questions.get(record.questionId)?.text, record.questionId)}`, `- 问题组：${inline(record.groupId)}`, `- 回答关系：${inline(record.relation)}`, `- Answer Run：${inline(record.answerRunId)}`, `- 模型：${inline(record.model)}`, `- 模式：${inline(record.mode)}`, `- 状态：${answerStatus(record)}`, `- 首 token：${record.latencyFirstToken === undefined ? "—" : `${record.latencyFirstToken} ms`}`, `- 总耗时：${record.latencyTotal === undefined ? "—" : `${record.latencyTotal} ms`}`, "", blockquote(record.text || "未生成完整回答"), "");
   });
 
   if (snapshot.questions.length > 0) {
@@ -162,6 +162,8 @@ export function formatInterviewMarkdown(snapshot: InterviewSnapshot, metrics: In
         `- 检测时间：${dateTime(question.detectedAt)}`,
         `- 语义帧：${inline(question.semanticFrame)}`,
         `- 上下文关系：${inline(question.contextRelation)}`,
+        `- 问题组：${inline(question.groupId)}`,
+        `- 线程项类型：${inline(question.threadItemType)}`,
         `- 主题：${inline(question.topic ?? question.inheritedTopic)}`,
         `- 原始转写：${inline(question.rawTranscript)}`,
         `- 规范化问题：${inline(question.normalizedQuestion)}`,

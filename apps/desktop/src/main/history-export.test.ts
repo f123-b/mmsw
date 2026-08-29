@@ -21,8 +21,8 @@ describe("interview history markdown export", () => {
         { id: "transcript-1", interviewId: "interview-1", source: "remote", text: "请介绍你的项目", rawText: "请介绍你得项目", canonicalText: "请介绍你的项目", terminologyCorrections: [{ raw: "你得", canonical: "你的", source: "llm" }], startMs: 0, endMs: 1_000, final: true, createdAt: 2_000 },
         { id: "transcript-2", interviewId: "interview-1", source: "mic", text: "这是一个嵌入式项目", startMs: 1_100, endMs: 2_000, final: true, createdAt: 3_000 }
       ],
-      questions: [{ id: "question-1", interviewId: "interview-1", text: "请介绍你的项目", confidence: "high", source: "extractor", detectedAt: 2_100, status: "answered", semanticFrame: "personal_fact", contextRelation: "standalone", topic: "嵌入式项目", rawTranscript: "请介绍你得项目", normalizedQuestion: "请介绍你的项目", canonicalQuestion: "请介绍你的项目", terminologyCorrections: [{ raw: "你得", canonical: "你的", source: "llm" }] }],
-      answers: [{ id: "answer-1", questionId: "question-1", text: "我负责了驱动和调试。", model: "test-model", mode: "NORMAL", latencyFirstToken: 120, latencyTotal: 800, createdAt: 4_000, finishedAt: 4_800, telemetry: { rawText: "请介绍你得项目", normalizedText: "请介绍你的项目", canonicalText: "请介绍你的项目", answerSourceMode: "project_qa_direct", semanticFrame: "personal_fact", claimGateDecision: "allow", technicalGuardDecision: "allow", historyRevision: 7 } }]
+      questions: [{ id: "question-1", interviewId: "interview-1", text: "请介绍你的项目", confidence: "high", source: "extractor", detectedAt: 2_100, status: "answered", semanticFrame: "personal_fact", contextRelation: "standalone", topic: "嵌入式项目", groupId: "question-group-1", threadItemType: "QUESTION_NUCLEUS", rawTranscript: "请介绍你得项目", normalizedQuestion: "请介绍你的项目", canonicalQuestion: "请介绍你的项目", terminologyCorrections: [{ raw: "你得", canonical: "你的", source: "llm" }] }],
+      answers: [{ id: "answer-1", questionId: "question-1", text: "我负责了驱动和调试。", model: "test-model", mode: "NORMAL", groupId: "question-group-1", relation: "PRIMARY", answerRunId: "answer-run-1", latencyFirstToken: 120, latencyTotal: 800, createdAt: 4_000, finishedAt: 4_800, telemetry: { rawText: "请介绍你得项目", normalizedText: "请介绍你的项目", canonicalText: "请介绍你的项目", answerSourceMode: "project_qa_direct", semanticFrame: "personal_fact", claimGateDecision: "allow", technicalGuardDecision: "allow", historyRevision: 7 } }]
     };
     const before = structuredClone(snapshot);
     const markdown = formatInterviewMarkdown(snapshot, analyzeInterview(snapshot));
@@ -36,6 +36,8 @@ describe("interview history markdown export", () => {
     expect(markdown).toContain("请介绍你的项目");
     expect(markdown).toContain("- 回答来源模式：project_qa_direct");
     expect(markdown).toContain("- Claim Gate：allow");
+    expect(markdown).toContain("- 问题组：question-group-1");
+    expect(markdown).toContain("- 回答关系：PRIMARY");
     expect(markdown.indexOf("请介绍你的项目")).toBeLessThan(markdown.indexOf("我负责了驱动和调试。"));
   });
 

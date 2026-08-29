@@ -157,7 +157,9 @@ export const answerStartSchema = z.object({
   answerId: z.string().min(1),
   questionId: z.string().min(1),
   mode: z.enum(["FAST", "NORMAL", "DEEP"]),
-  model: z.string().min(1)
+  model: z.string().min(1),
+  groupId: z.string().min(1).optional(),
+  relation: z.enum(["PRIMARY", "AUGMENTATION", "FOLLOW_UP", "PARALLEL_SUBQUESTION"]).optional()
 });
 
 export const answerDeltaSchema = z.object({
@@ -188,6 +190,31 @@ export const answerCancelledSchema = z.object({
 export const answerResetSchema = z.object({
   type: z.literal("answer_reset"),
   questionId: z.string().min(1)
+});
+
+const questionGroupItemSchema = z.object({
+  id: z.string().min(1),
+  questionId: z.string().min(1),
+  text: z.string(),
+  type: z.enum(["TOPIC_FRAGMENT", "QUESTION_NUCLEUS", "ANSWER_CONSTRAINT", "EXAMPLE", "SAME_QUESTION_AUGMENTATION", "PARALLEL_SUBQUESTION", "FOLLOW_UP", "NEW_TOPIC", "ASR_REVISION"]),
+  answerable: z.boolean(),
+  state: z.enum(["pending", "queued", "answering", "answered", "cancelled", "ignored"])
+});
+
+const questionGroupSlotSchema = z.object({
+  id: z.string().min(1),
+  text: z.string(),
+  status: z.enum(["pending", "covered", "answered", "merged", "skipped"])
+});
+
+export const questionGroupUpdatedSchema = z.object({
+  type: z.literal("question_group_updated"),
+  groupId: z.string().min(1),
+  title: z.string(),
+  primaryQuestion: z.string(),
+  items: z.array(questionGroupItemSchema),
+  slots: z.array(questionGroupSlotSchema),
+  updatedAt: z.number()
 });
 
 export const runtimeErrorSchema = z.object({
@@ -223,6 +250,7 @@ export const realtimeServerMessageSchema = z.discriminatedUnion("type", [
   answerEndSchema,
   answerCancelledSchema,
   answerResetSchema,
+  questionGroupUpdatedSchema,
   runtimeErrorSchema
 ]);
 
