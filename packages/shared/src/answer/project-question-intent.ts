@@ -4,7 +4,7 @@ import type { AnswerIntent } from "./answer-intent";
 export interface ProjectQuestionIntentInput {
   question: string;
   targetProjectId?: string;
-  answerIntent: Pick<AnswerIntent, "requiresPersonalIdentity" | "asksProjectImplementation" | "requiresPersonalOwnership" | "requiresPersonalMetric" | "requiresPersonalResult">;
+  answerIntent: Pick<AnswerIntent, "requiresPersonalIdentity" | "asksProjectImplementation" | "requiresPersonalOwnership" | "requiresPersonalMetric" | "requiresPersonalResult" | "technicalNucleusWithProjectAnchor">;
   questionAnalysisType?: "project" | "technical" | "behavioral" | "follow-up";
   followUpContext?: FollowUpContext;
 }
@@ -14,6 +14,7 @@ export interface ProjectQuestionIntentDecision {
   projectQuestionRequested: boolean;
   explicitProjectMention: boolean;
   projectAnchoredFollowUp: boolean;
+  projectQuestionMode: "actual_project_fact" | "actual_project_implementation" | "hypothetical_project_design" | "general_technical_with_project_anchor";
 }
 
 const PROJECT_MENTION = /项目|你这个|你们的|这个系统|这个模块|这套(?:系统|方案|实现)|实际实现|工程上|你在.*(?:项目|系统|模块).*中/;
@@ -58,6 +59,7 @@ export function analyzeProjectQuestionIntent(input: ProjectQuestionIntentInput):
     projectAnchorAvailable
     && (
       !input.answerIntent.requiresPersonalIdentity
+      && !input.answerIntent.technicalNucleusWithProjectAnchor
       && !genericStandalone
       && (
         input.answerIntent.asksProjectImplementation
@@ -70,5 +72,9 @@ export function analyzeProjectQuestionIntent(input: ProjectQuestionIntentInput):
       )
     )
   );
-  return { projectAnchorAvailable, projectQuestionRequested, explicitProjectMention, projectAnchoredFollowUp };
+  const hypothetical = /(?:如果|假设|重新设计|设计一个|会怎么|如何设计)/.test(input.question);
+  const projectQuestionMode = projectQuestionRequested
+    ? hypothetical ? "hypothetical_project_design" : input.answerIntent.asksProjectImplementation ? "actual_project_implementation" : "actual_project_fact"
+    : projectAnchorAvailable ? "general_technical_with_project_anchor" : "actual_project_fact";
+  return { projectAnchorAvailable, projectQuestionRequested, explicitProjectMention, projectAnchoredFollowUp, projectQuestionMode };
 }

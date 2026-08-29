@@ -36,4 +36,28 @@ describe("technical accuracy guard", () => {
     expect(result.rewrittenAnswer).toContain(expected);
     expect(result.violationCount).toBeGreaterThan(0);
   });
+
+  it.each([
+    ["UART 是同步通信吗？", "UART 使用同步通信并由发送端提供独立时钟。", "异步串行"],
+    ["DMA 怎么保证安全？", "DMA 完全不需要 CPU 配置或处理缓存。", "缓冲区所有权"],
+    ["看门狗怎么用？", "用一个无条件定时器持续喂狗就能保证系统健康。", "健康监测"],
+    ["ISR 能拿 mutex 吗？", "ISR 可以等待并获取互斥锁。", "不应阻塞等待互斥锁"]
+  ] as const)("repairs runtime safety risk: %s", (question, answer, expected) => {
+    const result = guard.check({ question, answer });
+    expect(result.decision).toBe("rewrite");
+    expect(result.rewrittenAnswer).toContain(expected);
+  });
+
+  it("rewrites the real CAN/UART absolute reliability claim", () => {
+    const result = guard.check({ question: "CAN 和 UART 的可靠性有什么区别？", answer: "CAN保证关键指令不丢，UART做不到这一点。" });
+    expect(result.decision).toBe("rewrite");
+    expect(result.rewrittenAnswer).toContain("ACK");
+    expect(result.rewrittenAnswer).toContain("缓冲、流控和协议设计");
+  });
+
+  it("rewrites the real DMA CPU claim", () => {
+    const result = guard.check({ question: "DMA 有什么作用？", answer: "DMA搬数据不占用CPU。" });
+    expect(result.decision).toBe("rewrite");
+    expect(result.rewrittenAnswer).toContain("缓冲区所有权");
+  });
 });

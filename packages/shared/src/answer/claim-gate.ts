@@ -7,6 +7,7 @@ import {
 } from "../knowledge/answer-validator";
 import type { AnswerIntent } from "./answer-intent";
 import type { EvidenceSnapshot } from "./evidence-context";
+import { PersonalPastActionDetector } from "../knowledge/personal-past-action-detector";
 
 export type ClaimGateDecision = "allow" | "rewrite" | "partial" | "abstain";
 
@@ -40,6 +41,7 @@ export interface ClaimGateResult {
   fallbackAnswer?: string;
   validation: ClaimEvidenceValidation;
   blockedClaims: BlockedClaim[];
+  unsupportedPastPersonalActionCount: number;
 }
 
 /** Kept for callers that imported the Phase 4 constant. */
@@ -98,30 +100,38 @@ function requiresPersonalValidation(claim: ClaimEvidenceMatch, input: ClaimGateI
   return claim.type === "hardware" && PERSONAL_ATTRIBUTION.test(claim.claim);
 }
 
-function rewriteSentence(sentence: string, types: Set<ClaimType>): string {
-  let rewritten = sentence.trim();
-  let changed = false;
-  if (types.has("responsibility") || types.has("personal_identity") || types.has("hardware")) {
-    const before = rewritten;
-    rewritten = rewritten
-      .replace(/(?:我|我的|我们|本人)(?:在项目中|在这个项目里|在项目里面)?\s*(?:主要)?(?:负责|主导|设计|实现|独立完成|做过|解决|优化|承担|参与)/g, "项目中涉及")
-      .replace(/(?:我|我的|我们|本人)\s*(?:使用|采用|做了|完成了)/g, "项目中使用")
-      .replace(/(?:负责|主导|设计|实现|独立完成|做过|解决|优化|承担|参与)/g, "涉及");
-    if (types.has("hardware")) rewritten = rewritten.replace(/(?:STM\d+[A-Z0-9]*|RK\d+|MCU|芯片|控制板|驱动板|处理器|传感器)/gi, "相关硬件");
-    changed = changed || before !== rewritten;
-  }
-  if (types.has("metric") || types.has("result")) {
-    const before = rewritten;
-    rewritten = rewritten.replace(/[^，。！？!?；;\n]{0,16}(?:准确率|召回率|延迟|耗时|吞吐量|占用率|频率|精度|提升|降低|下降|增加|减少|达到|稳定(?:在)?)[^，。！？!?；;\n]{0,16}\d+(?:\.\d+)?\s*(?:ms|us|秒|分钟|小时|天|周|个月|年|%|Hz|MHz|kHz|MB|KB|路|个)?/gi, "具体量化结果未记录");
-    rewritten = rewritten.replace(MEASURED_VALUE, "具体数值");
-    rewritten = rewritten.replace(/(?:准确率|召回率|延迟|耗时|吞吐量|占用率|频率|精度|提升|降低|下降|增加|减少|达到|稳定(?:在)?)[^，。！？!?；;\n]{0,12}/gi, "具体量化结果未记录");
-    changed = changed || before !== rewritten;
-  }
-  if (types.has("result") && RESULT_WORD.test(rewritten) && !/具体(?:量化)?结果未记录/.test(rewritten)) {
-    rewritten = rewritten.replace(/(?:我|我的|我们|本人)(?:在项目中)?[^，。！？!?；;\n]{0,16}(?:完成|解决|优化|达到|稳定|结果|成果)[^，。！？!?；;\n]*/g, "项目中进行了相关处理");
-    changed = true;
-  }
-  if (!changed) return "";
+function rewriteSentence(sentence: string, types: Set<ClaimType>, hasEvidence: boolean): string {
+  const original = sentence.trim();
+  if (types.has("responsibility") && !hasEvidence && /(?:我之前|我当时|我在项目里|我在项目中|我们项目|曾经|实际|最后定位|最后解决|做过|用过|调过|负责过|实现过|采用过)/u.test(original) && /(?:负责|主导|设计|实现|定位|解决|调试|使用|采用|优化|排查|修复|完成|搭建|开发)/u.test(original)) return "";
+  const clauses = original.split(/(?<=[，,；;])/u).map((part) => part.trim()).filter(Boolean);
+  const kept = clauses.filter((clause) => {
+    MEASURED_VALUE.lastIndex = 0;
+    const hasMetric = (types.has("metric") || types.has("result"))
+      && (MEASURED_VALUE.test(clause) || RESULT_WORD.test(clause));
+    MEASURED_VALUE.lastIndex = 0;
+    RESULT_WORD.lastIndex = 0;
+    if (hasMetric) {
+      return false;
+    }
+    const hasOwnership = (types.has("responsibility") || types.has("personal_identity"))
+      && /(?:我|我的|我们|本人).*(?:负责|主导|设计|实现|做过|解决|优化|承担|参与|发表|获得)/u.test(clause);
+    if (hasOwnership) {
+      if (hasEvidence && /(?:STM\d+[A-Z0-9]*|RK\d+|AS\d+[A-Z0-9]*|编码器|传感器|控制板|驱动板)/iu.test(clause)) {
+        return clause.replace(/^(?:我|我的|我们|本人)(?:在项目中|在这个项目里|在项目里面)?\s*(?:主要)?(?:负责|主导|设计|实现|独立完成|做过|解决|优化|承担|参与)\s*/u, "项目中涉及 ");
+      }
+      return false;
+    }
+    if (types.has("hardware") && /(?:STM\d+[A-Z0-9]*|RK\d+|MCU|芯片|控制板|驱动板|处理器|传感器)/iu.test(clause)) {
+      // A hardware noun may be generalized only when an evidence source still
+      // supports the fact; otherwise the complete unsupported clause is gone.
+      return hasEvidence;
+    }
+    return true;
+  });
+  if (!kept.length) return "";
+  let rewritten = kept.join(" ").trim();
+  if (types.has("hardware") && hasEvidence) rewritten = rewritten.replace(/(?:STM\d+[A-Z0-9]*|RK\d+)/gi, "芯片");
+  if (rewritten === original) return "";
   return rewritten.replace(/[，、；;]+$/g, "").trim();
 }
 
@@ -129,7 +139,7 @@ function splitSentences(answer: string): string[] {
   return answer.split(/(?<=[。！？!?；;\n])/).map((part) => part.trim()).filter(Boolean);
 }
 
-function usefulRewrite(answer: string, blocked: BlockedClaim[]): string {
+function usefulRewrite(answer: string, blocked: BlockedClaim[], hasEvidence: boolean): string {
   const blockedBySentence = new Map<string, Set<ClaimType>>();
   blocked.forEach((claim) => {
     const key = claim.claim.trim();
@@ -138,10 +148,23 @@ function usefulRewrite(answer: string, blocked: BlockedClaim[]): string {
     blockedBySentence.set(key, types);
   });
   const rewritten = splitSentences(answer).map((sentence) => {
-    const types = blockedBySentence.get(sentence.replace(/[。！？!?；;\n]+$/g, "").trim());
-    return types ? rewriteSentence(sentence, types) : sentence;
+    const normalizedSentence = sentence.replace(/[。！？!?；;\n]+$/g, "").trim();
+    let types = blockedBySentence.get(normalizedSentence);
+    if (!types) {
+      const matchingClaim = blocked.find((claim) => normalizedSentence.includes(claim.claim) || claim.claim.includes(normalizedSentence));
+      types = matchingClaim ? blockedBySentence.get(matchingClaim.claim.trim()) : undefined;
+    }
+    const result = types ? rewriteSentence(sentence, types, hasEvidence) : sentence;
+    return result;
   }).filter(Boolean);
   return rewritten.join(" ").trim();
+}
+
+function sanitizeClaimArtifacts(answer: string): string {
+  return answer
+    .replace(/具体量化结果未记录/g, "具体数字当前资料里没有确认，我不乱报")
+    .replace(/具体数值/g, "具体数字")
+    .replace(/相关硬件/g, "设备侧实现");
 }
 
 function partialFallback(blocked: BlockedClaim[], intent?: AnswerIntent): string {
@@ -168,11 +191,13 @@ export class ClaimGate {
     const personalValidation = validator.validate(answer, personal);
     const technicalValidation = validator.validate(answer, technical);
     const validation = validator.validate(answer, allEvidence);
-    const blockedClaims = validation.claims
+    const pastActions = new PersonalPastActionDetector().detect(answer, personal);
+    const historicalBlocks: BlockedClaim[] = pastActions.unsupported.map((finding) => ({ claim: finding.sentence.replace(/[。！？!?；;]+$/g, ""), type: "responsibility", status: "unsupported", provenance: "personal_ownership", risk: "high" }));
+    const blockedClaims = [...validation.claims
       .map((claim) => claimStatus(claim, personalValidation, technicalValidation, validation))
       .filter((claim) => HIGH_RISK_CLAIM_TYPES.has(claim.type) && (claim.status === "unsupported" || claim.status === "partial" || claim.status === "conflicting"))
       .filter((claim) => requiresPersonalValidation(claim, input))
-      .map((claim) => ({ claim: claim.claim, type: claim.type, status: claim.status as "unsupported" | "partial" | "conflicting", provenance: claim.provenance, risk: claim.risk }));
+      .map((claim) => ({ claim: claim.claim, type: claim.type, status: claim.status as "unsupported" | "partial" | "conflicting", provenance: claim.provenance, risk: claim.risk })), ...historicalBlocks];
     const issues: string[] = [];
     const suggestions: string[] = [];
     if (!answer) {
@@ -190,11 +215,16 @@ export class ClaimGate {
         suggestions,
         fallbackAnswer: SAFE_PERSONAL_IDENTITY_ABSTAIN,
         validation,
-        blockedClaims
+        blockedClaims,
+        unsupportedPastPersonalActionCount: pastActions.unsupportedCount
       };
     }
     if (blockedClaims.length === 0 && answer) {
-      return { decision: "allow", allowed: true, score: validation.score, issues, suggestions, validation, blockedClaims };
+      const sanitized = sanitizeClaimArtifacts(answer);
+      if (sanitized !== answer) {
+        return { decision: "rewrite", allowed: true, score: validation.score, issues: [...issues, "claim-placeholder-sanitized"], suggestions, rewrittenAnswer: sanitized, validation, blockedClaims, unsupportedPastPersonalActionCount: pastActions.unsupportedCount };
+      }
+      return { decision: "allow", allowed: true, score: validation.score, issues, suggestions, validation, blockedClaims, unsupportedPastPersonalActionCount: pastActions.unsupportedCount };
     }
     if (blockedClaims.length > 0) {
       issues.push("claim-gate-rewrite");
@@ -211,8 +241,12 @@ export class ClaimGate {
         issues.push("claim-evidence-partial");
         suggestions.push("项目技术事实只能说明实现，不足以确认候选人的个人职责、指标或结果");
       }
-      const directRewrite = usefulRewrite(answer, blockedClaims);
-      const rewrittenAnswer = directRewrite || partialFallback(blockedClaims, input.intent);
+      const directRewrite = usefulRewrite(answer, blockedClaims, technical.length > 0);
+      const numericQuestion = /(?:多少|几路|几个|数字|数值|指标|比例|百分比|多大|多快|多长|多少毫秒|多少秒)/u.test(input.question);
+      const numericDisclosure = numericQuestion && blockedClaims.some((claim) => claim.type === "metric" || claim.type === "result")
+        ? "具体数字当前资料里没有确认，我不乱报。"
+        : "";
+      const rewrittenAnswer = sanitizeClaimArtifacts([directRewrite, numericDisclosure].filter(Boolean).join(" ") || partialFallback(blockedClaims, input.intent));
       const decision: ClaimGateDecision = directRewrite ? "rewrite" : "partial";
       return {
         decision,
@@ -222,7 +256,8 @@ export class ClaimGate {
         suggestions,
         rewrittenAnswer,
         validation,
-        blockedClaims
+        blockedClaims,
+        unsupportedPastPersonalActionCount: pastActions.unsupportedCount
       };
     }
     return {
@@ -231,9 +266,10 @@ export class ClaimGate {
       score: 0.5,
       issues,
       suggestions,
-      rewrittenAnswer: partialFallback([], input.intent),
+      rewrittenAnswer: sanitizeClaimArtifacts(partialFallback([], input.intent)),
       validation,
-      blockedClaims
+      blockedClaims,
+      unsupportedPastPersonalActionCount: pastActions.unsupportedCount
     };
   }
 

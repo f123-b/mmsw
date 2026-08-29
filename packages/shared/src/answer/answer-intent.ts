@@ -1,5 +1,6 @@
 import { classifyAnswerQuestion, type AnswerQuestionKind } from "./answer-strategy";
 import { normalizeTechnicalTerms } from "../terminology";
+import { analyzeQuestionNucleus } from "../question/question-nucleus";
 
 export interface AnswerIntent {
   requiresPersonalIdentity: boolean;
@@ -7,6 +8,7 @@ export interface AnswerIntent {
   requiresPersonalMetric: boolean;
   requiresPersonalResult: boolean;
   asksProjectImplementation: boolean;
+  technicalNucleusWithProjectAnchor: boolean;
   asksGeneralTechnicalKnowledge: boolean;
   asksBehavioralEpisode: boolean;
   allowsSessionEvidence: boolean;
@@ -33,24 +35,27 @@ const TECHNICAL_CUE = /ADC|DMA|PWM|CAN|UART|I2C|IIC|SPI|FOC|SVPWM|RTOS|FreeRTOS|
 export function analyzeAnswerIntent(input: AnswerIntentInput | string, kind?: AnswerQuestionKind): AnswerIntent {
   const question = typeof input === "string" ? input : input.question;
   const normalized = normalizeTechnicalTerms(question);
+  const nucleus = analyzeQuestionNucleus(normalized);
   const resolvedKind = typeof input === "string" ? kind ?? classifyAnswerQuestion(normalized) : input.kind ?? classifyAnswerQuestion(normalized);
   const asksBehavioralEpisode = resolvedKind === "behavioral" || BEHAVIORAL_CUE.test(normalized) && /经历|案例|分享|如何处理|怎么做/.test(normalized);
-  const asksProjectImplementation = PROJECT_CUE.test(normalized) && IMPLEMENTATION_CUE.test(normalized);
+  const technicalNucleusWithAnchor = nucleus.intent === "technical" && nucleus.contextAnchor.length > 0;
+  const asksProjectImplementation = !technicalNucleusWithAnchor && PROJECT_CUE.test(normalized) && IMPLEMENTATION_CUE.test(normalized);
   const asksGeneralTechnicalKnowledge = !IDENTITY_QUESTION.test(normalized) && (
     ["technical", "concept", "comparison", "system-design", "embedded-debugging", "troubleshooting", "code", "clarification"].includes(resolvedKind)
     || TECHNICAL_CUE.test(normalized)
     || asksProjectImplementation
   );
   const requiresPersonalIdentity = IDENTITY_QUESTION.test(normalized) && !asksGeneralTechnicalKnowledge;
-  const requiresPersonalOwnership = !requiresPersonalIdentity && (OWNERSHIP_QUESTION.test(normalized) || asksBehavioralEpisode);
-  const requiresPersonalMetric = !requiresPersonalIdentity && (PERSONAL_TECHNICAL_METRIC_QUESTION.test(normalized) || METRIC_QUESTION.test(normalized) && (PROJECT_CUE.test(normalized) || asksBehavioralEpisode || resolvedKind === "follow-up" || /\d+(?:\.\d+)?\s*(?:%|ms|us|秒|分钟|小时|天|Hz|MHz|kHz|MB|KB)/.test(normalized)));
-  const requiresPersonalResult = !requiresPersonalIdentity && (RESULT_QUESTION.test(normalized) && (PROJECT_CUE.test(normalized) || asksBehavioralEpisode || resolvedKind === "follow-up"));
+  const requiresPersonalOwnership = !technicalNucleusWithAnchor && !requiresPersonalIdentity && (OWNERSHIP_QUESTION.test(normalized) || asksBehavioralEpisode);
+  const requiresPersonalMetric = !technicalNucleusWithAnchor && !requiresPersonalIdentity && (PERSONAL_TECHNICAL_METRIC_QUESTION.test(normalized) || METRIC_QUESTION.test(normalized) && (PROJECT_CUE.test(normalized) || asksBehavioralEpisode || resolvedKind === "follow-up" || /\d+(?:\.\d+)?\s*(?:%|ms|us|秒|分钟|小时|天|Hz|MHz|kHz|MB|KB)/.test(normalized)));
+  const requiresPersonalResult = !technicalNucleusWithAnchor && !requiresPersonalIdentity && (RESULT_QUESTION.test(normalized) && (PROJECT_CUE.test(normalized) || asksBehavioralEpisode || resolvedKind === "follow-up"));
   return {
     requiresPersonalIdentity,
     requiresPersonalOwnership,
     requiresPersonalMetric,
     requiresPersonalResult,
     asksProjectImplementation,
+    technicalNucleusWithProjectAnchor: technicalNucleusWithAnchor,
     asksGeneralTechnicalKnowledge,
     asksBehavioralEpisode,
     allowsSessionEvidence: true,

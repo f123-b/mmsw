@@ -58,8 +58,15 @@ export interface AnswerTelemetry {
   normalizedText?: string;
   canonicalText?: string;
   terminologyCorrectionCount?: number;
+  terminologyPossibleTerms?: string[];
   terminologyConfidence?: number;
+  unresolvedAsr?: boolean;
+  asrUnderstandingQuality?: string;
   speechAct?: string;
+  speechActReason?: string;
+  turnCompletionState?: string;
+  turnCompletionConfidence?: number;
+  turnCompletionReason?: string;
   semanticFrame?: string;
   topicRelation?: string;
   contextRelation?: string;
@@ -67,6 +74,11 @@ export interface AnswerTelemetry {
   rootQuestionId?: string;
   projectAnchorAvailable?: boolean;
   projectQuestionRequested?: boolean;
+  projectQuestionMode?: string;
+  projectAutoAnchorId?: string;
+  projectAutoAnchorConfidence?: number;
+  questionNucleusIntent?: string;
+  questionNucleus?: string;
   answerSourceMode?: string;
   coreQaMatchLevel?: string;
   coreQaQuestionId?: string;
@@ -74,9 +86,12 @@ export interface AnswerTelemetry {
   projectQaMatchLevel?: string;
   projectQaQuestionId?: string;
   technicalGuardDecision?: "allow" | "rewrite";
+  technicalGuardIssues?: string[];
   technicalViolationCount?: number;
   claimGateDecision?: "allow" | "rewrite" | "partial" | "abstain";
   blockedPersonalClaimCount?: number;
+  blockedClaimTypes?: string[];
+  unsupportedPastPersonalActionCount?: number;
   historyRevision?: number;
   timings?: Record<string, number | undefined>;
 }
@@ -613,9 +628,12 @@ export class AnswerAgent {
       coreQaQuestionId: context.coreTechnicalQa?.id ?? context.questionTelemetry?.coreQaQuestionId,
       coreQaMatchLevel: context.coreTechnicalQa ? "verified" : context.questionTelemetry?.coreQaMatchLevel,
       technicalGuardDecision: technicalAccuracy.decision,
+      technicalGuardIssues: technicalAccuracy.issues,
       technicalViolationCount: technicalAccuracy.violationCount,
       claimGateDecision: claimGate.decision,
       blockedPersonalClaimCount: claimGate.blockedClaims.length,
+      blockedClaimTypes: [...new Set(claimGate.blockedClaims.map((claim) => claim.type))],
+      unsupportedPastPersonalActionCount: claimGate.unsupportedPastPersonalActionCount,
       ...(context.answerSourcePlan?.qaMatch?.questionId ? { projectQaQuestionId: context.answerSourcePlan.qaMatch.questionId } : {})
     };
     yield { type: "answer_end", answerId, text: formattedText, quality };

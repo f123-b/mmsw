@@ -21,7 +21,15 @@ describe("project question intent gate", () => {
   });
 
   it("opens the project route for an explicit project implementation question", () => {
-    expect(decision("你这个 FOC 项目里 ADC 怎么保证实时性？")).toMatchObject({ projectAnchorAvailable: true, projectQuestionRequested: true, explicitProjectMention: true });
+    expect(decision("你这个 FOC 项目里 ADC 怎么保证实时性？")).toMatchObject({ projectAnchorAvailable: true, projectQuestionRequested: true, explicitProjectMention: true, projectQuestionMode: "actual_project_implementation" });
+  });
+
+  it("separates a hypothetical project design from historical implementation", () => {
+    expect(decision("在你的嵌入式项目中，如果要设计异常恢复机制，你会怎么做？")).toMatchObject({ projectQuestionRequested: true, projectQuestionMode: "hypothetical_project_design" });
+  });
+
+  it("marks a technical nucleus with a resume anchor as general knowledge", () => {
+    expect(decision("你简历里做过FOC项目，FOC基本原理是什么？")).toMatchObject({ projectQuestionRequested: false, projectQuestionMode: "general_technical_with_project_anchor" });
   });
 
   it("opens the project route for a direct personal engineering metric", () => {

@@ -23,4 +23,5 @@ export * from "./project-timeline";
 export * from "./project-data-health";
 export * from "./retriever";
 export * from "./answer-validator";
+export * from "./personal-past-action-detector";
 export * from "./knowledge-graph";

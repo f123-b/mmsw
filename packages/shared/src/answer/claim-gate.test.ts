@@ -94,4 +94,37 @@ describe("ClaimGate", () => {
     expect(result.allowed).toBe(true);
     expect(result.decision).toBe("allow");
   });
+
+  it("removes unsupported metric and hardware placeholders at clause level", () => {
+    const result = new ClaimGate().check({
+      question: "说说项目结果",
+      answer: "我把准确率提升到98%，并使用相关硬件完成采样。",
+      requiresPersonalEvidence: true
+    });
+    expect(result.allowed).toBe(true);
+    expect(result.rewrittenAnswer).not.toMatch(/具体量化结果未记录|具体数值|相关硬件/);
+    expect(["rewrite", "partial"]).toContain(result.decision);
+  });
+
+  it("uses a natural disclosure for an unsupported numeric answer", () => {
+    const result = new ClaimGate().check({
+      question: "你项目延迟多少？",
+      answer: "我的项目延迟是 5ms。",
+      requiresPersonalEvidence: true
+    });
+    expect(result.allowed).toBe(true);
+    expect(result.rewrittenAnswer).toContain("具体数字当前资料里没有确认，我不乱报。");
+    expect(result.rewrittenAnswer).not.toContain("具体数值");
+  });
+
+  it("does not retain an unsupported historical action as a personal fact", () => {
+    const result = new ClaimGate().check({
+      question: "你做过哪些优化？",
+      answer: "我之前项目里定位到过一个中断竞态，加锁以后就解决了。",
+      requiresPersonalEvidence: true
+    });
+    expect(result.allowed).toBe(true);
+    expect(result.rewrittenAnswer).not.toContain("我之前项目里定位到过一个中断竞态");
+    expect(result.unsupportedPastPersonalActionCount).toBeGreaterThan(0);
+  });
 });

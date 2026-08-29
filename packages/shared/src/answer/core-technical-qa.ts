@@ -39,13 +39,45 @@ export const VERIFIED_CORE_TECHNICAL_QA: readonly CoreTechnicalQaCard[] = [
   { id: "linux-filesystem", question: "Linux 文件系统", aliases: ["Linux文件系统", "Linux文件系统有哪些"], category: "linux", semanticFrame: "enumeration", shortAnswer: "常见的 Linux 文件系统有 ext4、XFS、Btrfs、F2FS、UBIFS、SquashFS、tmpfs、procfs 和 sysfs。", normalAnswer: "常见的 Linux 文件系统有 ext4、XFS、Btrfs、F2FS、UBIFS、SquashFS、tmpfs、procfs 和 sysfs；其中 procfs、sysfs 是内核提供的虚拟文件系统。VFS 统一了它们的目录、inode、权限和读写接口，但不能把虚拟文件系统当成普通磁盘文件系统。", deepAnswer: "回答 Linux 文件系统有哪些时，先列举 ext4、XFS、Btrfs、F2FS、UBIFS、SquashFS、tmpfs、procfs 和 sysfs，再按块设备、闪存、只读镜像、内存盘和内核状态接口分类。用户态系统调用进入 VFS 后再分派到具体 superblock、inode、dentry 和 file 操作；选型还要结合一致性、快照、写放大、性能和运维约束。", verified: true, version: "core-2026.08", source: "linux-core-qa" }
 ];
 
-export function matchCoreTechnicalQa(text: string): CoreTechnicalQaCard | undefined {
-  const normalized = normalizeTechnicalTerms(text).toLowerCase().replace(/[\s？?。！!，,、]/g, "");
-  let best: { card: CoreTechnicalQaCard; score: number } | undefined;
+export type CoreQaMatchLevel = "exact" | "strong" | "partial" | "none";
+
+export interface CoreTechnicalQaMatch {
+  card?: CoreTechnicalQaCard;
+  level: CoreQaMatchLevel;
+  score: number;
+  reasons: string[];
+  frame?: QuestionSemanticFrame;
+  entity?: string;
+  lexicalScore: number;
+}
+
+function compactCore(text: string): string {
+  return normalizeTechnicalTerms(text).toLowerCase().replace(/[\s？?。！!，,、；;：:（）()]/g, "");
+}
+
+/** Conservative deterministic router: exact/strong matches are answerable. */
+export function routeCoreTechnicalQa(text: string): CoreTechnicalQaMatch {
+  const compact = compactCore(text);
+  let best: CoreTechnicalQaMatch = { level: "none", score: 0, reasons: [], lexicalScore: 0 };
   for (const card of VERIFIED_CORE_TECHNICAL_QA) {
-    const candidates = [card.question, ...card.aliases].map((value) => normalizeTechnicalTerms(value).toLowerCase().replace(/[\s？?。！!，,、]/g, ""));
-    const score = Math.max(...candidates.map((candidate) => normalized.includes(candidate) ? candidate.length / Math.max(1, normalized.length) + 0.6 : 0));
-    if (score > (best?.score ?? 0)) best = { card, score };
+    const candidates = [card.question, ...card.aliases].map(compactCore);
+    const exact = candidates.find((candidate) => compact === candidate || compact.includes(candidate));
+    const entity = card.question.match(/[A-Z][A-Za-z0-9+/-]*|C\+\+|I2C|CAN|PWM|DMA|ADC|UART|RTOS|Linux|volatile|static/i)?.[0];
+    const normalizedEntity = entity?.toLowerCase().replace(/\s/g, "");
+    const entityAliases = entity === "I2C" ? ["i2c", "iic"] : normalizedEntity ? [normalizedEntity] : [];
+    const entityHit = !entity || entityAliases.some((alias) => compact.includes(alias));
+    const lexical = Math.max(...candidates.map((candidate) => {
+      const terms = candidate.match(/[a-z0-9+#]+|[\u4e00-\u9fff]{2}/g) ?? [];
+      return terms.length ? terms.filter((term) => compact.includes(term)).length / terms.length : 0;
+    }));
+    const score = exact && entityHit ? 1 : entityHit ? lexical : 0;
+    const level: CoreQaMatchLevel = exact && entityHit ? "exact" : score >= 0.72 ? "strong" : score >= 0.48 ? "partial" : "none";
+    if (score > best.score) best = { card, level, score, reasons: exact ? ["alias-exact"] : ["lexical-overlap"], frame: card.semanticFrame, entity, lexicalScore: lexical };
   }
-  return best && best.score >= 0.78 ? best.card : undefined;
+  return best;
+}
+
+export function matchCoreTechnicalQa(text: string): CoreTechnicalQaCard | undefined {
+  const result = routeCoreTechnicalQa(text);
+  return result.card && (result.level === "exact" || result.level === "strong") ? result.card : undefined;
 }

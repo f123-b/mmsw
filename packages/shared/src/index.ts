@@ -110,6 +110,10 @@ export { QuestionBankRouter } from "./question-bank-router";
 export { DEFAULT_PROJECT_QA_ROUTING_POLICY, questionBankAnswerIsReady } from "./question-bank-router";
 export type { ProjectQaMatchLevel, ProjectQaRouteResult, ProjectQaRoutingPolicy, QuestionBankRouteHit, QuestionBankRouteOptions, QuestionBankRouteResult } from "./question-bank-router";
 export type { QuestionCategory, QuestionClassification } from "./question-classifier";
+export { TurnCompletionGate, decideTurnCompletion, type TurnCompletionContext, type TurnCompletionDecision, type TurnCompletionState } from "./interview/turn-completion-gate";
+export { UnresolvedAsrGate, type AsrUnderstandingQuality, type UnresolvedAsrDecision } from "./interview/unresolved-asr-gate";
+export { analyzeQuestionNucleus, type QuestionNucleusAnalysis, type QuestionNucleusIntent } from "./question/question-nucleus";
+export { ProjectAliasResolver, type ProjectAliasCandidate, type ProjectAliasResolution } from "./project-alias-resolver";
 
 export interface TranscriptSnapshot {
   source: TranscriptSource;
@@ -277,7 +281,7 @@ export interface QuestionCandidate {
   codeContext?: boolean;
   anchorId?: string;
   canonicalQuestion?: string;
-  contextRelation?: "standalone" | "follow_up" | "continuation" | "repair";
+  contextRelation?: "standalone" | "follow_up" | "continuation" | "repair" | "topic_announcement" | "instruction_modifier";
   inheritedTopic?: string;
   topic?: string;
   semanticFrame?: QuestionSemanticFrame;

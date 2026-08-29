@@ -11,7 +11,7 @@ import { createScreenshotFixtureResult, ScreenshotManager } from "./screenshot-m
 import { createScreenshotRequestId, SCREENSHOT_PROMPT, ScreenshotOperationRegistry, ScreenshotTraceBuffer, withScreenshotTimeout, type ScreenshotTraceEvent, type ScreenshotTraceEventName } from "./screenshot-pipeline";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, AnswerAgent, AgentToolRegistry, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, analyzeQuestionNucleus, AnswerAgent, AgentToolRegistry, buildDynamicTechnicalLexicon, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectAliasResolver, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, type SqliteDatabase } from "./database";
@@ -2093,8 +2093,9 @@ if (hasSingleInstanceLock) {
     const coreTechnicalQa = matchCoreTechnicalQa(normalizedQuestion);
     const projectSnapshot = projectMemoryService?.get(profileId) ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] };
     const questionAnalysis = new QuestionAnalyzer().analyze(normalizedQuestion, projectSnapshot.projects.map((project) => project.name));
+    const projectAlias = new ProjectAliasResolver().resolve(normalizedQuestion, projectSnapshot.projects.map((project) => ({ id: project.id, name: project.name, entities: [project.description, project.role, ...project.technologyStack, ...project.hardware, ...project.software] })));
     const detectedProjectId = questionAnalysis.project ? projectSnapshot.projects.find((project) => project.name.toLowerCase() === questionAnalysis.project?.toLowerCase())?.id : undefined;
-    const targetProjectId = interviewContext?.projectId ?? detectedProjectId;
+    const targetProjectId = interviewContext?.projectId ?? (projectAlias.ambiguous ? undefined : projectAlias.projectId ?? detectedProjectId);
     const targetProject = targetProjectId ? projectSnapshot.projects.find((project) => project.id === targetProjectId) : undefined;
     const answerIntent = analyzeAnswerIntent(normalizedQuestion);
     const intentGateStartedAt = performance.now();
@@ -2325,7 +2326,17 @@ if (hasSingleInstanceLock) {
       salaryExpectation: profile?.salaryExpectation,
       projectQaEvidence,
       retrievedKnowledge,
-      recentTranscript: recentTranscript.slice(-8)
+      recentTranscript: recentTranscript.slice(-8),
+      questionTelemetry: {
+        projectAnchorAvailable,
+        projectQuestionRequested,
+        projectQuestionMode: projectIntent.projectQuestionMode,
+        ...(targetProjectId ? { projectAutoAnchorId: targetProjectId } : {}),
+        ...(projectAlias.confidence > 0 ? { projectAutoAnchorConfidence: projectAlias.confidence } : {}),
+        questionNucleusIntent: analyzeQuestionNucleus(normalizedQuestion).intent,
+        ...(coreTechnicalQa ? { coreQaMatchLevel: "strong" as const, coreQaScore: 1, coreQaQuestionId: coreTechnicalQa.id } : {}),
+        ...(sourcePlan.qaMatch ? { projectQaMatchLevel: sourcePlan.qaMatchLevel, projectQaQuestionId: sourcePlan.qaMatch.questionId } : {})
+      }
     };
   };
 
@@ -2349,7 +2360,32 @@ if (hasSingleInstanceLock) {
         url: settings?.baseUrl
       };
     },
-    contextProvider: answerContextProvider
+    contextProvider: answerContextProvider,
+    terminologyLexiconProvider: (profileId, projectId, jobTargetId) => {
+      const profile = profileRepository?.get(profileId);
+      const projectSnapshot = projectMemoryService?.get(profileId);
+      const project = projectSnapshot?.projects.find((item) => item.id === projectId);
+      const projectFacts = projectSnapshot?.facts?.filter((fact) => !projectId || fact.projectId === projectId).map((fact) => ({ title: fact.title, content: fact.content })) ?? [];
+      const projectQa = projectId
+        ? questionBankRepository?.listQuestions({ profileId, projectId, exactProject: true, status: "active", limit: 5_000 }).flatMap((question) => [question.canonicalText, ...question.variants, ...question.answerCards.map((card) => card.content)]) ?? []
+        : [];
+      const generalQa = questionBankRepository?.listQuestions({ profileId, scope: "global", status: "active", limit: 5_000 }).flatMap((question) => [question.canonicalText, ...question.variants, ...question.answerCards.map((card) => card.content)]) ?? [];
+      const jobTarget = jobTargetId ? jobTargetRepository?.get(jobTargetId) : undefined;
+      return buildDynamicTechnicalLexicon({
+        profileSkills: profile?.skills.map((skill) => ({ name: skill.name, aliases: skill.tags })),
+        resume: profile?.resume?.rawContent,
+        jobDescription: [profile?.jobDescription?.rawContent, jobTarget?.description, ...(jobTarget?.requirements ?? []).map((item) => item.requirement)].filter(Boolean).join("\n"),
+        projectFacts: [
+          ...(project ? [project.name, project.description, project.role, ...project.hardware, ...project.software, ...project.technologyStack] : []),
+          ...projectFacts,
+          ...(projectSnapshot?.modules.filter((item) => !projectId || item.projectId === projectId).map((item) => `${item.moduleName} ${item.description}`) ?? []),
+          ...(projectSnapshot?.technicalPoints.filter((item) => !projectId || item.projectId === projectId).map((item) => `${item.topic} ${item.content}`) ?? [])
+        ],
+        projectQa,
+        generalQa,
+        recentTopics: project ? [project.name, ...project.technologyStack] : []
+      });
+    }
   });
   writtenTestController = new WrittenTestController({
     answerAgent,
