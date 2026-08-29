@@ -1594,6 +1594,8 @@ function registerIpc(): void {
    ipcMain.handle("overlay:toggle-transcript", () => { overlayManager?.toggleTranscript(); return true; });
    ipcMain.handle("overlay:toggle-answer", () => { overlayManager?.toggleAnswer(); return true; });
    ipcMain.handle("overlay:request-end", () => { if (coordinator().running || writtenTestController?.running || overlayManager?.hudState.running) overlayManager?.requestEndInterviewConfirmation(); return true; });
+   ipcMain.handle("overlay:cancel-end", () => { overlayManager?.cancelEndInterviewConfirmation(); return true; });
+   ipcMain.handle("overlay:confirm-end", async () => { overlayManager?.confirmEndInterviewConfirmation(); await stopInterview(); return true; });
    ipcMain.handle("overlay:reset-layout", () => {
      const next = overlaySettingsStore?.resetLayout();
      if (next) {

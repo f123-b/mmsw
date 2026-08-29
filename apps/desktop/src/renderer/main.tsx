@@ -19,7 +19,7 @@ function FatalStartupError() {
 
 const rootElement = document.getElementById("root");
 const overlayWindowMode = new URLSearchParams(window.location.search).get("window");
-const isOverlayWindow = overlayWindowMode === "overlay" || overlayWindowMode === "overlay-question" || overlayWindowMode === "overlay-answer" || overlayWindowMode === "overlay-control";
+const isOverlayWindow = overlayWindowMode === "overlay" || overlayWindowMode === "overlay-question" || overlayWindowMode === "overlay-answer" || overlayWindowMode === "overlay-control" || overlayWindowMode === "overlay-confirm";
 if (isOverlayWindow) {
   document.documentElement.classList.add("overlay-window");
   document.body.classList.add("overlay-window");
@@ -30,6 +30,7 @@ if (rootElement) {
     if (overlayWindowMode === "overlay-question") { const module = await import("./overlay-question"); void module; return; }
     if (overlayWindowMode === "overlay-answer") { const module = await import("./overlay-answer"); void module; return; }
     if (overlayWindowMode === "overlay-control") { const module = await import("./overlay-control"); void module; return; }
+    if (overlayWindowMode === "overlay-confirm") { const module = await import("./overlay-confirm"); void module; return; }
     const [{ App }, { RootErrorBoundary }] = await Promise.all([import("./App"), import("./components/ErrorBoundary")]);
     createRoot(rootElement).render(<StrictMode><RootErrorBoundary><App /></RootErrorBoundary></StrictMode>);
     document.documentElement.dataset.appReady = "true";

@@ -41,6 +41,8 @@ declare global {
         toggleTranscript(): Promise<boolean>;
         toggleAnswer(): Promise<boolean>;
         requestEndInterview(): Promise<boolean>;
+        cancelEndInterview(): Promise<boolean>;
+        confirmEndInterview(): Promise<boolean>;
         resetLayout(): Promise<boolean>;
         toggleShortcuts(): Promise<boolean>;
         getState(): Promise<HUDState | undefined>;
@@ -237,6 +239,7 @@ declare global {
         onOverlayPreferences(listener: (preferences: OverlayPreferences) => void): () => void;
         onOverlayCommand(listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end") => void): () => void;
         onOverlayCaptureProtection(listener: (state: CaptureProtectionState) => void): () => void;
+        onOverlayDialogState(listener: (state: { endInterviewConfirmOpen: boolean }) => void): () => void;
         onShortcut(listener: (shortcut: string) => void): () => void;
         onAudioProcess(listener: (state: AudioProcessState) => void): () => void;
         onScreenshot(listener: (result: ScreenshotResult) => void): () => void;

@@ -55,6 +55,8 @@ const api = {
     toggleTranscript: () => ipcRenderer.invoke("overlay:toggle-transcript"),
     toggleAnswer: () => ipcRenderer.invoke("overlay:toggle-answer"),
     requestEndInterview: () => ipcRenderer.invoke("overlay:request-end"),
+    cancelEndInterview: (): Promise<boolean> => ipcRenderer.invoke("overlay:cancel-end"),
+    confirmEndInterview: (): Promise<boolean> => ipcRenderer.invoke("overlay:confirm-end"),
     resetLayout: () => ipcRenderer.invoke("overlay:reset-layout"),
     toggleShortcuts: () => ipcRenderer.invoke("overlay:toggle-shortcuts"),
     getState: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:get-state"),
@@ -295,6 +297,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, state: CaptureProtectionState) => listener(state);
       ipcRenderer.on("overlay:capture-protection", handler);
       return () => ipcRenderer.removeListener("overlay:capture-protection", handler);
+    },
+    onOverlayDialogState: (listener: (state: { endInterviewConfirmOpen: boolean }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, state: { endInterviewConfirmOpen: boolean }) => listener(state);
+      ipcRenderer.on("overlay:dialog-state", handler);
+      return () => ipcRenderer.removeListener("overlay:dialog-state", handler);
     },
     onShortcut: (listener: (shortcut: string) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, shortcut: string) => listener(shortcut);
