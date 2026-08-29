@@ -4,7 +4,7 @@ import { applyOverlayMode, nextOverlayMode, type OverlayMode } from "./overlay-m
 import { applyCaptureProtection, getCaptureProtectionCapabilities, type CaptureProtectionCapabilities, type CaptureProtectionState } from "./overlay-capture-protection";
 import { initialHUDState, reduceHUDState, type HUDAction, type HUDState } from "./hud-state";
 import { calculateHUDLayout, type HUDLayout, type HUDWorkArea } from "./hud-layout";
-import type { OverlayBehaviorPreferences } from "../shared/overlay-preferences";
+import type { MouseInteractionMode, OverlayBehaviorPreferences, WheelRoutingMode } from "../shared/overlay-preferences";
 
 export { applyOverlayMode, nextOverlayMode } from "./overlay-mode";
 export type { OverlayMode, OverlayWindowLike } from "./overlay-mode";
@@ -31,7 +31,9 @@ export class OverlayManager {
   private mode: OverlayMode = "passive";
   private interactiveRegion = false;
   private alwaysOnTop = true;
-  private mousePassthrough = true;
+  private interactionMode: MouseInteractionMode = "interactive";
+  private wheelRouting: WheelRoutingMode = "overlay_under_cursor";
+  private layoutEditMode = false;
   private hudStateValue: HUDState = { ...initialHUDState };
   private hudLayoutValue: HUDLayout = calculateHUDLayout({ x: 0, y: 0, width: 1440, height: 900 });
   private captureProtectionEnabled: boolean;
@@ -97,11 +99,10 @@ export class OverlayManager {
   }
 
   private enterHUDMode(): BrowserWindow {
-    // Every new interview starts click-through. Users can still reach the
-    // toolbar because the renderer reports when the pointer enters a control
-    // region, at which point only the native hit-test state is relaxed.
+    // The configured interaction mode is applied to the existing HUD window;
+    // this only changes native hit testing and never touches interview state.
     this.transition({ type: "start" });
-    this.mode = "passive";
+    this.mode = this.interactionMode === "interactive" ? "interactive" : "passive";
     this.interactiveRegion = false;
     const window = this.show();
     this.coverCurrentMonitor();
@@ -158,18 +159,42 @@ export class OverlayManager {
   setClickThrough(enabled: boolean): void { this.setMode(enabled ? "passive" : "interactive"); }
 
   setControlRegion(interactive: boolean): void {
-    this.interactiveRegion = this.hudState.shareMode ? false : this.mousePassthrough && Boolean(interactive);
+    this.interactiveRegion = this.hudState.shareMode ? false : Boolean(interactive);
     this.applyMode();
   }
 
-  applyPreferences(preferences: Pick<OverlayBehaviorPreferences, "alwaysOnTop" | "mousePassthrough">): void {
+  applyPreferences(preferences: Pick<OverlayBehaviorPreferences, "alwaysOnTop" | "interactionMode" | "mousePassthrough" | "wheelRouting">): void {
     this.alwaysOnTop = Boolean(preferences.alwaysOnTop);
-    this.mousePassthrough = Boolean(preferences.mousePassthrough);
+    this.interactionMode = preferences.interactionMode ?? (preferences.mousePassthrough ? "click_through" : "interactive");
+    this.wheelRouting = preferences.wheelRouting ?? "overlay_under_cursor";
     const window = this.currentWindow;
     if (window) {
       window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
+      if (!this.layoutEditMode) this.mode = this.interactionMode === "interactive" ? "interactive" : "passive";
       this.applyMode();
     }
+  }
+
+  get currentInteractionMode(): MouseInteractionMode { return this.interactionMode; }
+
+  get currentWheelRouting(): WheelRoutingMode { return this.wheelRouting; }
+
+  get isLayoutEditMode(): boolean { return this.layoutEditMode; }
+
+  setLayoutEditMode(enabled: boolean): void {
+    this.layoutEditMode = Boolean(enabled);
+    if (this.layoutEditMode) {
+      const window = this.show();
+      this.mode = "interactive";
+      this.interactiveRegion = true;
+      this.applyMode();
+      window.showInactive();
+    } else {
+      this.mode = this.interactionMode === "interactive" ? "interactive" : "passive";
+      this.interactiveRegion = false;
+      this.applyMode();
+    }
+    this.sendLayoutEditMode();
   }
 
   coverCurrentMonitor(): void {
@@ -185,6 +210,7 @@ export class OverlayManager {
       this.applyCaptureProtection();
       this.applyMode();
       this.sendHudState();
+      this.sendLayoutEditMode();
       this.refreshLayout(this.window.getBounds());
       this.window.showInactive();
       return this.window;
@@ -222,6 +248,7 @@ export class OverlayManager {
       // Re-apply and re-check here so packaged and dev windows use the same native handle.
       this.applyCaptureProtection();
       this.sendHudState();
+      this.sendLayoutEditMode();
       this.refreshLayout(this.window?.getBounds() ?? bounds);
       this.window?.showInactive();
     });
@@ -287,7 +314,8 @@ export class OverlayManager {
 
   private applyMode(): void {
     if (!this.window || this.window.isDestroyed()) return;
-    applyOverlayMode(this.window, this.mode, this.mousePassthrough ? this.interactiveRegion : true);
+    const interactiveRegion = this.layoutEditMode || this.interactionMode === "interactive" || (this.interactionMode === "click_through" && this.interactiveRegion);
+    applyOverlayMode(this.window, this.mode, interactiveRegion);
     this.window.webContents.send("overlay:mode", this.mode);
     this.sendHudState();
   }
@@ -315,6 +343,11 @@ export class OverlayManager {
   private sendPanelCommand(command: OverlayPanelCommand): void {
     const window = this.currentWindow;
     if (window) window.webContents.send("overlay:command", command);
+  }
+
+  private sendLayoutEditMode(): void {
+    const window = this.currentWindow;
+    if (window) window.webContents.send("overlay:layout-edit-mode", this.layoutEditMode);
   }
 
   private targetMonitorBounds(): Electron.Rectangle {

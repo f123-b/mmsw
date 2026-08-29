@@ -58,6 +58,8 @@ const api = {
     getLayout: (): Promise<HUDLayout | undefined> => ipcRenderer.invoke("overlay:get-layout"),
     getPreferences: (): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:get-preferences"),
     setPreferences: (input: OverlayPreferencesPatch): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:set-preferences", input),
+    enterLayoutEditMode: (): Promise<boolean> => ipcRenderer.invoke("overlay:enter-layout-edit"),
+    finishLayoutEditMode: (): Promise<boolean> => ipcRenderer.invoke("overlay:finish-layout-edit"),
     setShareMode: (enabled: boolean): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:set-share-mode", enabled),
     toggleShareMode: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:toggle-share-mode"),
     setMode: (mode: OverlayMode) => ipcRenderer.invoke("overlay:set-mode", mode),
@@ -267,6 +269,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, layout: HUDLayout) => listener(layout);
       ipcRenderer.on("overlay:layout", handler);
       return () => ipcRenderer.removeListener("overlay:layout", handler);
+    },
+    onOverlayLayoutEditMode: (listener: (enabled: boolean) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, enabled: boolean) => listener(Boolean(enabled));
+      ipcRenderer.on("overlay:layout-edit-mode", handler);
+      return () => ipcRenderer.removeListener("overlay:layout-edit-mode", handler);
     },
     onOverlayCommand: (listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end") => void) => {
       const handler = (_event: Electron.IpcRendererEvent, command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end") => listener(command);

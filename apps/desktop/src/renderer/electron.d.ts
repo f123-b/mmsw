@@ -45,6 +45,8 @@ declare global {
         getLayout(): Promise<HUDLayout | undefined>;
         getPreferences(): Promise<OverlayPreferences>;
         setPreferences(input: OverlayPreferencesPatch): Promise<OverlayPreferences>;
+        enterLayoutEditMode(): Promise<boolean>;
+        finishLayoutEditMode(): Promise<boolean>;
         setShareMode(enabled: boolean): Promise<HUDState | undefined>;
         toggleShareMode(): Promise<HUDState | undefined>;
         setMode(mode: OverlayMode): Promise<void>;
@@ -225,6 +227,7 @@ declare global {
         onOverlayMode(listener: (mode: OverlayMode) => void): () => void;
         onOverlayState(listener: (state: HUDState) => void): () => void;
         onOverlayLayout(listener: (layout: HUDLayout) => void): () => void;
+        onOverlayLayoutEditMode(listener: (enabled: boolean) => void): () => void;
         onOverlayPreferences(listener: (preferences: OverlayPreferences) => void): () => void;
         onOverlayCommand(listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end") => void): () => void;
         onOverlayCaptureProtection(listener: (state: CaptureProtectionState) => void): () => void;

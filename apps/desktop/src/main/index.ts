@@ -1393,6 +1393,8 @@ function registerIpc(): void {
      if (next) { overlayManager?.applyPreferences(next.behavior); broadcast("overlay:preferences", next); }
      return next;
    });
+   ipcMain.handle("overlay:enter-layout-edit", () => { overlayManager?.setLayoutEditMode(true); return true; });
+   ipcMain.handle("overlay:finish-layout-edit", () => { overlayManager?.setLayoutEditMode(false); return true; });
    ipcMain.handle("overlay:set-share-mode", (_event, enabled: boolean) => { overlayManager?.setShareMode(Boolean(enabled)); return overlayManager?.hudState; });
    ipcMain.handle("overlay:toggle-share-mode", () => { overlayManager?.toggleShareMode(); return overlayManager?.hudState; });
   ipcMain.handle("overlay:set-control-region", (_event, interactive: boolean) => {
@@ -2435,6 +2437,12 @@ if (hasSingleInstanceLock) {
       broadcast("overlay:capture-protection-diagnostic", { event, fields });
     },
     onHUDStateChange: (state) => broadcast("overlay:state", state)
+  });
+  overlayManager.applyPreferences(overlaySettingsStore?.getPreferences().behavior ?? {
+    alwaysOnTop: true,
+    interactionMode: "interactive",
+    mousePassthrough: false,
+    wheelRouting: "overlay_under_cursor"
   });
   appLogger?.info("OVERLAY_CAPTURE_PROTECTION_RUNTIME", {
     platform: process.platform,
