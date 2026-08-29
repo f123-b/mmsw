@@ -278,7 +278,7 @@ export class OverlayManager {
     this.windows[panel] = window;
     window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
     void this.options.loadRenderer(window, panel);
-    window.once("ready-to-show", () => { this.applyCaptureProtection(); this.sendHudState(); this.sendLayoutEditMode(); this.refreshLayout(window.getBounds()); if (!this.hudStateValue.shareMode) window.showInactive(); });
+    window.once("ready-to-show", () => { this.applyMode(); this.applyCaptureProtection(); this.sendHudState(); this.sendLayoutEditMode(); this.refreshLayout(window.getBounds()); if (!this.hudStateValue.shareMode) window.showInactive(); });
     window.on("closed", () => { if (this.windows[panel] === window) this.windows[panel] = undefined; });
     return window;
   }

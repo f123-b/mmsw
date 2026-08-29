@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, screen } from "electron";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import { version as osVersion } from "node:os";
@@ -260,6 +260,7 @@ const preloadPath = join(__dirname, "../preload/index.mjs");
 const rendererFile = join(__dirname, "../renderer/index.html");
 const visualSmokeRequested = process.argv.includes("--visual-smoke");
 const captureProtectionSmokeRequested = process.argv.includes("--capture-protection-smoke");
+const nativeMouseSmokeRequested = process.argv.includes("--native-mouse-smoke");
 const captureTestRequested = process.env.INTERVIEW_COPILOT_CAPTURE_TEST === "1";
 const productionSmokeRequested = process.argv.includes("--production-smoke") || visualSmokeRequested;
 const screenshotOperations = new ScreenshotOperationRegistry();
@@ -756,6 +757,181 @@ async function waitForRendererLoad(window: BrowserWindow): Promise<void> {
     window.webContents.once("did-fail-load", finish);
     if (!window.webContents.isLoading()) finish();
   });
+}
+
+function runNativeMouseCommand(command: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], { windowsHide: true }, (error, _stdout, stderr) => {
+      if (error) reject(new Error(stderr.trim() || error.message));
+      else resolve(String(_stdout));
+    });
+  });
+}
+
+const nativeMouseTypeDefinition = `
+using System;
+using System.Runtime.InteropServices;
+public static class InterviewCopilotNativeMouse {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+  [StructLayout(LayoutKind.Sequential)] public struct MouseInput { public int dx; public int dy; public uint mouseData; public uint flags; public uint time; public UIntPtr extraInfo; }
+  [StructLayout(LayoutKind.Sequential)] public struct Input { public uint type; public MouseInput mouseInput; }
+  [DllImport("user32.dll", SetLastError=true)] public static extern uint SendInput(uint count, Input[] inputs, int size);
+  public const uint LeftDown = 0x0002;
+  public const uint LeftUp = 0x0004;
+  public static void LeftClick() { var inputs = new Input[2]; inputs[0].type = 0; inputs[0].mouseInput.flags = LeftDown; inputs[1].type = 0; inputs[1].mouseInput.flags = LeftUp; if (SendInput(2, inputs, Marshal.SizeOf(typeof(Input))) != 2) throw new Exception("SendInput failed"); }
+}`;
+
+async function nativeMouseClick(x: number, y: number): Promise<void> {
+  const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${nativeMouseTypeDefinition}\n'@; if(-not [InterviewCopilotNativeMouse]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})){ throw 'SetCursorPos failed' }; Start-Sleep -Milliseconds 40; [InterviewCopilotNativeMouse]::LeftClick();`;
+  await runNativeMouseCommand(command);
+}
+
+async function nativeMouseDrag(from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> {
+  const points = Array.from({ length: 8 }, (_, index) => ({ x: Math.round(from.x + ((to.x - from.x) * (index + 1)) / 8), y: Math.round(from.y + ((to.y - from.y) * (index + 1)) / 8) }));
+  const moves = points.map((point) => `[InterviewCopilotNativeMouse]::SetCursorPos(${point.x}, ${point.y}) | Out-Null; Start-Sleep -Milliseconds 25;`).join(" ");
+  const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${nativeMouseTypeDefinition}\n'@; if(-not [InterviewCopilotNativeMouse]::SetCursorPos(${Math.round(from.x)}, ${Math.round(from.y)})){ throw 'SetCursorPos failed' }; Start-Sleep -Milliseconds 60; [InterviewCopilotNativeMouse]::mouse_event([InterviewCopilotNativeMouse]::LeftDown, 0, 0, 0, [UIntPtr]::Zero); ${moves} [InterviewCopilotNativeMouse]::mouse_event([InterviewCopilotNativeMouse]::LeftUp, 0, 0, 0, [UIntPtr]::Zero);`;
+  await runNativeMouseCommand(command);
+}
+
+async function nativeRaiseWindow(window: BrowserWindow): Promise<void> {
+  const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${nativeMouseTypeDefinition}\n'@; if(-not [InterviewCopilotNativeMouse]::SetWindowPos([IntPtr]::new([long]${nativeWindowId(window)}), [IntPtr]::new(-1), 0, 0, 0, 0, 0x0043)){ throw 'SetWindowPos failed' };`;
+  await runNativeMouseCommand(command);
+}
+
+async function nativeWindowAt(point: { x: number; y: number }): Promise<string> {
+  const definition = `using System; using System.Runtime.InteropServices; public struct NativePoint { public int x; public int y; } [StructLayout(LayoutKind.Sequential)] public struct NativeRect { public int left; public int top; public int right; public int bottom; } public static class NativeWindowProbe { [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(NativePoint point); [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr window, uint flags); [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out NativeRect rect); [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr window, System.Text.StringBuilder text, int length); }`;
+  const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${definition}\n'@; $point = New-Object NativePoint; $point.x = ${Math.round(point.x)}; $point.y = ${Math.round(point.y)}; $window = [NativeWindowProbe]::WindowFromPoint($point); $root = [NativeWindowProbe]::GetAncestor($window, 2); $rect = New-Object NativeRect; [NativeWindowProbe]::GetWindowRect($root, [ref]$rect) | Out-Null; $text = New-Object System.Text.StringBuilder 256; [NativeWindowProbe]::GetWindowText($window, $text, 256) | Out-Null; $rootText = New-Object System.Text.StringBuilder 256; [NativeWindowProbe]::GetWindowText($root, $rootText, 256) | Out-Null; Write-Output (\"hwnd=\" + $window.ToInt64() + \" title=\" + $text.ToString() + \" root=\" + $root.ToInt64() + \" rootTitle=\" + $rootText.ToString() + \" rect=\" + $rect.left + \",\" + $rect.top + \",\" + $rect.right + \",\" + $rect.bottom);`;
+  return (await runNativeMouseCommand(command)).trim();
+}
+
+function nativePoint(window: BrowserWindow, point: { x: number; y: number }): { x: number; y: number } {
+  const bounds = window.getBounds();
+  return screen.dipToScreenPoint({ x: bounds.x + point.x, y: bounds.y + point.y });
+}
+
+async function elementCenter(window: BrowserWindow, selector: string): Promise<{ x: number; y: number }> {
+  const point = await window.webContents.executeJavaScript(`(() => { const element = document.querySelector(${JSON.stringify(selector)}); if (!element) return undefined; const rect = element.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }; })()`, true) as { x: number; y: number } | undefined;
+  if (!point) throw new Error(`Native mouse target not found: ${selector}`);
+  return nativePoint(window, point);
+}
+
+async function waitForNativeCount(window: BrowserWindow, expected: number): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const count = await window.webContents.executeJavaScript("window.__nativeMouseClickCount ?? 0", true) as number;
+    if (count >= expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Native underlay click was not observed: expected ${expected}`);
+}
+
+async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
+  if (process.platform !== "win32") {
+    process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify({ ok: false, result: "UNSUPPORTED_ENVIRONMENT", reason: "Windows Native mouse smoke requires win32" })}\n`);
+    app.exit(0);
+    return;
+  }
+  const manager = overlayManager;
+  if (!manager) throw new Error("Overlay manager was not created");
+  const underlay = new BrowserWindow({ width: 430, height: 500, frame: false, show: false, backgroundColor: "#ffffff", webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  const underlayHtml = `<html><body style="margin:0;width:100vw;height:100vh;background:#fff"><button id="underlay-button" style="width:100%;height:100%;font-size:28px">underlay</button><script>window.__nativeMouseClickCount=0;document.querySelector('#underlay-button').addEventListener('click',()=>{window.__nativeMouseClickCount+=1;document.body.dataset.clicked=String(window.__nativeMouseClickCount);});</script></body></html>`;
+  await underlay.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(underlayHtml)}`);
+  const smokeWorkArea = screen.getPrimaryDisplay().workArea;
+  underlay.setBounds({ x: smokeWorkArea.x + 80, y: smokeWorkArea.y + 120, width: 430, height: 500 });
+  underlay.setAlwaysOnTop(true, "floating");
+  underlay.show();
+  app.focus({ steal: true });
+  underlay.focus();
+  underlay.moveTop();
+  const underlaySelfTestPoint = nativePoint(underlay, { x: 215, y: 250 });
+  await nativeMouseClick(underlaySelfTestPoint.x, underlaySelfTestPoint.y);
+  await waitForNativeCount(underlay, 1).catch(async (error) => { const state = await underlay.webContents.executeJavaScript("({ count: window.__nativeMouseClickCount, href: location.href, body: document.body.innerText })", true); throw new Error(`${String(error)}; underlayBounds=${JSON.stringify(underlay.getBounds())}; underlayPoint=${JSON.stringify(underlaySelfTestPoint)}; cursor=${JSON.stringify(screen.getCursorScreenPoint())}; displays=${JSON.stringify(screen.getAllDisplays().map((display) => ({ bounds: display.bounds, workArea: display.workArea, scaleFactor: display.scaleFactor }))) }; underlayState=${JSON.stringify(state)}`); });
+  await underlay.webContents.executeJavaScript("window.__nativeMouseClickCount = 0", true);
+  const questionWindow = manager.enterInterviewMode();
+  await Promise.all(manager.currentWindows.map((window) => waitForRendererLoad(window)));
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  manager.setMode("passive");
+  const answerWindow = manager.currentAnswerWindow;
+  const controlWindow = manager.currentControlWindow;
+  if (!answerWindow || !controlWindow) throw new Error("Native overlay windows were not created");
+
+  // Keep the test surface on the same topmost desktop as the overlay so a
+  // background Edge window cannot steal the native click while this smoke
+  // test is running from a non-interactive runner.
+  underlay.setAlwaysOnTop(true, "screen-saver");
+  underlay.moveTop();
+  for (const window of [questionWindow, answerWindow, controlWindow]) { window.show(); window.setAlwaysOnTop(true, "screen-saver"); window.moveTop(); }
+  await nativeRaiseWindow(underlay);
+  for (const window of [questionWindow, answerWindow, controlWindow]) await nativeRaiseWindow(window);
+  main.hide();
+  app.focus({ steal: true });
+  underlay.focus();
+  underlay.setBounds(questionWindow.getBounds());
+  underlay.show();
+  underlay.focus();
+  const questionCenter = nativePoint(questionWindow, { x: questionWindow.getBounds().width / 2, y: questionWindow.getBounds().height / 2 });
+  const nativeHitBeforeClick = await nativeWindowAt(questionCenter);
+  const nativeHitRoot = nativeHitBeforeClick.match(/root=(\d+)/)?.[1];
+  const expectedNativeRoots = new Set([nativeWindowId(questionWindow), nativeWindowId(answerWindow), nativeWindowId(controlWindow), nativeWindowId(underlay)]);
+  if (nativeHitRoot && !expectedNativeRoots.has(nativeHitRoot)) {
+    const result = { ok: false, result: "UNSUPPORTED_ENVIRONMENT", reason: "The current desktop foreground window is outside the Electron smoke surface; run from an interactive Windows desktop session", nativeHit: nativeHitBeforeClick };
+    underlay.destroy();
+    manager.exitInterviewMode();
+    process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify(result)}\n`);
+    app.exit(0);
+    return;
+  }
+  await nativeMouseClick(questionCenter.x, questionCenter.y);
+  await waitForNativeCount(underlay, 1).catch(async (error) => { const hit = await nativeWindowAt(questionCenter); throw new Error(`${String(error)}; questionBounds=${JSON.stringify(questionWindow.getBounds())}; questionId=${nativeWindowId(questionWindow)}; underlayId=${nativeWindowId(underlay)}; questionPoint=${JSON.stringify(questionCenter)}; nativeHit=${hit}; display=${JSON.stringify(smokeWorkArea)}`); });
+
+  underlay.setBounds(answerWindow.getBounds());
+  const answerCenter = nativePoint(answerWindow, { x: answerWindow.getBounds().width / 2, y: answerWindow.getBounds().height / 2 });
+  await nativeMouseClick(answerCenter.x, answerCenter.y);
+  await waitForNativeCount(underlay, 2);
+
+  const controlTarget = await elementCenter(controlWindow, "button[aria-label='显示或隐藏问题']");
+  const beforeControl = manager.hudState.transcriptVisible;
+  await nativeMouseClick(controlTarget.x, controlTarget.y);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  if (manager.hudState.transcriptVisible === beforeControl) throw new Error("ControlWindow native click did not toggle question visibility");
+
+  const endTarget = await elementCenter(controlWindow, ".toolbar-end-button");
+  await nativeMouseClick(endTarget.x, endTarget.y);
+  const dialogDeadline = Date.now() + 5_000;
+  let dialogVisible = false;
+  while (Date.now() < dialogDeadline) {
+    dialogVisible = await questionWindow.webContents.executeJavaScript("Boolean(document.querySelector('.end-interview-dialog'))", true) as boolean;
+    if (dialogVisible) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (!dialogVisible) throw new Error("End dialog did not open after native ControlWindow click");
+  const dialogCancel = await elementCenter(questionWindow, ".dialog-cancel");
+  await nativeMouseClick(dialogCancel.x, dialogCancel.y);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const dialogClosed = await questionWindow.webContents.executeJavaScript("!document.querySelector('.end-interview-dialog')", true) as boolean;
+  if (!dialogClosed) throw new Error("End dialog did not close after native cancel");
+  const beforeCancelControl = manager.hudState.transcriptVisible;
+  await nativeMouseClick(controlTarget.x, controlTarget.y);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  if (manager.hudState.transcriptVisible === beforeCancelControl) throw new Error("ControlWindow stopped responding after end-dialog cancel");
+
+  const beforeEditBounds = questionWindow.getBounds();
+  manager.setLayoutEditMode(true);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const dragStart = nativePoint(questionWindow, { x: 100, y: 100 });
+  const dragEnd = nativePoint(questionWindow, { x: 140, y: 130 });
+  await nativeMouseDrag(dragStart, dragEnd);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const afterEditBounds = questionWindow.getBounds();
+  manager.setLayoutEditMode(false);
+  underlay.destroy();
+  manager.exitInterviewMode();
+  const dragged = afterEditBounds.x !== beforeEditBounds.x || afterEditBounds.y !== beforeEditBounds.y;
+  const result = { ok: dragged, result: dragged ? "PASS" : "FAIL", questionClickThrough: true, answerClickThrough: true, controlClick: true, endDialogSingleOwner: true, cancelRestoresControl: true, layoutEditDrag: dragged, questionWindow: beforeEditBounds, questionWindowAfterDrag: afterEditBounds, mainWindow: !main.isDestroyed() };
+  process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify(result)}\n`);
+  app.exit(result.ok ? 0 : 1);
 }
 
 async function runProductionSmoke(main: BrowserWindow): Promise<void> {
@@ -1390,7 +1566,7 @@ function registerIpc(): void {
    ipcMain.handle("overlay:toggle-all", () => { overlayManager?.toggleAll(); return true; });
    ipcMain.handle("overlay:toggle-transcript", () => { overlayManager?.toggleTranscript(); return true; });
    ipcMain.handle("overlay:toggle-answer", () => { overlayManager?.toggleAnswer(); return true; });
-   ipcMain.handle("overlay:request-end", () => { if (coordinator().running || writtenTestController?.running) overlayManager?.requestEndInterviewConfirmation(); return true; });
+   ipcMain.handle("overlay:request-end", () => { if (coordinator().running || writtenTestController?.running || overlayManager?.hudState.running) overlayManager?.requestEndInterviewConfirmation(); return true; });
    ipcMain.handle("overlay:reset-layout", () => {
      const next = overlaySettingsStore?.resetLayout();
      if (next) {
@@ -2566,7 +2742,8 @@ if (hasSingleInstanceLock) {
       process.exitCode = environmentReason ? 0 : 1;
       app.quit();
     }
-  } else if (productionSmokeRequested) await runProductionSmoke(createdMainWindow);
+  } else if (nativeMouseSmokeRequested) await runNativeMouseSmoke(createdMainWindow).catch((error) => { process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify({ ok: false, result: "FAIL", error: String(error) })}\n`); overlayManager?.destroy(); app.exit(1); });
+  else if (productionSmokeRequested) await runProductionSmoke(createdMainWindow);
   });
 } else {
   app.quit();
