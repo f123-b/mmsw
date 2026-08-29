@@ -174,7 +174,8 @@ export class OverlayManager {
     if (controlWindow) controlWindow.setBounds(this.controlWindowBounds(), false);
   }
   toggleShortcuts(): void { this.transition({ type: "toggle-shortcuts" }); }
-  requestEndInterviewConfirmation(): void { this.sendPanelCommand("confirm-end"); }
+  /** The confirmation dialog has one owner: the content renderer. */
+  requestEndInterviewConfirmation(): void { this.currentWindow?.webContents.send("overlay:command", "confirm-end"); }
   setShareMode(enabled: boolean): void {
     this.transition({ type: "set-share-mode", enabled });
     if (this.hudState.shareMode) {

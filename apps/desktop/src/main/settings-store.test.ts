@@ -166,6 +166,23 @@ describe("OverlaySettingsStore", () => {
     } finally { database.close(); }
   });
 
+  it("migrates legacy interactive preferences once and preserves later user edits", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      database.run("INSERT INTO app_state(key, value) VALUES (?, ?)", ["overlay.preferences", JSON.stringify({ behavior: { interactionMode: "interactive", mousePassthrough: false, lockLayout: false }, questionWindow: { width: 500 } })]);
+      const settings = new OverlaySettingsStore(database);
+      const migrated = settings.getPreferences();
+      expect(migrated.schemaVersion).toBe(2);
+      expect(migrated.behavior).toMatchObject({ interactionMode: "click_through", mousePassthrough: true, lockLayout: true });
+      const storedAfterMigration = database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", ["overlay.preferences"]);
+      expect(JSON.parse(storedAfterMigration?.value ?? "{}").schemaVersion).toBe(2);
+
+      const edited = settings.setPreferences({ behavior: { interactionMode: "interactive", lockLayout: false } });
+      expect(edited.behavior).toMatchObject({ interactionMode: "interactive", mousePassthrough: false, lockLayout: false });
+      expect(new OverlaySettingsStore(database).getPreferences().behavior).toMatchObject({ interactionMode: "interactive", mousePassthrough: false, lockLayout: false });
+    } finally { database.close(); }
+  });
+
   it("defaults to enabled and persists the main-process setting", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
@@ -233,6 +250,23 @@ describe("OverlaySettingsStore", () => {
     } finally {
       database.close();
     }
+  });
+
+  it("keeps reset scopes explicit", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      settings.setPreferences({ behavior: { interactionMode: "interactive", lockLayout: false }, appearance: { mode: "text_only" }, questionWindow: { x: 900 } });
+      const layoutReset = settings.resetLayout();
+      expect(layoutReset.questionWindow.x).toBeUndefined();
+      expect(layoutReset.behavior.interactionMode).toBe("interactive");
+      expect(layoutReset.appearance.mode).toBe("text_only");
+      const interactionReset = settings.resetInteraction();
+      expect(interactionReset.behavior.interactionMode).toBe("click_through");
+      expect(interactionReset.appearance.mode).toBe("text_only");
+      const appearanceReset = settings.resetAppearance();
+      expect(appearanceReset.appearance.mode).toBe("glass");
+    } finally { database.close(); }
   });
 
   it("persists Tencent desktop and window validation independently", async () => {

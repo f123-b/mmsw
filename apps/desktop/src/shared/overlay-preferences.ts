@@ -92,6 +92,8 @@ export interface OverlayScreenshotPreferences {
 }
 
 export interface OverlayPreferences {
+  /** Persisted schema version. Missing values are treated as the legacy v1 schema. */
+  schemaVersion: number;
   backgroundOpacity: number;
   backgroundColor: string;
   fontColor: string;
@@ -144,6 +146,7 @@ const sharedWindowDefaults = {
 };
 
 export const DEFAULT_OVERLAY_PREFERENCES: OverlayPreferences = {
+  schemaVersion: 2,
   backgroundOpacity: 0.78,
   backgroundColor: "#1d304a",
   fontColor: "#f8fbff",

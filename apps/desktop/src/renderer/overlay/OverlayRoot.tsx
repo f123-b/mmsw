@@ -13,7 +13,7 @@ type PanelLayout = { x: number; y: number; width: number; height: number; visibl
 type OverlayLayout = Record<PanelKey, PanelLayout>;
 type OverlayCommand = "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end";
 
-interface OverlayRootProps {
+export interface OverlayRootProps {
   surface?: OverlaySurface;
   mic: number;
   system: number;
@@ -439,9 +439,9 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
       if (element) element.scrollTop += deltaY;
     });
     const unsubscribePreferences = window.interviewCopilot.events.onOverlayPreferences((next) => { if (!disposed) setPreferences(next); });
-    const unsubscribeCommands = window.interviewCopilot.events.onOverlayCommand((command: OverlayCommand) => { if (command === "confirm-end") setEndConfirmOpen(true); else if (command === "reset-layout") clearSavedLayout(); });
+    const unsubscribeCommands = window.interviewCopilot.events.onOverlayCommand((command: OverlayCommand) => { if (command === "confirm-end" && overlaySurface === "content") setEndConfirmOpen(true); else if (command === "reset-layout") clearSavedLayout(); });
     return () => { disposed = true; unsubscribeProtection(); unsubscribeLayout(); unsubscribeLayoutEdit(); unsubscribeGlobalWheel(); unsubscribePreferences(); unsubscribeCommands(); };
-  }, [applyMainLayout, clearSavedLayout]);
+  }, [applyMainLayout, clearSavedLayout, overlaySurface]);
   const status = hudState({ state, sessionState, realtimeState, operationMode, question, answerText, answerStreaming });
   const statusMeta = HUD_LABELS[status];
   const effectiveProtectionEnabled = runtimeProtection?.requested ?? captureProtectionEnabled;

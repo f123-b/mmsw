@@ -20,12 +20,13 @@ import type { AppPage } from "./app/routes";
 import { Sidebar } from "./layout/Sidebar";
 import { WelcomeScreen } from "./chat/WelcomeScreen";
 import { ChatComposer } from "./chat/ChatComposer";
-import { OverlayRoot } from "./overlay/OverlayRoot";
+import { OverlayWindowRoot as OverlayRoot } from "./overlay/OverlayWindowRoot";
 import { OverlayDesigner } from "./overlay/OverlayDesigner";
 import { AppDialog, type DialogState } from "./dialogs/AppDialog";
 import { PageErrorBoundary } from "./components/ErrorBoundary";
 import { ProjectLibraryPage } from "./project-library/ProjectLibraryPage";
 import { KNOWLEDGE_DOCUMENT_TYPES, KNOWLEDGE_DOCUMENT_TYPE_LABELS, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption } from "@interview-copilot/shared";
+
 
 interface ChatMessage {
   id: string;
