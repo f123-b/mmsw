@@ -24,7 +24,7 @@ export class QuestionAnalyzer {
     const project = projectNames.find((name) => normalized.toLowerCase().includes(name.toLowerCase()));
     const type: PersonalQuestionType = /项目|负责|做过|经历|实际|为什么这么设计|遇到什么问题|怎么解决|具体怎么实现|结合你的/.test(normalized) || Boolean(project)
       ? "project"
-      : /团队|冲突|压力|困难|失败|沟通|协作|优势|缺点/.test(normalized)
+        : /团队|冲突|压力|困难|失败|沟通|协作|优势|缺点|资源有限|高目标|高压力|自主学习|案例/.test(normalized)
         ? "behavioral"
         : /上一题|刚才|继续|展开|具体一点|然后|还有|那如果/.test(normalized) && normalized.length < 42
           ? "follow-up"

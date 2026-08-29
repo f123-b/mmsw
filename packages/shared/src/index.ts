@@ -1,4 +1,5 @@
 import { normalizeTechnicalTerms } from "./terminology";
+import type { TerminologyCorrection } from "./terminology";
 export { buildVisionInput, type ScreenshotImage, type VisionInput } from "./vision";
 
 export const SESSION_STATES = [
@@ -73,12 +74,17 @@ export function normalizeMeter(value: number): number {
 import type { TranscriptSegment, TranscriptSource } from "@interview-copilot/protocol";
 import { classifyQuestion, questionFingerprint, type QuestionCategory } from "./question-classifier";
 import type { QuestionAnalysis, QuestionDetectionType, QuestionScore, QuestionSpeechAct } from "./question/types";
+import { classifyQuestionSemanticFrame, type QuestionSemanticFrame } from "./question/semantic-frame";
 
 export { classifyQuestion, questionFingerprint } from "./question-classifier";
 export {
   QUESTION_BANK_TYPES,
   QUESTION_BANK_TYPE_LABELS,
+  QUESTION_BANK_BANK_TYPES,
+  QUESTION_BANK_BANK_LABELS,
   QUESTION_BANK_SCOPES,
+  QUESTION_BANK_RELATION_TYPES,
+  inferQuestionBankBankType,
   inferQuestionBankType,
   normalizeQuestionBankText,
   parseQuestionBankText,
@@ -87,9 +93,12 @@ export {
 export type {
   QuestionBankAnswerCardRecord,
   QuestionBankAnswerMode,
+  QuestionBankBankType,
   QuestionBankJobProfileRecord,
   QuestionBankMatch,
   QuestionBankQuestionRecord,
+  QuestionBankRelationRecord,
+  QuestionBankRelationType,
   QuestionBankScope,
   ParsedQuestionBankEntry,
   QuestionBankSkillPointRecord,
@@ -97,6 +106,9 @@ export type {
   QuestionBankSourceType,
   QuestionBankType
 } from "./question-bank";
+export { QuestionBankRouter } from "./question-bank-router";
+export { DEFAULT_PROJECT_QA_ROUTING_POLICY, questionBankAnswerIsReady } from "./question-bank-router";
+export type { ProjectQaMatchLevel, ProjectQaRouteResult, ProjectQaRoutingPolicy, QuestionBankRouteHit, QuestionBankRouteOptions, QuestionBankRouteResult } from "./question-bank-router";
 export type { QuestionCategory, QuestionClassification } from "./question-classifier";
 
 export interface TranscriptSnapshot {
@@ -242,6 +254,9 @@ export type QuestionStatus = "candidate" | "confirmed" | "answering" | "supersed
 export interface QuestionCandidate {
   id: string;
   text: string;
+  rawText?: string;
+  normalizedText?: string;
+  canonicalText?: string;
   confidence: QuestionConfidence;
   score: number;
   source: "rules" | "extractor";
@@ -262,6 +277,17 @@ export interface QuestionCandidate {
   codeContext?: boolean;
   anchorId?: string;
   canonicalQuestion?: string;
+  contextRelation?: "standalone" | "follow_up" | "continuation" | "repair";
+  inheritedTopic?: string;
+  topic?: string;
+  semanticFrame?: QuestionSemanticFrame;
+  terminologyCorrections?: TerminologyCorrection[];
+  /** Runtime turn/group metadata added after final ASR assembly. */
+  utteranceId?: string;
+  segmentIds?: string[];
+  turnId?: string;
+  groupId?: string;
+  relationType?: "ASR_REVISION" | "SAME_QUESTION_AUGMENTATION" | "PARALLEL_SUBQUESTION" | "FOLLOW_UP" | "NEW_TOPIC";
 }
 
 export type QuestionEvent =
@@ -325,6 +351,11 @@ function scoreFromAnalysis(analysis: QuestionAnalysis): { score: number; confide
 
 function isDeferredShortFollowUp(candidate: QuestionCandidate): boolean {
   if (candidate.speechAct !== "FOLLOW_UP") return false;
+  // Canonical follow-ups now carry an explicit relation. They are already
+  // complete utterances, so the extra trailing-fragment hold would delay them
+  // and make short canonical questions look incomplete to callers that flush
+  // on the normal debounce boundary.
+  if (candidate.contextRelation === "follow_up" || candidate.contextRelation === "continuation") return false;
   return normalizeQuestionText(candidate.text).length <= 8;
 }
 
@@ -431,12 +462,15 @@ export class QuestionDetector {
   private confirmCandidate(candidate: QuestionCandidate, observedAtMs: number): QuestionEvent[] {
     const dedupeScore = this.confirmed.reduce((maximum, previous) => {
       if (observedAtMs - previous.detectedAt >= this.dedupeWindowMs) return maximum;
-      // Brain-normalized follow-ups deliberately contain the parent question
-      // (“围绕…针对…追问：…”). Containment is useful for ASR revisions, but
-      // must not collapse a real follow-up into its parent turn.
+      // Structured follow-up metadata is authoritative here. Containment is
+      // useful for ASR revisions, but must not collapse a real follow-up into
+      // its parent turn. Keep the legacy text marker for older callers that
+      // still provide Brain-normalized candidates.
       const parentContextFollowUp = candidate.speechAct === "FOLLOW_UP"
         && candidate.fingerprint !== previous.fingerprint
-        && /(?:围绕|追问：|追问:)/.test(candidate.text);
+        && (candidate.contextRelation === "follow_up"
+          || candidate.contextRelation === "continuation"
+          || /(?:围绕|追问：|追问:)/.test(candidate.text));
       if (parentContextFollowUp) return maximum;
       return Math.max(maximum, previous.fingerprint && candidate.fingerprint && previous.fingerprint === candidate.fingerprint ? 1 : questionSimilarity(previous.text, candidate.text));
     }, 0);
@@ -499,7 +533,15 @@ export class QuestionDetector {
       triggerReason: analysis?.reason ?? classification.reason,
       shouldAnswer: analysis?.shouldAnswer,
       codeContext: analysis?.codeContext,
-      canonicalQuestion: analysis?.normalizedQuestion
+      canonicalQuestion: analysis?.canonicalText ?? analysis?.normalizedQuestion,
+      rawText: analysis?.rawText,
+      normalizedText: analysis?.normalizedText ?? analysis?.normalizedQuestion,
+      canonicalText: analysis?.canonicalText ?? analysis?.normalizedQuestion,
+      contextRelation: analysis?.contextRelation ?? (analysis?.speechAct === "FOLLOW_UP" ? "follow_up" : undefined),
+      inheritedTopic: analysis?.inheritedTopic,
+      topic: analysis?.topic,
+      semanticFrame: analysis?.semanticFrame ?? classifyQuestionSemanticFrame(analysis?.normalizedQuestion ?? text, analysis?.type),
+      terminologyCorrections: analysis?.terminologyCorrections
     };
   }
 
@@ -515,12 +557,19 @@ export class QuestionDetector {
 }
 
 export * from "./answer";
+export { createAnswerSourcePlan, planAnswerSource } from "./answer/project-answer-source-planner";
+export type { AnswerSourceMode, AnswerSourcePlan, AnswerSourcePlannerInput } from "./answer/project-answer-source-planner";
 export * from "./chat";
 export * from "./chat-response";
 export * from "./question-bank-coverage";
 export * from "./answer/interview-answer-formatter";
 export * from "./answer/answer-quality-checker";
 export * from "./answer/streaming-answer-sanitizer";
+export { answerStrategyFor } from "./answer/answer-strategy";
+export { AnswerLengthController, ANSWER_DURATION_POLICY, FOLLOW_UP_DURATION_POLICY } from "./answer/answer-length-controller";
+export { SpokenAnswerFormatter } from "./answer/spoken-answer-formatter";
+export { SpokenQualityChecker } from "./answer/spoken-quality-checker";
+export type { SpokenQualityInput, SpokenQualityMetrics, SpokenQualityResult } from "./answer/spoken-quality-checker";
 export * from "./follow-up-context";
 export * from "./profile";
 export * from "./knowledge";
@@ -536,6 +585,10 @@ export * from "./interview-memory";
 export * from "./interview/speech-act-classifier";
 export * from "./interview/context-anchor-store";
 export * from "./interview/context-anchor-resolver";
+export * from "./interview/topic-boundary-detector";
+export * from "./interview/turn-builder";
+export * from "./interview/question-group";
+export * from "./interview/answer-scheduler";
 export * from "./question-trace";
 export * from "./question";
 export * from "./profile-builder";

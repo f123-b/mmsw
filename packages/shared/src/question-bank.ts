@@ -14,9 +14,32 @@ export const QUESTION_BANK_TYPES = [
 
 export type QuestionBankType = typeof QUESTION_BANK_TYPES[number];
 export type QuestionBankAnswerMode = "short" | "standard" | "deep" | "code";
-export type QuestionBankSourceType = "manual" | "imported" | "verified" | "generated";
+export const QUESTION_BANK_BANK_TYPES = ["project", "skill", "general", "behavioral", "job", "custom"] as const;
+export type QuestionBankBankType = typeof QUESTION_BANK_BANK_TYPES[number];
+export const QUESTION_BANK_BANK_LABELS: Record<QuestionBankBankType, string> = {
+  project: "项目题库",
+  skill: "技能题库",
+  general: "通用题库",
+  behavioral: "行为题库",
+  job: "岗位题库",
+  custom: "自定义题库"
+};
+export type QuestionBankSourceType = "manual" | "imported" | "verified" | "generated" | "resume" | "project-document" | "project-code" | "github" | "jd" | "skill" | "interview-history" | "ai-generated";
 export const QUESTION_BANK_SCOPES = ["global", "profile", "project", "job"] as const;
 export type QuestionBankScope = typeof QUESTION_BANK_SCOPES[number];
+export const QUESTION_BANK_RELATION_TYPES = ["FOLLOW_UP", "DEEPER", "RELATED", "PREREQUISITE", "ALTERNATIVE", "PROJECT_VARIANT"] as const;
+export type QuestionBankRelationType = typeof QUESTION_BANK_RELATION_TYPES[number];
+
+export interface QuestionBankRelationRecord {
+  id: string;
+  sourceQuestionId: string;
+  targetQuestionId: string;
+  relationType: QuestionBankRelationType;
+  confidence: number;
+  source: QuestionBankSourceType;
+  createdAt: number;
+  updatedAt: number;
+}
 
 export interface ParsedQuestionBankEntry {
   question: string;
@@ -42,9 +65,12 @@ export interface QuestionBankQuestionRecord {
   canonicalText: string;
   normalizedText: string;
   type: QuestionBankType;
+  bankType: QuestionBankBankType;
+  category: string;
   scope: QuestionBankScope;
   profileId?: string;
   projectId?: string;
+  moduleId?: string;
   jobProfileId?: string;
   difficulty: string;
   jobRole?: string;
@@ -56,8 +82,13 @@ export interface QuestionBankQuestionRecord {
   embedding?: number[];
   factIds?: string[];
   variants: string[];
+  relations: QuestionBankRelationRecord[];
+  followUps: QuestionBankRelationRecord[];
   answerCards: QuestionBankAnswerCardRecord[];
   skillIds: string[];
+  frequency: number;
+  lastAskedAt?: number;
+  mastery: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -118,8 +149,17 @@ export interface QuestionBankMatch {
   exact: boolean;
 }
 
-const QUESTION_LINE_PREFIX = /^\s*(?:(?:q\s*\d*|question|问题|题目)\s*[:：]|(?:\d+\s*[\.、）)]|[（(]\s*\d+\s*[）)]|[一二三四五六七八九十百]+\s*[、.）)]|[-•]\s+))\s*/i;
-const ANSWER_LINE_PREFIX = /^\s*(?:a\s*\d*|answer|答案|参考答案)\s*[:：]\s*/i;
+export function inferQuestionBankBankType(input: { scope?: QuestionBankScope; type?: QuestionBankType; projectId?: string; jobProfileId?: string; skillIds?: string[]; source?: QuestionBankSourceType }): QuestionBankBankType {
+  if (input.scope === "project" || input.projectId || input.type === "project") return "project";
+  if (input.scope === "job" || input.jobProfileId || input.source === "jd") return "job";
+  if (input.type === "behavioral") return "behavioral";
+  if (input.type === "general") return "general";
+  if (input.skillIds?.length || input.type) return "skill";
+  return "custom";
+}
+
+const QUESTION_LINE_PREFIX = /^\s*(?:(?:q\s*\d*|question|问题|题目|问)\s*(?:[:：]|[-—])|(?:\d+\s*[\.、）)]|[（(]\s*\d+\s*[）)]|[一二三四五六七八九十百]+\s*[、.）)]|[-•]\s+))\s*/i;
+const ANSWER_LINE_PREFIX = /^\s*(?:a\s*\d*|answer|答案|参考答案|回答|答)\s*(?:[:：]|[-—])\s*/i;
 const QUESTION_HINTS = /[?？]|什么|如何|怎么|怎样|为什么|为何|是否|能否|哪个|哪些|区别|优缺点|介绍|说说|讲讲|解释|说明|原理|流程|作用|用途|机制|场景|实现|配置|排查|定位|解决|用过|了解|吗|呢|多少|包含|手撕|写一个|判断|反转|复杂度/i;
 
 function isLikelyQuestion(text: string): boolean {
@@ -196,7 +236,15 @@ export function parseQuestionBankText(text: string): ParsedQuestionBankEntry[] {
     if (collectingAnswer && current) {
       current.answerLines.push(line);
     } else if (current && !isSectionHeading(line) && !QUESTION_LINE_PREFIX.test(line)) {
-      current.question = `${current.question} ${line}`;
+      // Numbered banks commonly omit the “A:” label and put the answer on
+      // the next line. Keep the parser useful for that format without
+      // changing the handling of multi-line question labels.
+      if (current.answerLines.length === 0 && current.question.length >= 8) {
+        collectingAnswer = true;
+        current.answerLines.push(line);
+      } else {
+        current.question = `${current.question} ${line}`;
+      }
     } else if (!current && isLikelyQuestion(line)) {
       current = { question: line, answerLines: [], sourceLine: index + 1 };
     }

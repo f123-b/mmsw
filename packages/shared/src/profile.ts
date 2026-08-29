@@ -11,6 +11,14 @@ export interface Skill {
   tags: string[];
 }
 
+export interface SalaryExpectation {
+  min?: number;
+  max?: number;
+  currency?: string;
+  period?: "month" | "year";
+  negotiable?: boolean;
+}
+
 export interface Profile {
   id: string;
   name: string;
@@ -20,6 +28,8 @@ export interface Profile {
   instructions?: string;
   expressionLevel: "plain" | "standard" | "expert";
   explainAdvancedTerms: boolean;
+  companyContext?: string;
+  salaryExpectation?: SalaryExpectation;
   skills: Skill[];
   knowledgeBaseIds: string[];
   createdAt: number;
@@ -34,6 +44,8 @@ export interface ProfileInput {
   instructions?: string;
   expressionLevel?: "plain" | "standard" | "expert";
   explainAdvancedTerms?: boolean;
+  companyContext?: string;
+  salaryExpectation?: SalaryExpectation;
   skills?: Skill[];
   knowledgeBaseIds?: string[];
 }
@@ -54,6 +66,8 @@ export function createProfile(input: ProfileInput, now = Date.now()): Profile {
     instructions: input.instructions,
     expressionLevel: input.expressionLevel ?? "plain",
     explainAdvancedTerms: input.explainAdvancedTerms ?? true,
+    ...(input.companyContext?.trim() ? { companyContext: input.companyContext.trim() } : {}),
+    ...(input.salaryExpectation ? { salaryExpectation: { ...input.salaryExpectation } } : {}),
     skills: [...(input.skills ?? [])],
     knowledgeBaseIds: [...(input.knowledgeBaseIds ?? [])],
     createdAt: now,

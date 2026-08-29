@@ -1,4 +1,6 @@
-import type { AnswerMode } from "./answer";
+import type { AnswerMode, AnswerTelemetry } from "./answer";
+import type { TerminologyCorrection } from "./terminology";
+import type { QuestionSemanticFrame } from "./question/semantic-frame";
 
 export type InterviewStatus = "created" | "running" | "ended" | "error";
 export type HistoryQuestionStatus = "candidate" | "confirmed" | "answering" | "superseded" | "answered" | "ignored";
@@ -21,6 +23,10 @@ export interface TranscriptRecord {
   interviewId: string;
   source: "mic" | "remote";
   text: string;
+  rawText?: string;
+  normalizedText?: string;
+  canonicalText?: string;
+  terminologyCorrections?: TerminologyCorrection[];
   startMs: number;
   endMs: number;
   final: boolean;
@@ -38,6 +44,21 @@ export interface QuestionRecord {
   status: HistoryQuestionStatus;
   parentQuestionId?: string;
   rootQuestionId?: string;
+  rawTranscript?: string;
+  normalizedQuestion?: string;
+  canonicalQuestion?: string;
+  contextRelation?: "standalone" | "follow_up" | "continuation" | "repair";
+  inheritedTopic?: string;
+  topic?: string;
+  terminologyCorrections?: TerminologyCorrection[];
+  semanticFrame?: QuestionSemanticFrame;
+}
+
+export interface HistoryChangedEvent {
+  interviewId: string;
+  revision: number;
+  type: "transcript" | "question" | "answer" | "state";
+  createdAt?: number;
 }
 
 export interface AnswerRecord {
@@ -52,6 +73,7 @@ export interface AnswerRecord {
   firstTokenAt?: number;
   finishedAt?: number;
   cancelReason?: "user" | "superseded" | "timeout";
+  telemetry?: AnswerTelemetry;
   createdAt: number;
 }
 
@@ -69,10 +91,20 @@ export class InterviewHistoryStore {
   private readonly transcripts: TranscriptRecord[] = [];
   private readonly questions: QuestionRecord[] = [];
   private readonly answers: AnswerRecord[] = [];
+  private readonly revisions = new Map<string, number>();
+  private readonly listeners = new Set<(event: HistoryChangedEvent) => void>();
+
+  onChanged(listener: (event: HistoryChangedEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  getRevision(interviewId: string): number { return this.revisions.get(interviewId) ?? 0; }
 
   createInterview(input: Omit<InterviewRecord, "id" | "createdAt">, now = Date.now()): InterviewRecord {
     const interview = { ...input, id: id("interview", now), createdAt: now };
     this.interviews.set(interview.id, interview);
+    this.emitChanged(interview.id, "state");
     return { ...interview };
   }
 
@@ -80,6 +112,7 @@ export class InterviewHistoryStore {
     const interview = this.requireInterview(interviewId);
     const next = { ...interview, status, endedAt };
     this.interviews.set(interviewId, next);
+    this.emitChanged(interviewId, "state");
     return { ...next };
   }
 
@@ -87,12 +120,14 @@ export class InterviewHistoryStore {
     if (!input.final) return undefined;
     const record = { ...input, id: id("transcript", now), createdAt: now };
     this.transcripts.push(record);
+    this.emitChanged(record.interviewId, "transcript");
     return { ...record };
   }
 
   addQuestion(input: Omit<QuestionRecord, "id">): QuestionRecord {
     const record = { ...input, id: id("question", input.detectedAt) };
     this.questions.push(record);
+    this.emitChanged(record.interviewId, "question");
     return { ...record };
   }
 
@@ -101,12 +136,15 @@ export class InterviewHistoryStore {
     if (index < 0) return undefined;
     const next = { ...this.questions[index], status };
     this.questions[index] = next;
+    this.emitChanged(next.interviewId, "question");
     return { ...next };
   }
 
   addAnswer(input: Omit<AnswerRecord, "id">): AnswerRecord {
     const record = { ...input, id: id("answer", input.createdAt) };
     this.answers.push(record);
+    const interviewId = this.questions.find((question) => question.id === record.questionId)?.interviewId;
+    if (interviewId) this.emitChanged(interviewId, "answer");
     return { ...record };
   }
 
@@ -125,6 +163,13 @@ export class InterviewHistoryStore {
     const interview = this.interviews.get(interviewId);
     if (!interview) throw new Error(`Interview not found: ${interviewId}`);
     return interview;
+  }
+
+  private emitChanged(interviewId: string, type: HistoryChangedEvent["type"]): void {
+    const revision = (this.revisions.get(interviewId) ?? 0) + 1;
+    this.revisions.set(interviewId, revision);
+    const event = { interviewId, revision, type, createdAt: Date.now() } satisfies HistoryChangedEvent;
+    this.listeners.forEach((listener) => listener(event));
   }
 }
 

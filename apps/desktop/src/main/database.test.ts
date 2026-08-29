@@ -206,7 +206,7 @@ describe("SQLite persistence", () => {
   it("applies migration 23 ownership and technical memory semantics", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(25);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(30);
       expect(database.all<{ name: string }>("PRAGMA table_info(projects)").map((row) => row.name)).toEqual(expect.arrayContaining(["ownership_mode", "ownership_note"]));
       expect(database.all<{ name: string }>("PRAGMA table_info(project_facts)").map((row) => row.name)).toEqual(expect.arrayContaining(["experience_relation", "value_json"]));
       new SqliteProfileRepository(database).save({ id: "profile-v4", name: "V4", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
@@ -287,6 +287,111 @@ describe("SQLite persistence", () => {
     } finally { database.close(); }
   });
 
+  it("stores categorized project questions, modules, relations and route metadata", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const questionBank = new SqliteQuestionBankRepository(database);
+      const root = questionBank.saveQuestion({ id: "project-root", canonicalText: "FOC 项目为什么要同步采样？", type: "project", bankType: "project", category: "project", scope: "project", projectId: "foc", moduleId: "current-loop", verified: true });
+      const followUp = questionBank.saveQuestion({ id: "project-follow-up", canonicalText: "具体怎么验证采样时序？", type: "troubleshooting", bankType: "project", category: "troubleshooting", scope: "project", projectId: "foc", moduleId: "current-loop" });
+      questionBank.saveAnswerCard({ questionId: root.id, content: "我会用示波器核对 PWM 触发点和 ADC 采样点，再用同一工况回归。", verified: true });
+      const relation = questionBank.saveRelation({ sourceQuestionId: root.id, targetQuestionId: followUp.id, relationType: "FOLLOW_UP" });
+
+      expect(questionBank.listQuestions({ bankType: "project", projectId: "foc", moduleId: "current-loop" })).toHaveLength(2);
+      expect(questionBank.getQuestion(root.id)).toMatchObject({ bankType: "project", category: "project", projectId: "foc", moduleId: "current-loop", frequency: 0, mastery: 0 });
+      expect(questionBank.getQuestion(root.id)?.relations).toEqual([expect.objectContaining({ id: relation.id, relationType: "FOLLOW_UP", targetQuestionId: followUp.id })]);
+      expect(questionBank.getQuestion(root.id)?.followUps).toHaveLength(1);
+      expect(questionBank.routeQuestion("FOC 项目为什么要同步采样？", { projectId: "foc" }).top?.question.id).toBe(root.id);
+    } finally { database.close(); }
+  });
+
+  it("imports trusted project QA into the existing question-bank schema without blanket invalidation", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const profile = profiles.save({ name: "项目 QA", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const project = new SqliteProjectMemoryRepository(database).createProject(profile.id, "FOC");
+      const questionBank = new SqliteQuestionBankRepository(database);
+      const report = questionBank.importProjectText(profile.id, project.id, "问题：ADC 怎么保证实时性？\n答案：PWM 中点触发 ADC，并通过 DMA 搬运。", "foc-questions.md");
+
+      expect(report).toMatchObject({ projectId: project.id, sourceRole: "question_bank", verified: true, recognizedQuestions: 1, importedAnswers: 1 });
+      expect(questionBank.listQuestions({ scope: "project", projectId: project.id, exactProject: true, status: "all" })).toHaveLength(1);
+      expect(questionBank.listQuestions({ scope: "project", projectId: "another-project", exactProject: true, status: "all" })).toHaveLength(0);
+      expect(questionBank.listQuestions({ status: "all" })).toHaveLength(1);
+      const saved = questionBank.listQuestions({ scope: "project", projectId: project.id, exactProject: true, status: "all" })[0];
+      expect(saved).toMatchObject({ scope: "project", projectId: project.id, bankType: "project", source: "imported", verified: true, stale: false });
+      expect(saved?.answerCards[0]).toMatchObject({ sourceType: "imported", verified: true, stale: false });
+
+      expect(questionBank.markProjectQuestionBankStale(project.id, 100)).toBe(0);
+      expect(questionBank.getQuestion(saved?.id ?? "")).toMatchObject({ stale: false });
+      expect(questionBank.getQuestion(saved?.id ?? "")?.answerCards[0]).toMatchObject({ stale: false });
+    } finally { database.close(); }
+  });
+
+  it("invalidates only project QA that depends on changed facts", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profile = new SqliteProfileRepository(database).save({ name: "事实依赖", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const memory = new SqliteProjectMemoryRepository(database);
+      const project = memory.createProject(profile.id, "FOC");
+      const pwmFact = memory.addCandidateFact({ id: "fact-pwm-frequency", projectId: project.id, profileId: profile.id, type: "parameter", title: "PWM 频率", content: "10kHz", confidence: 1, verified: false, sourceIds: ["doc-pwm"], evidence: [{ sourceId: "doc-pwm", quote: "PWM 频率 10kHz" }] });
+      const canFact = memory.addCandidateFact({ id: "fact-can-arbitration", projectId: project.id, profileId: profile.id, type: "technology", title: "CAN 仲裁", content: "显性位优先", confidence: 1, verified: false, sourceIds: ["doc-can"], evidence: [{ sourceId: "doc-can", quote: "CAN 使用显性位仲裁" }] });
+      const questionBank = new SqliteQuestionBankRepository(database);
+      const pwmQuestion = questionBank.saveQuestion({ id: "qa-pwm", canonicalText: "PWM 频率是多少？", type: "project", bankType: "project", category: "project", scope: "project", profileId: profile.id, projectId: project.id, source: "imported", verified: true, factIds: [pwmFact.id] });
+      questionBank.saveAnswerCard({ id: "qa-pwm-card", questionId: pwmQuestion.id, content: "10kHz", sourceType: "imported", verified: true, factIds: [pwmFact.id] });
+      const canQuestion = questionBank.saveQuestion({ id: "qa-can", canonicalText: "CAN 怎么仲裁？", type: "project", bankType: "project", category: "project", scope: "project", profileId: profile.id, projectId: project.id, source: "imported", verified: true, factIds: [canFact.id] });
+      questionBank.saveAnswerCard({ id: "qa-can-card", questionId: canQuestion.id, content: "显性位优先。", sourceType: "imported", verified: true, factIds: [canFact.id] });
+      const unrelatedQuestion = questionBank.saveQuestion({ id: "qa-unrelated", canonicalText: "ADC 怎么保证实时性？", type: "project", bankType: "project", category: "project", scope: "project", profileId: profile.id, projectId: project.id, source: "manual", verified: true });
+      questionBank.saveAnswerCard({ id: "qa-unrelated-card", questionId: unrelatedQuestion.id, content: "PWM 中点采样。", sourceType: "manual", verified: true });
+
+      expect(questionBank.invalidateProjectQaDependencies(project.id, [pwmFact.id], 100)).toBe(1);
+      expect(questionBank.getQuestion(pwmQuestion.id)).toMatchObject({ stale: true });
+      expect(questionBank.getQuestion(pwmQuestion.id)?.answerCards[0]).toMatchObject({ stale: true });
+      expect(questionBank.getQuestion(canQuestion.id)).toMatchObject({ stale: false });
+      expect(questionBank.getQuestion(unrelatedQuestion.id)).toMatchObject({ stale: false });
+    } finally { database.close(); }
+  });
+
+  it("keeps question verification independent from answer-card verification", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const questionBank = new SqliteQuestionBankRepository(database);
+      const question = questionBank.saveQuestion({ id: "qa-independent", canonicalText: "项目如何验证采样？", type: "project", bankType: "project", scope: "project", projectId: "project-independent", source: "ai-generated", verified: false });
+      questionBank.saveAnswerCard({ id: "qa-independent-a", questionId: question.id, content: "答案 A，待单独确认。", sourceType: "manual", verified: false });
+      questionBank.saveAnswerCard({ id: "qa-independent-b", questionId: question.id, content: "答案 B，待单独确认。", sourceType: "manual", verified: false });
+      questionBank.bulkUpdate([question.id], { verified: true });
+      questionBank.saveAnswerCard({ id: "qa-independent-a", questionId: question.id, content: "答案 A，已由候选人核对。", sourceType: "manual", verified: true });
+      const saved = questionBank.getQuestion(question.id);
+      expect(saved).toMatchObject({ verified: true });
+      expect(saved?.answerCards.find((card) => card.id === "qa-independent-a")).toMatchObject({ verified: true });
+      expect(saved?.answerCards.find((card) => card.id === "qa-independent-b")).toMatchObject({ verified: false });
+    } finally { database.close(); }
+  });
+
+  it("uses the unified question bank for project snapshots without legacy question writes", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const profile = profiles.save({ name: "统一题库", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const memory = new SqliteProjectMemoryRepository(database);
+      const project = memory.createProject(profile.id, "统一项目");
+      const projectSnapshot = memory.getSnapshot(profile.id).projects[0];
+      expect(projectSnapshot).toBeDefined();
+      memory.replaceSnapshot(profile.id, {
+        projects: [projectSnapshot!],
+        modules: [],
+        technicalPoints: [],
+        problems: [],
+        interviewQuestions: [{ id: "unified-project-question", projectId: project.id, question: "项目如何验证采样时序？", answerPoints: ["用示波器核对触发点"], keywords: ["采样时序"], sourceIds: [], factIds: ["unified-fact"] }],
+        facts: [{ id: "unified-fact", projectId: project.id, profileId: profile.id, type: "technology", title: "采样时序", content: "用示波器核对触发点", confidence: 1, verified: false, sourceIds: [] }]
+      }, 10, project.id);
+
+      const loaded = memory.getSnapshot(profile.id);
+      expect(loaded.interviewQuestions).toMatchObject([{ id: "unified-project-question", question: "项目如何验证采样时序？" }]);
+      expect(new SqliteQuestionBankRepository(database).getQuestion("unified-project-question")).toMatchObject({ scope: "project", projectId: project.id, source: "generated" });
+      expect(database.first<{ count: number }>("SELECT COUNT(*) AS count FROM interview_questions")?.count).toBe(0);
+    } finally { database.close(); }
+  });
+
   it("repairs legacy trust defaults when migration 21 is applied", async () => {
     const directory = await mkdtemp(join(tmpdir(), "interview-copilot-migration-"));
     const filePath = join(directory, "legacy.sqlite");
@@ -314,7 +419,7 @@ describe("SQLite persistence", () => {
       first.close();
       const second = await SqliteDatabase.open(filePath);
       try {
-        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(25);
+        expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(30);
         const repaired = new SqliteProjectMemoryRepository(second);
         repaired.repairProjectTechnicalSemantics("project-migration");
         expect(repaired.listFacts(profile.id, "project-migration", { includeStale: true, includeRejected: true })).toHaveLength(2);
@@ -353,7 +458,22 @@ describe("SQLite persistence", () => {
       expect(memory.getUnderstandingSnapshot(project.id, "hash-a")?.understanding.summary).toContain("可缓存");
       expect(memory.getSnapshot(profile.id).understandings?.[0]?.projectId).toBe(project.id);
       expect(memory.getUnderstandingSnapshot(project.id, "different-hash")).toBeUndefined();
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(25);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(30);
+    } finally { database.close(); }
+  });
+
+  it("persists answer telemetry and revision timestamps for history diagnostics", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const events: Array<{ revision: number; createdAt?: number }> = [];
+      const history = new SqliteInterviewHistoryRepository(database, (event) => events.push(event));
+      const interview = history.createInterview({ profileId: "telemetry-profile", startedAt: 1, status: "running", language: "zh-CN", automationMode: "AUTO" }, 1);
+      const question = history.addQuestion({ interviewId: interview.id, text: "C 语言里 static 有什么作用？", confidence: "high", source: "rules", detectedAt: 2, status: "confirmed", rawTranscript: "study 有什么作用", normalizedQuestion: "static 有什么作用", canonicalQuestion: "static 有什么作用？", contextRelation: "standalone", semanticFrame: "keyword", terminologyCorrections: [{ raw: "study", canonical: "static", source: "phonetic", confidence: 0.97 }] });
+      history.addAnswer({ questionId: question.id, text: "static 影响存储期或链接范围。", model: "core", telemetry: { rawText: "study 有什么作用", normalizedText: "static 有什么作用", canonicalText: "static 有什么作用？", terminologyCorrectionCount: 1, terminologyConfidence: 0.97, semanticFrame: "keyword", answerSourceMode: "general_core_qa", historyRevision: history.getRevision(interview.id) }, createdAt: 3 });
+      const saved = history.snapshot(interview.id).answers[0];
+      expect(saved?.telemetry).toMatchObject({ canonicalText: "static 有什么作用？", terminologyCorrectionCount: 1, answerSourceMode: "general_core_qa" });
+      expect(events.every((event) => typeof event.createdAt === "number")).toBe(true);
+      expect(history.getRevision(interview.id)).toBe(3);
     } finally { database.close(); }
   });
 

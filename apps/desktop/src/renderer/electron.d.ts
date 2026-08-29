@@ -7,16 +7,17 @@ import type { RealtimeConnectOptions } from "../main/realtime-session";
 import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
-import type { TranscriptSnapshot } from "@interview-copilot/shared";
+import type { HistoryChangedEvent, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
-import type { ChatAction, KnowledgeDocumentType, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectMemorySnapshot, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
+import type { ChatAction, KnowledgeDocumentType, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectMemorySnapshot, ProjectQaGenerationResult, ProjectQuestionBankImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, OverlayPreferences, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectAnalysisState, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
+import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectAnalysisState, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankRelationInput, QuestionBankRouteQuery, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 import type { ModelCatalogResult } from "../main/model-catalog";
+import type { InterviewExportResult } from "../main/history-export";
 
 declare global {
   interface Window {
@@ -170,6 +171,7 @@ declare global {
         listDocuments(knowledgeBaseId?: string): Promise<Array<{ id: string; knowledgeBaseId: string; filename: string; mimeType: string; documentType: KnowledgeDocumentType; status: string; error?: string }>>;
         ingest(input: { knowledgeBaseId?: string; profileId?: string; projectId?: string; sourceRole?: ProjectSourceRole | "auto"; filename: string; mimeType: string; bytes: Uint8Array; documentType?: KnowledgeDocumentType | "auto" }): Promise<unknown>;
         ingestProjectMaterials(input: { profileId: string; projectId: string; knowledgeBaseId: string; files: Array<{ filename: string; mimeType: string; bytes: Uint8Array; sourceRole?: ProjectSourceRole | "auto" }> }): Promise<ProjectMaterialImportReport>;
+        ingestProjectQuestionBank(input: { profileId: string; projectId: string; filename: string; mimeType: string; bytes: Uint8Array }): Promise<ProjectQuestionBankImportReport>;
         updateType(documentId: string, documentType: KnowledgeDocumentType): Promise<unknown>;
         delete(documentId: string): Promise<boolean>;
         reindex(documentId: string): Promise<unknown>;
@@ -185,6 +187,10 @@ declare global {
         deleteQuestion(questionId: string): Promise<boolean>;
         saveAnswer(input: QuestionBankAnswerCardInput): Promise<QuestionBankAnswerCardRecord | undefined>;
         deleteAnswer(answerCardId: string): Promise<boolean>;
+        route(text: string, options?: QuestionBankRouteQuery): Promise<QuestionBankRouteResult | undefined>;
+        saveRelation(input: QuestionBankRelationInput): Promise<QuestionBankRelationRecord | undefined>;
+        listRelations(questionId?: string): Promise<QuestionBankRelationRecord[]>;
+        deleteRelation(relationId: string): Promise<boolean>;
         listSkills(search?: string): Promise<QuestionBankSkillRecord[]>;
         saveSkill(input: QuestionBankSkillInput): Promise<QuestionBankSkillRecord | undefined>;
         saveSkillPoint(input: QuestionBankSkillPointInput): Promise<unknown>;
@@ -194,6 +200,7 @@ declare global {
         saveJob(input: QuestionBankJobProfileInput): Promise<QuestionBankJobProfileRecord | undefined>;
         importText(input: { text: string; filename?: string; includeProject?: boolean; includeBehavioral?: boolean }): Promise<QuestionBankImportResult | undefined>;
         generateAnswers(input?: { questionIds?: string[]; onlyUnanswered?: boolean }): Promise<QuestionBankAnswerGenerationResult>;
+        generateProjectQa(projectId: string): Promise<ProjectQaGenerationResult>;
         match(text: string): Promise<{ question: QuestionBankQuestionRecord; score: number; exact: boolean } | undefined>;
       };
       history: {
@@ -202,6 +209,7 @@ declare global {
         analyze(interviewId: string): Promise<{ durationMs: number; questionCount: number; answeredQuestionCount: number; answerRate: number; averageFirstTokenMs?: number; averageAnswerLatencyMs?: number } | undefined>;
         getAnalysis(interviewId: string): Promise<unknown>;
         delete(interviewId: string): Promise<boolean>;
+        export(interviewId: string): Promise<InterviewExportResult>;
       };
       preparation: {
         start(goal: string): Promise<boolean>;
@@ -213,6 +221,7 @@ declare global {
         onAudio(listener: (event: AudioSidecarEvent) => void): () => void;
         onAudioDiagnostic(listener: (message: string) => void): () => void;
         onSessionState(listener: (state: SessionState) => void): () => void;
+        onHistoryChanged(listener: (event: HistoryChangedEvent) => void): () => void;
         onOverlayMode(listener: (mode: OverlayMode) => void): () => void;
         onOverlayState(listener: (state: HUDState) => void): () => void;
         onOverlayLayout(listener: (layout: HUDLayout) => void): () => void;

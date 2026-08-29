@@ -9,17 +9,18 @@ import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { InterviewRuntimeDiagnostics, RuntimeTraceEvent } from "../main/runtime-diagnostics";
 import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
-import type { TranscriptSnapshot } from "@interview-copilot/shared";
+import type { HistoryChangedEvent, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayMode } from "../main/overlay-manager";
 import type { OverlayPreferences, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { SessionState } from "@interview-copilot/shared";
-import type { ChatAction, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankType, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
+import type { ChatAction, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectQaGenerationResult, ProjectQuestionBankImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
+import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankRelationInput, QuestionBankRouteQuery, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 import type { ModelCatalogResult } from "../main/model-catalog";
+import type { InterviewExportResult } from "../main/history-export";
 
 function createRendererScreenshotRequestId(): string {
   return `screenshot-${Date.now()}-${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2, 10)}`;
@@ -185,6 +186,7 @@ const api = {
     listDocuments: (knowledgeBaseId?: string) => ipcRenderer.invoke("knowledge:list-documents", knowledgeBaseId),
     ingest: (input: { knowledgeBaseId?: string; profileId?: string; projectId?: string; sourceRole?: ProjectSourceRole | "auto"; filename: string; mimeType: string; bytes: Uint8Array; documentType?: string }) => ipcRenderer.invoke("knowledge:ingest", input),
     ingestProjectMaterials: (input: { profileId: string; projectId: string; knowledgeBaseId: string; files: Array<{ filename: string; mimeType: string; bytes: Uint8Array; sourceRole?: ProjectSourceRole | "auto" }> }): Promise<ProjectMaterialImportReport> => ipcRenderer.invoke("knowledge:ingest-project-materials", input),
+    ingestProjectQuestionBank: (input: { profileId: string; projectId: string; filename: string; mimeType: string; bytes: Uint8Array }): Promise<ProjectQuestionBankImportReport> => ipcRenderer.invoke("knowledge:ingest-project-question-bank", input),
     updateType: (documentId: string, documentType: string) => ipcRenderer.invoke("knowledge:update-type", documentId, documentType),
     delete: (documentId: string) => ipcRenderer.invoke("knowledge:delete", documentId),
     reindex: (documentId: string) => ipcRenderer.invoke("knowledge:reindex", documentId)
@@ -200,6 +202,10 @@ const api = {
     deleteQuestion: (questionId: string): Promise<boolean> => ipcRenderer.invoke("question-bank:delete-question", questionId),
     saveAnswer: (input: QuestionBankAnswerCardInput): Promise<QuestionBankAnswerCardRecord | undefined> => ipcRenderer.invoke("question-bank:save-answer", input),
     deleteAnswer: (answerCardId: string): Promise<boolean> => ipcRenderer.invoke("question-bank:delete-answer", answerCardId),
+    route: (text: string, options?: QuestionBankRouteQuery): Promise<QuestionBankRouteResult | undefined> => ipcRenderer.invoke("question-bank:route", text, options),
+    saveRelation: (input: QuestionBankRelationInput): Promise<QuestionBankRelationRecord | undefined> => ipcRenderer.invoke("question-bank:save-relation", input),
+    listRelations: (questionId?: string): Promise<QuestionBankRelationRecord[]> => ipcRenderer.invoke("question-bank:list-relations", questionId),
+    deleteRelation: (relationId: string): Promise<boolean> => ipcRenderer.invoke("question-bank:delete-relation", relationId),
     listSkills: (search?: string): Promise<QuestionBankSkillRecord[]> => ipcRenderer.invoke("question-bank:list-skills", search),
     saveSkill: (input: QuestionBankSkillInput): Promise<QuestionBankSkillRecord | undefined> => ipcRenderer.invoke("question-bank:save-skill", input),
     saveSkillPoint: (input: QuestionBankSkillPointInput): Promise<unknown> => ipcRenderer.invoke("question-bank:save-skill-point", input),
@@ -209,6 +215,7 @@ const api = {
     saveJob: (input: QuestionBankJobProfileInput): Promise<QuestionBankJobProfileRecord | undefined> => ipcRenderer.invoke("question-bank:save-job", input),
     importText: (input: { text: string; filename?: string; includeProject?: boolean; includeBehavioral?: boolean }): Promise<QuestionBankImportResult | undefined> => ipcRenderer.invoke("question-bank:import-text", input),
     generateAnswers: (input?: { questionIds?: string[]; onlyUnanswered?: boolean }): Promise<QuestionBankAnswerGenerationResult> => ipcRenderer.invoke("question-bank:generate-answers", input),
+    generateProjectQa: (projectId: string): Promise<ProjectQaGenerationResult> => ipcRenderer.invoke("question-bank:generate-project-qa", projectId),
     match: (text: string): Promise<{ question: QuestionBankQuestionRecord; score: number; exact: boolean } | undefined> => ipcRenderer.invoke("question-bank:match", text)
   },
   history: {
@@ -216,7 +223,8 @@ const api = {
     get: (interviewId: string) => ipcRenderer.invoke("history:get", interviewId),
     analyze: (interviewId: string) => ipcRenderer.invoke("history:analyze", interviewId),
     getAnalysis: (interviewId: string) => ipcRenderer.invoke("history:get-analysis", interviewId),
-    delete: (interviewId: string) => ipcRenderer.invoke("history:delete", interviewId) as Promise<boolean>
+    delete: (interviewId: string) => ipcRenderer.invoke("history:delete", interviewId) as Promise<boolean>,
+    export: (interviewId: string) => ipcRenderer.invoke("history:export", interviewId) as Promise<InterviewExportResult>
   },
   preparation: {
     start: (goal: string) => ipcRenderer.invoke("preparation:start", goal),
@@ -239,6 +247,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, state: SessionState) => listener(state);
       ipcRenderer.on("session:state", handler);
       return () => ipcRenderer.removeListener("session:state", handler);
+    },
+    onHistoryChanged: (listener: (event: HistoryChangedEvent) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: HistoryChangedEvent) => listener(payload);
+      ipcRenderer.on("history:changed", handler);
+      return () => ipcRenderer.removeListener("history:changed", handler);
     },
     onOverlayMode: (listener: (mode: OverlayMode) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, mode: OverlayMode) => listener(mode);

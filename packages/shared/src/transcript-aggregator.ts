@@ -5,6 +5,7 @@ export interface TranscriptUtterance {
   id: string;
   source: TranscriptSource;
   text: string;
+  rawText?: string;
   segmentIds: string[];
   startMs: number;
   endMs: number;
@@ -90,6 +91,7 @@ export class TranscriptAggregator {
   private readonly current: Partial<Record<TranscriptSource, TranscriptUtterance>> = {};
   private readonly completed: Partial<Record<TranscriptSource, TranscriptUtterance[]>> = {};
   private readonly parts: Partial<Record<TranscriptSource, Map<string, string>>> = {};
+  private readonly rawParts: Partial<Record<TranscriptSource, Map<string, string>>> = {};
   private readonly maxGapMs: number;
   private readonly punctuationBoundary: boolean;
 
@@ -107,7 +109,7 @@ export class TranscriptAggregator {
    * Only final segments are emitted. Partials are intentionally left to the
    * stabilizer/UI so the question detector never answers on unstable text.
    */
-  push(segment: TranscriptSegment, receivedAt = Date.now()): TranscriptUtterance | undefined {
+  push(segment: TranscriptSegment, receivedAt = Date.now(), rawText = segment.text): TranscriptUtterance | undefined {
     if (!segment.final) return undefined;
     const text = normalize(segment.text);
     if (!text) return undefined;
@@ -117,11 +119,13 @@ export class TranscriptAggregator {
     // that segment instead of appending a duplicate copy to the utterance.
     if (previous?.segmentIds.includes(segment.id)) {
       this.parts[segment.source]?.set(segment.id, text);
+      this.rawParts[segment.source]?.set(segment.id, rawText);
       previous.startMs = Math.min(previous.startMs, segment.startMs);
       previous.endMs = Math.max(previous.endMs, segment.endMs);
       previous.lastFinalReceivedAt = receivedAt;
       if (segment.confidence !== undefined) previous.confidence = segment.confidence;
       previous.text = this.rebuildText(segment.source, previous.segmentIds);
+      previous.rawText = this.rebuildRawText(segment.source, previous.segmentIds);
       return { ...previous, segmentIds: [...previous.segmentIds] };
     }
     const canMerge = Boolean(
@@ -133,7 +137,9 @@ export class TranscriptAggregator {
     if (canMerge && previous) {
       this.parts[segment.source] ??= new Map<string, string>();
       this.parts[segment.source]?.set(segment.id, text);
+      this.rawParts[segment.source]?.set(segment.id, rawText);
       previous.text = this.rebuildText(segment.source, [...previous.segmentIds, segment.id]);
+      previous.rawText = this.rebuildRawText(segment.source, [...previous.segmentIds, segment.id]);
       previous.endMs = Math.max(previous.endMs, segment.endMs);
       previous.segmentIds.push(segment.id);
       previous.lastFinalReceivedAt = receivedAt;
@@ -143,10 +149,12 @@ export class TranscriptAggregator {
     if (previous) this.enqueueCompleted(segment.source, previous, receivedAt);
     const parts = new Map<string, string>([[segment.id, text]]);
     this.parts[segment.source] = parts;
+    this.rawParts[segment.source] = new Map<string, string>([[segment.id, rawText]]);
     const utterance: TranscriptUtterance = {
       id: `utterance-${segment.source}-${segment.id}`,
       source: segment.source,
       text,
+      rawText,
       segmentIds: [segment.id],
       startMs: segment.startMs,
       endMs: segment.endMs,
@@ -175,6 +183,7 @@ export class TranscriptAggregator {
       const completed = this.drainCompleted(source);
       delete this.current[source];
       delete this.parts[source];
+      delete this.rawParts[source];
       return value ? [...completed, { ...value, finalizedAt, segmentIds: [...value.segmentIds] }] : completed;
     }
     const values = (Object.keys(this.current) as TranscriptSource[]).flatMap((item) => this.flush(item));
@@ -188,6 +197,8 @@ export class TranscriptAggregator {
     delete this.completed.remote;
     delete this.parts.mic;
     delete this.parts.remote;
+    delete this.rawParts.mic;
+    delete this.rawParts.remote;
   }
 
   private enqueueCompleted(source: TranscriptSource, utterance: TranscriptUtterance, finalizedAt: number): void {
@@ -200,5 +211,16 @@ export class TranscriptAggregator {
     const parts = this.parts[source];
     if (!parts) return "";
     return segmentIds.reduce((text, id) => mergeText(text, parts.get(id) ?? ""), "");
+  }
+
+  private rebuildRawText(source: TranscriptSource, segmentIds: string[]): string {
+    const parts = this.rawParts[source];
+    if (!parts) return "";
+    return segmentIds.reduce((text, id) => {
+      const part = parts.get(id)?.trim() ?? "";
+      if (!text) return part;
+      if (!part) return text;
+      return `${text}${/^[，。！？、,.!?；;：:]/.test(part) ? "" : " "}${part}`;
+    }, "");
   }
 }

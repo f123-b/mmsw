@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AnswerAgent, classifyAnswerQuestion, ContextRouter, ModelRouter, PromptBuilder, StableAnswerStateMachine, type AnswerProvider } from "./answer";
+import { createEvidenceSnapshot } from "./answer/evidence-context";
 import { InterviewAnswerFormatter } from "./answer/interview-answer-formatter";
 import { StreamingAnswerSanitizer } from "./answer/streaming-answer-sanitizer";
 
@@ -36,6 +37,78 @@ describe("Answer routing and generation", () => {
     const prompt = new PromptBuilder().build({ id: "plain", text: "解释一下DMA" }, "NORMAL", context).map((section) => section.content).join("\n");
     expect(prompt).toContain("优先使用简单、口语化的中文");
     expect(prompt).toContain("首次出现较难术语");
+  });
+
+  it("gives direct project QA a dedicated rewrite context and removes ordinary retrieval", () => {
+    const context = new ContextRouter().route("FOC 项目的 ADC 如何保证实时性？", {
+      answerSourcePlan: {
+        mode: "project_qa_direct",
+        projectAnchorAvailable: true,
+        projectQuestionRequested: true,
+        projectId: "foc",
+        qaMatchLevel: "strong",
+        preserveStoredAnswerFacts: true,
+        allowProjectKnowledge: false,
+        allowGeneralKnowledge: false,
+        allowSessionEvidence: true,
+        answerRewriteUsed: true
+      },
+      preparedAnswer: { content: "PWM 中点触发 ADC，并通过 DMA 搬运。", score: 0.92, verified: true, source: "project-question-bank" },
+      projectQaEvidence: ["PWM 中点触发 ADC，并通过 DMA 搬运。"],
+      projectEvidence: ["不应进入 direct prompt 的项目资料"],
+      retrievedKnowledge: ["不应进入 direct prompt 的普通检索"]
+    });
+    const sections = new PromptBuilder().build({ id: "project-qa", text: "FOC 项目的 ADC 如何保证实时性？" }, "NORMAL", context);
+    expect(context.projectEvidence).toEqual([]);
+    expect(context.retrievedKnowledge).toEqual([]);
+    expect(sections.find((section) => section.name === "project-qa-context")?.content).toContain("保留原答案中的事实");
+    expect(sections.find((section) => section.name === "project-qa-context")?.content).toContain("PWM 中点触发 ADC");
+  });
+
+  it("allows safe first-person project wording but blocks unsupported ownership wording", () => {
+    const context = new ContextRouter().route("这个系统为什么用 MQTT？", { projectEvidence: ["系统使用 MQTT 传输状态"] });
+    const prompt = new PromptBuilder().build({ id: "safe-project", text: "这个系统为什么用 MQTT？" }, "NORMAL", context).map((section) => section.content).join("\n");
+    expect(prompt).toContain("我这个项目里用的是 X");
+    expect(prompt).toContain("不能改写成“我设计了 X”");
+  });
+
+  it("runs project QA through the final claim gate and exposes source telemetry", async () => {
+    const stored = "项目中使用 PWM 中点触发 ADC，并通过 DMA 搬运采样数据。";
+    const provider: AnswerProvider = { stream: async function* () { yield stored; } };
+    let ended: unknown;
+    for await (const event of new AnswerAgent({ normal: provider }, new ModelRouter({ normal: "test-model" })).stream(
+      { id: "project-qa-answer", text: "ADC 怎么保证实时性？" },
+      "NORMAL",
+      {
+        answerSourcePlan: { mode: "project_qa_direct", projectAnchorAvailable: true, projectQuestionRequested: true, projectId: "foc", qaMatchLevel: "exact", preserveStoredAnswerFacts: true, allowProjectKnowledge: false, allowGeneralKnowledge: false, allowSessionEvidence: true, answerRewriteUsed: true },
+        preparedAnswer: { content: stored, score: 1, verified: true },
+        projectQaEvidence: [stored]
+      },
+      undefined,
+      { directDisplay: true, emitDeltas: false, allowQualityRepair: false, formatAnswer: false }
+    )) if (event.type === "answer_end") ended = event;
+    expect(ended).toMatchObject({ type: "answer_end", text: stored, quality: { claimGateDecision: "allow", blockedClaimCount: 0, answerSourceMode: "project_qa_direct", qaMatchLevel: "exact" } });
+  });
+
+  it("passes a structured answer plan into the provider prompt", async () => {
+    let prompt = "";
+    const planningProvider: AnswerProvider = {
+      stream: async function* (request) {
+        prompt = request.sections.map((section) => section.content).join("\n");
+        yield "我负责这个项目的通信模块。";
+      }
+    };
+    for await (const event of new AnswerAgent({ normal: planningProvider }, new ModelRouter({ normal: "test-model" })).stream(
+      { id: "planned", text: "介绍一下你负责的项目" },
+      "NORMAL",
+      { currentProject: "通信项目", projectEvidence: ["我负责通信模块"] },
+      undefined,
+      { allowQualityRepair: false }
+    )) void event;
+    expect(prompt).toContain("题型：project");
+    expect(prompt).toContain("结构顺序：project_background");
+    expect(prompt).toContain("目标口述时长约");
+    expect(prompt).toContain("我负责通信模块");
   });
 
   it("keeps code answers complete instead of slicing the tail", () => {
@@ -93,6 +166,27 @@ describe("Answer routing and generation", () => {
     expect(context.recentTranscript.at(-1)).toBe("对话 19");
   });
 
+  it("uses the evidence snapshot as the authoritative planning context", () => {
+    const snapshot = createEvidenceSnapshot({
+      questionId: "q-locked",
+      currentProject: "锁定项目",
+      currentModule: "锁定模块",
+      currentTopic: "锁定主题",
+      projectEvidence: ["锁定证据"]
+    });
+    const context = new ContextRouter().route("这个项目怎么设计？", {
+      currentProject: "后来项目",
+      currentModule: "后来模块",
+      currentTopic: "后来主题",
+      projectEvidence: ["后来证据"],
+      evidenceSnapshot: snapshot
+    });
+    expect(context.currentProject).toBe("锁定项目");
+    expect(context.currentModule).toBe("锁定模块");
+    expect(context.currentTopic).toBe("锁定主题");
+    expect(context.projectEvidence).toEqual(["锁定证据"]);
+  });
+
   it("repairs a low-quality grounded answer before finalizing", async () => {
     let calls = 0;
     const requests = [] as Array<Parameters<NonNullable<AnswerProvider["stream"]>>[0]>;
@@ -134,7 +228,7 @@ describe("Answer routing and generation", () => {
     expect(events.at(-1)).toMatchObject({ type: "answer_end", text: "首先，直接返回这一版。" });
   });
 
-  it("blocks unsupported project details even when a repair still invents facts", async () => {
+  it("rewrites unsupported project details even when a repair still invents facts", async () => {
     let calls = 0;
     const unsafeProvider: AnswerProvider = {
       stream: async function* () { calls += 1; yield "我主导了STM32项目，把延迟降低了50%。"; },
@@ -152,10 +246,23 @@ describe("Answer routing and generation", () => {
     expect(events.map((event) => event.type)).toEqual(["answer_start", "answer_end"]);
     expect(events.at(-1)).toMatchObject({
       type: "answer_end",
-      text: expect.stringContaining("没有足够证据"),
-      quality: { issues: ["strict-grounding-fallback"], needsRepair: false }
+      text: expect.not.stringContaining("没有足够证据"),
+      quality: { needsRepair: false }
     });
-    expect((events.at(-1) as { text: string }).text).not.toContain("STM32");
+    expect((events.at(-1) as { text: string }).text).not.toContain("50%");
+    expect((events.at(-1) as { quality: { issues: string[] } }).quality.issues).toContain("claim-gate-rewrite");
+  });
+
+  it("answers project implementation questions with generic knowledge when project evidence is empty", async () => {
+    const technicalProvider: AnswerProvider = { stream: async function* () { yield "可以让高级定时器在中心对齐 PWM 的中点触发 ADC，再用 DMA 搬运采样数据，减少中断抖动。"; } };
+    let final = "";
+    for await (const event of new AnswerAgent({ normal: technicalProvider }, new ModelRouter({ normal: "test-model" })).stream(
+      { id: "q-generic-project", text: "FOC 项目中的 ADC 如何保证实时性？" },
+      "NORMAL",
+      {}
+    )) if (event.type === "answer_end") final = event.text;
+    expect(final).toContain("ADC");
+    expect(final).not.toContain("当前资料");
   });
 
   it("sanitizes safe presentation noise without rewriting technical content", () => {

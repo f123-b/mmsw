@@ -50,9 +50,9 @@ describe("InterviewCoordinator software E2E", () => {
     for (let index = 0; index < 12; index += 1) await Promise.resolve();
     expect(messages).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "answer_start" }),
-      expect.objectContaining({ type: "answer_end", text: expect.stringContaining("没有足够证据") })
+      expect.objectContaining({ type: "answer_end", text: expect.stringContaining("核心回答") })
     ]));
-    expect(messages.some((message) => (message as { type?: string }).type === "answer_delta")).toBe(false);
+    expect(messages.some((message) => (message as { type?: string }).type === "answer_delta")).toBe(true);
     await coordinator.stop();
     expect(coordinator.running).toBe(false);
     expect(interviewId).toMatch(/^interview-/);
@@ -104,6 +104,30 @@ describe("InterviewCoordinator software E2E", () => {
     await coordinator.stop();
   });
 
+  it("carries candidate statements into the next personal follow-up", async () => {
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    let prompt = "";
+    const provider: AnswerProvider = { stream: async function* (request) {
+      prompt = request.sections.map((section) => section.content).join("\n");
+      yield "可以沿着采样数据、标注口径和验证集继续说明。";
+    } };
+    const coordinator = new InterviewCoordinator({
+      audio,
+      realtime,
+      session: new SessionStateMachine(),
+      answerAgent: new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" })),
+      contextProvider: () => ({}),
+      now: () => 1_000
+    });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
+    realtime.emit("transcript", {}, { id: "candidate-1", source: "mic", text: "我的语音识别准确率大约98%。", startMs: 0, endMs: 800, final: true, confidence: 0.95 });
+    await coordinator.answerQuestionText("这个98%是怎么做到的？");
+    expect(prompt).toContain("我的语音识别准确率大约98%");
+    expect(prompt).toContain("candidate_asserted");
+    await coordinator.stop();
+  });
+
   it("uses a remote partial to prepare detection and confirms on the final transcript", async () => {
     vi.useFakeTimers();
     const audio = new FakeAudio();
@@ -147,7 +171,7 @@ describe("InterviewCoordinator software E2E", () => {
     clock = 3_600;
     vi.advanceTimersByTime(500);
     for (let turn = 0; turn < 24; turn += 1) await Promise.resolve();
-    expect(confirmed.some((text) => text.includes("电机控制/FOC") && text.includes("好，说说"))).toBe(true);
+    expect(confirmed.some((text) => text === "好，说说")).toBe(true);
     await coordinator.stop();
     vi.useRealTimers();
   });
@@ -273,7 +297,7 @@ describe("InterviewCoordinator software E2E", () => {
     expect(snapshot.questions).toHaveLength(3);
     expect(snapshot.questions.every((question) => question.status === "answered")).toBe(true);
     expect(snapshot.answers).toHaveLength(3);
-    expect(snapshot.answers.every((answer) => answer.model === "test-model" && answer.latencyFirstToken !== undefined && answer.latencyTotal !== undefined)).toBe(true);
+    expect(snapshot.answers.every((answer) => answer.model === "test-model" && answer.latencyFirstToken !== undefined && answer.latencyTotal !== undefined && answer.telemetry?.canonicalText && answer.telemetry.technicalGuardDecision)).toBe(true);
     await coordinator.stop();
     vi.useRealTimers();
   });
@@ -318,7 +342,11 @@ describe("InterviewCoordinator software E2E", () => {
     const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
     const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, history, now: () => clock });
     const messages: Array<{ type: string; reason?: string }> = [];
-    coordinator.on("event", (event: { type: string; message?: { type: string; reason?: string } }) => { if (event.type === "realtime_message" && event.message) messages.push(event.message); });
+    const questionEvents: Array<{ type: string; question?: { id: string; groupId?: string; relationType?: string } }> = [];
+    coordinator.on("event", (event: { type: string; message?: { type: string; reason?: string }; event?: { type: string; question?: { id: string; groupId?: string; relationType?: string } } }) => {
+      if (event.type === "realtime_message" && event.message) messages.push(event.message);
+      if (event.type === "question" && event.event) questionEvents.push(event.event);
+    });
     await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "AUTO", answerMode: "NORMAL" });
     realtime.emit("transcript", {}, { id: "q1", source: "remote", text: "为什么要分层？", startMs: 0, endMs: 900, final: true });
     clock = 1_600;
@@ -332,6 +360,10 @@ describe("InterviewCoordinator software E2E", () => {
     releaseFirst();
     for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
     expect(messages.filter((message) => message.type === "answer_end")).toHaveLength(2);
+    const confirmed = questionEvents.filter((event) => event.type === "question_confirmed");
+    expect(confirmed).toHaveLength(2);
+    expect(confirmed[1]?.question?.groupId).toBe(confirmed[0]?.question?.groupId);
+    expect(confirmed[1]?.question?.relationType).toBe("FOLLOW_UP");
     const snapshot = history.snapshot(coordinator.interviewId!);
     expect(snapshot.answers.map((answer) => answer.text)).toEqual(["第一题答案完成", "第二题答案"]);
     expect(snapshot.questions.every((question) => question.status === "answered")).toBe(true);

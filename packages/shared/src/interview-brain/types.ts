@@ -21,6 +21,7 @@ export interface InterviewBrainDecision {
   confidence: number;
   normalizedQuestion: string;
   reason: string;
+  contextRelation?: "standalone" | "follow_up" | "continuation" | "repair";
+  inheritedTopic?: string;
   answerTask?: AnswerTask;
 }
-

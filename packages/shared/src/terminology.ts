@@ -10,16 +10,42 @@ export interface TerminologyRule {
   pattern: RegExp;
   context?: RegExp;
   priority?: number;
-  source?: "embedded" | "general" | "project";
+  source?: TerminologySource;
 }
+
+export type TerminologySource = "embedded" | "general" | "project" | "builtin" | "profile" | "question_bank" | "contextual" | "phonetic" | "llm";
 
 export interface TerminologyCorrection {
   raw: string;
   canonical: string;
-  source: "embedded" | "general" | "project";
+  source: TerminologySource;
   confidence?: number;
   reason?: string;
   context?: string;
+}
+
+export interface DynamicTechnicalLexiconEntry {
+  term: string;
+  canonical: string;
+  source: "builtin" | "profile" | "project" | "question_bank" | "llm";
+  confidence: number;
+  aliases?: string[];
+}
+
+export interface DynamicTechnicalLexicon {
+  readonly entries: readonly DynamicTechnicalLexiconEntry[];
+  readonly rules: readonly TerminologyRule[];
+}
+
+export interface DynamicTechnicalLexiconInput {
+  profileSkills?: readonly (string | { name?: string; aliases?: readonly string[]; content?: string })[];
+  projectFacts?: readonly (string | { title?: string; content?: string; value?: unknown })[];
+  projectQa?: readonly (string | { question?: string; answer?: string })[];
+  generalQa?: readonly (string | { question?: string; answer?: string })[];
+  resume?: string;
+  jobDescription?: string;
+  recentTopics?: readonly string[];
+  entries?: readonly DynamicTechnicalLexiconEntry[];
 }
 
 export interface TerminologyDictionary {
@@ -184,6 +210,17 @@ export const INTERVIEW_TERMINOLOGY_RULES: readonly TerminologyRule[] = [
   { canonical: "C#", pattern: /(?:\bc\s*sharp\b|\bc#)/gi }
 ];
 
+const TECHNICAL_LEXICON_TOKEN = /(?:[A-Z][A-Za-z0-9+#./-]{1,31}|[A-Za-z][A-Za-z0-9+#./-]{2,31}\d[A-Za-z0-9+#./-]*|[\u4e00-\u9fff]{2,12}(?:总线|协议|系统|控制|模块|算法|架构|文件系统|关键字|项目|网关|驱动|中断|采样|通信|数据库|线程))/g;
+
+function sourceConfidence(source: TerminologySource, priority = 0): number {
+  if (priority >= 100) return 0.99;
+  if (source === "phonetic" || source === "contextual") return 0.97;
+  if (source === "embedded" || source === "builtin") return 0.96;
+  if (source === "project" || source === "profile") return 0.95;
+  if (source === "question_bank") return 0.93;
+  return 0.9;
+}
+
 function applyRules(text: string, rules: readonly TerminologyRule[], source: TerminologyCorrection["source"], corrections: TerminologyCorrection[]): string {
   let normalized = text;
   for (const rule of [...rules].sort((left, right) => (right.priority ?? 0) - (left.priority ?? 0))) {
@@ -195,8 +232,8 @@ function applyRules(text: string, rules: readonly TerminologyRule[], source: Ter
       if (raw !== rule.canonical) corrections.push({
         raw,
         canonical: rule.canonical,
-        source,
-        confidence: (rule.priority ?? 0) >= 100 ? 0.99 : source === "embedded" ? 0.96 : source === "project" ? 0.95 : 0.9,
+        source: rule.source ?? source,
+        confidence: sourceConfidence(rule.source ?? source, rule.priority),
         reason: rule.context ? "contextual-rule" : "terminology-rule"
       });
       return rule.canonical;
@@ -205,10 +242,70 @@ function applyRules(text: string, rules: readonly TerminologyRule[], source: Ter
   return normalized;
 }
 
-export function normalizeTechnicalTermsWithCorrections(text: string, projectRules: readonly TerminologyRule[] = []): { text: string; corrections: TerminologyCorrection[] } {
+function inputText(value: string | { name?: string; aliases?: readonly string[]; content?: string; title?: string; value?: unknown; question?: string; answer?: string }): string {
+  if (typeof value === "string") return value;
+  return [value.name, ...(value.aliases ?? []), value.title, value.content, value.question, value.answer, typeof value.value === "string" ? value.value : undefined].filter(Boolean).join(" ");
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Builds a conservative session lexicon. Only terms that look like a model,
+ * protocol, acronym, or explicit technical phrase become rewrite rules; prose
+ * words are deliberately ignored to avoid false corrections.
+ */
+export function buildDynamicTechnicalLexicon(input: DynamicTechnicalLexiconInput = {}): DynamicTechnicalLexicon {
+  const entries: DynamicTechnicalLexiconEntry[] = [...(input.entries ?? [])];
+  const sources: Array<[TerminologySource, readonly (string | Record<string, unknown>)[] | undefined]> = [
+    ["profile", input.profileSkills],
+    ["project", input.projectFacts],
+    ["question_bank", input.projectQa],
+    ["question_bank", input.generalQa],
+    ["project", input.recentTopics],
+    ["profile", [input.resume, input.jobDescription].filter((value): value is string => Boolean(value))]
+  ];
+  for (const [source, values] of sources) {
+    for (const value of values ?? []) {
+      if (typeof value !== "string") {
+        const explicitTerm = typeof value.name === "string" ? value.name : typeof value.title === "string" ? value.title : undefined;
+        if (explicitTerm && !entries.some((entry) => entry.term.toLowerCase() === explicitTerm.toLowerCase() && entry.source === source)) {
+          entries.push({ term: explicitTerm, canonical: explicitTerm, source: source as DynamicTechnicalLexiconEntry["source"], confidence: source === "project" ? 0.96 : 0.92, ...(Array.isArray(value.aliases) && value.aliases.length ? { aliases: [...value.aliases] } : {}) });
+        }
+      }
+      const text = inputText(value as Parameters<typeof inputText>[0]);
+      for (const match of text.matchAll(TECHNICAL_LEXICON_TOKEN)) {
+        const term = match[0].trim();
+        if (term.length < 3 || /^(?:The|This|With|What|Study|Count|Project|System)$/i.test(term)) continue;
+        if (!entries.some((entry) => entry.term.toLowerCase() === term.toLowerCase() && entry.source === source)) {
+          entries.push({ term, canonical: term, source: source as DynamicTechnicalLexiconEntry["source"], confidence: source === "project" ? 0.96 : 0.92 });
+        }
+      }
+    }
+  }
+  const rules = entries.flatMap((entry) => {
+    const aliases = [entry.term, ...(entry.aliases ?? [])].filter((alias) => alias && alias !== entry.canonical);
+    return aliases.map((alias) => ({ canonical: entry.canonical, pattern: new RegExp(`(?<![A-Za-z0-9])${escapeRegex(alias)}(?![A-Za-z0-9])`, "gi"), priority: 30, source: entry.source } satisfies TerminologyRule));
+  });
+  return { entries, rules };
+}
+
+export interface TerminologyResolution {
+  text: string;
+  corrections: TerminologyCorrection[];
+  rawText: string;
+  normalizedText: string;
+  canonicalText: string;
+  confidence: number;
+  possibleTerms: Array<{ value: string; score: number }>;
+}
+
+export function normalizeTechnicalTermsWithCorrections(text: string, projectRules: readonly TerminologyRule[] | DynamicTechnicalLexicon = []): { text: string; corrections: TerminologyCorrection[] } {
   const corrections: TerminologyCorrection[] = [];
   let normalized = text.replace(/\s+/g, " ").trim();
-  normalized = applyRules(normalized, projectRules, "project", corrections);
+  const rules = "rules" in projectRules ? projectRules.rules : projectRules;
+  normalized = applyRules(normalized, rules, "project", corrections);
   normalized = applyRules(normalized, EMBEDDED_TERMINOLOGY_RULES, "embedded", corrections);
   normalized = applyRules(normalized, INTERVIEW_TERMINOLOGY_RULES, "general", corrections);
   return { text: normalized, corrections };
@@ -218,6 +315,9 @@ export interface ContextualTerminologyOptions {
   contextText?: string;
   entities?: readonly string[];
   topics?: readonly string[];
+  previousQuestion?: string;
+  semanticFrame?: string;
+  lexicon?: DynamicTechnicalLexicon;
 }
 
 /**
@@ -225,17 +325,49 @@ export interface ContextualTerminologyOptions {
  * In particular, “约函数/余函数” is only rewritten when nearby speech clearly
  * establishes a C++/OOP/polymorphism context.
  */
-export function resolveContextualTerminology(text: string, options: ContextualTerminologyOptions = {}): { text: string; corrections: TerminologyCorrection[] } {
-  const base = normalizeTechnicalTermsWithCorrections(text);
-  const context = [options.contextText, ...(options.entities ?? []), ...(options.topics ?? [])].filter(Boolean).join(" ");
-  const cppContext = /C\+\+|面向对象|多态|继承|虚函数|override|virtual|类|对象/i.test(context);
-  if (!cppContext || !/(?:约|余)\s*函数/.test(base.text)) return base;
+export function resolveContextualTerminology(text: string, options: ContextualTerminologyOptions = {}): TerminologyResolution {
+  const base = normalizeTechnicalTermsWithCorrections(text, options.lexicon ?? []);
+  const context = [options.contextText, options.previousQuestion, options.semanticFrame, ...(options.entities ?? []), ...(options.topics ?? [])].filter(Boolean).join(" ");
+  let resolved = base.text;
   const corrections = [...base.corrections];
-  const resolved = base.text.replace(/(?:约|余)\s*函数/g, (raw) => {
-    corrections.push({ raw, canonical: "虚函数", source: "embedded", confidence: 0.97, reason: "cpp-oop-context", context: "C++/OOP/polymorphism" });
-    return "虚函数";
-  });
-  return { text: resolved, corrections };
+  const add = (raw: string, canonical: string, reason: string, source: TerminologySource = "phonetic", confidence = 0.97): void => {
+    if (raw === canonical) return;
+    corrections.push({ raw, canonical, source, confidence, reason, context: context.slice(0, 160) });
+  };
+  const possibleTerms: Array<{ value: string; score: number }> = [];
+  const cppContext = /C\+\+|面向对象|多态|继承|虚函数|override|virtual|类|对象/i.test(context);
+  if (cppContext) resolved = resolved.replace(/(?:约|余)\s*函数/g, (raw) => { add(raw, "虚函数", "cpp-oop-context", "contextual"); return "虚函数"; });
+
+  const explicitCContext = /C\+\+|C语言|C 语言|C\/C\+\+/i.test(context);
+  const cSignalText = `${context} ${resolved}`;
+  const cKeywordContext = /关键字|存储类|限定符|修饰符|常量/i.test(cSignalText) && /volatile|static|const|指针/i.test(cSignalText);
+  const cContext = explicitCContext || cKeywordContext;
+  if (cContext) {
+    resolved = resolved.replace(/\bstudy\b/gi, (raw, offset: number, whole: string) => {
+      const nearby = whole.slice(Math.max(0, offset - 24), offset + 36);
+      if (/study\s*(?:计划|方法|习惯)|(?:计划|方法|习惯)\s*study/i.test(nearby)) return raw;
+      add(raw, "static", "c-keyword-phonetic", "phonetic");
+      return "static";
+    });
+    resolved = resolved.replace(/\bcount\b/gi, (raw, offset: number, whole: string) => {
+      const nearby = whole.slice(Math.max(0, offset - 36), offset + 40);
+      if (/count\s*(?:\+\+|--|\]|变量|字段|值)|[\[.]\s*count\b|\b(?:变量|字段)\s*count/i.test(nearby)) return raw;
+      if (!/(?:关键字|限定符|修饰符|常量|作用|含义|声明|类型)/i.test(nearby)) return raw;
+      add(raw, "const", "c-keyword-phonetic", "phonetic");
+      return "const";
+    });
+  }
+  if (!cContext && /\bstudy\b/i.test(resolved) && !/study\s*(?:计划|方法|习惯)/i.test(resolved)) possibleTerms.push({ value: "static", score: 0.64 }, { value: "study", score: 0.36 });
+  if (!cContext && /\bcount\b/i.test(resolved) && !/count\s*(?:\+\+|--|\]|变量|字段|值)/i.test(resolved)) possibleTerms.push({ value: "const", score: 0.64 }, { value: "count", score: 0.36 });
+
+  const motorContext = /FOC|电机|电机控制|编码器|电角度|机械角|转子|极对/i.test(context);
+  if (motorContext) resolved = resolved.replace(/(?:一对数|绝对是|绝对数|极对术)/g, (raw) => { add(raw, "极对数", "motor-control-phonetic"); return "极对数"; });
+
+  const stackContext = /堆|栈|内存|malloc|free|内存管理|溢出|heap|stack/i.test(context);
+  if (stackContext) resolved = resolved.replace(/(?:这和站|和站)/g, (raw) => { add(raw, "栈", "stack-phonetic"); return "栈"; });
+
+  const confidence = corrections.length ? Math.min(...corrections.map((correction) => correction.confidence ?? 0.9)) : 1;
+  return { text: resolved, corrections, rawText: text, normalizedText: base.text, canonicalText: resolved, confidence: possibleTerms.length ? Math.min(confidence, 0.64) : confidence, possibleTerms };
 }
 
 export function normalizeTechnicalTerms(text: string): string {

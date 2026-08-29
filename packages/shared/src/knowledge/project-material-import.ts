@@ -59,3 +59,17 @@ export interface ProjectMaterialImportReport {
     failed: number;
   };
 }
+
+export interface ProjectQuestionBankImportReport {
+  projectId: string;
+  filename: string;
+  sourceRole: "question_bank";
+  recognizedQuestions: number;
+  importedQuestions: number;
+  importedAnswers: number;
+  duplicatesMerged: number;
+  failedQuestions: number;
+  ids: string[];
+  /** Explicit user import is promoted to the trusted project-QA tier. */
+  verified: true;
+}

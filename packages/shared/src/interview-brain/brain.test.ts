@@ -12,7 +12,9 @@ describe("InterviewBrain", () => {
     const decision = new InterviewBrain().analyze({ text: "好，说说", analysis, memory: memory.snapshot() });
     expect(decision.isQuestion).toBe(true);
     expect(decision.type).toBe("follow_up");
-    expect(decision.normalizedQuestion).toContain("电机控制/FOC");
+    expect(decision.normalizedQuestion).toBe("好，说说");
+    expect(decision.inheritedTopic).toBe("电机控制/FOC");
+    expect(decision.contextRelation).toBe("follow_up");
     expect(decision.answerTask?.context.join("\n")).toContain("介绍一下你的FOC项目");
   });
 
@@ -22,8 +24,9 @@ describe("InterviewBrain", () => {
     memory.recordAnswer("我会先复现并记录关键波形。");
     const decision = new InterviewBrain().analyze({ text: "怎么验证？", memory: memory.snapshot() });
     expect(decision.isQuestion).toBe(true);
-    expect(decision.normalizedQuestion).toContain("如果 IIC 问题再次出现");
-    expect(decision.normalizedQuestion).toContain("追问：怎么验证");
+    expect(decision.normalizedQuestion).toBe("怎么验证？");
+    expect(decision.contextRelation).toBe("follow_up");
+    expect(decision.inheritedTopic).toBe("嵌入式通信");
   });
 
   it("does not promote acknowledgement or repair meta text to a question", () => {

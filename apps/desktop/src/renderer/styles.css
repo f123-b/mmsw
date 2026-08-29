@@ -1121,7 +1121,8 @@ body { background: #f1f1ee; color: var(--text-primary); }
 .history-detail-sheet { min-width: 0; }
 .history-detail-actions { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #edf0f3; padding-bottom: 12px; color: #8a94a3; font-size: 11px; }
 .history-detail-actions > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.history-detail-actions > button { flex: 0 0 auto; margin-left: 14px; }
+.history-detail-action-buttons { display: flex; flex: 0 0 auto; gap: 8px; margin-left: 14px; }
+.history-detail-action-buttons button { white-space: nowrap; }
 .history-empty-detail { display: grid; min-height: 280px; place-content: center; gap: 8px; text-align: center; color: #8a94a3; }
 @media (max-width: 900px) { .project-agent-panel > header,.project-agent-composer { grid-template-columns: 1fr; display: grid; }.history-record-list { min-width: 0; }.history-summary { flex-wrap: wrap; } }
 .project-overview-v2 { display: grid; grid-template-columns: 1.1fr 1fr 1fr; gap: 15px; }
@@ -1334,6 +1335,33 @@ body { background: #f1f1ee; color: var(--text-primary); }
 .project-question-list-v5 strong, .project-source-copy strong, .project-conflict-list-v5 strong { overflow: hidden; color: #344b6f; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .project-question-list-v5 small, .project-source-copy small, .project-conflict-list-v5 small { color: #929dac; font-size: 11px; }
 .project-question-list-v5 > button > span { color: #4f8b69; font-size: 11px; white-space: nowrap; }
+.project-question-bank-panel { display: grid; gap: 16px; }
+.project-question-bank-panel .project-section-header { margin-bottom: 0; }
+.project-question-bank-panel .detail-actions { flex-wrap: wrap; }
+.project-question-search { display: grid; gap: 6px; color: #7f8b9b; font-size: 12px; }
+.project-question-search input, .project-qa-card input, .project-qa-card textarea, .project-qa-editor input, .project-qa-editor textarea { width: 100%; border: 1px solid #dfe5ee; border-radius: 10px; background: #fff; padding: 10px 12px; color: #253044; }
+.project-qa-list { display: grid; gap: 12px; }
+.project-qa-card { display: grid; gap: 11px; border: 1px solid #e5e9f0; border-radius: 14px; padding: 16px; background: #fff; }
+.project-qa-card.is-stale { border-color: #e1b28c; background: #fffaf6; }
+.project-qa-card-heading { display: flex; align-items: flex-start; gap: 10px; }
+.project-qa-card-heading h3 { flex: 1; margin: 3px 0 0; color: #344b6f; font-size: 16px; line-height: 1.45; }
+.project-qa-index { display: grid; width: 25px; height: 25px; place-items: center; border-radius: 8px; background: #edf3fb; color: #5274a8; font-size: 11px; font-weight: 700; }
+.project-qa-status { flex: 0 0 auto; border-radius: 999px; padding: 5px 8px; font-size: 11px; }
+.project-qa-status.confirmed { background: #e7f4ec; color: #2b8c5a; }
+.project-qa-status.pending { background: #fff0e3; color: #a56a36; }
+.project-qa-answer { margin: 0; color: #536174; line-height: 1.7; white-space: pre-wrap; }
+.project-qa-answer-cards { display: grid; gap: 8px; }
+.project-qa-answer-card { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: 10px; background: #f8faff; color: #536174; }
+.project-qa-answer-card.is-stale { background: #fff2e9; }
+.project-qa-answer-card > div { flex: 1; min-width: 0; }
+.project-qa-answer-card span { color: #8a94a3; font-size: 11px; }
+.project-qa-answer-card p { margin: 4px 0 0; line-height: 1.7; white-space: pre-wrap; }
+.project-qa-variants { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: #8a94a3; font-size: 12px; }
+.project-qa-variant { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border-radius: 999px; background: #f1f4f8; color: #61708a; }
+.project-qa-variant button { border: 0; padding: 0; background: transparent; color: #a56a36; cursor: pointer; }
+.project-qa-meta, .project-qa-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: #8a94a3; font-size: 12px; }
+.project-qa-actions { padding-top: 2px; border-top: 1px solid #eef0f4; }
+.project-qa-editor { display: grid; gap: 12px; padding: 16px; border: 1px solid #e5e9f0; border-radius: 14px; background: #f8faff; }
 .project-source-file-icon { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 7px; background: #f1f4f7; color: #7084a2; }
 .project-source-count { color: #8793a3; font-size: 11px; white-space: nowrap; }
 .project-source-chevron, .project-conflict-list-v5 b { color: #9aa4b0; font-size: 15px; font-weight: 400; }

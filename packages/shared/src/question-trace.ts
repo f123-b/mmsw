@@ -9,6 +9,13 @@ export interface QuestionTraceInput {
   localClassifierScore?: number;
   llmScore?: number;
   contextTopic?: string;
+  contextRelation?: string;
+  topicRelation?: string;
+  semanticFrame?: string;
+  terminologyCorrectionCount?: number;
+  terminologyConfidence?: number;
+  projectAnchorAvailable?: boolean;
+  projectQuestionRequested?: boolean;
   parentQuestionId?: string;
   isFollowUp?: boolean;
   finalScore?: number;
@@ -28,7 +35,11 @@ export interface QuestionTraceInput {
   projectId?: string;
   jobTargetId?: string;
   retrievalRoute?: string;
-  answerSource?: "llm" | "question-bank" | "project-memory" | "other";
+  answerSource?: "llm" | "question-bank" | "project-qa" | "project-memory" | "other";
+  answerSourceMode?: string;
+  qaMatchLevel?: string;
+  claimGateDecision?: "allow" | "rewrite" | "partial" | "abstain";
+  blockedClaimCount?: number;
   llmRequestAt?: number;
   answerFinishedAt?: number;
 }

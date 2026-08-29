@@ -15,4 +15,10 @@ describe("project material source role inference", () => {
     expect(inferProjectSourceRole("notes.md", "# 问题排查\n低速抖动")).toBe("debug");
     expect(inferProjectSourceRole("notes.md", "普通会议记录")).toBe("other");
   });
+
+  it("keeps project question banks out of ordinary material roles", () => {
+    expect(inferProjectSourceRole("project-questions.md")).toBe("question_bank");
+    expect(inferProjectSourceRole("notes.md", "# 项目题库\n问题：ADC 怎么保证实时性？")).toBe("question_bank");
+    expect(inferProjectSourceRole("interview-notes.md")).not.toBe("question_bank");
+  });
 });

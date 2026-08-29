@@ -422,7 +422,14 @@ try {
       { filename: 'PROJECT_RESULTS.md', text: ['# 测试结果', '测试结果：低速运行稳定。', '性能指标：稳态误差 1%。', '限制：尚未完成正式 benchmark。'].join('\\n') }
     ];
     const batchReport = await window.interviewCopilot.knowledge.ingestProjectMaterials({ profileId: profile.id, projectId: project.id, knowledgeBaseId: base.id, files: materials.map((material) => ({ filename: material.filename, mimeType: 'text/markdown', bytes: new TextEncoder().encode(material.text), sourceRole: 'auto' })) });
-    if (batchReport.summary.assigned !== materials.length || batchReport.rebuild.status !== 'completed') throw new Error('batch project import failed: ' + JSON.stringify(batchReport));
+    if (batchReport.summary.assigned !== materials.length || batchReport.rebuild.status !== 'queued') throw new Error('batch project import failed: ' + JSON.stringify(batchReport));
+    const analysisDeadline = Date.now() + 30_000;
+    let analysisJob = await window.interviewCopilot.projectMemory.analysisJob(project.id);
+    while (analysisJob && !['completed', 'failed', 'cancelled'].includes(analysisJob.status) && Date.now() < analysisDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      analysisJob = await window.interviewCopilot.projectMemory.analysisJob(project.id);
+    }
+    if (analysisJob?.status !== 'completed') throw new Error('batch project analysis failed: ' + JSON.stringify({ batchReport, analysisJob }));
     const document = (await window.interviewCopilot.knowledge.listDocuments(base.id)).find((item) => item.id === batchReport.imported[0]?.documentId);
     const memory = await window.interviewCopilot.projectMemory.get(profile.id);
     const conflictCandidates = [
@@ -438,7 +445,7 @@ try {
     const understanding = currentMemory.understandings?.find((item) => item.projectId === project.id) ?? (currentMemory.understanding?.projectId === project.id ? currentMemory.understanding : undefined);
     return { document, batchReport, roles: batchReport.imported.map((item) => item.sourceRole), project: currentMemory.projects.find((item) => item.id === project.id), factCount: projectFacts.length, parameterFacts: projectFacts.filter((fact) => fact.type === 'parameter').map((fact) => ({ canonicalKey: fact.canonicalKey, value: fact.value, relation: fact.experienceRelation })), decisionFacts: projectFacts.filter((fact) => fact.type === 'technical_decision' || fact.type === 'decision').length, problemFacts: projectFacts.filter((fact) => ['challenge', 'cause', 'solution'].includes(fact.type)).length, stats, conflictGroups: conflictGroups.map((group) => ({ id: group.id, canonicalKey: group.canonicalKey, factIds: group.factIds })), understanding: understanding ? { status: understanding.status, summary: understanding.summary, components: understanding.architecture.components.map((item) => item.name), relationships: understanding.architecture.relationships.length, flows: [...understanding.runtimeFlows, ...understanding.dataFlows, ...understanding.controlFlows].map((item) => item.name), parameters: understanding.parameters.map((item) => item.semanticKey), unknowns: understanding.unknowns.length, trace: understanding.trace } : undefined };
   })()`);
-  if (projectSeed?.document?.documentType !== "project" || projectSeed?.batchReport?.summary?.assigned !== 5 || projectSeed.batchReport.rebuild.status !== "completed" || JSON.stringify(projectSeed.roles) !== JSON.stringify(["overview", "architecture", "architecture", "debug", "test"]) || !projectSeed?.project?.id || projectSeed.project.ownershipMode !== "personal" || projectSeed.factCount < 1 || !projectSeed.parameterFacts?.some((fact) => fact.canonicalKey === "control.current_loop.frequency" && fact.value?.value === 20_000 && fact.value?.unit === "Hz" && fact.relation === "configured") || projectSeed.parameterFacts?.filter((fact) => fact.canonicalKey === "control.current_loop.frequency" || fact.canonicalKey === "control.speed_loop.frequency" || fact.canonicalKey === "sampling.pwm.frequency").length !== 3 || projectSeed.decisionFacts < 1 || projectSeed.problemFacts < 3 || projectSeed.stats?.projectFamiliarityScore <= 0 || projectSeed.stats?.conflictGroups !== 1 || projectSeed.conflictGroups?.length !== 1 || projectSeed.conflictGroups[0]?.canonicalKey !== "mcu.main" || projectSeed.understanding?.status !== "completed" || projectSeed.understanding.summary.length < 40 || projectSeed.understanding.summary.includes("PROJECT_") || !projectSeed.understanding.components.includes("Motor Control") || !projectSeed.understanding.components.includes("Current Sampling") || projectSeed.understanding.relationships < 1 || projectSeed.understanding.flows.length < 1 || !projectSeed.understanding.parameters.includes("control.current_loop.frequency") || projectSeed.understanding.trace.toolCalls < 1) throw new Error(`Project Comprehension V6 semantic seed failed: ${JSON.stringify(projectSeed)}`);
+  if (projectSeed?.document?.documentType !== "project" || projectSeed?.batchReport?.summary?.assigned !== 5 || projectSeed.batchReport.rebuild.status !== "queued" || JSON.stringify(projectSeed.roles) !== JSON.stringify(["overview", "architecture", "architecture", "debug", "test"]) || !projectSeed?.project?.id || projectSeed.project.ownershipMode !== "personal" || projectSeed.factCount < 1 || !projectSeed.parameterFacts?.some((fact) => fact.canonicalKey === "control.current_loop.frequency" && fact.value?.value === 20_000 && fact.value?.unit === "Hz" && fact.relation === "configured") || projectSeed.parameterFacts?.filter((fact) => fact.canonicalKey === "control.current_loop.frequency" || fact.canonicalKey === "control.speed_loop.frequency" || fact.canonicalKey === "sampling.pwm.frequency").length !== 3 || projectSeed.decisionFacts < 1 || projectSeed.problemFacts < 3 || projectSeed.stats?.projectFamiliarityScore <= 0 || projectSeed.stats?.conflictGroups !== 1 || projectSeed.conflictGroups?.length !== 1 || projectSeed.conflictGroups[0]?.canonicalKey !== "mcu.main" || projectSeed.understanding?.status !== "completed" || projectSeed.understanding.summary.length < 40 || projectSeed.understanding.summary.includes("PROJECT_") || !projectSeed.understanding.components.includes("Motor Control") || !projectSeed.understanding.components.includes("Current Sampling") || projectSeed.understanding.relationships < 1 || projectSeed.understanding.flows.length < 1 || !projectSeed.understanding.parameters.includes("control.current_loop.frequency") || projectSeed.understanding.trace.toolCalls < 1) throw new Error(`Project Comprehension V6 semantic seed failed: ${JSON.stringify(projectSeed)}`);
   await main.evaluate("location.reload()");
   await waitFor(() => document.documentElement?.dataset.appReady === "true" && document.querySelectorAll("button").length > 0);
   await clickText("项目库");
@@ -453,7 +460,7 @@ try {
   if (projectLibraryState?.sourceCount !== 5 || projectLibraryState.factCount < 1 || projectLibraryState.parameterCount < 1 || projectLibraryState.decisionCount < 1 || projectLibraryState.problemCount < 1 || !projectLibraryState.summary.trim() || JSON.stringify(projectLibraryState.sourceRoles) !== JSON.stringify(["overview", "architecture", "architecture", "debug", "test"])) throw new Error(`PROJECT_LIBRARY_V5_1_BATCH_STATE failed: ${JSON.stringify(projectLibraryState)}`);
   const legacyProjectUi = await main.evaluate("({ legacyText: document.body.innerText.includes('PROJECT TECHNICAL MEMORY V4'), legacyNode: Boolean(document.querySelector('.project-v4-overview')), localSidebar: Boolean(document.querySelector('.project-local-sidebar')), duplicateBreadcrumb: document.querySelectorAll('.project-header-kicker').length })");
   if (legacyProjectUi?.legacyText || legacyProjectUi?.legacyNode || legacyProjectUi?.localSidebar || legacyProjectUi?.duplicateBreadcrumb) throw new Error(`PROJECT_LIBRARY_V5_UI_CLEANUP failed: ${JSON.stringify(legacyProjectUi)}`);
-  const requiredProjectTabs = ["概览", "关键参数", "技术架构", "决策与 Why", "问题排查", "面试题", "资料证据"];
+  const requiredProjectTabs = ["概览", "关键参数", "技术架构", "决策与 Why", "问题排查", "项目题库", "项目资料"];
   const missingProjectTabs = await main.evaluate(`(${JSON.stringify(requiredProjectTabs)}).filter((label) => !document.body.innerText.includes(label))`);
   if (missingProjectTabs?.length) throw new Error(`PROJECT_LIBRARY_V5_PRIMARY_NAV_MISSING: ${missingProjectTabs.join(", ")}`);
   const projectChrome = await main.evaluate(`({
@@ -495,7 +502,7 @@ try {
   await waitFor(() => document.body.innerText.includes("冲突"));
   await clickText("概览");
   await waitFor(() => Boolean(document.querySelector(".project-agent-composer textarea")));
-  await clickText("资料证据");
+  await clickText("项目资料");
   await waitFor(() => document.querySelectorAll(".project-source-list-v5 > button").length === 5);
   const sourceUi = await main.evaluate("(() => { const rows = [...document.querySelectorAll('.project-source-list-v5 > button')].map((item) => item.innerText); return { count: rows.length, hasOverview: rows.some((row) => row.includes('项目说明')), hasArchitecture: rows.filter((row) => row.includes('架构设计')).length, hasDebug: rows.some((row) => row.includes('问题排查')), hasTest: rows.some((row) => row.includes('测试与指标')), hasExtractedCount: rows.some((row) => /\\d+ 条信息/.test(row)) }; })()");
   if (sourceUi?.count !== 5 || !sourceUi.hasOverview || sourceUi.hasArchitecture !== 2 || !sourceUi.hasDebug || !sourceUi.hasTest || !sourceUi.hasExtractedCount) throw new Error(`PROJECT_SOURCE_SUMMARY_UI failed: ${JSON.stringify(sourceUi)}`);
@@ -596,8 +603,8 @@ try {
 
   const projectQuestionAssertions = [
     { question: "你的电流环频率多少？", markers: ["PROJECT_UNDERSTANDING_ROUTE=parameter", "control.current_loop.frequency", "20 kHz"], label: "EXACT_PARAMETER_RETRIEVAL" },
-    { question: "为什么要 PWM 中心对齐？", markers: ["PROJECT_UNDERSTANDING_ROUTE=decision", "TECHNICAL_DECISIONS", "PWM 中心对齐"], label: "TECHNICAL_DECISION_RETRIEVAL" },
-    { question: "低速抖动怎么查？", markers: ["PROJECT_UNDERSTANDING_ROUTE=problem", "PROBLEM_CHAINS", "低速抖动", "增量 delta + frame rebase"], label: "PROBLEM_CHAIN_RETRIEVAL" }
+    { question: "你这个项目里为什么要 PWM 中心对齐？", markers: ["PROJECT_UNDERSTANDING_ROUTE=decision", "TECHNICAL_DECISIONS", "PWM 中心对齐"], label: "TECHNICAL_DECISION_RETRIEVAL" },
+    { question: "你这个项目里低速抖动怎么查？", markers: ["PROJECT_UNDERSTANDING_ROUTE=problem", "PROBLEM_CHAINS", "低速抖动", "增量 delta + frame rebase"], label: "PROBLEM_CHAIN_RETRIEVAL" }
   ];
   // Let the three scheduled interview answers drain before injecting the
   // explicit project questions. This keeps the assertion about project
