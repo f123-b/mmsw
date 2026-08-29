@@ -27,12 +27,24 @@ describe("AnswerScheduler", () => {
     expect(scheduler.request({ id: "q1-revision", text: "为什么要使用 DMA？", relationType: "ASR_REVISION" }).action).toBe("start");
   });
 
-  it("keeps an augmentation in the serialized plan instead of cancelling", () => {
+  it("merges an augmentation into the active plan instead of queueing", () => {
     const scheduler = new AnswerScheduler();
     scheduler.request(q1, { now: 1_000 });
     const augmentation = scheduler.request({ id: "q2", text: "以及常见误区？", groupId: "g1", relationType: "SAME_QUESTION_AUGMENTATION" }, { relationType: "SAME_QUESTION_AUGMENTATION" });
     expect(augmentation.action).toBe("merge");
-    expect(scheduler.queueDepth).toBe(1);
+    expect(scheduler.queueDepth).toBe(0);
+    expect(scheduler.active?.plan.constraints).toContain("以及常见误区？");
+    expect(scheduler.metrics()).toMatchObject({ requestCount: 2, mergeCount: 1, answerPlanMergeRate: 0.5 });
     expect(scheduler.cancel("session_stop").cancelled).toBe(true);
+  });
+
+  it("queues a same-group follow-up after visible output without replacing the active plan", () => {
+    const scheduler = new AnswerScheduler();
+    scheduler.request(q1, { now: 1_000 });
+    scheduler.observeOutput("DMA 可以降低 CPU 参与搬运数据的开销。");
+    const followUp = scheduler.request({ id: "q3", text: "那函数传参呢？", groupId: "g1", relationType: "FOLLOW_UP" }, { relationType: "FOLLOW_UP" });
+    expect(followUp.action).toBe("queue");
+    expect(scheduler.active?.id).toBe("q1");
+    expect(scheduler.queue).toHaveLength(1);
   });
 });

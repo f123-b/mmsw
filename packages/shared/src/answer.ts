@@ -646,15 +646,17 @@ export interface StableAnswerSnapshot {
   pendingAnswerId?: string;
   pendingText: string;
   streaming: boolean;
+  /** Compatibility state for legacy consumers; visible answers are never removed. */
+  visibleAnswers: Array<{ answerId: string; text: string }>;
 }
 
 export class StableAnswerStateMachine {
-  private value: StableAnswerSnapshot = { displayedText: "", pendingText: "", streaming: false };
+  private value: StableAnswerSnapshot = { displayedText: "", pendingText: "", streaming: false, visibleAnswers: [] };
 
-  get snapshot(): StableAnswerSnapshot { return { ...this.value }; }
+  get snapshot(): StableAnswerSnapshot { return { ...this.value, visibleAnswers: this.value.visibleAnswers.map((answer) => ({ ...answer })) }; }
 
   reset(): StableAnswerSnapshot {
-    this.value = { displayedText: "", pendingText: "", streaming: false };
+    this.value = { displayedText: "", pendingText: "", streaming: false, visibleAnswers: [] };
     return this.snapshot;
   }
 
@@ -666,7 +668,8 @@ export class StableAnswerStateMachine {
       displayedAnswerId: this.value.displayedAnswerId,
       pendingAnswerId: answerId,
       pendingText: "",
-      streaming: true
+      streaming: true,
+      visibleAnswers: this.value.visibleAnswers
     };
     return this.snapshot;
   }
@@ -674,11 +677,15 @@ export class StableAnswerStateMachine {
   delta(answerId: string, delta: string): StableAnswerSnapshot {
     if (this.value.pendingAnswerId !== answerId || !delta) return this.snapshot;
     const pendingText = this.value.pendingText + delta;
+    const visibleAnswers = this.value.visibleAnswers.some((answer) => answer.answerId === answerId)
+      ? this.value.visibleAnswers.map((answer) => answer.answerId === answerId ? { ...answer, text: pendingText } : answer)
+      : [...this.value.visibleAnswers, { answerId, text: pendingText }];
     this.value = {
       ...this.value,
       pendingText,
       displayedText: pendingText,
-      displayedAnswerId: answerId
+      displayedAnswerId: answerId,
+      visibleAnswers
     };
     return this.snapshot;
   }
@@ -690,7 +697,10 @@ export class StableAnswerStateMachine {
       this.value = { ...this.value, pendingAnswerId: undefined, pendingText: "", streaming: false };
       return this.snapshot;
     }
-    this.value = { displayedText: finalText, displayedAnswerId: answerId, pendingText: "", streaming: false };
+    const visibleAnswers = this.value.visibleAnswers.some((answer) => answer.answerId === answerId)
+      ? this.value.visibleAnswers.map((answer) => answer.answerId === answerId ? { ...answer, text: finalText } : answer)
+      : [...this.value.visibleAnswers, { answerId, text: finalText }];
+    this.value = { displayedText: finalText, displayedAnswerId: answerId, pendingText: "", streaming: false, visibleAnswers };
     return this.snapshot;
   }
 

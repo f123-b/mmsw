@@ -3,6 +3,13 @@ import type { QuestionRelationType } from "./turn-builder";
 export type AnswerCancellationReason = "user" | "asr_revision" | "provider_timeout" | "session_stop";
 export type AnswerSchedulerAction = "start" | "queue" | "merge" | "ignore";
 
+export interface AnswerMergePlan {
+  question: string;
+  constraints: string[];
+  examples: string[];
+  subQuestions: string[];
+}
+
 export interface AnswerSchedulerQuestion {
   id: string;
   text: string;
@@ -14,6 +21,7 @@ export interface AnswerSchedulerActive extends AnswerSchedulerQuestion {
   startedAt: number;
   visibleText: string;
   hasVisibleOutput: boolean;
+  plan: AnswerMergePlan;
 }
 
 export interface AnswerSchedulerRequestOptions {
@@ -30,14 +38,46 @@ export interface AnswerSchedulerDecision {
   active?: AnswerSchedulerActive;
 }
 
+export interface AnswerSchedulerMetrics {
+  answerPlanMergeRate: number;
+  requestCount: number;
+  mergeCount: number;
+  queueCount: number;
+}
+
 const EFFECTIVE_OUTPUT_MIN_LENGTH = 8;
 
 function cloneQuestion(question: AnswerSchedulerQuestion): AnswerSchedulerQuestion {
   return { ...question };
 }
 
+function clonePlan(plan: AnswerMergePlan): AnswerMergePlan {
+  return { ...plan, constraints: [...plan.constraints], examples: [...plan.examples], subQuestions: [...plan.subQuestions] };
+}
+
 function hasEffectiveOutput(text: string): boolean {
   return text.replace(/[\s\p{P}\p{S}]/gu, "").length >= EFFECTIVE_OUTPUT_MIN_LENGTH;
+}
+
+function initialPlan(question: AnswerSchedulerQuestion): AnswerMergePlan {
+  return { question: question.text, constraints: [], examples: [], subQuestions: [] };
+}
+
+function mergeableRelation(relationType?: QuestionRelationType): boolean {
+  return relationType === "SAME_QUESTION_AUGMENTATION"
+    || relationType === "ANSWER_CONSTRAINT"
+    || relationType === "EXAMPLE"
+    || relationType === "PARALLEL_SUBQUESTION";
+}
+
+function mergePlan(plan: AnswerMergePlan, question: AnswerSchedulerQuestion): AnswerMergePlan {
+  const text = question.text.trim();
+  if (!text) return clonePlan(plan);
+  if (/^(?:比如|例如|举例|像是|像)\s*/.test(text)) return { ...clonePlan(plan), examples: [...plan.examples, text] };
+  if (question.relationType === "ANSWER_CONSTRAINT") return { ...clonePlan(plan), constraints: [...plan.constraints, text] };
+  if (question.relationType === "EXAMPLE") return { ...clonePlan(plan), examples: [...plan.examples, text] };
+  if (question.relationType === "PARALLEL_SUBQUESTION") return { ...clonePlan(plan), subQuestions: [...plan.subQuestions, text] };
+  return { ...clonePlan(plan), constraints: [...plan.constraints, text] };
 }
 
 /**
@@ -49,9 +89,12 @@ function hasEffectiveOutput(text: string): boolean {
 export class AnswerScheduler {
   private activeAnswer: AnswerSchedulerActive | undefined;
   private readonly queuedAnswers: AnswerSchedulerQuestion[] = [];
+  private requestCount = 0;
+  private mergeCount = 0;
+  private queueCount = 0;
 
   get active(): AnswerSchedulerActive | undefined {
-    return this.activeAnswer ? { ...this.activeAnswer } : undefined;
+    return this.activeAnswer ? { ...this.activeAnswer, plan: clonePlan(this.activeAnswer.plan) } : undefined;
   }
 
   get queue(): AnswerSchedulerQuestion[] {
@@ -63,6 +106,18 @@ export class AnswerScheduler {
   reset(): void {
     this.activeAnswer = undefined;
     this.queuedAnswers.length = 0;
+    this.requestCount = 0;
+    this.mergeCount = 0;
+    this.queueCount = 0;
+  }
+
+  metrics(): AnswerSchedulerMetrics {
+    return {
+      answerPlanMergeRate: this.requestCount ? this.mergeCount / this.requestCount : 0,
+      requestCount: this.requestCount,
+      mergeCount: this.mergeCount,
+      queueCount: this.queueCount
+    };
   }
 
   request(question: AnswerSchedulerQuestion, options: AnswerSchedulerRequestOptions = {}): AnswerSchedulerDecision {
@@ -71,6 +126,7 @@ export class AnswerScheduler {
       ...(options.groupId ? { groupId: options.groupId } : {}),
       ...(options.relationType ? { relationType: options.relationType } : {})
     };
+    this.requestCount += 1;
     if (this.activeAnswer?.id === enriched.id || this.queuedAnswers.some((candidate) => candidate.id === enriched.id)) {
       return { action: "ignore", question: cloneQuestion(enriched), reason: "duplicate-question", queueDepth: this.queueDepth, ...(this.active ? { active: this.active } : {}) };
     }
@@ -79,16 +135,20 @@ export class AnswerScheduler {
         ...enriched,
         startedAt: options.now ?? Date.now(),
         visibleText: "",
-        hasVisibleOutput: false
+        hasVisibleOutput: false,
+        plan: initialPlan(enriched)
       };
       return { action: "start", question: cloneQuestion(enriched), reason: "scheduler-idle", queueDepth: 0, active: this.active };
     }
-    // An augmentation can be represented by the same answer plan in a caller
-    // that supports plan mutation. This scheduler intentionally queues it as
-    // well so no sub-question is lost when the provider is already running.
-    const action: AnswerSchedulerAction = enriched.relationType === "SAME_QUESTION_AUGMENTATION" && !this.activeAnswer.hasVisibleOutput ? "merge" : "queue";
+    if (mergeableRelation(enriched.relationType) && !this.activeAnswer.hasVisibleOutput && enriched.groupId === this.activeAnswer.groupId) {
+      this.activeAnswer.plan = mergePlan(this.activeAnswer.plan, enriched);
+      this.mergeCount += 1;
+      return { action: "merge", question: cloneQuestion(enriched), reason: "augmentation-merged-before-visible-output", queueDepth: this.queueDepth, active: this.active };
+    }
+    const action: AnswerSchedulerAction = "queue";
     this.queuedAnswers.push(enriched);
-    return { action, question: cloneQuestion(enriched), reason: action === "merge" ? "augmentation-kept-with-active-plan" : "active-answer-protected", queueDepth: this.queueDepth, active: this.active };
+    this.queueCount += 1;
+    return { action, question: cloneQuestion(enriched), reason: "active-answer-protected", queueDepth: this.queueDepth, active: this.active };
   }
 
   observeOutput(delta: string): void {
@@ -122,7 +182,7 @@ export class AnswerScheduler {
     this.activeAnswer = undefined;
     const next = this.queuedAnswers.shift();
     if (next && options.activateNext !== false) {
-      this.activeAnswer = { ...next, startedAt: Date.now(), visibleText: "", hasVisibleOutput: false };
+      this.activeAnswer = { ...next, startedAt: Date.now(), visibleText: "", hasVisibleOutput: false, plan: initialPlan(next) };
     }
     return next ? cloneQuestion(next) : undefined;
   }
