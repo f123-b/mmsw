@@ -1,17 +1,18 @@
 export type HUDMode = "FULL" | "MINI" | "HIDDEN";
 export type HUDMouseMode = "interactive" | "passthrough";
+export type OverlayTransientLayer = "none" | "shortcut" | "end_confirm";
 
 export interface HUDState {
   running: boolean;
   panelVisible: boolean;
   transcriptVisible: boolean;
   answerVisible: boolean;
-  shortcutVisible: boolean;
+  transientLayer: OverlayTransientLayer;
   shareMode: boolean;
   topBarVisible: boolean;
   mouseMode: HUDMouseMode;
   mode: HUDMode;
-  previousVisualState?: Pick<HUDState, "panelVisible" | "transcriptVisible" | "answerVisible" | "shortcutVisible" | "topBarVisible" | "mode" | "mouseMode">;
+  previousVisualState?: Pick<HUDState, "panelVisible" | "transcriptVisible" | "answerVisible" | "transientLayer" | "topBarVisible" | "mode" | "mouseMode">;
 }
 
 export type HUDAction =
@@ -23,6 +24,7 @@ export type HUDAction =
   | { type: "toggle-transcript" }
   | { type: "toggle-answer" }
   | { type: "toggle-shortcuts" }
+  | { type: "set-transient-layer"; layer: OverlayTransientLayer }
   | { type: "set-share-mode"; enabled: boolean }
   | { type: "set-mouse-mode"; mode: HUDMouseMode };
 
@@ -31,7 +33,7 @@ export const initialHUDState: HUDState = {
   panelVisible: false,
   transcriptVisible: false,
   answerVisible: false,
-  shortcutVisible: false,
+  transientLayer: "none",
   shareMode: false,
   topBarVisible: false,
   mouseMode: "passthrough",
@@ -44,7 +46,7 @@ function fullState(state: HUDState): HUDState {
     panelVisible: true,
     transcriptVisible: true,
     answerVisible: true,
-    shortcutVisible: false,
+    transientLayer: "none",
     shareMode: false,
     topBarVisible: true,
     mode: "FULL",
@@ -61,10 +63,10 @@ export function reduceHUDState(state: HUDState, action: HUDAction): HUDState {
     case "show-all":
       return fullState({ ...state, running: true });
     case "hide-all":
-      return { ...state, panelVisible: false, transcriptVisible: false, answerVisible: false, shortcutVisible: false, topBarVisible: false, shareMode: false, mode: "HIDDEN", previousVisualState: undefined };
+      return { ...state, panelVisible: false, transcriptVisible: false, answerVisible: false, transientLayer: "none", topBarVisible: false, shareMode: false, mode: "HIDDEN", previousVisualState: undefined };
     case "toggle-panels":
       if (state.shareMode) return state;
-      if (state.mode === "FULL") return { ...state, panelVisible: false, transcriptVisible: false, answerVisible: false, shortcutVisible: false, mode: "MINI", topBarVisible: true };
+      if (state.mode === "FULL") return { ...state, panelVisible: false, transcriptVisible: false, answerVisible: false, transientLayer: "none", mode: "MINI", topBarVisible: true };
       return fullState({ ...state, running: true });
     case "toggle-transcript": {
       if (state.shareMode || !state.running) return state;
@@ -79,8 +81,11 @@ export function reduceHUDState(state: HUDState, action: HUDAction): HUDState {
       return { ...state, panelVisible, answerVisible, topBarVisible: true, mode: panelVisible ? "FULL" : "MINI" };
     }
     case "toggle-shortcuts":
-      if (state.shareMode || !state.running) return state;
-      return { ...state, shortcutVisible: !state.shortcutVisible };
+      if (state.shareMode || !state.running || state.transientLayer === "end_confirm") return state;
+      return { ...state, transientLayer: state.transientLayer === "shortcut" ? "none" : "shortcut" };
+    case "set-transient-layer":
+      if (state.shareMode && action.layer !== "none") return state;
+      return { ...state, transientLayer: action.layer };
     case "set-share-mode": {
       if (!state.running) return state;
       if (action.enabled && !state.shareMode) {
@@ -89,7 +94,7 @@ export function reduceHUDState(state: HUDState, action: HUDAction): HUDState {
           panelVisible: false,
           transcriptVisible: false,
           answerVisible: false,
-          shortcutVisible: false,
+          transientLayer: "none",
           topBarVisible: false,
           shareMode: true,
           mouseMode: "passthrough",
@@ -98,7 +103,7 @@ export function reduceHUDState(state: HUDState, action: HUDAction): HUDState {
             panelVisible: state.panelVisible,
             transcriptVisible: state.transcriptVisible,
             answerVisible: state.answerVisible,
-            shortcutVisible: state.shortcutVisible,
+            transientLayer: state.transientLayer,
             topBarVisible: state.topBarVisible,
             mode: state.mode,
             mouseMode: state.mouseMode
@@ -106,7 +111,7 @@ export function reduceHUDState(state: HUDState, action: HUDAction): HUDState {
         };
       }
       if (!action.enabled && state.shareMode) {
-        const previous = state.previousVisualState ?? { panelVisible: true, transcriptVisible: true, answerVisible: true, shortcutVisible: false, topBarVisible: true, mode: "FULL" as const, mouseMode: "passthrough" as const };
+        const previous = state.previousVisualState ?? { panelVisible: true, transcriptVisible: true, answerVisible: true, transientLayer: "none" as const, topBarVisible: true, mode: "FULL" as const, mouseMode: "passthrough" as const };
         return { ...state, ...previous, shareMode: false, previousVisualState: undefined };
       }
       return state;

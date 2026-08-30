@@ -2,6 +2,7 @@ import type { OverlayDisplayInfo } from "./overlay-manager";
 import type { OverlayPreferences } from "../shared/overlay-preferences";
 
 export type OverlayNativePanel = "question" | "answer" | "control";
+export type OverlayContentPanel = "question" | "answer";
 
 export interface OverlayNativeBounds {
   x: number;
@@ -14,6 +15,11 @@ export interface OverlayLayoutControllerOptions {
   display: Pick<OverlayDisplayInfo, "workArea">;
   defaults: { question: OverlayNativeBounds; answer: OverlayNativeBounds; control: OverlayNativeBounds };
 }
+
+export const OVERLAY_CONTENT_LIMITS: Record<OverlayContentPanel, { minHeight: number; maxHeight: number }> = {
+  question: { minHeight: 88, maxHeight: 280 },
+  answer: { minHeight: 132, maxHeight: 440 }
+};
 
 type OverlayGeometryPreferences = Pick<OverlayPreferences["questionWindow"], "x" | "y" | "width" | "height">;
 
@@ -34,8 +40,13 @@ export function clampOverlayBounds(bounds: OverlayNativeBounds, workArea: Overla
 
 export function clampOverlayPanelBounds(panel: OverlayNativePanel, bounds: OverlayNativeBounds, workArea: OverlayNativeBounds): OverlayNativeBounds {
   const minimumWidth = panel === "question" ? 220 : panel === "answer" ? 300 : 120;
-  const minimumHeight = panel === "question" ? 120 : panel === "answer" ? 150 : 36;
+  const minimumHeight = panel === "question" ? OVERLAY_CONTENT_LIMITS.question.minHeight : panel === "answer" ? OVERLAY_CONTENT_LIMITS.answer.minHeight : 36;
   return clampOverlayBounds(bounds, workArea, minimumWidth, minimumHeight);
+}
+
+export function contentDrivenHeight(panel: OverlayContentPanel, measuredHeight: number): number {
+  const limits = OVERLAY_CONTENT_LIMITS[panel];
+  return clamp(Math.round(measuredHeight), limits.minHeight, limits.maxHeight);
 }
 
 function resolvePanel(panel: OverlayNativePanel, preferences: OverlayGeometryPreferences, defaults: OverlayNativeBounds, workArea: OverlayNativeBounds): OverlayNativeBounds {

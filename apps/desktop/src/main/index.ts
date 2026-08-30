@@ -342,7 +342,7 @@ function verifyPreload(): boolean {
   return exists;
 }
 
-function attachRendererDiagnostics(window: BrowserWindow, windowName: "main" | "overlay" | "overlay-question" | "overlay-answer" | "overlay-control" | "overlay-confirm"): void {
+function attachRendererDiagnostics(window: BrowserWindow, windowName: "main" | "overlay" | "overlay-question" | "overlay-answer" | "overlay-control" | "overlay-transient"): void {
   window.webContents.on("did-start-loading", () => {
     appLogger?.info("RENDERER_LOAD_STARTED", { window: windowName });
   });
@@ -433,7 +433,7 @@ async function captureVisibleWindow(window: BrowserWindow): Promise<Buffer> {
 
 async function loadRenderer(window: BrowserWindow, overlay: false | OverlayWindowSurface = false): Promise<void> {
   const isOverlay = overlay !== false;
-  const windowMode = overlay === "control" ? "overlay-control" : overlay === "question" ? "overlay-question" : overlay === "answer" ? "overlay-answer" : overlay === "confirm" ? "overlay-confirm" : "main";
+  const windowMode = overlay === "control" ? "overlay-control" : overlay === "question" ? "overlay-question" : overlay === "answer" ? "overlay-answer" : overlay === "transient" ? "overlay-transient" : "main";
   const windowName = isOverlay ? windowMode : "main";
   attachRendererDiagnostics(window, windowName);
   appLogger?.info("RENDERER_LOAD_STARTED", { window: windowName });
@@ -503,12 +503,12 @@ function broadcast(channel: string, payload: unknown): void {
   broadcastToWindows(channel, payload);
 }
 
-function rendererWindowName(window: BrowserWindow | null): "main" | "overlay-question" | "overlay-answer" | "overlay-control" | "overlay-confirm" | "unknown" {
+function rendererWindowName(window: BrowserWindow | null): "main" | "overlay-question" | "overlay-answer" | "overlay-control" | "overlay-transient" | "unknown" {
   if (window && window === mainWindow) return "main";
   if (window && window === overlayManager?.currentQuestionWindow) return "overlay-question";
   if (window && window === overlayManager?.currentAnswerWindow) return "overlay-answer";
   if (window && window === overlayManager?.currentControlWindow) return "overlay-control";
-  if (window && window === overlayManager?.currentConfirmWindow) return "overlay-confirm";
+  if (window && window === overlayManager?.currentTransientWindow) return "overlay-transient";
   return "unknown";
 }
 
@@ -984,7 +984,7 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   await nativeRaiseWindow(controlWindow);
   const foregroundBeforeConfirm = await nativeForegroundWindow();
   await nativeMouseClick(endTarget.x, endTarget.y);
-  const confirmWindow = manager.currentConfirmWindow;
+  const confirmWindow = manager.currentTransientWindow;
   if (!confirmWindow) throw new Error("End confirmation window was not created after native ControlWindow click");
   await waitForRendererLoad(confirmWindow);
   await waitForRendererReady(confirmWindow);
@@ -1015,7 +1015,7 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
 
   const finalEndTarget = await elementCenter(controlWindow, ".toolbar-end-button");
   await nativeMouseClick(finalEndTarget.x, finalEndTarget.y);
-  const finalConfirmWindow = manager.currentConfirmWindow;
+  const finalConfirmWindow = manager.currentTransientWindow;
   if (!finalConfirmWindow) throw new Error("Final end confirmation window was not created");
   await waitForRendererReady(finalConfirmWindow);
   await waitForWindowVisible(finalConfirmWindow);
@@ -1683,6 +1683,10 @@ function registerIpc(): void {
      return true;
    });
    ipcMain.handle("overlay:toggle-shortcuts", () => { overlayManager?.toggleShortcuts(); return true; });
+   ipcMain.handle("overlay:content-size", (_event, panel: "question" | "answer", size: { width?: number; height?: number }) => {
+     if (!(["question", "answer"] as const).includes(panel) || !size || !Number.isFinite(size.height)) return false;
+     return overlayManager?.setContentSize(panel, size.height ?? 0) ?? false;
+   });
    ipcMain.handle("overlay:get-state", () => overlayManager?.hudState);
    ipcMain.handle("overlay:get-layout", () => overlayManager?.hudLayout);
    ipcMain.handle("overlay:get-displays", () => overlayManager?.getDisplays() ?? []);

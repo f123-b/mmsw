@@ -24,10 +24,6 @@ import type { InterviewExportResult } from "../main/history-export";
 import type { ProfileAnalysisJob } from "../main/profile-analysis-job";
 import type { InterviewStartupEvent } from "../main/interview-startup-timing";
 
-let latestOverlayDialogState: { endInterviewConfirmOpen: boolean } = { endInterviewConfirmOpen: false };
-ipcRenderer.on("overlay:dialog-state", (_event, state: { endInterviewConfirmOpen: boolean }) => {
-  latestOverlayDialogState = { endInterviewConfirmOpen: Boolean(state.endInterviewConfirmOpen) };
-});
 let latestOverlayLayoutEditMode: boolean | undefined;
 ipcRenderer.on("overlay:layout-edit-mode", (_event, enabled: boolean) => {
   latestOverlayLayoutEditMode = Boolean(enabled);
@@ -74,6 +70,7 @@ const api = {
     confirmEndInterview: (): Promise<boolean> => ipcRenderer.invoke("overlay:confirm-end"),
     resetLayout: () => ipcRenderer.invoke("overlay:reset-layout"),
     toggleShortcuts: () => ipcRenderer.invoke("overlay:toggle-shortcuts"),
+    reportContentSize: (panel: "question" | "answer", size: { width: number; height: number }): Promise<boolean> => ipcRenderer.invoke("overlay:content-size", panel, size),
     getState: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:get-state"),
     getLayout: (): Promise<HUDLayout | undefined> => ipcRenderer.invoke("overlay:get-layout"),
     getDisplays: (): Promise<OverlayDisplayInfo[]> => ipcRenderer.invoke("overlay:get-displays"),
@@ -323,12 +320,6 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, state: CaptureProtectionState) => listener(state);
       ipcRenderer.on("overlay:capture-protection", handler);
       return () => ipcRenderer.removeListener("overlay:capture-protection", handler);
-    },
-    onOverlayDialogState: (listener: (state: { endInterviewConfirmOpen: boolean }) => void) => {
-      const handler = (_event: Electron.IpcRendererEvent, state: { endInterviewConfirmOpen: boolean }) => listener(state);
-      ipcRenderer.on("overlay:dialog-state", handler);
-      listener(latestOverlayDialogState);
-      return () => ipcRenderer.removeListener("overlay:dialog-state", handler);
     },
     onShortcut: (listener: (shortcut: string) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, shortcut: string) => listener(shortcut);

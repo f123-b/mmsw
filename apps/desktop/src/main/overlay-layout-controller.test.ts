@@ -18,7 +18,7 @@ describe("OverlayLayoutController", () => {
     }, { display, defaults });
 
     expect(bounds.question).toEqual({ x: -1920, y: 0, width: 1920, height: 1040 });
-    expect(bounds.answer).toEqual({ x: -300, y: 890, width: 300, height: 150 });
+    expect(bounds.answer).toEqual({ x: -300, y: 900, width: 300, height: 132 });
     expect(bounds.control).toEqual({ x: -1020, y: 0, width: 1000, height: 36 });
   });
 

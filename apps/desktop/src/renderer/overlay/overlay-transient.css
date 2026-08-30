@@ -1,0 +1,50 @@
+.transient-overlay-root {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: start end;
+  padding: 0;
+  pointer-events: none;
+}
+
+.transient-card {
+  width: 100%;
+  color: rgba(248, 251, 255, .96);
+  font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
+  pointer-events: auto;
+  background: rgba(25, 37, 55, .94);
+  border: 1px solid rgba(255, 255, 255, .2);
+  border-radius: 12px;
+  box-shadow: 0 12px 28px rgba(8, 15, 26, .26);
+  backdrop-filter: blur(16px) saturate(125%);
+}
+
+.transient-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 38px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, .12);
+}
+
+.transient-header strong { font-size: 13px; font-weight: 600; }
+.transient-header button { width: 24px; height: 24px; border-radius: 6px; background: transparent; color: rgba(255, 255, 255, .72); font-size: 18px; line-height: 1; }
+.transient-header button:hover { background: rgba(255, 255, 255, .1); color: #fff; }
+
+.shortcut-actions { display: grid; gap: 2px; padding: 8px; }
+.shortcut-actions button { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; min-width: 0; min-height: 34px; padding: 7px 8px; border-radius: 7px; background: transparent; color: rgba(248, 251, 255, .9); text-align: left; white-space: nowrap; }
+.shortcut-actions button:hover { background: rgba(255, 255, 255, .1); }
+.shortcut-actions button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.shortcut-actions kbd { flex: 0 0 auto; border: 1px solid rgba(255, 255, 255, .2); border-radius: 5px; padding: 3px 5px; color: rgba(255, 255, 255, .68); font: 11px/1.1 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.shortcut-actions .shortcut-danger { color: #ffb7af; }
+
+.confirm-card { width: 100%; min-height: 100%; padding: 18px 20px; }
+.confirm-card > strong { display: block; font-size: 17px; }
+.confirm-card > p { margin: 7px 0 15px; color: rgba(219, 228, 240, .72); font-size: 12px; line-height: 1.45; }
+.transient-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.transient-actions button { min-width: 70px; border-radius: 7px; padding: 7px 11px; background: transparent; color: rgba(248, 251, 255, .88); }
+.transient-actions button:first-child { border: 1px solid rgba(255, 255, 255, .22); }
+.transient-actions button:hover { background: rgba(255, 255, 255, .1); }
+.transient-actions .confirm-danger { background: #d85f56; color: #fff; }
+.transient-actions .confirm-danger:hover { background: #e8756b; }

@@ -2,16 +2,17 @@ import { BrowserWindow, screen, type BrowserWindowConstructorOptions } from "ele
 import { join } from "node:path";
 import { applyOverlayMode, nextOverlayMode, type OverlayMode } from "./overlay-mode";
 import { applyCaptureProtection, getCaptureProtectionCapabilities, type CaptureProtectionCapabilities, type CaptureProtectionState } from "./overlay-capture-protection";
-import { initialHUDState, reduceHUDState, type HUDAction, type HUDState } from "./hud-state";
+import { initialHUDState, reduceHUDState, type HUDAction, type HUDState, type OverlayTransientLayer } from "./hud-state";
 import { calculateHUDLayout, type HUDLayout, type HUDWorkArea } from "./hud-layout";
 import { DEFAULT_OVERLAY_PREFERENCES, type MouseInteractionMode, type OverlayBehaviorPreferences, type OverlayPreferences, type WheelRoutingMode } from "../shared/overlay-preferences";
 import { initialOverlayLifecycleState, isOverlayLayoutEditing, reduceOverlayLifecycle, type OverlayLifecycleState } from "./overlay-lifecycle";
-import { clampOverlayPanelBounds, resolveOverlayNativeBounds, type OverlayNativeBounds, type OverlayNativePanel } from "./overlay-layout-controller";
+import { clampOverlayPanelBounds, contentDrivenHeight, resolveOverlayNativeBounds, type OverlayContentPanel, type OverlayNativeBounds, type OverlayNativePanel } from "./overlay-layout-controller";
 import type { InterviewStartupEvent } from "./interview-startup-timing";
 
 export { applyOverlayMode, nextOverlayMode } from "./overlay-mode";
 export type { OverlayMode, OverlayWindowLike } from "./overlay-mode";
-export type { OverlayNativeBounds, OverlayNativePanel } from "./overlay-layout-controller";
+export { contentDrivenHeight } from "./overlay-layout-controller";
+export type { OverlayContentPanel, OverlayNativeBounds, OverlayNativePanel } from "./overlay-layout-controller";
 export { getCaptureProtectionCapabilities } from "./overlay-capture-protection";
 export type { CaptureProtectionCapabilities, CaptureProtectionState } from "./overlay-capture-protection";
 export { initialHUDState, reduceHUDState } from "./hud-state";
@@ -28,7 +29,7 @@ export interface OverlayDisplayInfo {
   scaleFactor: number;
 }
 
-export type OverlayWindowSurface = "question" | "answer" | "control" | "confirm";
+export type OverlayWindowSurface = "question" | "answer" | "control" | "transient";
 
 export interface OverlayManagerOptions {
   preloadPath?: string;
@@ -56,10 +57,9 @@ type OverlayWindowMap = Record<OverlayNativePanel, BrowserWindow | undefined>;
 /** Owns the native overlay windows and their lifecycle. Renderers only render their panel. */
 export class OverlayManager {
   private windows: OverlayWindowMap = { question: undefined, answer: undefined, control: undefined };
-  private confirmWindowValue: BrowserWindow | undefined;
+  private transientWindowValue: BrowserWindow | undefined;
   private readonly rendererLoads = new Map<OverlayWindowSurface, Promise<void>>();
   private readonly rendererReady = new Set<OverlayWindowSurface>();
-  private endInterviewConfirmOpenValue = false;
   private mode: OverlayMode = "passive";
   private alwaysOnTop = true;
   private interactionMode: MouseInteractionMode = "click_through";
@@ -102,9 +102,11 @@ export class OverlayManager {
   get currentQuestionWindow(): BrowserWindow | undefined { return this.getWindow("question"); }
   get currentAnswerWindow(): BrowserWindow | undefined { return this.getWindow("answer"); }
   get currentControlWindow(): BrowserWindow | undefined { return this.getWindow("control"); }
-  get currentConfirmWindow(): BrowserWindow | undefined { const window = this.confirmWindowValue; return window && !window.isDestroyed() ? window : undefined; }
+  get currentTransientWindow(): BrowserWindow | undefined { const window = this.transientWindowValue; return window && !window.isDestroyed() ? window : undefined; }
+  /** Compatibility alias for callers that only know the old confirm surface. */
+  get currentConfirmWindow(): BrowserWindow | undefined { return this.currentTransientWindow; }
   get confirmWindowConfiguration(): ConfirmWindowConfiguration { return { frame: false, transparent: true, skipTaskbar: true, alwaysOnTop: true, hasShadow: false, focusable: true }; }
-  get endInterviewConfirmOpen(): boolean { return this.endInterviewConfirmOpenValue; }
+  get endInterviewConfirmOpen(): boolean { return this.hudStateValue.transientLayer === "end_confirm"; }
   get currentWindows(): BrowserWindow[] { return (["question", "answer", "control"] as const).map((panel) => this.getWindow(panel)).filter((window): window is BrowserWindow => Boolean(window)); }
   get captureProtection(): boolean { return this.captureProtectionEnabled; }
   get captureProtectionSupported(): boolean { return this.capabilities.captureProtectionSupported; }
@@ -136,32 +138,30 @@ export class OverlayManager {
   toggleAll(): void { this.transition({ type: "toggle-panels" }); }
   toggleTranscript(): void { this.transition({ type: "toggle-transcript" }); }
   toggleAnswer(): void { this.transition({ type: "toggle-answer" }); }
-  toggleShortcuts(): void { this.transition({ type: "toggle-shortcuts" }); }
+  toggleShortcuts(): void {
+    const layer: OverlayTransientLayer = this.hudStateValue.transientLayer === "shortcut" ? "none" : "shortcut";
+    this.setTransientLayer(layer);
+  }
   /** The confirmation dialog has its own native interactive owner. */
   requestEndInterviewConfirmation(): void {
-    const window = this.ensureConfirmWindow();
-    this.endInterviewConfirmOpenValue = true;
-    window.setBounds(this.confirmBounds(), false);
-    window.setFocusable(true);
-    window.setIgnoreMouseEvents(false);
-    window.showInactive();
-    window.webContents.send("overlay:dialog-state", { endInterviewConfirmOpen: true });
+    this.setTransientLayer("end_confirm");
   }
 
-  cancelEndInterviewConfirmation(): void { this.setEndInterviewConfirmation(false); }
-  confirmEndInterviewConfirmation(): void { this.setEndInterviewConfirmation(false); }
+  cancelEndInterviewConfirmation(): void { this.setTransientLayer("none"); }
+  confirmEndInterviewConfirmation(): void { this.setTransientLayer("none"); }
 
   async prepare(): Promise<void> {
     this.options.onStartupTiming?.("OVERLAY_PREPARE_BEGIN");
     this.ensureWindow("question");
     this.ensureWindow("answer");
     this.ensureWindow("control");
+    this.ensureTransientWindow();
     await Promise.all([...this.rendererLoads.values()]);
     this.applyNativeBounds();
     this.applyMode();
     this.applyCaptureProtection();
     this.hide();
-    this.setEndInterviewConfirmation(false);
+    this.setTransientLayer("none");
   }
 
   resetLayout(): void { this.applyNativeBounds(); }
@@ -191,6 +191,17 @@ export class OverlayManager {
     this.refreshLayout(display.workArea);
   }
 
+  setContentSize(panel: OverlayContentPanel, measuredHeight: number): boolean {
+    if (!Number.isFinite(measuredHeight)) return false;
+    const window = this.getWindow(panel);
+    if (!window || this.isLayoutEditMode) return false;
+    const current = window.getBounds();
+    const nextHeight = contentDrivenHeight(panel, measuredHeight);
+    if (current.height === nextHeight) return true;
+    window.setBounds({ ...current, height: nextHeight }, false);
+    return true;
+  }
+
 
   applyPreferences(preferences: Pick<OverlayBehaviorPreferences, "alwaysOnTop" | "interactionMode" | "mousePassthrough" | "wheelRouting" | "temporaryInteractionModifier">): void {
     this.alwaysOnTop = Boolean(preferences.alwaysOnTop);
@@ -198,7 +209,7 @@ export class OverlayManager {
     this.wheelRouting = preferences.wheelRouting ?? "overlay_under_cursor";
     this.temporaryInteractionModifier = preferences.temporaryInteractionModifier ?? "ctrl";
     for (const window of this.currentWindows) window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
-    this.currentConfirmWindow?.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
+    this.currentTransientWindow?.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
     if (!this.isLayoutEditMode) this.mode = this.interactionMode === "interactive" ? "interactive" : "passive";
     this.applyMode();
   }
@@ -257,6 +268,7 @@ export class OverlayManager {
     const questionWindow = this.ensureWindow("question");
     this.ensureWindow("answer");
     this.ensureWindow("control");
+    this.ensureTransientWindow();
     for (const panel of ["question", "answer", "control"] as const) {
       if (this.rendererReady.has(panel)) this.options.onStartupTiming?.(panel === "question" ? "QUESTION_RENDERER_READY" : panel === "answer" ? "ANSWER_RENDERER_READY" : "CONTROL_RENDERER_READY");
     }
@@ -270,10 +282,11 @@ export class OverlayManager {
         this.options.onStartupTiming?.(panel === "question" ? "QUESTION_VISIBLE" : panel === "answer" ? "ANSWER_VISIBLE" : "CONTROL_VISIBLE");
       }
     }
+    this.syncTransientWindow();
     return questionWindow;
   }
 
-  hide(): void { for (const window of this.currentWindows) window.hide(); this.currentConfirmWindow?.hide(); }
+  hide(): void { for (const window of this.currentWindows) window.hide(); this.currentTransientWindow?.hide(); }
   toggle(): void { if (this.currentWindows.some((window) => window.isVisible())) this.hide(); else this.show(); }
   setMode(mode: OverlayMode): void {
     this.mode = this.hudStateValue.shareMode ? "passive" : mode;
@@ -285,7 +298,7 @@ export class OverlayManager {
   setCaptureProtection(enabled: boolean): void { this.captureProtectionEnabled = enabled; this.applyCaptureProtection(); }
   applyCaptureProtection(): void {
     let state = this.captureProtectionState;
-    for (const window of this.currentWindows) state = applyCaptureProtection(window, this.captureProtectionEnabled, this.capabilities, this.options.onCaptureProtectionDiagnostic);
+    for (const window of this.allWindows()) state = applyCaptureProtection(window, this.captureProtectionEnabled, this.capabilities, this.options.onCaptureProtectionDiagnostic);
     this.captureProtectionState = state;
     this.sendToWindows("overlay:capture-protection", state);
   }
@@ -299,11 +312,10 @@ export class OverlayManager {
     this.lifecycleState = initialOverlayLifecycleState;
     for (const panel of ["question", "answer", "control"] as const) this.getWindow(panel)?.destroy();
     this.windows = { question: undefined, answer: undefined, control: undefined };
-    this.currentConfirmWindow?.destroy();
-    this.confirmWindowValue = undefined;
+    this.currentTransientWindow?.destroy();
+    this.transientWindowValue = undefined;
     this.rendererLoads.clear();
     this.rendererReady.clear();
-    this.endInterviewConfirmOpenValue = false;
     this.hudStateValue = { ...initialHUDState };
   }
 
@@ -315,6 +327,12 @@ export class OverlayManager {
     if (questionWindow) { applyOverlayMode(questionWindow, interactiveContent ? "interactive" : "passive"); questionWindow.setResizable(this.isLayoutEditMode); questionWindow.webContents.send("overlay:mode", interactiveContent ? "interactive" : "passive"); }
     if (answerWindow) { applyOverlayMode(answerWindow, interactiveContent ? "interactive" : "passive"); answerWindow.setResizable(this.isLayoutEditMode); answerWindow.webContents.send("overlay:mode", interactiveContent ? "interactive" : "passive"); }
     if (controlWindow) { applyOverlayMode(controlWindow, "interactive"); controlWindow.setResizable(this.isLayoutEditMode); controlWindow.webContents.send("overlay:mode", "interactive"); }
+    const transientWindow = this.currentTransientWindow;
+    if (transientWindow) {
+      applyOverlayMode(transientWindow, this.hudStateValue.transientLayer === "none" ? "passive" : "interactive");
+      transientWindow.setResizable(false);
+      transientWindow.webContents.send("overlay:mode", this.hudStateValue.transientLayer === "none" ? "passive" : "interactive");
+    }
     this.sendHudState();
   }
 
@@ -329,10 +347,11 @@ export class OverlayManager {
     this.currentAnswerWindow?.webContents.send("overlay:layout", this.hudLayoutValue);
     const controlWindow = this.currentControlWindow;
     if (controlWindow) controlWindow.webContents.send("overlay:layout", { ...this.hudLayoutValue, toolbar: { x: 0, y: 0, width: controlWindow.getBounds().width, height: controlWindow.getBounds().height }, shortcuts: { x: 0, y: 0, width: 0, height: 0 } });
+    this.syncTransientWindow();
   }
   private sendPanelCommand(command: OverlayPanelCommand): void { this.sendToWindows("overlay:command", command); }
   private sendLayoutEditMode(): void { this.sendToWindows("overlay:layout-edit-mode", this.isLayoutEditMode); }
-  private sendToWindows(channel: string, payload: unknown): void { for (const window of this.currentWindows) if (!window.webContents.isDestroyed()) window.webContents.send(channel, payload); }
+  private sendToWindows(channel: string, payload: unknown): void { for (const window of this.allWindows()) if (!window.webContents.isDestroyed()) window.webContents.send(channel, payload); }
 
   private ensureWindow(panel: OverlayNativePanel): BrowserWindow {
     const existing = this.getWindow(panel);
@@ -351,36 +370,61 @@ export class OverlayManager {
     return window;
   }
 
-  private ensureConfirmWindow(): BrowserWindow {
-    const existing = this.currentConfirmWindow;
+  private ensureTransientWindow(): BrowserWindow {
+    const existing = this.currentTransientWindow;
     if (existing) return existing;
-    const configuration: BrowserWindowConstructorOptions = { ...this.confirmBounds(), title: "Interview Copilot Confirm", frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false } };
+    const configuration: BrowserWindowConstructorOptions = { ...this.transientBounds("shortcut"), title: "Interview Copilot Transient", frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false } };
     const window = new BrowserWindow(configuration);
-    this.confirmWindowValue = window;
+    this.transientWindowValue = window;
     window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
-    const load = Promise.resolve(this.options.loadRenderer(window, "confirm")).then(() => { this.rendererReady.add("confirm"); }).catch(() => undefined);
-    this.rendererLoads.set("confirm", load);
-    window.once("ready-to-show", () => { window.setFocusable(true); window.setIgnoreMouseEvents(false); window.webContents.send("overlay:dialog-state", { endInterviewConfirmOpen: this.endInterviewConfirmOpenValue }); });
-    window.on("closed", () => { if (this.confirmWindowValue === window) this.confirmWindowValue = undefined; this.rendererLoads.delete("confirm"); this.rendererReady.delete("confirm"); });
+    const load = Promise.resolve(this.options.loadRenderer(window, "transient")).then(() => { this.rendererReady.add("transient"); }).catch(() => undefined);
+    this.rendererLoads.set("transient", load);
+    window.once("ready-to-show", () => { this.syncTransientWindow(); this.applyCaptureProtection(); this.sendHudState(); });
+    window.on("closed", () => { if (this.transientWindowValue === window) this.transientWindowValue = undefined; this.rendererLoads.delete("transient"); this.rendererReady.delete("transient"); });
     return window;
   }
 
-  private setEndInterviewConfirmation(open: boolean): void {
-    this.endInterviewConfirmOpenValue = open;
-    const window = this.currentConfirmWindow;
-    if (!window) return;
-    window.webContents.send("overlay:dialog-state", { endInterviewConfirmOpen: open });
-    if (open) window.showInactive(); else window.hide();
+  private setTransientLayer(layer: OverlayTransientLayer): void {
+    if (layer !== "none") this.ensureTransientWindow();
+    this.transition({ type: "set-transient-layer", layer });
+    this.syncTransientWindow();
   }
 
-  private confirmBounds(): Electron.Rectangle {
+  private syncTransientWindow(): void {
+    const window = this.currentTransientWindow;
+    if (!window) return;
+    const layer = this.hudStateValue.transientLayer;
+    if (layer === "none" || this.hudStateValue.shareMode || !this.hudStateValue.running) {
+      window.hide();
+      return;
+    }
+    window.setBounds(this.transientBounds(layer), false);
+    window.setFocusable(true);
+    window.setIgnoreMouseEvents(false);
+    window.webContents.send("overlay:transient-layer", layer);
+    window.showInactive();
+  }
+
+  private transientBounds(layer: Exclude<OverlayTransientLayer, "none">): Electron.Rectangle {
     const workArea = this.targetDisplay().workArea;
-    const width = 420;
-    const height = 170;
-    return { x: workArea.x + Math.round((workArea.width - width) / 2), y: workArea.y + Math.round((workArea.height - height) / 2), width, height };
+    if (layer === "end_confirm") {
+      const width = 420;
+      const height = 170;
+      return { x: workArea.x + Math.round((workArea.width - width) / 2), y: workArea.y + Math.round((workArea.height - height) / 2), width, height };
+    }
+    const control = this.currentControlWindow?.getBounds() ?? this.nativeBounds("control");
+    const width = 292;
+    const height = 250;
+    return {
+      x: Math.max(workArea.x + 8, Math.min(control.x + control.width - width, workArea.x + workArea.width - width - 8)),
+      y: Math.max(workArea.y + 8, Math.min(control.y + control.height + 8, workArea.y + workArea.height - height - 8)),
+      width,
+      height
+    };
   }
 
   private getWindow(panel: OverlayNativePanel): BrowserWindow | undefined { const window = this.windows[panel]; return window && !window.isDestroyed() ? window : undefined; }
+  private allWindows(): BrowserWindow[] { return [...this.currentWindows, ...(this.currentTransientWindow ? [this.currentTransientWindow] : [])]; }
 
   private applyNativeBounds(): void {
     const bounds = this.nativeBounds();

@@ -47,6 +47,7 @@ declare global {
         confirmEndInterview(): Promise<boolean>;
         resetLayout(): Promise<boolean>;
         toggleShortcuts(): Promise<boolean>;
+        reportContentSize(panel: "question" | "answer", size: { width: number; height: number }): Promise<boolean>;
         getState(): Promise<HUDState | undefined>;
         getLayout(): Promise<HUDLayout | undefined>;
         getDisplays(): Promise<OverlayDisplayInfo[]>;
@@ -250,7 +251,6 @@ declare global {
         onOverlayPreferences(listener: (preferences: OverlayPreferences) => void): () => void;
         onOverlayCommand(listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end") => void): () => void;
         onOverlayCaptureProtection(listener: (state: CaptureProtectionState) => void): () => void;
-        onOverlayDialogState(listener: (state: { endInterviewConfirmOpen: boolean }) => void): () => void;
         onShortcut(listener: (shortcut: string) => void): () => void;
         onAudioProcess(listener: (state: AudioProcessState) => void): () => void;
         onScreenshot(listener: (result: ScreenshotResult) => void): () => void;

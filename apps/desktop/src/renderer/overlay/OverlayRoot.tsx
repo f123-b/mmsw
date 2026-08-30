@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type JSX } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type JSX, type RefObject } from "react";
 import type { AnswerThread } from "@interview-copilot/shared";
 import type { HUDLayout, HUDState, OverlayMode } from "../../main/overlay-manager";
 import { DEFAULT_OVERLAY_PREFERENCES, type OverlayPreferences } from "../../shared/overlay-preferences";
@@ -6,10 +6,11 @@ import { followModeAfterScroll, newContentBadgeLabel, shouldAutoFollowLatest, ty
 import { applyLayoutPreset, boundsForPanel, clampDesignerRect, resizeDesignerRect, snapDesignerRect, type DesignerPanel, type ResizeHandle } from "./overlay-designer";
 import { OVERLAY_LABELS } from "./overlay-labels";
 import { isDisplayableQuestionGroup, primaryRuntimeStatus, type RuntimePhaseState } from "./runtime-state";
+import { buildAnswerOverlayViewModel, buildQuestionOverlayViewModel, type AnswerOverlayViewModel, type QuestionOverlayViewModel } from "./view-models";
 
 type HudState = "IDLE" | "LISTENING" | "QUESTION_DETECTED" | "GENERATING" | "ANSWER_READY" | "PAUSED" | "ERROR";
-type PanelKey = "toolbar" | "transcript" | "answer" | "shortcuts";
-export type OverlaySurface = "content" | "question" | "answer" | "control";
+type PanelKey = "toolbar" | "transcript" | "answer";
+export type OverlaySurface = "content" | "question" | "answer" | "control" | "transient";
 export type OverlayPanelLayout = { x: number; y: number; width: number; height: number; visible: boolean; collapsed: boolean; locked: boolean; opacity: number };
 type PanelLayout = OverlayPanelLayout;
 type OverlayLayout = Record<PanelKey, PanelLayout>;
@@ -62,7 +63,6 @@ const defaults: OverlayLayout = {
   toolbar: { x: 0, y: 80, width: 680, height: 50, visible: true, collapsed: false, locked: true, opacity: 1 },
   transcript: { x: 0, y: 320, width: 394, height: 406, visible: true, collapsed: false, locked: false, opacity: 1 },
   answer: { x: 410, y: 320, width: 670, height: 406, visible: true, collapsed: false, locked: false, opacity: 1 },
-  shortcuts: { x: 24, y: 0, width: 320, height: 360, visible: false, collapsed: false, locked: false, opacity: 1 }
 };
 
 function clampNumber(value: number, minimum: number, maximum: number): number {
@@ -75,15 +75,14 @@ function viewportDefaults(preferences = DEFAULT_OVERLAY_PREFERENCES, surface: Ov
       ...defaults,
       toolbar: { ...defaults.toolbar, x: 0, y: 0, width: window.innerWidth, height: window.innerHeight },
       transcript: { ...defaults.transcript, visible: false },
-      answer: { ...defaults.answer, visible: false },
-      shortcuts: { ...defaults.shortcuts, visible: false }
+      answer: { ...defaults.answer, visible: false }
     };
   }
   if (surface === "question") {
-    return { ...defaults, toolbar: { ...defaults.toolbar, visible: false }, transcript: { ...defaults.transcript, x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }, answer: { ...defaults.answer, visible: false }, shortcuts: { ...defaults.shortcuts, visible: false } };
+    return { ...defaults, toolbar: { ...defaults.toolbar, visible: false }, transcript: { ...defaults.transcript, x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }, answer: { ...defaults.answer, visible: false } };
   }
   if (surface === "answer") {
-    return { ...defaults, toolbar: { ...defaults.toolbar, visible: false }, transcript: { ...defaults.transcript, visible: false }, answer: { ...defaults.answer, x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }, shortcuts: { ...defaults.shortcuts, visible: false } };
+    return { ...defaults, toolbar: { ...defaults.toolbar, visible: false }, transcript: { ...defaults.transcript, visible: false }, answer: { ...defaults.answer, x: 0, y: 0, width: window.innerWidth, height: window.innerHeight } };
   }
   const resolved = applyLayoutPreset(preferences.layoutPreset, { workArea: { width: window.innerWidth, height: window.innerHeight } }, {
     questionWindow: { x: preferences.questionWindow.x ?? 120, y: preferences.questionWindow.y ?? 180, width: preferences.questionWindow.width, height: preferences.questionWindow.height },
@@ -96,12 +95,10 @@ function viewportDefaults(preferences = DEFAULT_OVERLAY_PREFERENCES, surface: Ov
     toolbar: { ...defaults.toolbar, x: resolved.controlBar.x, y: resolved.controlBar.y, width: resolved.controlBar.width, height: resolved.controlBar.height },
     transcript: { ...defaults.transcript, x: resolved.questionWindow.x, y: resolved.questionWindow.y, width: resolved.questionWindow.width, height: resolved.questionWindow.height },
     answer: { ...defaults.answer, x: resolved.answerWindow.x, y: resolved.answerWindow.y, width: resolved.answerWindow.width, height: resolved.answerWindow.height },
-    shortcuts: { ...defaults.shortcuts, y: Math.max(0, window.innerHeight - 360 - 24) }
   };
 }
 
 function clampLayout(panel: PanelKey, layout: PanelLayout): PanelLayout {
-  if (panel === "shortcuts") return { ...layout, width: Math.max(260, Math.min(layout.width, Math.max(260, window.innerWidth - 16))), height: Math.max(120, Math.min(layout.height, Math.max(120, window.innerHeight - 16))), x: Math.max(8, Math.min(layout.x, Math.max(8, window.innerWidth - layout.width - 8))), y: Math.max(8, Math.min(layout.y, Math.max(8, window.innerHeight - layout.height - 8))) };
   const designerPanel: DesignerPanel = panel === "transcript" ? "question" : panel === "answer" ? "answer" : "controlBar";
   const next = clampDesignerRect({ x: layout.x, y: layout.y, width: layout.width, height: layout.height }, { width: window.innerWidth, height: window.innerHeight }, boundsForPanel(designerPanel));
   return { ...layout, ...next };
@@ -135,7 +132,7 @@ function useOverlayLayout(preferences: OverlayPreferences, surface?: OverlaySurf
   useEffect(() => {
     setLayout((current) => {
       const next = viewportDefaults(preferences, surface);
-      const merged = { ...current, transcript: { ...next.transcript }, answer: { ...next.answer }, toolbar: { ...current.toolbar, ...next.toolbar }, shortcuts: { ...current.shortcuts, ...next.shortcuts } };
+      const merged = { ...current, transcript: { ...next.transcript }, answer: { ...next.answer }, toolbar: { ...current.toolbar, ...next.toolbar } };
       layoutRef.current = merged;
       return merged;
     });
@@ -273,6 +270,39 @@ function compactQuestionText(text: string | undefined, limit = 180): string {
   return `${normalized.slice(0, Math.max(1, limit - 1)).trimEnd()}…`;
 }
 
+function useNativeContentSize(panel: "question" | "answer" | undefined, targetRef: RefObject<HTMLElement | null>, enabled: boolean): void {
+  useEffect(() => {
+    if (!panel || !enabled || !targetRef.current) return undefined;
+    const target = targetRef.current;
+    let raf = 0;
+    let timer: number | undefined;
+    let lastHeight = 0;
+    const report = () => {
+      timer = undefined;
+      const rect = target.getBoundingClientRect();
+      const height = Math.max(rect.height, target.scrollHeight);
+      if (lastHeight && Math.abs(height - lastHeight) < 8) return;
+      lastHeight = height;
+      void window.interviewCopilot.overlay.reportContentSize(panel, { width: rect.width, height });
+    };
+    const schedule = () => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        if (timer !== undefined) window.clearTimeout(timer);
+        timer = window.setTimeout(report, 120);
+      });
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(target);
+    schedule();
+    return () => {
+      observer.disconnect();
+      if (raf) cancelAnimationFrame(raf);
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [enabled, panel, targetRef]);
+}
+
 function questionItemLabel(type: string): string {
   if (type === "TOPIC_FRAGMENT") return "上下文";
   if (type === "ANSWER_CONSTRAINT") return "回答要求";
@@ -285,6 +315,28 @@ function questionItemLabel(type: string): string {
 
 function visibleQuestionDetails(group: OverlayGroup): OverlayGroup["items"] {
   return group.items.filter((item) => item.type === "ANSWER_CONSTRAINT" || item.type === "EXAMPLE" || item.type === "SAME_QUESTION_AUGMENTATION");
+}
+
+function QuestionOverlayContent({ groups, viewModel, onSelectQuestion }: { groups: OverlayGroup[]; viewModel: QuestionOverlayViewModel; onSelectQuestion: (questionId: string) => void }): JSX.Element {
+  const active = groups.find((group) => group.id === viewModel.activeGroupId);
+  const older = groups.filter((group) => isDisplayableQuestionGroup(group) && group.id !== viewModel.activeGroupId).reverse();
+  const activeQuestion = active?.items.find((item) => item.answerable);
+  return <section className="overlay-panel-card question-card question-overlay-content" data-overlay-content="question" aria-label="当前问题">
+    <div className="overlay-content-status"><span className="content-status-dot" />{viewModel.status === "detected" ? "已识别" : "正在听取"}</div>
+    <p className="current-question-text">{compactQuestionText(viewModel.currentQuestion, 260)}</p>
+    {viewModel.currentFollowUp && <div className="current-follow-up"><span>追问</span><strong>{compactQuestionText(viewModel.currentFollowUp, 220)}</strong></div>}
+    {activeQuestion && viewModel.currentQuestion && <button type="button" className="question-content-select" onClick={() => onSelectQuestion(activeQuestion.questionId)} aria-label="选择当前问题">查看回答</button>}
+    {viewModel.hasHistory && <details className="overlay-history"><summary>历史 {viewModel.historyCount}</summary>{older.map((group) => <button type="button" className="overlay-history-item" key={group.id} onClick={() => { const item = group.items.find((candidate) => candidate.answerable); if (item) onSelectQuestion(item.questionId); }}><span>{compactQuestionText(group.primaryQuestion ?? group.title, 180)}</span></button>)}</details>}
+  </section>;
+}
+
+function AnswerOverlayContent({ viewModel }: { viewModel: AnswerOverlayViewModel }): JSX.Element {
+  return <section className="overlay-panel-card answer-card answer-overlay-content" data-overlay-content="answer" aria-label="当前回答">
+    {viewModel.question && <p className="answer-context-question">{compactQuestionText(viewModel.question, 220)}</p>}
+    <div className={`answer-content-status ${viewModel.streaming ? "generating" : ""}`}><span className="content-status-dot" />{viewModel.streaming ? "生成中" : viewModel.answer ? "" : "等待回答"}</div>
+    <div className="answer-core">{viewModel.answer ? <AnswerCore text={viewModel.answer} /> : <p className="overlay-empty">等待回答</p>}{viewModel.streaming && <span className="answer-cursor">▌</span>}</div>
+    {viewModel.hasOlderAnswers && <details className="overlay-history"><summary>历史回答 {viewModel.olderAnswerCount}</summary></details>}
+  </section>;
 }
 
 function QuestionThreadPanel({ groups, activeGroupId, followLatestPreference, showStatus, onSelectQuestion }: { groups: OverlayRootProps["questionGroups"]; activeGroupId?: string; followLatestPreference: boolean; showStatus: boolean; onSelectQuestion: (questionId: string) => void }): JSX.Element {
@@ -421,15 +473,11 @@ function ToolbarIcon({ name }: { name: "eye" | "eye-off" | "glasses" | "keyboard
   return <svg {...common}><rect x="6" y="6" width="12" height="12" rx="2" /></svg>;
 }
 
-function ShortcutPopover({ writtenTestMode, onAnswerLatest, onAnswerScreenshot, onHideAll, onToggleMode, onToggleAutomation, onResetLayout, onEndInterview, onClose }: { writtenTestMode: boolean; onAnswerLatest: () => Promise<void>; onAnswerScreenshot: () => Promise<void>; onHideAll: () => void; onToggleMode: () => void; onToggleAutomation: () => void; onResetLayout: () => void; onEndInterview: () => void; onClose: () => void }): JSX.Element {
-  return <section className="shortcut-card" role="dialog" aria-label="快捷操作"><header><div><span className="panel-kicker">快捷操作</span><strong>快捷操作</strong></div><button onClick={onClose} aria-label="关闭快捷操作">×</button></header><div className="shortcut-actions">{!writtenTestMode && <button onClick={() => void onAnswerLatest()}><span>回答最新问题</span><kbd>Ctrl + Alt + A</kbd></button>}<button onClick={() => void onAnswerScreenshot()}><span>截图识别并回答</span><kbd>Ctrl + Alt + S</kbd></button>{!writtenTestMode && <div className="shortcut-static"><span>截图识别并回答（仅手动模式）</span><kbd>鼠标中键</kbd></div>}<button onClick={onHideAll}><span>显示 / 隐藏全部悬浮窗</span><kbd>Ctrl + Alt + D</kbd></button><button onClick={onClose}><span>显示 / 隐藏快捷操作</span><kbd>Ctrl + Alt + K</kbd></button><button onClick={onEndInterview}><span>{writtenTestMode ? "结束笔试" : "结束面试"}</span><kbd>Ctrl + Alt + Q</kbd></button>{!writtenTestMode && <button onClick={onToggleAutomation}><span>自动 / 手动回答</span><kbd>Ctrl + Alt + X</kbd></button>}<button onClick={onToggleMode}><span>交互 / 穿透模式</span><kbd>Ctrl + Alt + P</kbd></button>{!writtenTestMode && <><div className="shortcut-static"><span>切换面试官记录</span><kbd>Ctrl + Alt + 1–8</kbd></div><div className="shortcut-static"><span>滚动回答面板</span><kbd>Ctrl + Alt + ↑↓</kbd></div></>}<button onClick={onResetLayout}><span>恢复默认布局</span></button></div></section>;
-}
-
 export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   const panel = props.panel ?? "all";
   const runtimePhases = props.runtimePhases;
   const activeAnswerGroupId = props.activeAnswerGroupId;
-  const { surface, state, sessionState, realtimeState, operationMode, overlayMode, hudState: sharedHUDState, automationMode, question, answerText, answerStreaming, questionGroups, activeQuestionGroupId, answerThreads, onToggleMode, onToggleAutomation, onAnswerLatest, onAnswerScreenshot, onEndInterview, onHideAll, onTogglePanels, onToggleTranscript, onToggleAnswer, onToggleShortcuts, onRequestEndInterview, captureProtectionEnabled, captureProtectionSupported, captureProtectionOsFlagApplied, captureProtectionDisplayVerified, captureProtectionLastError, captureTest } = props;
+  const { surface, state, sessionState, realtimeState, operationMode, overlayMode, hudState: sharedHUDState, automationMode, question, answerText, answerStreaming, questionGroups, activeQuestionGroupId, answerThreads, onAnswerScreenshot, onToggleTranscript, onToggleAnswer, captureProtectionEnabled, captureProtectionSupported, captureProtectionOsFlagApplied, captureProtectionDisplayVerified, captureProtectionLastError, captureTest } = props;
   const nativeSurface = surface ?? "content";
   // Question and answer windows use the content rendering policy but each
   // receives only its own panel. This keeps the legacy all-in-one surface
@@ -444,6 +492,7 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   const [layoutEditMode, setLayoutEditMode] = useState(false);
   const displayMeta = useRef<{ displayId?: number; scaleFactor?: number }>({});
   const [runtimeProtection, setRuntimeProtection] = useState<{ requested: boolean; osFlagApplied: boolean; displayCaptureVerified: boolean | null; lastError?: string }>();
+  const nativeContentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!sharedHUDState.running) {
       setElapsedSeconds(0);
@@ -501,11 +550,13 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   const visualHidden = (!sharedHUDState.running && !layoutEditMode) || sharedHUDState.shareMode;
   const transcriptVisible = overlaySurface !== "control" && panel !== "answer" && preferences.showTranscript && (layoutEditMode || sharedHUDState.transcriptVisible) && !visualHidden;
   const answerVisible = overlaySurface !== "control" && panel !== "question" && preferences.showAnswer && (layoutEditMode || sharedHUDState.answerVisible) && !visualHidden;
-  const shortcutVisible = (nativeSurface === "content" || nativeSurface === "question") && panel !== "answer" && sharedHUDState.shortcutVisible && !visualHidden;
   const displayedQuestionGroups = layoutEditMode && questionGroups.length === 0 ? DESIGNER_QUESTION_GROUPS : questionGroups;
   const displayedAnswerThreads = layoutEditMode && answerThreads.length === 0 ? DESIGNER_ANSWER_THREADS : answerThreads;
   const displayedQuestion = layoutEditMode && !question ? { text: "CAN 总线是什么？" } : question;
   const displayedAnswerText = layoutEditMode && !answerText ? "CAN 使用基于 ID 的逐位仲裁，显性位会覆盖隐性位，适合可靠的实时通信。" : answerText;
+  const questionViewModel = buildQuestionOverlayViewModel(displayedQuestionGroups, activeQuestionGroupId, displayedQuestion?.text);
+  const answerViewModel = buildAnswerOverlayViewModel(displayedAnswerThreads, activeAnswerGroupId, displayedQuestion?.text, displayedAnswerText, answerStreaming);
+  useNativeContentSize(nativeSurface === "question" ? "question" : nativeSurface === "answer" ? "answer" : undefined, nativeContentRef, !layoutEditMode && !visualHidden);
   const questionVisual = visualWindowPreferences(preferences, preferences.questionWindow);
   const answerVisual = visualWindowPreferences(preferences, preferences.answerWindow);
   const toolbarVisual = visualWindowPreferences(preferences, preferences.controlBar);
@@ -542,10 +593,12 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   } as CSSProperties;
   return <main className="overlay-root" style={appearanceStyle} data-overlay-surface={overlaySurface} data-hud-state={status} data-hud-mode={sharedHUDState.mode} data-share-mode={sharedHUDState.shareMode ? "on" : "off"} data-overlay-mode={overlayMode} data-operation-mode={operationMode} data-compact-header={preferences.behavior.compactHeader ? "on" : "off"} data-layout-edit-mode={layoutEditMode ? "on" : "off"} data-interaction-mode={preferences.behavior.interactionMode} data-wheel-routing={preferences.behavior.wheelRouting} data-appearance-mode={preferences.appearance.mode}>
     {captureTest && !visualHidden && <div className="capture-test-marker">CAPTURE_PROTECTION_TEST_MARKER_7F32</div>}
-      {preferences.showToolbar && nativeSurface === "content" && (layoutEditMode || sharedHUDState.topBarVisible) && !visualHidden && <DraggableResizablePanel panel="toolbar" layout={{ ...layout.toolbar, visible: true, locked: !layoutEditMode }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className={`toolbar-panel ${preferences.controlBar.orientation === "vertical" ? "toolbar-vertical" : ""}`}><div className="floating-toolbar hud-interactive-region" role="toolbar" aria-label={writtenTestMode ? "笔试控制栏" : "面试控制栏"}><span className="toolbar-audio-mark" aria-hidden="true"><ToolbarIcon name="waveform" /></span><div className="toolbar-runtime"><span>{layoutEditMode ? "00:24" : elapsedLabel}</span></div><span className="toolbar-divider" aria-hidden="true" /><div className={`toolbar-status-inline ${statusMeta.tone}`}><i aria-hidden="true" /><span>{listeningLabel}{answerReadyLabel && <small className="toolbar-answer-indicator"> · {answerReadyLabel}</small>}</span></div>{!writtenTestMode && <div className="toolbar-mode-switch" role="group" aria-label="回答模式"><button className={automationMode === "AUTO" ? "selected" : ""} onClick={() => { if (automationMode !== "AUTO") void onToggleAutomation(); }}>自动</button><button className={automationMode === "MANUAL" ? "selected" : ""} onClick={() => { if (automationMode !== "MANUAL") void onToggleAutomation(); }}>手动</button></div>}{preferences.showTranscript && <button className={`toolbar-inline-action toolbar-panel-toggle ${transcriptVisible ? "active" : "inactive"}`} onClick={onToggleTranscript} title={transcriptVisible ? "隐藏已识别问题" : "显示已识别问题"} aria-label={transcriptVisible ? "隐藏已识别问题" : "显示已识别问题"} aria-pressed={transcriptVisible}><ToolbarIcon name="panel-left" /></button>}{preferences.showAnswer && <button className={`toolbar-inline-action toolbar-panel-toggle ${answerVisible ? "active" : "inactive"}`} onClick={onToggleAnswer} title={answerVisible ? "隐藏AI回答" : "显示AI回答"} aria-label={answerVisible ? "隐藏AI回答" : "显示AI回答"} aria-pressed={answerVisible}><ToolbarIcon name="panel-right" /></button>}<button className="toolbar-inline-action toolbar-shortcut-toggle" onClick={onToggleShortcuts} title="打开快捷操作" aria-label="打开快捷操作"><ToolbarIcon name="keyboard" /></button><button className="toolbar-end-button" onClick={onRequestEndInterview} title={writtenTestMode ? "结束笔试 Ctrl+Alt+Q" : "结束面试 Ctrl+Alt+Q"} aria-label={writtenTestMode ? "结束笔试" : "结束面试"}>{writtenTestMode ? "结束笔试" : "结束面试"}</button></div></DraggableResizablePanel>}
-      {transcriptVisible && !writtenTestMode && <DraggableResizablePanel panel="transcript" nativePanel={nativeSurface === "question" ? "question" : undefined} layout={{ ...layout.transcript, visible: true, locked: !layoutEditMode && (layout.transcript.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="question-panel"><section className="overlay-panel-card question-card overlay-content" aria-label={OVERLAY_LABELS.questionNavigator}><header><div><span className="panel-kicker">{OVERLAY_LABELS.questionNavigator}</span><strong>{OVERLAY_LABELS.questionNavigator}</strong></div></header><QuestionThreadPanel groups={displayedQuestionGroups} activeGroupId={layoutEditMode && questionGroups.length === 0 ? DESIGNER_QUESTION_GROUPS[0].id : activeQuestionGroupId} followLatestPreference={preferences.behavior.followLatestQuestion} showStatus={preferences.behavior.showQuestionStatus} onSelectQuestion={setSelectedQuestionId} /></section></DraggableResizablePanel>}
-      {answerVisible && <DraggableResizablePanel panel="answer" nativePanel={nativeSurface === "answer" ? "answer" : undefined} layout={{ ...layout.answer, visible: true, locked: !layoutEditMode && (layout.answer.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="answer-panel"><section className="overlay-panel-card answer-card overlay-content" aria-label={OVERLAY_LABELS.answerReader}><header><div><span className="panel-kicker">{OVERLAY_LABELS.answerReader}</span><strong>{OVERLAY_LABELS.answerReader}</strong></div>{preferences.behavior.showAnswerStatus && (answerStreaming || displayedAnswerText) && <span className={`answer-ready ${answerStreaming ? "generating" : ""}`}>{answerStreaming ? "生成中" : "回答已就绪"}</span>}</header><AnswerThreadPanel threads={displayedAnswerThreads} activeGroupId={layoutEditMode && answerThreads.length === 0 ? DESIGNER_ANSWER_THREADS[0].groupId : activeAnswerGroupId} fallbackText={displayedAnswerText} fallbackQuestion={displayedQuestion?.text} streaming={answerStreaming} followLatestPreference={preferences.behavior.followLatestAnswer} selectedQuestionId={selectedQuestionId} />{writtenTestMode ? <div className="written-test-action hud-interactive-region"><span>按 Ctrl+Alt+S 截取当前题目</span><button onClick={() => void submitScreenshot()} disabled={answerSending}>截图回答</button></div> : <div className="overlay-answer-actions hud-interactive-region"><button onClick={() => void submitScreenshot()} disabled={answerSending}>截图回答</button></div>}</section></DraggableResizablePanel>}
-    {shortcutVisible && <DraggableResizablePanel panel="shortcuts" layout={{ ...layout.shortcuts, visible: true }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="shortcut-panel"><div className="hud-interactive-region"><ShortcutPopover writtenTestMode={writtenTestMode} onAnswerLatest={onAnswerLatest} onAnswerScreenshot={onAnswerScreenshot} onHideAll={onHideAll} onToggleMode={onToggleMode} onToggleAutomation={() => void onToggleAutomation()} onResetLayout={() => void window.interviewCopilot.overlay.resetLayout()} onEndInterview={onRequestEndInterview} onClose={onToggleShortcuts} /></div></DraggableResizablePanel>}
+      {transcriptVisible && !writtenTestMode && (nativeSurface === "question" && !layoutEditMode
+        ? <div ref={nativeContentRef} className="native-content-window question-panel"><QuestionOverlayContent groups={displayedQuestionGroups} viewModel={questionViewModel} onSelectQuestion={setSelectedQuestionId} /></div>
+        : <DraggableResizablePanel panel="transcript" nativePanel={nativeSurface === "question" ? "question" : undefined} layout={{ ...layout.transcript, visible: true, locked: !layoutEditMode && (layout.transcript.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="question-panel"><QuestionOverlayContent groups={displayedQuestionGroups} viewModel={questionViewModel} onSelectQuestion={setSelectedQuestionId} /></DraggableResizablePanel>)}
+      {answerVisible && (nativeSurface === "answer" && !layoutEditMode
+        ? <div ref={nativeContentRef} className="native-content-window answer-panel"><AnswerOverlayContent viewModel={answerViewModel} /></div>
+        : <DraggableResizablePanel panel="answer" nativePanel={nativeSurface === "answer" ? "answer" : undefined} layout={{ ...layout.answer, visible: true, locked: !layoutEditMode && (layout.answer.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="answer-panel"><div className="answer-content-stack"><AnswerOverlayContent viewModel={answerViewModel} />{writtenTestMode && <div className="written-test-action hud-interactive-region"><span>按 Ctrl+Alt+S 截取当前题目</span><button onClick={() => void submitScreenshot()} disabled={answerSending}>截图回答</button></div>}</div></DraggableResizablePanel>)}
     {layoutEditMode && !visualHidden && <div className="layout-edit-toolbar hud-interactive-region"><span>布局编辑模式 · Alt 临时关闭吸附 · Esc 退出</span><button onClick={() => void window.interviewCopilot.overlay.finishLayoutEditMode()}>完成布局</button></div>}
     {!visualHidden && <div className={`hud-protection-indicator ${protectionTone}`} title={!effectiveProtectionSupported ? "当前平台不支持 Windows Capture Protection" : effectiveLastError ? "Windows protection flag 失败" : effectiveDisplayVerified === true ? "Display Capture Verified" : effectiveProtectionEnabled ? "Windows protection on" : "Windows protection off"}>{effectiveProtectionSupported ? "◈" : "·"}</div>}
   </main>;
