@@ -189,7 +189,7 @@ const sharedWindowDefaults = {
 
 const questionWindow = {
   width: 420,
-  height: 620,
+  height: 500,
   fontSize: 14,
   ...sharedWindowDefaults,
   fontWeight: 600 as OverlayFontWeight,
@@ -199,13 +199,13 @@ const questionWindow = {
 
 const dialogueWindow = {
   ...questionWindow,
-  width: 460,
+  width: 420,
   fontWeight: 400 as OverlayFontWeight
 };
 
 const answerWindow = {
   width: 680,
-  height: 620,
+  height: 500,
   fontSize: 14,
   ...sharedWindowDefaults,
   lineHeight: 1.62,
@@ -249,8 +249,8 @@ export const DEFAULT_OVERLAY_PREFERENCES: OverlayPreferences = {
   },
   writtenTest: {
     layoutPreset: "single_reader",
-    questionWindow: { ...answerWindow, width: 900, height: 640 },
-    answerWindow: { ...answerWindow, width: 700, height: 640 },
+    questionWindow: { ...answerWindow, width: 920, height: 560 },
+    answerWindow: { ...answerWindow, width: 700, height: 560 },
     controlBar: { ...controlBar, width: 360 },
     showAnswer: true
   },

@@ -395,6 +395,17 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
   const legacyControl = { ...objectValue(DEFAULT_OVERLAY_PREFERENCES.interview.controlBar), ...objectValue(raw.controlBar) };
   const interviewQuestion = { ...legacyQuestion, ...objectValue(interviewInput.questionWindow) };
   const interviewDialogue = { ...legacyQuestion, ...objectValue(interviewInput.dialogueWindow) };
+  const hasGeometry = (value: Record<string, unknown>) => ["x", "y", "width", "height", "displayId", "scaleFactor"].some((key) => Object.prototype.hasOwnProperty.call(value, key));
+  // questionWindow is the canonical left-window geometry. Older v4 data may
+  // only have dialogueWindow, so use that as the one-time compatibility
+  // source and normalize both aliases to the same geometry below.
+  const canonicalInterviewLeft = hasGeometry(interviewQuestion)
+    ? interviewQuestion
+    : hasGeometry(interviewDialogue)
+      ? interviewDialogue
+      : interviewQuestion;
+  const leftGeometry = (value: Record<string, unknown>) => Object.fromEntries(["x", "y", "width", "height", "displayId", "scaleFactor"].filter((key) => Object.prototype.hasOwnProperty.call(value, key)).map((key) => [key, value[key]]));
+  const interviewDialogueAlias = { ...interviewDialogue, ...leftGeometry(canonicalInterviewLeft) };
   const interviewAnswer = { ...legacyAnswer, ...objectValue(interviewInput.answerWindow) };
   const interviewControl = { ...legacyControl, ...objectValue(interviewInput.controlBar) };
   const writtenQuestion = { ...objectValue(DEFAULT_OVERLAY_PREFERENCES.writtenTest.questionWindow), ...legacyAnswer, ...objectValue(writtenInput.questionWindow) };
@@ -425,8 +436,8 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
     interview: {
       layoutPreset: enumValue(interviewInput.layoutPreset ?? (input.layoutPreset ? legacyInterviewPreset(input.layoutPreset) : undefined), ["classic_split", "compact_split", "answer_focus", "minimal"] as const, DEFAULT_OVERLAY_PREFERENCES.interview.layoutPreset),
       leftPanel: enumValue(interviewInput.leftPanel, ["dialogue", "question", "hidden"] as const, input.showTranscript === false ? "hidden" : DEFAULT_OVERLAY_PREFERENCES.interview.leftPanel) as InterviewLeftPanelMode,
-      questionWindow: windowPreferences(interviewQuestion, { ...DEFAULT_OVERLAY_PREFERENCES.interview.questionWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "question"),
-      dialogueWindow: windowPreferences(interviewDialogue, { ...DEFAULT_OVERLAY_PREFERENCES.interview.dialogueWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "dialogue"),
+      questionWindow: windowPreferences(canonicalInterviewLeft, { ...DEFAULT_OVERLAY_PREFERENCES.interview.questionWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "question"),
+      dialogueWindow: windowPreferences(interviewDialogueAlias, { ...DEFAULT_OVERLAY_PREFERENCES.interview.dialogueWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "dialogue"),
       answerWindow: windowPreferences(interviewAnswer, { ...DEFAULT_OVERLAY_PREFERENCES.interview.answerWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "answer"),
       controlBar: control(interviewControl, { ...DEFAULT_OVERLAY_PREFERENCES.interview.controlBar, backgroundOpacity, backgroundColor, textColor: fontColor }),
       showAnswer: flag(interviewInput.showAnswer ?? input.showAnswer, DEFAULT_OVERLAY_PREFERENCES.interview.showAnswer)
@@ -504,17 +515,15 @@ export class OverlaySettingsStore {
       : {};
     const interviewInput = input.interview ?? {};
     const writtenInput = input.writtenTest ?? {};
-    const interviewGeometryChanged = [interviewInput.questionWindow, interviewInput.dialogueWindow, interviewInput.answerWindow, interviewInput.controlBar].some((window) => window && ["x", "y", "width", "height"].some((key) => Object.prototype.hasOwnProperty.call(window, key)));
-    const manualInterviewPreset = interviewInput.layoutPreset === undefined && interviewGeometryChanged ? { layoutPreset: "minimal" as const } : {};
+    const leftGeometryPatch = interviewInput.questionWindow ?? interviewInput.dialogueWindow ?? {};
     const next = normalizeOverlayPreferences({
       ...current,
       ...input,
       interview: {
         ...current.interview,
         ...interviewInput,
-        ...manualInterviewPreset,
-        questionWindow: { ...current.interview.questionWindow, ...(interviewInput.questionWindow ?? {}) },
-        dialogueWindow: { ...current.interview.dialogueWindow, ...(interviewInput.dialogueWindow ?? {}) },
+        questionWindow: { ...current.interview.questionWindow, ...leftGeometryPatch },
+        dialogueWindow: { ...current.interview.dialogueWindow, ...leftGeometryPatch },
         answerWindow: { ...current.interview.answerWindow, ...(interviewInput.answerWindow ?? {}) },
         controlBar: { ...current.interview.controlBar, ...(interviewInput.controlBar ?? {}) }
       },

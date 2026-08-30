@@ -159,9 +159,9 @@ describe("OverlaySettingsStore", () => {
       database.run("INSERT INTO app_state(key, value) VALUES (?, ?)", ["overlay.preferences", JSON.stringify({ backgroundOpacity: 0, backgroundColor: "#102030", fontColor: "#ffffff", fontSize: 10, width: 900, height: 0 })]);
       const preferences = new OverlaySettingsStore(database).getPreferences();
       expect(preferences.schemaVersion).toBe(4);
-      expect(preferences.interview.questionWindow).toMatchObject({ width: 900, height: 620, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
-      expect(preferences.interview.answerWindow).toMatchObject({ width: 900, height: 620, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
-      expect(preferences.writtenTest.questionWindow).toMatchObject({ width: 900, height: 640, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
+      expect(preferences.interview.questionWindow).toMatchObject({ width: 900, height: 500, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
+      expect(preferences.interview.answerWindow).toMatchObject({ width: 900, height: 500, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
+      expect(preferences.writtenTest.questionWindow).toMatchObject({ width: 900, height: 560, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
       expect(preferences.behavior.interactionMode).toBe("click_through");
       expect(preferences.appearance.mode).toBe("glass");
       expect(new OverlaySettingsStore(database).setPreferences({ behavior: { mousePassthrough: true } }).behavior.interactionMode).toBe("click_through");
@@ -193,6 +193,31 @@ describe("OverlaySettingsStore", () => {
       expect(preferences.schemaVersion).toBe(4);
       expect(preferences.interview.layoutPreset).toBe("classic_split");
       expect(preferences.interview.controlBar).toMatchObject({ width: 680, height: 50 });
+    } finally { database.close(); }
+  });
+
+  it("normalizes an old dialogue-only v4 layout to canonical question geometry", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      database.run("INSERT INTO app_state(key, value) VALUES (?, ?)", ["overlay.preferences", JSON.stringify({ schemaVersion: 4, interview: { layoutPreset: "classic_split", leftPanel: "dialogue", dialogueWindow: { x: 120, y: 80, width: 440, height: 510, displayId: 7, scaleFactor: 1.25 } }, writtenTest: { layoutPreset: "single_reader" } })]);
+      const preferences = new OverlaySettingsStore(database).getPreferences();
+      expect(preferences.interview.questionWindow).toMatchObject({ x: 120, y: 80, width: 440, height: 510, displayId: 7, scaleFactor: 1.25 });
+      expect(preferences.interview.dialogueWindow).toMatchObject({ x: 120, y: 80, width: 440, height: 510, displayId: 7, scaleFactor: 1.25 });
+    } finally { database.close(); }
+  });
+
+  it("persists display selection independently for interview and written-test layouts", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      const next = settings.setPreferences({
+        interview: { questionWindow: { displayId: 1, scaleFactor: 1 }, answerWindow: { displayId: 1, scaleFactor: 1 }, controlBar: { displayId: 1, scaleFactor: 1 } },
+        writtenTest: { questionWindow: { displayId: 2, scaleFactor: 1.25 }, answerWindow: { displayId: 2, scaleFactor: 1.25 }, controlBar: { displayId: 2, scaleFactor: 1.25 } }
+      });
+      expect(next.interview.questionWindow.displayId).toBe(1);
+      expect(next.interview.answerWindow.displayId).toBe(1);
+      expect(next.writtenTest.questionWindow.displayId).toBe(2);
+      expect(next.writtenTest.answerWindow.scaleFactor).toBe(1.25);
     } finally { database.close(); }
   });
 
@@ -232,12 +257,15 @@ describe("OverlaySettingsStore", () => {
     }
   });
 
-  it("marks a manual geometry edit as custom while preserving preset-generated saves", async () => {
+  it("keeps the selected preset while manual geometry becomes the runtime source of truth", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
       const settings = new OverlaySettingsStore(database);
       expect(settings.setPreferences({ interview: { layoutPreset: "classic_split" } }).interview.layoutPreset).toBe("classic_split");
-      expect(settings.setPreferences({ interview: { answerWindow: { x: 640 } } }).interview.layoutPreset).toBe("minimal");
+      const edited = settings.setPreferences({ interview: { questionWindow: { x: 640, width: 444 } } });
+      expect(edited.interview.layoutPreset).toBe("classic_split");
+      expect(edited.interview.questionWindow).toMatchObject({ x: 640, width: 444 });
+      expect(edited.interview.dialogueWindow).toMatchObject({ x: 640, width: 444 });
       expect(settings.setPreferences({ interview: { layoutPreset: "answer_focus", answerWindow: { x: 700, width: 940 } } }).interview.layoutPreset).toBe("answer_focus");
     } finally { database.close(); }
   });

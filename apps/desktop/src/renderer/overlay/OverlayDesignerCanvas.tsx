@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react";
 import type { OverlayPreferences, OverlayPreferencesPatch } from "../../shared/overlay-preferences";
+import { resolveOverlayPersistedGeometry, toRelativeOverlayBounds } from "../../shared/overlay-layout";
 import type { OverlayDisplayInfo } from "../../main/overlay-manager";
 import { OVERLAY_LABELS } from "./overlay-labels";
-import { ANSWER_DESIGNER_BOUNDS, CONTROL_BAR_DESIGNER_BOUNDS, QUESTION_DESIGNER_BOUNDS, applyLayoutPreset, boundsForPanel, clampDesignerRect, resolveWrittenTestLayoutPreset, resizeDesignerRectFromPointer, type DesignerCanvas, type DesignerLayout, type DesignerPanel, type DesignerRect, type ResizeHandle } from "./overlay-designer";
+import { ANSWER_DESIGNER_BOUNDS, CONTROL_BAR_DESIGNER_BOUNDS, QUESTION_DESIGNER_BOUNDS, boundsForPanel, clampDesignerRect, resizeDesignerRectFromPointer, type DesignerCanvas, type DesignerLayout, type DesignerPanel, type DesignerRect, type ResizeHandle } from "./overlay-designer";
 import { LayoutInspector } from "./OverlayInspector";
 
 export const DESIGNER_CANVAS: DesignerCanvas = { width: 1920, height: 1080 };
@@ -10,14 +11,9 @@ export type OverlayDesignerMode = "interview" | "writtenTest";
 
 function designerLayoutFromPreferences(value: OverlayPreferences, canvas: DesignerCanvas, mode: OverlayDesignerMode): DesignerLayout {
   const source = mode === "writtenTest" ? value.writtenTest : value.interview;
-  const resolved = mode === "writtenTest" ? resolveWrittenTestLayoutPreset(value.writtenTest.layoutPreset, { workArea: canvas }) : applyLayoutPreset(value.interview.layoutPreset, { workArea: canvas }, {
-    questionWindow: { x: source.questionWindow.x ?? 120, y: source.questionWindow.y ?? 180, width: source.questionWindow.width, height: source.questionWindow.height },
-    answerWindow: { x: source.answerWindow.x ?? 570, y: source.answerWindow.y ?? 180, width: source.answerWindow.width, height: source.answerWindow.height },
-    controlBar: { x: source.controlBar.x ?? 620, y: source.controlBar.y ?? 24, width: source.controlBar.width, height: source.controlBar.height },
-    controlBarOrientation: source.controlBar.orientation,
-    controlBarPositionMode: source.controlBar.positionMode
-  });
-  return { question: resolved.questionWindow, answer: resolved.answerWindow, controlBar: resolved.controlBar };
+  const workArea = { x: 0, y: 0, width: canvas.width, height: canvas.height };
+  const resolved = resolveOverlayPersistedGeometry({ mode: mode === "writtenTest" ? "written_test" : "interview", preset: source.layoutPreset, workArea, questionWindow: source.questionWindow, answerWindow: source.answerWindow, controlBar: source.controlBar });
+  return { question: toRelativeOverlayBounds(resolved.question, workArea), answer: toRelativeOverlayBounds(resolved.answer, workArea), controlBar: toRelativeOverlayBounds(resolved.control, workArea) };
 }
 
 function previewBackgroundStyle(background: OverlayPreferences["previewBackground"], customColor: string): CSSProperties {
@@ -74,8 +70,15 @@ export function OverlayDesignerCanvas({ value, mode = "interview", onChange, dis
   const draggingRef = useRef(false);
   useEffect(() => { if (!draggingRef.current) { const next = designerLayoutFromPreferences(value, screenSize, mode); layoutRef.current = next; setLayout(next); } }, [mode, screenSize.width, screenSize.height, value.interview.layoutPreset, value.interview.questionWindow.x, value.interview.questionWindow.y, value.interview.questionWindow.width, value.interview.questionWindow.height, value.interview.answerWindow.x, value.interview.answerWindow.y, value.interview.answerWindow.width, value.interview.answerWindow.height, value.interview.controlBar.x, value.interview.controlBar.y, value.interview.controlBar.width, value.interview.controlBar.height, value.interview.controlBar.orientation, value.interview.controlBar.positionMode, value.writtenTest.layoutPreset, value.writtenTest.questionWindow.x, value.writtenTest.questionWindow.y, value.writtenTest.questionWindow.width, value.writtenTest.questionWindow.height, value.writtenTest.answerWindow.x, value.writtenTest.answerWindow.y, value.writtenTest.answerWindow.width, value.writtenTest.answerWindow.height, value.writtenTest.controlBar.x, value.writtenTest.controlBar.y, value.writtenTest.controlBar.width, value.writtenTest.controlBar.height, value.writtenTest.controlBar.orientation, value.writtenTest.controlBar.positionMode]);
   useEffect(() => { if (!activeDisplay) return; setSelectedDisplayId(activeDisplay.id); setScreenSize({ width: activeDisplay.workArea.width, height: activeDisplay.workArea.height }); }, [activeDisplay?.id, activeDisplay?.workArea.width, activeDisplay?.workArea.height]);
+  useEffect(() => {
+    if (selectedDisplayId === undefined || selectedDisplayId < 0) return;
+    const selectedDisplay = displays.find((display) => display.id === selectedDisplayId);
+    if (!selectedDisplay) return;
+    const displayFields = { displayId: selectedDisplay.id, scaleFactor: selectedDisplay.scaleFactor };
+    onChange({ [mode]: mode === "writtenTest" ? { questionWindow: displayFields, answerWindow: displayFields, controlBar: displayFields } : { questionWindow: displayFields, dialogueWindow: displayFields, answerWindow: displayFields, controlBar: displayFields } } as OverlayPreferencesPatch);
+  }, [selectedDisplayId, mode, displays]);
   const updateLayout = (next: DesignerLayout) => { draggingRef.current = true; layoutRef.current = next; setLayout(next); };
-  const commit = () => { draggingRef.current = false; const next = layoutRef.current; const currentControl = mode === "writtenTest" ? value.writtenTest.controlBar : value.interview.controlBar; const leftWindow = { x: next.question.x, y: next.question.y, width: next.question.width, height: next.question.height }; const section = { questionWindow: leftWindow, ...(mode === "interview" ? { dialogueWindow: leftWindow } : {}), answerWindow: { x: next.answer.x, y: next.answer.y, width: next.answer.width, height: next.answer.height }, controlBar: { x: next.controlBar.x, y: next.controlBar.y, width: next.controlBar.width, height: next.controlBar.height, positionMode: "custom" as const, orientation: currentControl.orientation } }; onChange({ [mode]: section } as OverlayPreferencesPatch); };
+  const commit = () => { draggingRef.current = false; const next = layoutRef.current; const currentControl = mode === "writtenTest" ? value.writtenTest.controlBar : value.interview.controlBar; const selectedDisplay = displays.find((display) => display.id === selectedDisplayId); const displayFields = selectedDisplay && selectedDisplay.id >= 0 ? { displayId: selectedDisplay.id, scaleFactor: selectedDisplay.scaleFactor } : {}; const leftWindow = { x: next.question.x, y: next.question.y, width: next.question.width, height: next.question.height, ...displayFields }; const section = { questionWindow: leftWindow, ...(mode === "interview" ? { dialogueWindow: leftWindow } : {}), answerWindow: { x: next.answer.x, y: next.answer.y, width: next.answer.width, height: next.answer.height, ...displayFields }, controlBar: { x: next.controlBar.x, y: next.controlBar.y, width: next.controlBar.width, height: next.controlBar.height, ...displayFields, positionMode: "custom" as const, orientation: currentControl.orientation } }; onChange({ [mode]: section } as OverlayPreferencesPatch); };
   const movePanel = (panel: DesignerPanel, next: DesignerRect) => updateLayout({ ...layoutRef.current, [panel]: next });
   const selectedRect = layout[selected];
   const selectedBounds = boundsForPanel(selected);

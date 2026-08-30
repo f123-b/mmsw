@@ -14,12 +14,12 @@ describe("OverlayLayoutController", () => {
   it("keeps the default classic interview layout fixed and inside a negative-origin work area", () => {
     const bounds = resolveOverlayNativeBounds(DEFAULT_OVERLAY_PREFERENCES, { display, defaults });
 
-    expect(bounds.question).toEqual({ x: -1522, y: 104, width: 420, height: 720 });
-    expect(bounds.answer).toEqual({ x: -1078, y: 104, width: 680, height: 720 });
-    expect(bounds.control).toEqual({ x: -1180, y: 28, width: 440, height: 44 });
+    expect(bounds.question).toEqual({ x: -1522, y: 104, width: 420, height: 500 });
+    expect(bounds.answer).toEqual({ x: -1078, y: 104, width: 680, height: 500 });
+    expect(bounds.control).toEqual({ x: -1180, y: 24, width: 440, height: 44 });
   });
 
-  it("uses independent interview presets and does not reuse persisted geometry", () => {
+  it("uses persisted geometry after a preset has been applied", () => {
     const preferences = {
       ...DEFAULT_OVERLAY_PREFERENCES,
       interview: {
@@ -31,22 +31,23 @@ describe("OverlayLayoutController", () => {
     };
     const bounds = resolveOverlayNativeBounds(preferences, { display, defaults });
 
-    expect(bounds.question).toMatchObject({ x: -1407, y: 104, width: 340, height: 520 });
-    expect(bounds.answer).toMatchObject({ x: -1053, y: 104, width: 540, height: 520 });
+    expect(bounds.question).toMatchObject({ x: -1840, y: 120, width: 760, height: 360 });
+    expect(bounds.answer).toMatchObject({ x: -960, y: 160, width: 860, height: 520 });
+    expect(resolveOverlayNativeBounds({ ...preferences, interview: { ...preferences.interview, questionWindow: { ...preferences.interview.questionWindow, x: 140, width: 440 } } }, { display, defaults }).question).toMatchObject({ x: -1780, y: 120, width: 440, height: 360 });
   });
 
   it("resolves written-test single-reader and split layouts independently", () => {
     const single = resolveOverlayNativeBounds(DEFAULT_OVERLAY_PREFERENCES, { display, defaults }, "written_test");
-    expect(single.question).toMatchObject({ x: -1440, y: 104, width: 960, height: 720 });
-    expect(single.answer).toMatchObject({ x: -680, y: 104, width: 680, height: 720 });
+    expect(single.question).toMatchObject({ x: -1420, y: 104, width: 920, height: 560 });
+    expect(single.answer).toMatchObject({ x: -1310, y: 104, width: 700, height: 560 });
 
     const splitPreferences = {
       ...DEFAULT_OVERLAY_PREFERENCES,
-      writtenTest: { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest, layoutPreset: "split" as const }
+      writtenTest: { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest, layoutPreset: "split" as const, questionWindow: { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.questionWindow, x: 338, y: 104, width: 520, height: 560 }, answerWindow: { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.answerWindow, x: 882, y: 104, width: 700, height: 560 } }
     };
     const split = resolveOverlayNativeBounds(splitPreferences, { display, defaults }, "written_test");
-    expect(split.question).toMatchObject({ x: -1582, y: 104, width: 520, height: 720 });
-    expect(split.answer).toMatchObject({ x: -1038, y: 104, width: 700, height: 720 });
+    expect(split.question).toMatchObject({ x: -1582, y: 104, width: 520, height: 560 });
+    expect(split.answer).toMatchObject({ x: -1038, y: 104, width: 700, height: 560 });
   });
 
   it("allows minimal interview mode to use persisted work-area-relative positions", () => {
@@ -64,6 +65,18 @@ describe("OverlayLayoutController", () => {
     expect(bounds.question).toMatchObject({ x: -1840, y: 120, width: 760, height: 360 });
     expect(bounds.answer).toMatchObject({ x: -960, y: 160, width: 860, height: 520 });
     expect(bounds.control).toMatchObject({ x: -1888, y: 24, width: 440, height: 44 });
+  });
+
+  it.each([
+    ["classic_split", 420, 500],
+    ["compact_split", 360, 500],
+    ["answer_focus", 380, 500],
+    ["minimal", 410, 220]
+  ] as const)("re-applies the %s template only when geometry is uninitialized", (preset, width, height) => {
+    const preferences = { ...DEFAULT_OVERLAY_PREFERENCES, interview: { ...DEFAULT_OVERLAY_PREFERENCES.interview, layoutPreset: preset, questionWindow: { ...DEFAULT_OVERLAY_PREFERENCES.interview.questionWindow, x: undefined, y: undefined, width: undefined as never, height: undefined as never } } };
+    const bounds = resolveOverlayNativeBounds(preferences, { display, defaults });
+    expect(bounds.question.width).toBe(width);
+    expect(bounds.question.height).toBe(height);
   });
 
   it("rounds and clamps direct native bounds to minimum panel sizes", () => {

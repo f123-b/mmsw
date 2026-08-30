@@ -63,7 +63,7 @@ describe("overlay designer geometry", () => {
   it("retains per-monitor scale metadata for a 125% display", () => {
     const layout = applyLayoutPreset("standard", { id: 2, workArea: { width: 2560, height: 1440 }, scaleFactor: 1.25 });
     expect(layout.scaleFactor).toBe(1.25);
-    expect(layout.controlBar.width).toBe(480);
+    expect(layout.controlBar.width).toBe(440);
     expect(layout.controlBar.height).toBe(44);
   });
 

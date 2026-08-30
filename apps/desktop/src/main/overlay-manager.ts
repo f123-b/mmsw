@@ -48,7 +48,7 @@ export interface ConfirmWindowConfiguration {
   skipTaskbar: true;
   alwaysOnTop: true;
   hasShadow: false;
-  focusable: true;
+  focusable: false;
 }
 
 export type OverlayPanelCommand = "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end";
@@ -102,7 +102,7 @@ export class OverlayManager {
   get currentTransientWindow(): BrowserWindow | undefined { const window = this.transientWindowValue; return window && !window.isDestroyed() ? window : undefined; }
   /** Compatibility alias for callers that only know the old confirm surface. */
   get currentConfirmWindow(): BrowserWindow | undefined { return this.currentTransientWindow; }
-  get confirmWindowConfiguration(): ConfirmWindowConfiguration { return { frame: false, transparent: true, skipTaskbar: true, alwaysOnTop: true, hasShadow: false, focusable: true }; }
+  get confirmWindowConfiguration(): ConfirmWindowConfiguration { return { frame: false, transparent: true, skipTaskbar: true, alwaysOnTop: true, hasShadow: false, focusable: false }; }
   get endInterviewConfirmOpen(): boolean { return this.hudStateValue.transientLayer === "end_confirm"; }
   get currentWindows(): BrowserWindow[] { return (["question", "answer", "control"] as const).map((panel) => this.getWindow(panel)).filter((window): window is BrowserWindow => Boolean(window)); }
   get captureProtection(): boolean { return this.captureProtectionEnabled; }
@@ -128,6 +128,12 @@ export class OverlayManager {
     this.mode = "interactive";
     this.applyMode();
     this.hide();
+    // A transient popup is session-scoped. Recreate it on the next HUD
+    // session so a hidden Chromium renderer cannot retain stale operation
+    // state after switching between interview and written-test modes.
+    const transient = this.currentTransientWindow;
+    if (transient) transient.destroy();
+    this.transientWindowValue = undefined;
     this.runtimeLayoutMode = "interview";
   }
 
@@ -226,6 +232,8 @@ export class OverlayManager {
   }
 
   getDisplays(): OverlayDisplayInfo[] { return screen.getAllDisplays().map((display) => ({ id: display.id, bounds: { ...display.bounds }, workArea: { ...display.workArea }, scaleFactor: display.scaleFactor })); }
+  getWindowBounds(panel: OverlayNativePanel): OverlayNativeBounds | undefined { return this.getWindow(panel)?.getBounds(); }
+  getTransientBounds(): OverlayNativeBounds | undefined { return this.currentTransientWindow?.getBounds(); }
 
   setLayoutEditMode(enabled: boolean): void {
     const nextEnabled = Boolean(enabled);
@@ -398,7 +406,7 @@ export class OverlayManager {
     const existing = this.currentTransientWindow;
     if (existing) return existing;
     const owner = this.currentControlWindow ?? this.ensureWindow("control");
-    const configuration: BrowserWindowConstructorOptions = { ...this.transientBounds("shortcut"), title: "Interview Copilot Transient", parent: owner, modal: false, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: true, acceptFirstMouse: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false } };
+    const configuration: BrowserWindowConstructorOptions = { ...this.transientBounds("shortcut"), title: "Interview Copilot Transient", parent: owner, modal: false, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: false, acceptFirstMouse: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false } };
     const window = new BrowserWindow(configuration);
     this.transientWindowValue = window;
     window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
@@ -424,7 +432,10 @@ export class OverlayManager {
       return;
     }
     window.setBounds(this.transientBounds(layer), false);
-    window.setFocusable(true);
+    // The owner relationship keeps the popup out of the app's independent
+    // window identity; disabling focus prevents shortcut/confirm from
+    // stealing the foreground window underneath it.
+    window.setFocusable(false);
     window.setIgnoreMouseEvents(false);
     window.webContents.send("overlay:transient-layer", layer);
     window.showInactive();
@@ -468,7 +479,7 @@ export class OverlayManager {
   }
 
   private targetDisplay(): OverlayDisplayInfo {
-    const activeLeft = this.runtimeLayoutMode === "written_test" ? this.layoutPreferences.writtenTest.questionWindow : this.layoutPreferences.interview.leftPanel === "dialogue" ? this.layoutPreferences.interview.dialogueWindow : this.layoutPreferences.interview.questionWindow;
+    const activeLeft = this.runtimeLayoutMode === "written_test" ? this.layoutPreferences.writtenTest.questionWindow : this.layoutPreferences.interview.questionWindow;
     const preferredId = activeLeft.displayId;
     const preferred = preferredId === undefined ? undefined : screen.getAllDisplays().find((display) => display.id === preferredId);
     if (preferred) return { id: preferred.id, bounds: { ...preferred.bounds }, workArea: { ...preferred.workArea }, scaleFactor: preferred.scaleFactor };

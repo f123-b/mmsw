@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Poin
 import type { AnswerThread, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { HUDLayout, HUDState, OverlayMode } from "../../main/overlay-manager";
 import { DEFAULT_OVERLAY_PREFERENCES, type OverlayPreferences } from "../../shared/overlay-preferences";
-import { applyLayoutPreset, boundsForPanel, clampDesignerRect, resizeDesignerRect, snapDesignerRect, type DesignerPanel, type ResizeHandle } from "./overlay-designer";
+import { resolveOverlayPersistedGeometry, toRelativeOverlayBounds } from "../../shared/overlay-layout";
+import { boundsForPanel, clampDesignerRect, resizeDesignerRect, snapDesignerRect, type DesignerPanel, type ResizeHandle } from "./overlay-designer";
 import { isDisplayableQuestionGroup, type RuntimePhaseState } from "./runtime-state";
 import { buildAnswerOverlayViewModel, buildDialogueOverlayViewModel, buildQuestionOverlayViewModel, type AnswerOverlayViewModel, type DialogueSpeakingBlock, type QuestionOverlayViewModel } from "./view-models";
 
@@ -63,23 +64,18 @@ const defaults: OverlayLayout = {
   answer: { x: 0, y: 0, width: 620, height: 220, visible: true, collapsed: false, locked: false, opacity: 1 }
 };
 
-function viewportDefaults(preferences = DEFAULT_OVERLAY_PREFERENCES, surface: OverlaySurface | undefined = undefined): OverlayLayout {
+function viewportDefaults(preferences = DEFAULT_OVERLAY_PREFERENCES, surface: OverlaySurface | undefined = undefined, operationMode: OverlayRootProps["operationMode"] = "INTERVIEW"): OverlayLayout {
   if (surface === "control") return { ...defaults, toolbar: { ...defaults.toolbar, width: window.innerWidth, height: window.innerHeight }, transcript: { ...defaults.transcript, visible: false }, answer: { ...defaults.answer, visible: false } };
   if (surface === "question") return { ...defaults, toolbar: { ...defaults.toolbar, visible: false }, transcript: { ...defaults.transcript, width: window.innerWidth, height: window.innerHeight }, answer: { ...defaults.answer, visible: false } };
   if (surface === "answer") return { ...defaults, toolbar: { ...defaults.toolbar, visible: false }, transcript: { ...defaults.transcript, visible: false }, answer: { ...defaults.answer, width: window.innerWidth, height: window.innerHeight } };
-  const interview = preferences.interview;
-  const leftWindow = interview.leftPanel === "dialogue" ? interview.dialogueWindow : interview.questionWindow;
-  const resolved = applyLayoutPreset(interview.layoutPreset, { workArea: { width: window.innerWidth, height: window.innerHeight } }, {
-    questionWindow: { x: leftWindow.x ?? 120, y: leftWindow.y ?? 180, width: leftWindow.width, height: leftWindow.height },
-    answerWindow: { x: interview.answerWindow.x ?? 570, y: interview.answerWindow.y ?? 180, width: interview.answerWindow.width, height: interview.answerWindow.height },
-    controlBar: { x: interview.controlBar.x ?? 620, y: interview.controlBar.y ?? 24, width: interview.controlBar.width, height: interview.controlBar.height },
-    controlBarOrientation: interview.controlBar.orientation,
-    controlBarPositionMode: interview.controlBar.positionMode
-  });
+  const mode = operationMode === "WRITTEN_TEST" ? "written_test" : "interview";
+  const source = mode === "written_test" ? preferences.writtenTest : preferences.interview;
+  const resolved = resolveOverlayPersistedGeometry({ mode, preset: source.layoutPreset, workArea: { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }, questionWindow: source.questionWindow, answerWindow: source.answerWindow, controlBar: source.controlBar });
+  const relative = { question: toRelativeOverlayBounds(resolved.question, { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }), answer: toRelativeOverlayBounds(resolved.answer, { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }), control: toRelativeOverlayBounds(resolved.control, { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }) };
   return {
-    toolbar: { ...defaults.toolbar, x: resolved.controlBar.x, y: resolved.controlBar.y, width: resolved.controlBar.width, height: resolved.controlBar.height },
-    transcript: { ...defaults.transcript, x: resolved.questionWindow.x, y: resolved.questionWindow.y, width: resolved.questionWindow.width, height: resolved.questionWindow.height },
-    answer: { ...defaults.answer, x: resolved.answerWindow.x, y: resolved.answerWindow.y, width: resolved.answerWindow.width, height: resolved.answerWindow.height }
+    toolbar: { ...defaults.toolbar, x: relative.control.x, y: relative.control.y, width: relative.control.width, height: relative.control.height },
+    transcript: { ...defaults.transcript, x: relative.question.x, y: relative.question.y, width: relative.question.width, height: relative.question.height },
+    answer: { ...defaults.answer, x: relative.answer.x, y: relative.answer.y, width: relative.answer.width, height: relative.answer.height }
   };
 }
 
@@ -89,8 +85,8 @@ function clampLayout(panel: PanelKey, layout: PanelLayout): PanelLayout {
   return { ...layout, ...next };
 }
 
-function useOverlayLayout(preferences: OverlayPreferences, surface?: OverlaySurface): [OverlayLayout, (key: PanelKey, patch: Partial<PanelLayout>, altPressed?: boolean) => void, (next: HUDLayout) => void, () => void, () => OverlayLayout] {
-  const [layout, setLayout] = useState<OverlayLayout>(() => viewportDefaults(preferences, surface));
+function useOverlayLayout(preferences: OverlayPreferences, surface: OverlaySurface | undefined, operationMode: OverlayRootProps["operationMode"]): [OverlayLayout, (key: PanelKey, patch: Partial<PanelLayout>, altPressed?: boolean) => void, (next: HUDLayout) => void, () => void, () => OverlayLayout] {
+  const [layout, setLayout] = useState<OverlayLayout>(() => viewportDefaults(preferences, surface, operationMode));
   const preferencesRef = useRef(preferences);
   const layoutRef = useRef(layout);
   preferencesRef.current = preferences;
@@ -104,16 +100,16 @@ function useOverlayLayout(preferences: OverlayPreferences, surface?: OverlaySurf
     layoutRef.current = next;
     return next;
   }), []);
-  const applyMainLayout = useCallback((_next: HUDLayout) => { const next = viewportDefaults(preferencesRef.current, surface); layoutRef.current = next; setLayout(next); }, [surface]);
-  const clearSavedLayout = useCallback(() => { const next = viewportDefaults(preferencesRef.current, surface); layoutRef.current = next; setLayout(next); }, [surface]);
+  const applyMainLayout = useCallback((_next: HUDLayout) => { const next = viewportDefaults(preferencesRef.current, surface, operationMode); layoutRef.current = next; setLayout(next); }, [surface, operationMode]);
+  const clearSavedLayout = useCallback(() => { const next = viewportDefaults(preferencesRef.current, surface, operationMode); layoutRef.current = next; setLayout(next); }, [surface, operationMode]);
   useEffect(() => {
     setLayout((current) => {
-      const next = viewportDefaults(preferences, surface);
+      const next = viewportDefaults(preferences, surface, operationMode);
       const merged = { ...current, transcript: { ...next.transcript }, answer: { ...next.answer }, toolbar: { ...current.toolbar, ...next.toolbar } };
       layoutRef.current = merged;
       return merged;
     });
-  }, [surface, preferences.interview.layoutPreset, preferences.interview.leftPanel, preferences.interview.questionWindow.x, preferences.interview.questionWindow.y, preferences.interview.questionWindow.width, preferences.interview.questionWindow.height, preferences.interview.dialogueWindow.x, preferences.interview.dialogueWindow.y, preferences.interview.dialogueWindow.width, preferences.interview.dialogueWindow.height, preferences.interview.answerWindow.x, preferences.interview.answerWindow.y, preferences.interview.answerWindow.width, preferences.interview.answerWindow.height, preferences.interview.controlBar.x, preferences.interview.controlBar.y, preferences.interview.controlBar.width, preferences.interview.controlBar.height, preferences.interview.controlBar.orientation, preferences.interview.controlBar.positionMode]);
+  }, [surface, preferences, operationMode]);
   return [layout, update, applyMainLayout, clearSavedLayout, () => layoutRef.current];
 }
 
@@ -315,7 +311,7 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   const nativeSurface = props.surface;
   const writtenTestMode = props.operationMode === "WRITTEN_TEST";
   const [preferences, setPreferences] = useState<OverlayPreferences>(DEFAULT_OVERLAY_PREFERENCES);
-  const [layout, updateLayout, applyMainLayout, clearSavedLayout, getCurrentLayout] = useOverlayLayout(preferences, nativeSurface);
+  const [layout, updateLayout, applyMainLayout, clearSavedLayout, getCurrentLayout] = useOverlayLayout(preferences, nativeSurface, props.operationMode);
   const [layoutEditMode, setLayoutEditMode] = useState(false);
   const [runtimeProtection, setRuntimeProtection] = useState<{ requested: boolean; osFlagApplied: boolean; displayCaptureVerified: boolean | null; lastError?: string }>();
   const nativeContentRef = useRef<HTMLDivElement>(null);
@@ -345,14 +341,22 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   const dialogueBlocks = buildDialogueOverlayViewModel(props.remoteTranscript, props.micTranscript);
   useNativeContentSize(nativeSurface === "question" ? "question" : nativeSurface === "answer" ? "answer" : undefined, nativeContentRef, !layoutEditMode && !visualHidden && !writtenTestMode && interviewPreferences.layoutPreset === "minimal");
   const persistLayout = useCallback(() => {
+    // Native drag/resize already commits absolute BrowserWindow bounds through
+    // setWindowBounds(), whose Main callback converts them to work-area
+    // relative preferences. Writing this renderer viewport back here would
+    // replace the real display-relative coordinates with 0-based local ones.
+    if (nativeSurface) return;
     const current = getCurrentLayout();
     const patch = (panelLayout: PanelLayout) => ({ x: panelLayout.x, y: panelLayout.y, width: panelLayout.width, height: panelLayout.height });
     const leftPatch = patch(current.transcript);
-    void window.interviewCopilot.overlay.setPreferences({ interview: { questionWindow: leftPatch, dialogueWindow: leftPatch, answerWindow: patch(current.answer), controlBar: patch(current.toolbar) } });
-  }, [getCurrentLayout]);
+    const section = props.operationMode === "WRITTEN_TEST"
+      ? { writtenTest: { questionWindow: leftPatch, answerWindow: patch(current.answer), controlBar: patch(current.toolbar) } }
+      : { interview: { questionWindow: leftPatch, answerWindow: patch(current.answer), controlBar: patch(current.toolbar) } };
+    void window.interviewCopilot.overlay.setPreferences(section);
+  }, [getCurrentLayout, nativeSurface, props.operationMode]);
   const effectiveProtectionEnabled = runtimeProtection?.requested ?? props.captureProtectionEnabled;
   const protectionTone = !effectiveProtectionEnabled ? "off" : runtimeProtection?.displayCaptureVerified === true ? "verified" : "requested";
-  return <main className="overlay-root" data-overlay-surface={nativeSurface ?? "designer"} data-hud-mode={props.hudState.mode} data-share-mode={props.hudState.shareMode ? "on" : "off"} data-overlay-mode={props.overlayMode} data-layout-edit-mode={layoutEditMode ? "on" : "off"} data-appearance-mode={preferences.appearance.mode}>
+  return <main className="overlay-root" data-overlay-surface={nativeSurface ?? "designer"} data-hud-mode={props.hudState.mode} data-share-mode={props.hudState.shareMode ? "on" : "off"} data-overlay-mode={props.overlayMode} data-layout-edit-mode={layoutEditMode ? "on" : "off"} data-appearance-mode={preferences.appearance.mode} data-operation-mode={props.operationMode}>
     {props.captureTest && !visualHidden && <div className="capture-test-marker">CAPTURE_PROTECTION_TEST_MARKER_7F32</div>}
     {transcriptVisible && (nativeSurface === "question" && !layoutEditMode
       ? <div ref={nativeContentRef} className="native-content-window native-window-shell question-panel">{singleWrittenReader ? <WrittenTestReaderContent viewModel={answerViewModel} /> : writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} />}</div>
