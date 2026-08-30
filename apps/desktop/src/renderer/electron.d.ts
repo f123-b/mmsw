@@ -54,6 +54,7 @@ declare global {
         getDisplays(): Promise<OverlayDisplayInfo[]>;
         getWindowBounds(panel: "question" | "answer" | "control"): Promise<OverlayNativeBounds | undefined>;
         getTransientBounds(): Promise<OverlayNativeBounds | undefined>;
+        getZOrderDiagnostics(): Promise<import("../main/overlay-z-order-controller").OverlayZOrderDiagnostics | undefined>;
         getPreferences(): Promise<OverlayPreferences>;
         setPreferences(input: OverlayPreferencesPatch): Promise<OverlayPreferences>;
         enterLayoutEditMode(): Promise<boolean>;

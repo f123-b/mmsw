@@ -7,6 +7,7 @@ import { calculateHUDLayout, type HUDLayout, type HUDWorkArea } from "./hud-layo
 import { DEFAULT_OVERLAY_PREFERENCES, type MouseInteractionMode, type OverlayBehaviorPreferences, type OverlayPreferences, type WheelRoutingMode } from "../shared/overlay-preferences";
 import { initialOverlayLifecycleState, isOverlayLayoutEditing, reduceOverlayLifecycle, type OverlayLifecycleState } from "./overlay-lifecycle";
 import { clampOverlayPanelBounds, contentDrivenHeight, resolveOverlayNativeBounds, type OverlayContentPanel, type OverlayNativeBounds, type OverlayNativePanel, type OverlayRuntimeLayoutMode } from "./overlay-layout-controller";
+import { OverlayZOrderController, type OverlayZOrderDiagnosticEvent, type OverlayZOrderDiagnostics } from "./overlay-z-order-controller";
 import type { InterviewStartupEvent } from "./interview-startup-timing";
 
 export { applyOverlayMode, nextOverlayMode } from "./overlay-mode";
@@ -40,6 +41,7 @@ export interface OverlayManagerOptions {
   onNativeBoundsChanged?: (panel: OverlayNativePanel, bounds: OverlayNativeBounds, display: OverlayDisplayInfo) => void;
   onHUDStateChange?: (state: HUDState) => void;
   onStartupTiming?: (event: InterviewStartupEvent) => void;
+  onZOrderDiagnostic?: (event: OverlayZOrderDiagnosticEvent, fields: Record<string, unknown>) => void;
 }
 
 export interface ConfirmWindowConfiguration {
@@ -73,6 +75,14 @@ export class OverlayManager {
   private captureProtectionEnabled: boolean;
   private captureProtectionState: CaptureProtectionState;
   private readonly capabilities: CaptureProtectionCapabilities;
+  private readonly zOrderController: OverlayZOrderController;
+  private controlClickableReported = false;
+  private endConfirmVisibleReported = false;
+  private readonly displayChangeHandler = (): void => {
+    if (!this.hudStateValue.running && !this.isLayoutEditMode) return;
+    this.applyNativeBounds();
+    this.zOrderController.assertOverlayZOrder("display-change");
+  };
   private layoutPreferences: OverlayPreferences = DEFAULT_OVERLAY_PREFERENCES;
 
   constructor(private readonly options: OverlayManagerOptions) {
@@ -89,6 +99,10 @@ export class OverlayManager {
       displayCaptureVerified: null,
       windowCaptureVerified: null
     };
+    this.zOrderController = new OverlayZOrderController({ onDiagnostic: options.onZOrderDiagnostic });
+    screen.on("display-metrics-changed", this.displayChangeHandler);
+    screen.on("display-added", this.displayChangeHandler);
+    screen.on("display-removed", this.displayChangeHandler);
   }
 
   get currentMode(): OverlayMode { return this.mode; }
@@ -109,6 +123,10 @@ export class OverlayManager {
   get captureProtectionSupported(): boolean { return this.capabilities.captureProtectionSupported; }
   get captureProtectionStatus(): CaptureProtectionState { return this.captureProtectionState; }
   get captureProtectionCapabilities(): CaptureProtectionCapabilities { return this.capabilities; }
+  get zOrderDiagnostics(): OverlayZOrderDiagnostics { return this.zOrderController.diagnostics; }
+  assertOverlayZOrder(reason = "explicit"): void { this.zOrderController.assertOverlayZOrder(reason); }
+  notifyForeignTopmost(reason = "external-window"): void { this.zOrderController.notifyForeignTopmost(reason); }
+  recordEndConfirmNativeClickPass(fields: Record<string, unknown> = {}): void { this.zOrderController.recordEndConfirmNativeClickPass(fields); }
 
   enterInterviewMode(): BrowserWindow { this.runtimeLayoutMode = "interview"; return this.enterHUDMode(); }
   enterWrittenTestMode(): BrowserWindow { this.runtimeLayoutMode = "written_test"; return this.enterHUDMode(); }
@@ -128,6 +146,7 @@ export class OverlayManager {
     this.mode = "interactive";
     this.applyMode();
     this.hide();
+    this.zOrderController.setRuntimeActive(false);
     // A transient popup is session-scoped. Recreate it on the next HUD
     // session so a hidden Chromium renderer cannot retain stale operation
     // state after switching between interview and written-test modes.
@@ -147,7 +166,8 @@ export class OverlayManager {
     this.setTransientLayer(layer);
   }
   /** The confirmation dialog has its own native interactive owner. */
-  requestEndInterviewConfirmation(): void {
+  requestEndInterviewConfirmation(source: "control-renderer" | "main" = "main"): void {
+    if (source === "control-renderer") this.zOrderController.recordEndConfirmNativeClickPass({ source });
     this.setTransientLayer("end_confirm");
   }
 
@@ -166,6 +186,8 @@ export class OverlayManager {
     this.applyCaptureProtection();
     this.hide();
     this.setTransientLayer("none");
+    this.syncZOrderWindows();
+    this.zOrderController.setRuntimeActive(false);
   }
 
   resetLayout(): void { this.applyNativeBounds(); }
@@ -217,11 +239,11 @@ export class OverlayManager {
     this.interactionMode = preferences.interactionMode ?? (preferences.mousePassthrough ? "click_through" : "interactive");
     this.wheelRouting = preferences.wheelRouting ?? "overlay_under_cursor";
     this.temporaryInteractionModifier = preferences.temporaryInteractionModifier ?? "ctrl";
-    for (const window of this.currentWindows) window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
-    this.currentTransientWindow?.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
+    this.zOrderController.setPreferenceEnabled(this.alwaysOnTop);
     if (!this.isLayoutEditMode) this.mode = this.interactionMode === "interactive" ? "interactive" : "passive";
     this.applyMode();
     this.syncPanelVisibility();
+    this.syncZOrderWindows();
   }
 
   get currentInteractionMode(): MouseInteractionMode { return this.interactionMode; }
@@ -255,6 +277,7 @@ export class OverlayManager {
       this.mode = this.hudStateValue.running && this.interactionMode === "interactive" ? "interactive" : "passive";
       this.applyMode();
       if (this.hudStateValue.running && !this.hudStateValue.shareMode) this.show(); else this.hide();
+      this.zOrderController.setRuntimeActive(this.hudStateValue.running || this.isLayoutEditMode);
     }
     this.sendLayoutEditMode();
   }
@@ -289,10 +312,13 @@ export class OverlayManager {
     this.applyCaptureProtection();
     this.syncPanelVisibility();
     this.syncTransientWindow();
+    this.syncZOrderWindows();
+    this.zOrderController.setRuntimeActive(this.hudStateValue.running || this.isLayoutEditMode);
+    this.zOrderController.assertOverlayZOrder("show");
     return questionWindow;
   }
 
-  hide(): void { for (const window of this.currentWindows) window.hide(); this.currentTransientWindow?.hide(); }
+  hide(): void { for (const window of this.currentWindows) window.hide(); this.currentTransientWindow?.hide(); this.zOrderController.assertOverlayZOrder("hide"); }
   toggle(): void { if (this.currentWindows.some((window) => window.isVisible())) this.hide(); else this.show(); }
 
   private syncPanelVisibility(): void {
@@ -309,9 +335,26 @@ export class OverlayManager {
       if (!window) continue;
       if (visible.has(panel)) {
         window.showInactive();
+        if (panel === "control") {
+          // Control is the emergency surface: it never inherits the content
+          // panels' passthrough state, even while a mode transition is in
+          // flight.
+          window.setFocusable(false);
+          window.setIgnoreMouseEvents(false, { forward: true });
+          if (!this.controlClickableReported) {
+            this.controlClickableReported = true;
+            this.zOrderController.recordControlClickable({ source: "native-control-window" });
+          }
+        }
         this.options.onStartupTiming?.(panel === "question" ? "QUESTION_VISIBLE" : panel === "answer" ? "ANSWER_VISIBLE" : "CONTROL_VISIBLE");
-      } else window.hide();
+      } else {
+        window.hide();
+        if (panel === "control") this.controlClickableReported = false;
+      }
     }
+    this.syncZOrderWindows();
+    this.zOrderController.setRuntimeActive(this.hudStateValue.running || this.isLayoutEditMode);
+    this.zOrderController.assertOverlayZOrder("visibility-updated");
   }
   setMode(mode: OverlayMode): void {
     this.mode = this.hudStateValue.shareMode ? "passive" : mode;
@@ -334,6 +377,9 @@ export class OverlayManager {
   }
 
   destroy(): void {
+    screen.removeListener("display-metrics-changed", this.displayChangeHandler);
+    screen.removeListener("display-added", this.displayChangeHandler);
+    screen.removeListener("display-removed", this.displayChangeHandler);
     this.lifecycleState = initialOverlayLifecycleState;
     for (const panel of ["question", "answer", "control"] as const) this.getWindow(panel)?.destroy();
     this.windows = { question: undefined, answer: undefined, control: undefined };
@@ -342,6 +388,7 @@ export class OverlayManager {
     this.rendererLoads.clear();
     this.rendererReady.clear();
     this.hudStateValue = { ...initialHUDState };
+    this.zOrderController.destroy();
   }
 
   private applyMode(): void {
@@ -394,13 +441,13 @@ export class OverlayManager {
     const bounds = this.nativeBounds(panel);
     const window = new BrowserWindow({ ...bounds, title: panel === "control" ? "Interview Copilot Overlay Controls" : `Interview Copilot ${panel} Overlay`, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, show: false, focusable: false, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false } });
     this.windows[panel] = window;
-    window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
+    this.syncZOrderWindows();
     const load = Promise.resolve(this.options.loadRenderer(window, panel)).then(() => {
       this.rendererReady.add(panel);
       this.options.onStartupTiming?.(panel === "question" ? "QUESTION_RENDERER_READY" : panel === "answer" ? "ANSWER_RENDERER_READY" : "CONTROL_RENDERER_READY");
     }).catch(() => undefined);
     this.rendererLoads.set(panel, load);
-    window.once("ready-to-show", () => { this.applyMode(); this.applyCaptureProtection(); this.sendHudState(); this.sendLayoutEditMode(); this.refreshLayout(window.getBounds()); });
+    window.once("ready-to-show", () => { this.applyMode(); this.applyCaptureProtection(); this.sendHudState(); this.sendLayoutEditMode(); this.refreshLayout(window.getBounds()); this.syncZOrderWindows(); this.zOrderController.assertOverlayZOrder("renderer-ready"); });
     window.on("closed", () => { if (this.windows[panel] === window) this.windows[panel] = undefined; this.rendererLoads.delete(panel); this.rendererReady.delete(panel); });
     return window;
   }
@@ -412,10 +459,10 @@ export class OverlayManager {
     const configuration: BrowserWindowConstructorOptions = { ...this.transientBounds("shortcut"), title: "Interview Copilot Transient", parent: owner, modal: false, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: false, acceptFirstMouse: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false } };
     const window = new BrowserWindow(configuration);
     this.transientWindowValue = window;
-    window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
+    this.syncZOrderWindows();
     const load = Promise.resolve(this.options.loadRenderer(window, "transient")).then(() => { this.rendererReady.add("transient"); }).catch(() => undefined);
     this.rendererLoads.set("transient", load);
-    window.once("ready-to-show", () => { this.syncTransientWindow(); this.applyCaptureProtection(); this.sendHudState(); });
+    window.once("ready-to-show", () => { this.syncTransientWindow(); this.applyCaptureProtection(); this.sendHudState(); this.syncZOrderWindows(); this.zOrderController.assertOverlayZOrder("transient-ready"); });
     window.on("closed", () => { if (this.transientWindowValue === window) this.transientWindowValue = undefined; this.rendererLoads.delete("transient"); this.rendererReady.delete("transient"); });
     return window;
   }
@@ -432,6 +479,8 @@ export class OverlayManager {
     const layer = this.hudStateValue.transientLayer;
     if (layer === "none" || this.hudStateValue.shareMode || !this.hudStateValue.running) {
       window.hide();
+      this.endConfirmVisibleReported = false;
+      this.syncZOrderWindows();
       return;
     }
     window.setBounds(this.transientBounds(layer), false);
@@ -439,9 +488,20 @@ export class OverlayManager {
     // window identity; disabling focus prevents shortcut/confirm from
     // stealing the foreground window underneath it.
     window.setFocusable(false);
-    window.setIgnoreMouseEvents(false);
+    // Reapply the hit-test transition after a hidden transient is reused.
+    // Chromium can otherwise retain the previous passive native region until
+    // the next compositor commit.
+    window.setIgnoreMouseEvents(true, { forward: true });
+    window.setIgnoreMouseEvents(false, { forward: true });
     window.webContents.send("overlay:transient-layer", layer);
     window.showInactive();
+    if (layer === "end_confirm" && !this.endConfirmVisibleReported) {
+      this.endConfirmVisibleReported = true;
+      this.zOrderController.recordEndConfirmVisible({ source: "native-transient-window" });
+    }
+    this.syncZOrderWindows();
+    this.zOrderController.setRuntimeActive(true);
+    this.zOrderController.assertOverlayZOrder(layer === "end_confirm" ? "end-confirm-open" : "transient-open");
   }
 
   private transientBounds(layer: Exclude<OverlayTransientLayer, "none">): Electron.Rectangle {
@@ -465,10 +525,21 @@ export class OverlayManager {
   private getWindow(panel: OverlayNativePanel): BrowserWindow | undefined { const window = this.windows[panel]; return window && !window.isDestroyed() ? window : undefined; }
   private allWindows(): BrowserWindow[] { return [...this.currentWindows, ...(this.currentTransientWindow ? [this.currentTransientWindow] : [])]; }
 
+  private syncZOrderWindows(): void {
+    this.zOrderController.setWindows({
+      question: this.currentQuestionWindow,
+      answer: this.currentAnswerWindow,
+      control: this.currentControlWindow,
+      transient: this.currentTransientWindow
+    });
+  }
+
   private applyNativeBounds(): void {
     const bounds = this.nativeBounds();
     for (const panel of ["question", "answer", "control"] as const) this.getWindow(panel)?.setBounds(bounds[panel], false);
     this.refreshLayout(this.targetMonitorBounds());
+    this.syncZOrderWindows();
+    this.zOrderController.assertOverlayZOrder("bounds-applied");
   }
 
   private nativeBounds(): Record<OverlayNativePanel, OverlayNativeBounds>;

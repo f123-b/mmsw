@@ -43,3 +43,6 @@ button:focus-visible { outline: 2px solid #9bd2ff; outline-offset: 2px; }
 .hud-interactive-region { pointer-events: auto; }
 .capture-test-marker { position: fixed; z-index: 50; left: 50px; top: 50px; display: grid; width: 200px; height: 120px; place-items: center; background: #ff00ff; color: #000; font: 700 10px/1.1 "Segoe UI", sans-serif; text-align: center; }
 .hud-protection-indicator { position: fixed; right: 12px; bottom: 10px; color: #8b97a8; font-size: 12px; pointer-events: none; }
+.overlay-panel-drag-handle { display: none; height: 24px; align-items: center; padding: 0 12px; border-bottom: 1px solid rgba(133, 160, 198, .22); color: rgba(174, 196, 224, .88); font: 600 10px/1 "Segoe UI", sans-serif; letter-spacing: .08em; text-transform: uppercase; cursor: grab; pointer-events: auto; }
+.overlay-panel-drag-handle:active { cursor: grabbing; }
+.overlay-root[data-layout-edit-mode="on"] .overlay-panel-drag-handle { display: flex; }

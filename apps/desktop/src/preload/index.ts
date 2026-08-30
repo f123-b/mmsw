@@ -81,6 +81,7 @@ const api = {
     getDisplays: (): Promise<OverlayDisplayInfo[]> => ipcRenderer.invoke("overlay:get-displays"),
     getWindowBounds: (panel: "question" | "answer" | "control"): Promise<OverlayNativeBounds | undefined> => ipcRenderer.invoke("overlay:get-window-bounds", panel),
     getTransientBounds: (): Promise<OverlayNativeBounds | undefined> => ipcRenderer.invoke("overlay:get-transient-bounds"),
+    getZOrderDiagnostics: (): Promise<unknown> => ipcRenderer.invoke("overlay:get-z-order-diagnostics"),
     getPreferences: (): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:get-preferences"),
     setPreferences: (input: OverlayPreferencesPatch): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:set-preferences", input),
     enterLayoutEditMode: (): Promise<boolean> => ipcRenderer.invoke("overlay:enter-layout-edit"),

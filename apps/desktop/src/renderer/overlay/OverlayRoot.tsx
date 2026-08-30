@@ -248,6 +248,7 @@ function QuestionOverlayContent({ groups, viewModel }: { groups: OverlayRootProp
   const scrollRef = useRef<HTMLDivElement>(null);
   const follow = useScrollFollow(scrollRef, `${viewModel.currentQuestion ?? ""}:${viewModel.currentFollowUp ?? ""}:${older.length}`);
   return <section className="overlay-panel-card question-card question-overlay-content" data-overlay-content="question" aria-label="当前问题">
+    <div className="overlay-panel-drag-handle" data-layout-drag-handle="true" aria-label="拖动问题悬浮窗">布局编辑 · 拖动窗口</div>
     <div ref={scrollRef} className="overlay-scroll-region" onScroll={follow.onScroll} tabIndex={0}>
       <div className="overlay-content-status"><span className="content-status-dot" />{viewModel.status === "detected" ? "已识别" : "正在听取"}</div>
       <p className="current-question-text">{compactText(viewModel.currentQuestion)}</p>
@@ -262,6 +263,7 @@ function AnswerOverlayContent({ viewModel }: { viewModel: AnswerOverlayViewModel
   const scrollRef = useRef<HTMLDivElement>(null);
   const follow = useScrollFollow(scrollRef, `${viewModel.answer}:${viewModel.streaming}`);
   return <section className="overlay-panel-card answer-card answer-overlay-content" data-overlay-content="answer" aria-label="当前回答">
+    <div className="overlay-panel-drag-handle" data-layout-drag-handle="true" aria-label="拖动回答悬浮窗">布局编辑 · 拖动窗口</div>
     <div ref={scrollRef} className="overlay-scroll-region" onScroll={follow.onScroll} tabIndex={0}>
       {viewModel.question && <p className="answer-context-question">{compactText(viewModel.question, 220)}</p>}
       {viewModel.streaming && <div className="answer-content-status generating"><span className="content-status-dot" />生成中</div>}
