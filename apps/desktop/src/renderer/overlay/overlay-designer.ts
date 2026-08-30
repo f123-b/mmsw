@@ -51,9 +51,9 @@ export interface ResolvedOverlayLayout {
 
 export type ResizeHandle = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
 
-export const QUESTION_DESIGNER_BOUNDS: DesignerBounds = { minimumWidth: 220, maximumWidth: 1_000, minimumHeight: 120, maximumHeight: 1_200 };
-export const ANSWER_DESIGNER_BOUNDS: DesignerBounds = { minimumWidth: 300, maximumWidth: 1_600, minimumHeight: 150, maximumHeight: 1_200 };
-export const CONTROL_BAR_DESIGNER_BOUNDS: DesignerBounds = { minimumWidth: 120, maximumWidth: 2_000, minimumHeight: 36, maximumHeight: 240 };
+export const QUESTION_DESIGNER_BOUNDS: DesignerBounds = { minimumWidth: 320, maximumWidth: 760, minimumHeight: 88, maximumHeight: 280 };
+export const ANSWER_DESIGNER_BOUNDS: DesignerBounds = { minimumWidth: 480, maximumWidth: 1_000, minimumHeight: 132, maximumHeight: 440 };
+export const CONTROL_BAR_DESIGNER_BOUNDS: DesignerBounds = { minimumWidth: 320, maximumWidth: 560, minimumHeight: 42, maximumHeight: 64 };
 
 export function boundsForPanel(panel: DesignerPanel): DesignerBounds {
   if (panel === "question") return QUESTION_DESIGNER_BOUNDS;
@@ -171,19 +171,19 @@ export function resolveOverlayLayoutPreset(preset: OverlayLayoutPreset, display:
   const canvas = { width: Math.max(1, Math.round(display.workArea.width)), height: Math.max(1, Math.round(display.workArea.height)) };
   const margin = preset === "dual_screen" ? 28 : 40;
   const sizes = preset === "compact"
-    ? { question: { width: 320, height: 360 }, answer: { width: 520, height: 360 }, gap: 12 }
+    ? { question: { width: 360, height: 150 }, answer: { width: 520, height: 180 }, gap: 12 }
     : preset === "wide"
-      ? { question: { width: 600, height: 680 }, answer: { width: 940, height: 680 }, gap: 18 }
+      ? { question: { width: 460, height: 240 }, answer: { width: 760, height: 360 }, gap: 18 }
       : preset === "dual_screen"
-        ? { question: { width: 520, height: 620 }, answer: { width: 820, height: 620 }, gap: 24 }
-        : { question: { width: 430, height: 500 }, answer: { width: 680, height: 500 }, gap: 16 };
+        ? { question: { width: 440, height: 220 }, answer: { width: 700, height: 360 }, gap: 24 }
+        : { question: { width: 410, height: 180 }, answer: { width: 620, height: 220 }, gap: 16 };
   const panels = preset === "custom" && current?.questionWindow && current.answerWindow
     ? { question: { ...current.questionWindow }, answer: { ...current.answerWindow } }
     : fitPresetPanels(canvas, sizes.question, sizes.answer, sizes.gap, margin);
   const question = clampDesignerRect(panels.question, canvas, QUESTION_DESIGNER_BOUNDS);
   const answer = clampDesignerRect(panels.answer, canvas, ANSWER_DESIGNER_BOUNDS);
   const orientation = preset === "dual_screen" ? "vertical" : current?.controlBarOrientation ?? "horizontal";
-  const controlSize = orientation === "vertical" ? { width: 54, height: 260 } : { width: Math.min(680, Math.max(360, canvas.width - 2 * margin)), height: 58 };
+  const controlSize = orientation === "vertical" ? { width: 54, height: 220 } : { width: Math.min(480, Math.max(360, canvas.width - 2 * margin)), height: 44 };
   const positionMode = preset === "custom" ? current?.controlBarPositionMode ?? "custom" : preset === "compact" ? "top_right" : preset === "wide" ? "bottom_center" : "top_center";
   const customPoint = preset === "custom" && current?.controlBar ? { x: current.controlBar.x, y: current.controlBar.y } : undefined;
   const controlPoint = controlBarPosition(positionMode, orientation, canvas, controlSize, customPoint);

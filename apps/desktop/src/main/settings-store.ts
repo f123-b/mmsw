@@ -287,18 +287,37 @@ export const OVERLAY_PREFERENCES_SCHEMA_VERSION = 3;
 export function migrateOverlayPreferences(input: unknown): { value: OverlayPreferencesPatch; migrated: boolean } {
   const source = input && typeof input === "object" ? { ...(input as Record<string, unknown>) } : {};
   const version = typeof source.schemaVersion === "number" && Number.isFinite(source.schemaVersion) ? Math.floor(source.schemaVersion) : 1;
-  if (version >= OVERLAY_PREFERENCES_SCHEMA_VERSION) return { value: source as OverlayPreferencesPatch, migrated: false };
   const behavior = source.behavior && typeof source.behavior === "object" ? { ...(source.behavior as Record<string, unknown>) } : {};
-  // v1 allowed the old interactive default to survive in app_state. The v2
-  // migration intentionally changes only legacy data; subsequent user edits
-  // are never overwritten on startup.
   const controlBar = source.controlBar && typeof source.controlBar === "object" ? { ...(source.controlBar as Record<string, unknown>) } : undefined;
-  if (controlBar && source.layoutPreset !== "custom" && controlBar.width === 680 && controlBar.height === 50) {
-    controlBar.height = 58;
-    source.controlBar = controlBar;
+  const questionWindow = source.questionWindow && typeof source.questionWindow === "object" ? { ...(source.questionWindow as Record<string, unknown>) } : undefined;
+  const answerWindow = source.answerWindow && typeof source.answerWindow === "object" ? { ...(source.answerWindow as Record<string, unknown>) } : undefined;
+  const legacyGeometry = source.layoutPreset !== "custom" && (
+    (controlBar?.width === 680 && typeof controlBar.height === "number" && controlBar.height >= 50) ||
+    (questionWindow?.width === 430 && typeof questionWindow.height === "number" && questionWindow.height >= 400) ||
+    (answerWindow?.width === 680 && typeof answerWindow.height === "number" && answerWindow.height >= 400)
+  );
+  if (version >= OVERLAY_PREFERENCES_SCHEMA_VERSION && !legacyGeometry) return { value: source as OverlayPreferencesPatch, migrated: false };
+  if (legacyGeometry || version < OVERLAY_PREFERENCES_SCHEMA_VERSION) {
+    if (controlBar && (controlBar.width === 680 || (typeof controlBar.height === "number" && controlBar.height >= 50))) {
+      controlBar.width = DEFAULT_OVERLAY_PREFERENCES.controlBar.width;
+      controlBar.height = DEFAULT_OVERLAY_PREFERENCES.controlBar.height;
+      source.controlBar = controlBar;
+    }
+    if (questionWindow && questionWindow.height !== undefined && Number(questionWindow.height) >= 400) {
+      questionWindow.width = DEFAULT_OVERLAY_PREFERENCES.questionWindow.width;
+      questionWindow.height = DEFAULT_OVERLAY_PREFERENCES.questionWindow.height;
+      source.questionWindow = questionWindow;
+    }
+    if (answerWindow && answerWindow.height !== undefined && Number(answerWindow.height) >= 400) {
+      answerWindow.width = DEFAULT_OVERLAY_PREFERENCES.answerWindow.width;
+      answerWindow.height = DEFAULT_OVERLAY_PREFERENCES.answerWindow.height;
+      source.answerWindow = answerWindow;
+    }
   }
   source.schemaVersion = OVERLAY_PREFERENCES_SCHEMA_VERSION;
-  source.behavior = { ...behavior, interactionMode: "click_through", mousePassthrough: true, lockLayout: true, lockPosition: true };
+  source.behavior = version < OVERLAY_PREFERENCES_SCHEMA_VERSION
+    ? { ...behavior, interactionMode: "click_through", mousePassthrough: true, lockLayout: true, lockPosition: true }
+    : behavior;
   return { value: source as OverlayPreferencesPatch, migrated: true };
 }
 
@@ -318,10 +337,10 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
     return { x: coordinate(candidate.x, fallback?.x ?? 0) ?? 0, y: coordinate(candidate.y, fallback?.y ?? 0) ?? 0, width, height };
   };
   const windowPreferences = (value: Partial<OverlayWindowPreferences> | undefined, fallback: OverlayWindowPreferences, kind: "question" | "answer" | "control"): OverlayWindowPreferences => {
-    const minimumWidth = kind === "question" ? 220 : kind === "answer" ? 300 : 120;
-    const maximumWidth = kind === "question" ? 1_000 : kind === "answer" ? 1_600 : 2_000;
-    const minimumHeight = kind === "question" ? 120 : kind === "answer" ? 150 : 36;
-    const maximumHeight = kind === "control" ? 240 : 1_200;
+    const minimumWidth = kind === "question" ? 320 : kind === "answer" ? 480 : 120;
+    const maximumWidth = kind === "question" ? 760 : kind === "answer" ? 1_000 : 1_200;
+    const minimumHeight = kind === "question" ? 88 : kind === "answer" ? 132 : 36;
+    const maximumHeight = kind === "question" ? 280 : kind === "answer" ? 440 : 100;
     const backgroundOpacity = number(value?.backgroundOpacity, number(value?.opacity, fallback.backgroundOpacity, 0, 1), 0, 1);
     return {
       width: number(value?.width, fallback.width, minimumWidth, maximumWidth),
@@ -351,7 +370,7 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
   };
   const legacyWindowPatch: Partial<OverlayWindowPreferences> = {
     ...(raw.width !== undefined ? { width: raw.width as number } : {}),
-    ...(raw.height !== undefined ? { height: raw.height as number } : {}),
+    ...(typeof raw.height === "number" && raw.height > 0 ? { height: raw.height } : {}),
     ...(raw.x !== undefined ? { x: raw.x as number } : {}),
     ...(raw.y !== undefined ? { y: raw.y as number } : {}),
     ...(raw.opacity !== undefined ? { opacity: raw.opacity as number } : {}),

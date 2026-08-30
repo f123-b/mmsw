@@ -158,8 +158,8 @@ describe("OverlaySettingsStore", () => {
     try {
       database.run("INSERT INTO app_state(key, value) VALUES (?, ?)", ["overlay.preferences", JSON.stringify({ backgroundOpacity: 0, backgroundColor: "#102030", fontColor: "#ffffff", fontSize: 10, width: 900, height: 0 })]);
       const preferences = new OverlaySettingsStore(database).getPreferences();
-      expect(preferences.questionWindow).toMatchObject({ width: 900, height: 120, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
-      expect(preferences.answerWindow).toMatchObject({ width: 900, height: 150, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
+      expect(preferences.questionWindow).toMatchObject({ width: 760, height: 180, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
+      expect(preferences.answerWindow).toMatchObject({ width: 900, height: 220, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
       expect(preferences.behavior.interactionMode).toBe("click_through");
       expect(preferences.appearance.mode).toBe("glass");
       expect(new OverlaySettingsStore(database).setPreferences({ behavior: { mousePassthrough: true } }).behavior.interactionMode).toBe("click_through");
@@ -183,13 +183,13 @@ describe("OverlaySettingsStore", () => {
     } finally { database.close(); }
   });
 
-  it("migrates the legacy standard control-bar height to the canonical 58px geometry", async () => {
+  it("migrates legacy oversized runtime geometry to the compact defaults", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
       database.run("INSERT INTO app_state(key, value) VALUES (?, ?)", ["overlay.preferences", JSON.stringify({ schemaVersion: 2, layoutPreset: "standard", controlBar: { width: 680, height: 50 } })]);
       const preferences = new OverlaySettingsStore(database).getPreferences();
       expect(preferences.schemaVersion).toBe(3);
-      expect(preferences.controlBar).toMatchObject({ width: 680, height: 58 });
+      expect(preferences.controlBar).toMatchObject({ width: 440, height: 44 });
     } finally { database.close(); }
   });
 
@@ -218,8 +218,8 @@ describe("OverlaySettingsStore", () => {
         appearance: { mode: "text_only", radius: 99 },
         behavior: { interactionMode: "full_passthrough", snapEnabled: false, snapThreshold: 99 }
       });
-      expect(saved.questionWindow).toMatchObject({ width: 1_000, height: 120, fontSize: 32, backgroundOpacity: 0, textOpacity: 1, borderOpacity: 0 });
-      expect(saved.answerWindow).toMatchObject({ width: 1_600, height: 150, fontSize: 40 });
+      expect(saved.questionWindow).toMatchObject({ width: 760, height: 88, fontSize: 32, backgroundOpacity: 0, textOpacity: 1, borderOpacity: 0 });
+      expect(saved.answerWindow).toMatchObject({ width: 1_000, height: 132, fontSize: 40 });
       expect(saved.controlBar).toMatchObject({ x: 144, y: 280, positionMode: "custom", orientation: "vertical" });
       expect(saved.appearance).toMatchObject({ mode: "text_only", radius: 32 });
       expect(saved.behavior).toMatchObject({ interactionMode: "full_passthrough", mousePassthrough: true, snapEnabled: false, snapThreshold: 16 });

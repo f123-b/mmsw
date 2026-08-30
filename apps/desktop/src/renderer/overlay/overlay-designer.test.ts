@@ -10,8 +10,8 @@ const layout: DesignerLayout = {
 
 describe("overlay designer geometry", () => {
   it("keeps both requested panel ranges and a visible safe area", () => {
-    expect(clampDesignerRect({ x: -900, y: -900, width: 1, height: 1 }, canvas, ANSWER_DESIGNER_BOUNDS)).toMatchObject({ x: -260, y: -110, width: 300, height: 150 });
-    expect(clampDesignerRect({ x: 9_999, y: 9_999, width: 3_000, height: 3_000 }, canvas, ANSWER_DESIGNER_BOUNDS)).toMatchObject({ x: 1_880, y: 1_040, width: 1_600, height: 1_080 });
+    expect(clampDesignerRect({ x: -900, y: -900, width: 1, height: 1 }, canvas, ANSWER_DESIGNER_BOUNDS)).toMatchObject({ x: -440, y: -92, width: 480, height: 132 });
+    expect(clampDesignerRect({ x: 9_999, y: 9_999, width: 3_000, height: 3_000 }, canvas, ANSWER_DESIGNER_BOUNDS)).toMatchObject({ x: 1_880, y: 1_040, width: 1_000, height: 440 });
   });
 
   it("snaps to the screen and neighboring windows, with Alt as an escape hatch", () => {
@@ -20,8 +20,8 @@ describe("overlay designer geometry", () => {
   });
 
   it("resizes from all edges without violating limits", () => {
-    expect(resizeDesignerRect(layout.answer, "nw", { x: -200, y: -200 }, canvas, ANSWER_DESIGNER_BOUNDS)).toMatchObject({ width: 880, height: 700, x: 370, y: -20 });
-    expect(resizeDesignerRect(layout.answer, "se", { x: -900, y: -900 }, canvas, ANSWER_DESIGNER_BOUNDS)).toMatchObject({ width: 300, height: 150 });
+    expect(resizeDesignerRect(layout.answer, "nw", { x: -200, y: -200 }, canvas, ANSWER_DESIGNER_BOUNDS)).toMatchObject({ width: 880, height: 440, x: 370, y: 240 });
+    expect(resizeDesignerRect(layout.answer, "se", { x: -900, y: -900 }, canvas, ANSWER_DESIGNER_BOUNDS)).toMatchObject({ width: 480, height: 132 });
   });
 
   it("always applies preview resize delta to the pointer-down rectangle", () => {
@@ -58,6 +58,13 @@ describe("overlay designer geometry", () => {
     expect(compact.questionWindow).not.toEqual(standard.questionWindow);
     expect(standard.answerWindow).not.toEqual(wide.answerWindow);
     expect(compact.controlBar).not.toEqual(standard.controlBar);
+  });
+
+  it("retains per-monitor scale metadata for a 125% display", () => {
+    const layout = applyLayoutPreset("standard", { id: 2, workArea: { width: 2560, height: 1440 }, scaleFactor: 1.25 });
+    expect(layout.scaleFactor).toBe(1.25);
+    expect(layout.controlBar.width).toBe(480);
+    expect(layout.controlBar.height).toBe(44);
   });
 
   it("keeps control-bar hit testing independent from content passthrough", () => {

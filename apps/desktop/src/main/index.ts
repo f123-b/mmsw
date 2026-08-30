@@ -342,7 +342,7 @@ function verifyPreload(): boolean {
   return exists;
 }
 
-function attachRendererDiagnostics(window: BrowserWindow, windowName: "main" | "overlay" | "overlay-question" | "overlay-answer" | "overlay-control" | "overlay-transient"): void {
+function attachRendererDiagnostics(window: BrowserWindow, windowName: "main" | "overlay-question" | "overlay-answer" | "overlay-control" | "overlay-transient"): void {
   window.webContents.on("did-start-loading", () => {
     appLogger?.info("RENDERER_LOAD_STARTED", { window: windowName });
   });
@@ -424,7 +424,11 @@ function captureContainsTestMarker(dataUrl: string): boolean {
 async function captureVisibleWindow(window: BrowserWindow): Promise<Buffer> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     await waitForRendererPaint(window);
-    const png = (await window.capturePage()).toPNG();
+    const image = await Promise.race([
+      window.capturePage(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("capturePage timeout")), 4_000))
+    ]);
+    const png = image.toPNG();
     if (png.byteLength > 0 && hasVisiblePixels(png)) return png;
     if (attempt < 4) await new Promise<void>((resolve) => setTimeout(resolve, 100));
   }
@@ -1041,7 +1045,7 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
     appLogger?.error("PRODUCTION_SMOKE_MAIN_FAILED", { error: String(error) });
     return unavailable;
   });
-  let visualArtifacts: { main: string; overlay: string } | undefined;
+  let visualArtifacts: { main: string; overlay: string; snapshots?: Record<string, string> } | undefined;
   let visualArtifactDirectory: string | undefined;
   let mainArtifact: string | undefined;
   if (visualSmokeRequested) {
@@ -1062,6 +1066,7 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
     await waitForRendererLoad(overlay);
     const overlayReady = await waitForRendererReady(overlay);
     await waitForWindowVisible(overlay);
+    await Promise.all([overlayManager?.currentAnswerWindow, overlayManager?.currentControlWindow].filter((window): window is BrowserWindow => Boolean(window)).map((window) => waitForWindowVisible(window)));
     overlayManager?.applyCaptureProtection();
     overlayReadiness = { bridgeAvailable: overlayReady, rootChildren: overlayReady ? 1 : 0, appReady: overlayReady };
     if (visualSmokeRequested) await waitForWindowVisible(overlay);
@@ -1070,7 +1075,43 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
     const overlayArtifact = join(visualArtifactDirectory, process.env.UI_OVERLAY_NAME ?? "overlay-current.png");
     const overlayPng = await captureVisibleWindow(overlay);
     await writeFile(overlayArtifact, overlayPng);
-    visualArtifacts = { main: mainArtifact, overlay: overlayArtifact };
+    const manager = overlayManager;
+    if (!manager) throw new Error("VISUAL_OVERLAY_MANAGER_MISSING");
+    const snapshots: Record<string, string> = { "overlay-listening.png": join(visualArtifactDirectory, "overlay-listening.png") };
+    await writeFile(snapshots["overlay-listening.png"], overlayPng);
+    const questionWindow = manager.currentQuestionWindow;
+    const answerWindow = manager.currentAnswerWindow;
+    const controlWindow = manager.currentControlWindow;
+    const transientWindow = manager.currentTransientWindow;
+    if (!questionWindow || !answerWindow || !controlWindow || !transientWindow) throw new Error("VISUAL_OVERLAY_WINDOWS_MISSING");
+
+    // Render stable short/long fixtures in the already-mounted real renderer
+    // windows. This keeps the visual suite deterministic while the native
+    // BrowserWindow, ResizeObserver and IPC sizing path remain exercised.
+    await questionWindow.webContents.executeJavaScript("(() => { const node = document.querySelector('.current-question-text'); if (node) node.textContent = '在中断服务程序里哪些事情应该做？'; })()", true);
+    await waitForRendererPaint(questionWindow);
+    snapshots["overlay-question-short.png"] = join(visualArtifactDirectory, "overlay-question-short.png");
+    await writeFile(snapshots["overlay-question-short.png"], await captureVisibleWindow(questionWindow));
+
+    await answerWindow.webContents.executeJavaScript("(() => { const context = document.querySelector('.answer-context-question'); if (context) context.textContent = '为什么中断服务程序要快进快出？'; const core = document.querySelector('.answer-core'); if (core) core.textContent = '只在中断里完成采样、清状态和投递事件，耗时计算交给后台任务。'; })()", true);
+    await new Promise((resolve) => setTimeout(resolve, 220));
+    snapshots["overlay-answer-short.png"] = join(visualArtifactDirectory, "overlay-answer-short.png");
+    await writeFile(snapshots["overlay-answer-short.png"], await captureVisibleWindow(answerWindow));
+    await answerWindow.webContents.executeJavaScript("(() => { const core = document.querySelector('.answer-core'); if (core) core.textContent = Array.from({ length: 18 }, (_, index) => `长回答示例 ${index + 1}：中断路径只保留确定性、低延迟的工作，数据通过无锁队列交给后台任务处理，并在主循环中完成边界校验、错误恢复和可观测性记录。`).join(' '); })()", true);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    snapshots["overlay-answer-long.png"] = join(visualArtifactDirectory, "overlay-answer-long.png");
+    await writeFile(snapshots["overlay-answer-long.png"], await captureVisibleWindow(answerWindow));
+
+    manager.toggleShortcuts();
+    await new Promise((resolve) => setTimeout(resolve, 260));
+    snapshots["overlay-shortcut.png"] = join(visualArtifactDirectory, "overlay-shortcut.png");
+    await writeFile(snapshots["overlay-shortcut.png"], await captureVisibleWindow(transientWindow));
+    manager.requestEndInterviewConfirmation();
+    await new Promise((resolve) => setTimeout(resolve, 260));
+    snapshots["overlay-end-confirm.png"] = join(visualArtifactDirectory, "overlay-end-confirm.png");
+    await writeFile(snapshots["overlay-end-confirm.png"], await captureVisibleWindow(transientWindow));
+    manager.cancelEndInterviewConfirmation();
+    visualArtifacts = { main: mainArtifact, overlay: overlayArtifact, snapshots };
     appLogger?.info("PRODUCTION_SCREENSHOTS_CAPTURED", visualArtifacts);
   }
   const ok = mainReadiness.bridgeAvailable && mainReadiness.rootChildren > 0 && Boolean(overlay) && overlayReadiness.bridgeAvailable && overlayReadiness.rootChildren > 0;
