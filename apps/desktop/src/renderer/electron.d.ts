@@ -11,6 +11,7 @@ import type { HistoryChangedEvent, TranscriptSnapshot } from "@interview-copilot
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayDisplayInfo, OverlayMode, OverlayNativeBounds } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
+import type { RuntimeOperationMode } from "../shared/runtime-operation-mode";
 import type { ChatAction, KnowledgeDocumentType, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectMemorySnapshot, ProjectQaGenerationResult, ProjectQuestionBankImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord, SkillSuggestion, SkillSuggestionStatus } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, OverlayPreferences, OverlayPreferencesPatch, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectAnalysisState, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankRelationInput, QuestionBankRouteQuery, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord, ResumeAnalysisRecord } from "../main/database";
@@ -51,6 +52,8 @@ declare global {
         getState(): Promise<HUDState | undefined>;
         getLayout(): Promise<HUDLayout | undefined>;
         getDisplays(): Promise<OverlayDisplayInfo[]>;
+        getWindowBounds(panel: "question" | "answer" | "control"): Promise<OverlayNativeBounds | undefined>;
+        getTransientBounds(): Promise<OverlayNativeBounds | undefined>;
         getPreferences(): Promise<OverlayPreferences>;
         setPreferences(input: OverlayPreferencesPatch): Promise<OverlayPreferences>;
         enterLayoutEditMode(): Promise<boolean>;
@@ -244,6 +247,7 @@ declare global {
         onSessionState(listener: (state: SessionState) => void): () => void;
         onHistoryChanged(listener: (event: HistoryChangedEvent) => void): () => void;
         onOverlayMode(listener: (mode: OverlayMode) => void): () => void;
+        onOperationMode(listener: (mode: RuntimeOperationMode) => void): () => void;
         onOverlayState(listener: (state: HUDState) => void): () => void;
         onOverlayLayout(listener: (layout: HUDLayout) => void): () => void;
         onOverlayLayoutEditMode(listener: (enabled: boolean) => void): () => void;

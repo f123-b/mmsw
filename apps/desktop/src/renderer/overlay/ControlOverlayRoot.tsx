@@ -25,7 +25,7 @@ export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
   const writtenPreferences = preferences.writtenTest;
   const statusLabel = primaryRuntimeStatus(props.runtimePhases);
   const answerReady = props.runtimePhases.answerPhase === "READY";
-  return <main className="overlay-root control-overlay-root" data-overlay-surface="control" data-hud-state={statusLabel}>
+  return <main className="overlay-root control-overlay-root" data-overlay-surface="control" data-hud-state={statusLabel} data-operation-mode={props.operationMode}>
     {preferences.showToolbar && <DraggableResizablePanel panel="toolbar" nativePanel="control" layout={layout} onChange={(_panel, patch) => setLayout((current) => ({ ...current, ...patch }))} onCommit={() => undefined} editMode={layoutEditMode} className="toolbar-panel">
       <div className="floating-toolbar hud-interactive-region" role="toolbar" aria-label={`${modeLabel}控制栏`}>
         <span className="toolbar-audio-mark" aria-hidden="true">≈</span>

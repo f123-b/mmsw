@@ -23,6 +23,7 @@ import type { ModelCatalogResult } from "../main/model-catalog";
 import type { InterviewExportResult } from "../main/history-export";
 import type { ProfileAnalysisJob } from "../main/profile-analysis-job";
 import type { InterviewStartupEvent } from "../main/interview-startup-timing";
+import type { RuntimeOperationMode } from "../shared/runtime-operation-mode";
 
 let latestOverlayLayoutEditMode: boolean | undefined;
 ipcRenderer.on("overlay:layout-edit-mode", (_event, enabled: boolean) => {
@@ -31,6 +32,10 @@ ipcRenderer.on("overlay:layout-edit-mode", (_event, enabled: boolean) => {
 let latestOverlayState: HUDState | undefined;
 ipcRenderer.on("overlay:state", (_event, state: HUDState) => {
   latestOverlayState = state;
+});
+let latestRuntimeOperationMode: RuntimeOperationMode = "IDLE";
+ipcRenderer.on("overlay:operation-mode", (_event, mode: RuntimeOperationMode) => {
+  latestRuntimeOperationMode = mode;
 });
 
 function createRendererScreenshotRequestId(): string {
@@ -74,6 +79,8 @@ const api = {
     getState: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:get-state"),
     getLayout: (): Promise<HUDLayout | undefined> => ipcRenderer.invoke("overlay:get-layout"),
     getDisplays: (): Promise<OverlayDisplayInfo[]> => ipcRenderer.invoke("overlay:get-displays"),
+    getWindowBounds: (panel: "question" | "answer" | "control"): Promise<OverlayNativeBounds | undefined> => ipcRenderer.invoke("overlay:get-window-bounds", panel),
+    getTransientBounds: (): Promise<OverlayNativeBounds | undefined> => ipcRenderer.invoke("overlay:get-transient-bounds"),
     getPreferences: (): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:get-preferences"),
     setPreferences: (input: OverlayPreferencesPatch): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:set-preferences", input),
     enterLayoutEditMode: (): Promise<boolean> => ipcRenderer.invoke("overlay:enter-layout-edit"),
@@ -288,6 +295,12 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, mode: OverlayMode) => listener(mode);
       ipcRenderer.on("overlay:mode", handler);
       return () => ipcRenderer.removeListener("overlay:mode", handler);
+    },
+    onOperationMode: (listener: (mode: RuntimeOperationMode) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, mode: RuntimeOperationMode) => listener(mode);
+      ipcRenderer.on("overlay:operation-mode", handler);
+      listener(latestRuntimeOperationMode);
+      return () => ipcRenderer.removeListener("overlay:operation-mode", handler);
     },
     onOverlayState: (listener: (state: HUDState) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, state: HUDState) => listener(state);

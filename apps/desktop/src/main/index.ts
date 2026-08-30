@@ -36,6 +36,7 @@ import { formatInterviewMarkdown, type InterviewExportResult } from "./history-e
 import { deriveProjectProblemChains, deriveProjectTechnicalDecisions, formatProjectFactValue, inferProjectSourceRole, isFactEligible, isFactReviewRequired, normalizeProjectOwnershipMode, resolveProjectAnswerPerspective } from "@interview-copilot/shared";
 import type { ChatAction, ChatCancelReason, ChatResponse } from "@interview-copilot/shared";
 import type { QuestionBankBulkPatch, QuestionBankListOptions } from "./database";
+import type { RuntimeOperationMode } from "../shared/runtime-operation-mode";
 
 if (process.env.INTERVIEW_COPILOT_DISABLE_GPU === "1") {
   app.commandLine.appendSwitch("disable-gpu");
@@ -46,6 +47,7 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 let mainWindow: BrowserWindow | undefined;
 let overlayManager: OverlayManager | undefined;
+let runtimeOperationMode: RuntimeOperationMode = "IDLE";
 const audioManager = new AudioManager();
 function firstExistingLocalPath(candidates: Array<string | undefined>): string | undefined {
   return candidates.find((candidate): candidate is string => Boolean(candidate && existsSync(candidate)));
@@ -467,8 +469,15 @@ async function loadRenderer(window: BrowserWindow, overlay: false | OverlayWindo
   }
 }
 
+const transientOverlayChannels = new Set(["overlay:state", "overlay:operation-mode", "overlay:mode", "overlay:preferences", "overlay:layout-edit-mode", "overlay:capture-protection"]);
+
 function broadcastToWindows(channel: string, payload: unknown): void {
-  for (const window of [mainWindow, ...(overlayManager?.currentWindows ?? [])]) {
+  // The transient owner only renders the current HUD layer and operation
+  // mode. Do not stream ASR/answer deltas into it: unlike the question and
+  // answer surfaces, it has no content reader and can otherwise spend its
+  // renderer budget processing every token while a dialog is hidden.
+  const windows = [mainWindow, ...(overlayManager?.currentWindows ?? []), ...(transientOverlayChannels.has(channel) ? [overlayManager?.currentTransientWindow] : [])];
+  for (const window of windows) {
     if (!window || window.isDestroyed()) continue;
     try {
       window.webContents.send(channel, payload);
@@ -478,6 +487,11 @@ function broadcastToWindows(channel: string, payload: unknown): void {
       appLogger?.warn("RENDERER_EVENT_DELIVERY_FAILED", { channel, error: String(error) });
     }
   }
+}
+
+function setRuntimeOperationMode(mode: RuntimeOperationMode): void {
+  runtimeOperationMode = mode;
+  broadcast("overlay:operation-mode", mode);
 }
 
 function broadcast(channel: string, payload: unknown): void {
@@ -691,7 +705,7 @@ async function runIndependentVisionAnswer(visionInput: ReturnType<typeof buildVi
 async function captureScreenshot(trigger = "screenshot-answer"): Promise<void> {
   const screenshotRequestId = createScreenshotRequestId();
   try {
-    const mode = interviewCoordinator?.running ? "interview" : writtenTestController?.running ? "written-test" : undefined;
+    const mode = runtimeOperationMode === "INTERVIEW" ? "interview" : runtimeOperationMode === "WRITTEN_TEST" ? "written-test" : undefined;
     if (mode) await answerCapturedScreenshot(mode, screenshotRequestId, trigger);
     else {
       recordScreenshotTrace("SCREENSHOT_ACTION_REQUESTED", screenshotRequestId, { fields: { trigger, source: "global-shortcut" } });
@@ -827,11 +841,18 @@ public static class InterviewCopilotNativeMouse {
   [DllImport("user32.dll", SetLastError=true)] public static extern uint SendInput(uint count, Input[] inputs, int size);
   public const uint LeftDown = 0x0002;
   public const uint LeftUp = 0x0004;
+  public const uint Wheel = 0x0800;
   public static void LeftClick() { var inputs = new Input[2]; inputs[0].type = 0; inputs[0].mouseInput.flags = LeftDown; inputs[1].type = 0; inputs[1].mouseInput.flags = LeftUp; if (SendInput(2, inputs, Marshal.SizeOf(typeof(Input))) != 2) throw new Exception("SendInput failed"); }
+  public static void WheelBy(int delta) { mouse_event(Wheel, 0, 0, unchecked((uint)delta), UIntPtr.Zero); }
 }`;
 
 async function nativeMouseClick(x: number, y: number): Promise<void> {
   const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${nativeMouseTypeDefinition}\n'@; if(-not [InterviewCopilotNativeMouse]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})){ throw 'SetCursorPos failed' }; Start-Sleep -Milliseconds 40; [InterviewCopilotNativeMouse]::LeftClick();`;
+  await runNativeMouseCommand(command);
+}
+
+async function nativeMouseWheel(x: number, y: number, deltaY: number): Promise<void> {
+  const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${nativeMouseTypeDefinition}\n'@; if(-not [InterviewCopilotNativeMouse]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})){ throw 'SetCursorPos failed' }; Start-Sleep -Milliseconds 40; [InterviewCopilotNativeMouse]::WheelBy(${Math.round(deltaY)});`;
   await runNativeMouseCommand(command);
 }
 
@@ -857,6 +878,13 @@ async function nativeForegroundWindow(): Promise<string> {
   const definition = `using System; using System.Runtime.InteropServices; public static class NativeForegroundProbe { [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr window, System.Text.StringBuilder text, int length); }`;
   const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${definition}\n'@; $window = [NativeForegroundProbe]::GetForegroundWindow(); $text = New-Object System.Text.StringBuilder 256; [NativeForegroundProbe]::GetWindowText($window, $text, 256) | Out-Null; Write-Output ("hwnd=" + $window.ToInt64() + " title=" + $text.ToString());`;
   return (await runNativeMouseCommand(command)).trim();
+}
+
+async function nativeWindowDiagnostics(window: BrowserWindow): Promise<{ hwnd: string; owner: string; parent: string; visible: boolean; foreground: string; appWindow: boolean; toolWindow: boolean }> {
+  const definition = `using System; using System.Runtime.InteropServices; public static class NativeWindowDiagnostics { [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr window, uint command); [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr window); [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr window, int index); public const int ExStyle = -20; public const long AppWindow = 0x00040000; public const long ToolWindow = 0x00000080; }`;
+  const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${definition}\n'@; $window = [IntPtr]::new([long]${nativeWindowId(window)}); $owner = [NativeWindowDiagnostics]::GetWindow($window, 4); $parent = [NativeWindowDiagnostics]::GetParent($window); $foreground = [NativeWindowDiagnostics]::GetForegroundWindow(); $style = [NativeWindowDiagnostics]::GetWindowLongPtr($window, [NativeWindowDiagnostics]::ExStyle).ToInt64(); [pscustomobject]@{ hwnd = $window.ToInt64().ToString(); owner = $owner.ToInt64().ToString(); parent = $parent.ToInt64().ToString(); visible = [NativeWindowDiagnostics]::IsWindowVisible($window); foreground = $foreground.ToInt64().ToString(); appWindow = (($style -band [NativeWindowDiagnostics]::AppWindow) -ne 0); toolWindow = (($style -band [NativeWindowDiagnostics]::ToolWindow) -ne 0) } | ConvertTo-Json -Compress;`;
+  const output = (await runNativeMouseCommand(command)).trim();
+  return JSON.parse(output) as { hwnd: string; owner: string; parent: string; visible: boolean; foreground: string; appWindow: boolean; toolWindow: boolean };
 }
 
 function nativePoint(window: BrowserWindow, point: { x: number; y: number }): { x: number; y: number } {
@@ -902,8 +930,17 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   underlay.focus();
   underlay.moveTop();
   const underlaySelfTestPoint = nativePoint(underlay, { x: 215, y: 250 });
+  const underlaySelfTestHit = await nativeWindowAt(underlaySelfTestPoint);
+  const underlaySelfTestRoot = underlaySelfTestHit.match(/root=(\d+)/)?.[1];
+  if (underlaySelfTestRoot && underlaySelfTestRoot !== nativeWindowId(underlay)) {
+    const result = { ok: false, result: "UNSUPPORTED_ENVIRONMENT", reason: "The current Windows desktop session does not expose the Electron smoke surface to native input", nativeHit: underlaySelfTestHit, underlayId: nativeWindowId(underlay) };
+    underlay.destroy();
+    process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify(result)}\n`);
+    app.exit(0);
+    return;
+  }
   await nativeMouseClick(underlaySelfTestPoint.x, underlaySelfTestPoint.y);
-  await waitForNativeCount(underlay, 1).catch(async (error) => { const state = await underlay.webContents.executeJavaScript("({ count: window.__nativeMouseClickCount, href: location.href, body: document.body.innerText })", true); throw new Error(`${String(error)}; underlayBounds=${JSON.stringify(underlay.getBounds())}; underlayPoint=${JSON.stringify(underlaySelfTestPoint)}; cursor=${JSON.stringify(screen.getCursorScreenPoint())}; displays=${JSON.stringify(screen.getAllDisplays().map((display) => ({ bounds: display.bounds, workArea: display.workArea, scaleFactor: display.scaleFactor }))) }; underlayState=${JSON.stringify(state)}`); });
+  await waitForNativeCount(underlay, 1).catch(async (error) => { const state = await underlay.webContents.executeJavaScript("({ count: window.__nativeMouseClickCount, href: location.href, body: document.body.innerText })", true); throw new Error(`${String(error)}; underlayBounds=${JSON.stringify(underlay.getBounds())}; underlayPoint=${JSON.stringify(underlaySelfTestPoint)}; nativeHit=${underlaySelfTestHit}; cursor=${JSON.stringify(screen.getCursorScreenPoint())}; displays=${JSON.stringify(screen.getAllDisplays().map((display) => ({ bounds: display.bounds, workArea: display.workArea, scaleFactor: display.scaleFactor }))) }; underlayState=${JSON.stringify(state)}`); });
   await underlay.webContents.executeJavaScript("window.__nativeMouseClickCount = 0", true);
   main.hide();
   await manager.prepare();
@@ -932,6 +969,14 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   const answerWindow = manager.currentAnswerWindow;
   const controlWindow = manager.currentControlWindow;
   if (!answerWindow || !controlWindow) throw new Error("Native overlay windows were not created");
+  const nativeWheelPreferences = overlaySettingsStore?.getPreferences();
+  if (nativeWheelPreferences) {
+    manager.applyLayoutPreferences({
+      ...nativeWheelPreferences,
+      interview: { ...nativeWheelPreferences.interview, leftPanel: "dialogue", showAnswer: false }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  }
 
   // Keep the test surface on the same topmost desktop as the overlay so a
   // background Edge window cannot steal the native click while this smoke
@@ -943,6 +988,35 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   for (const window of [questionWindow, answerWindow, controlWindow]) await nativeRaiseWindow(window);
   underlay.setBounds(questionWindow.getBounds());
   underlay.show();
+  underlay.focus();
+  const dialogueWheelPoint = await questionWindow.webContents.executeJavaScript(`(() => {
+    const region = document.querySelector('.overlay-scroll-region');
+    if (!region) return undefined;
+    region.querySelectorAll('[data-native-dialogue-fixture]').forEach((node) => node.remove());
+    for (let index = 0; index < 24; index += 1) {
+      const item = document.createElement('p');
+      item.dataset.nativeDialogueFixture = 'true';
+      item.textContent = 'NATIVE_DIALOGUE_WHEEL_FIXTURE_' + index;
+      region.appendChild(item);
+    }
+    region.scrollTop = 0;
+    const rect = region.getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  })()`, true) as { x: number; y: number } | undefined;
+  if (!dialogueWheelPoint) throw new Error("Native dialogue wheel target was not found");
+  const dialogueWheelScreenPoint = nativePoint(questionWindow, dialogueWheelPoint);
+  await nativeMouseWheel(dialogueWheelScreenPoint.x, dialogueWheelScreenPoint.y, -480);
+  const dialogueWheelAfter = await questionWindow.webContents.executeJavaScript(`(() => {
+    const region = document.querySelector('.overlay-scroll-region');
+    return region ? { scrollHeight: region.scrollHeight, clientHeight: region.clientHeight, scrollTop: region.scrollTop } : undefined;
+  })()`, true) as { scrollHeight: number; clientHeight: number; scrollTop: number } | undefined;
+  await questionWindow.webContents.executeJavaScript("document.querySelectorAll('[data-native-dialogue-fixture]').forEach((node) => node.remove())", true);
+  if (!dialogueWheelAfter || dialogueWheelAfter.scrollHeight <= dialogueWheelAfter.clientHeight || dialogueWheelAfter.scrollTop <= 0) throw new Error(`Native dialogue wheel did not scroll the canonical left window: ${JSON.stringify(dialogueWheelAfter)}`);
+  if (nativeWheelPreferences) {
+    manager.applyLayoutPreferences(nativeWheelPreferences);
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  }
+  underlay.setBounds(questionWindow.getBounds());
   underlay.focus();
   const questionCenter = nativePoint(questionWindow, { x: questionWindow.getBounds().width / 2, y: questionWindow.getBounds().height / 2 });
   const nativeHitBeforeClick = await nativeWindowAt(questionCenter);
@@ -1005,9 +1079,12 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   }
   if (!dialogVisible) throw new Error("End dialog did not open after native ControlWindow click");
   const foregroundAfterConfirm = await nativeForegroundWindow();
+  const confirmNativeDiagnostics = await nativeWindowDiagnostics(confirmWindow);
   const confirmConfig = manager.confirmWindowConfiguration;
-  const confirmForegroundPreserved = !/Interview Copilot Confirm/i.test(foregroundAfterConfirm);
-  if (!confirmConfig.skipTaskbar || confirmConfig.frame || confirmConfig.hasShadow || !confirmForegroundPreserved) throw new Error(`ConfirmWindow native configuration changed: ${JSON.stringify({ confirmConfig, foregroundBeforeConfirm, foregroundAfterConfirm })}`);
+  const controlHwnd = nativeWindowId(controlWindow);
+  const confirmOwnedByControl = confirmNativeDiagnostics.owner === controlHwnd || confirmNativeDiagnostics.parent === controlHwnd;
+  const confirmForegroundPreserved = confirmNativeDiagnostics.foreground === foregroundBeforeConfirm.match(/hwnd=(\d+)/)?.[1] && !/Interview Copilot Transient/i.test(foregroundAfterConfirm);
+  if (!confirmConfig.skipTaskbar || confirmConfig.frame || confirmConfig.hasShadow || confirmConfig.focusable || !confirmOwnedByControl || confirmNativeDiagnostics.appWindow || !confirmNativeDiagnostics.toolWindow || !confirmForegroundPreserved) throw new Error(`ConfirmWindow native configuration changed: ${JSON.stringify({ confirmConfig, foregroundBeforeConfirm, foregroundAfterConfirm, confirmNativeDiagnostics, controlHwnd })}`);
   const dialogCancel = await elementCenter(confirmWindow, "[data-testid='confirm-cancel']");
   await nativeMouseClick(dialogCancel.x, dialogCancel.y);
   await new Promise((resolve) => setTimeout(resolve, 180));
@@ -1016,6 +1093,15 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   await nativeMouseClick(controlTarget.x, controlTarget.y);
   await new Promise((resolve) => setTimeout(resolve, 180));
   if (manager.hudState.transcriptVisible === beforeCancelControl) throw new Error("ControlWindow stopped responding after end-dialog cancel");
+
+  manager.toggleShortcuts();
+  const shortcutWindow = manager.currentTransientWindow;
+  if (!shortcutWindow) throw new Error("Shortcut transient window was not created");
+  await waitForWindowVisible(shortcutWindow);
+  const shortcutNativeDiagnostics = await nativeWindowDiagnostics(shortcutWindow);
+  const shortcutOwnedByControl = shortcutNativeDiagnostics.owner === controlHwnd || shortcutNativeDiagnostics.parent === controlHwnd;
+  if (!shortcutOwnedByControl || shortcutNativeDiagnostics.appWindow || !shortcutNativeDiagnostics.toolWindow || shortcutNativeDiagnostics.foreground !== foregroundBeforeConfirm.match(/hwnd=(\d+)/)?.[1]) throw new Error(`ShortcutWindow native configuration changed: ${JSON.stringify({ shortcutNativeDiagnostics, controlHwnd, foregroundBeforeConfirm })}`);
+  manager.toggleShortcuts();
 
   const finalEndTarget = await elementCenter(controlWindow, ".toolbar-end-button");
   await nativeMouseClick(finalEndTarget.x, finalEndTarget.y);
@@ -1033,7 +1119,7 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   if (manager.hudState.running || finalConfirmWindow.isVisible()) throw new Error("End confirmation did not stop the interview after native confirm click");
   underlay.destroy();
   manager.exitInterviewMode();
-  const result = { ok: dragged, result: dragged ? "PASS" : "FAIL", questionClickThrough: true, answerClickThrough: true, controlClick: true, endDialogSingleOwner: true, confirmDialogInteractive: true, confirmTaskbarHidden: confirmConfig.skipTaskbar, confirmHasNoHeavyShadow: !confirmConfig.hasShadow, confirmForegroundPreserved, cancelRestoresPassthrough: true, endClickStopsInterview: true, layoutEditDrag: dragged, questionWindow: beforeEditBounds, questionWindowAfterDrag: afterEditBounds, mainWindow: !main.isDestroyed() };
+  const result = { ok: dragged, result: dragged ? "PASS" : "FAIL", questionClickThrough: true, answerClickThrough: true, controlClick: true, dialogueWheel: true, endDialogSingleOwner: true, confirmDialogInteractive: true, confirmTaskbarHidden: confirmConfig.skipTaskbar, confirmHasNoHeavyShadow: !confirmConfig.hasShadow, confirmFocusableDisabled: !confirmConfig.focusable, confirmForegroundPreserved, confirmOwnedByControl, confirmNativeDiagnostics, shortcutOwnedByControl, shortcutTaskbarHidden: !shortcutNativeDiagnostics.appWindow && shortcutNativeDiagnostics.toolWindow, shortcutFocusableDisabled: true, shortcutNativeDiagnostics, cancelRestoresPassthrough: true, endClickStopsInterview: true, layoutEditDrag: dragged, questionWindow: beforeEditBounds, questionWindowAfterDrag: afterEditBounds, mainWindow: !main.isDestroyed() };
   process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify(result)}\n`);
   app.exit(result.ok ? 0 : 1);
 }
@@ -1146,14 +1232,17 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
     await applyVisualPreferences({ interview: { layoutPreset: "classic_split", leftPanel: "question" } });
 
     manager.toggleShortcuts();
+    const activeTransientWindow = manager.currentTransientWindow;
+    if (!activeTransientWindow) throw new Error("VISUAL_TRANSIENT_WINDOW_MISSING");
+    await waitForWindowVisible(activeTransientWindow);
     await new Promise((resolve) => setTimeout(resolve, 260));
     snapshots["overlay-shortcut.png"] = join(visualArtifactDirectory, "overlay-shortcut.png");
-    await writeFile(snapshots["overlay-shortcut.png"], await captureVisibleWindow(transientWindow));
+    await writeFile(snapshots["overlay-shortcut.png"], await captureVisibleWindow(activeTransientWindow));
     snapshots["shortcut_menu.png"] = snapshots["overlay-shortcut.png"];
     manager.requestEndInterviewConfirmation();
     await new Promise((resolve) => setTimeout(resolve, 260));
     snapshots["overlay-end-confirm.png"] = join(visualArtifactDirectory, "overlay-end-confirm.png");
-    await writeFile(snapshots["overlay-end-confirm.png"], await captureVisibleWindow(transientWindow));
+    await writeFile(snapshots["overlay-end-confirm.png"], await captureVisibleWindow(activeTransientWindow));
     snapshots["end_confirm.png"] = snapshots["overlay-end-confirm.png"];
     manager.cancelEndInterviewConfirmation();
     visualArtifacts = { main: mainArtifact, overlay: overlayArtifact, snapshots };
@@ -1389,6 +1478,7 @@ async function stopInterview(): Promise<void> {
     // The HUD is a session-scoped window. Always restore the normal app even
     // when ASR/audio shutdown reports an error or an answer is still flushing.
     overlayManager?.exitInterviewMode();
+    setRuntimeOperationMode("IDLE");
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show();
       mainWindow.focus();
@@ -1755,7 +1845,7 @@ function registerIpc(): void {
    ipcMain.handle("overlay:toggle-answer", () => { overlayManager?.toggleAnswer(); return true; });
    ipcMain.handle("overlay:request-end", () => { if (coordinator().running || writtenTestController?.running || overlayManager?.hudState.running) overlayManager?.requestEndInterviewConfirmation(); return true; });
    ipcMain.handle("overlay:cancel-end", () => { overlayManager?.cancelEndInterviewConfirmation(); return true; });
-   ipcMain.handle("overlay:confirm-end", async () => { overlayManager?.confirmEndInterviewConfirmation(); await stopInterview(); return true; });
+   ipcMain.handle("overlay:confirm-end", async () => { overlayManager?.confirmEndInterviewConfirmation(); if (runtimeOperationMode === "WRITTEN_TEST") stopWrittenTest(); else await stopInterview(); return true; });
    ipcMain.handle("overlay:reset-layout", () => {
      const next = overlaySettingsStore?.resetLayout();
      if (next) {
@@ -1776,6 +1866,8 @@ function registerIpc(): void {
    ipcMain.handle("overlay:get-state", () => overlayManager?.hudState);
    ipcMain.handle("overlay:get-layout", () => overlayManager?.hudLayout);
    ipcMain.handle("overlay:get-displays", () => overlayManager?.getDisplays() ?? []);
+   ipcMain.handle("overlay:get-window-bounds", (_event, panel: OverlayNativePanel) => overlayManager?.getWindowBounds(panel));
+   ipcMain.handle("overlay:get-transient-bounds", () => overlayManager?.getTransientBounds());
    ipcMain.handle("overlay:get-preferences", () => overlaySettingsStore?.getPreferences());
    ipcMain.handle("overlay:set-preferences", (_event, input: OverlayPreferencesPatch) => {
      const next = overlaySettingsStore?.setPreferences(input);
@@ -1852,6 +1944,7 @@ function registerIpc(): void {
       // A slow network or model boot must not leave the user staring at a frozen main window.
       mainWindow?.hide();
       overlayManager?.enterInterviewMode();
+      setRuntimeOperationMode("INTERVIEW");
       overlayShown = true;
       markInterviewStartup("OVERLAY_SHOW_REQUEST");
       if (asrProviderType === "funasr-local") {
@@ -1879,6 +1972,7 @@ function registerIpc(): void {
       if (overlayShown || coordinatorStarted || coordinator().running) {
         await coordinator().stop("error").catch(() => undefined);
         overlayManager?.exitInterviewMode();
+        setRuntimeOperationMode("IDLE");
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
       }
       const raw = String(error);
@@ -1914,6 +2008,7 @@ function registerIpc(): void {
     writtenTestController?.start({ profileId: options.profileId, answerMode: options.answerMode });
     mainWindow?.hide();
     overlayManager?.enterWrittenTestMode();
+    setRuntimeOperationMode("WRITTEN_TEST");
     return true;
   });
   ipcMain.handle("written-test:stop", () => { stopWrittenTest(); return true; });
@@ -2366,6 +2461,7 @@ async function generateProjectQuestionBank(projectId: string): Promise<ProjectQa
 function stopWrittenTest(): void {
   writtenTestController?.stop();
   overlayManager?.exitWrittenTestMode();
+  setRuntimeOperationMode("IDLE");
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show();
     mainWindow.focus();
@@ -2837,11 +2933,11 @@ if (hasSingleInstanceLock) {
   const middleMouseHelper = firstExistingLocalPath(middleMouseHelperCandidates(process.resourcesPath, app.getAppPath()));
   if (middleMouseHelper) {
     middleMouseShortcutManager = new MiddleMouseShortcutManager(middleMouseHelper, () => {
-      const interviewRunning = Boolean(interviewCoordinator?.running);
-      const writtenTestRunning = Boolean(writtenTestController?.running);
+      const interviewRunning = runtimeOperationMode === "INTERVIEW";
+      const writtenTestRunning = runtimeOperationMode === "WRITTEN_TEST";
       const preferences = overlaySettingsStore?.getPreferences();
       if (!shouldHandleMiddleMouseShortcut({ interviewRunning, automationMode: interviewCoordinator?.automationMode ?? "AUTO", writtenTestRunning, middleMouseEnabled: preferences?.screenshot.middleMouseEnabled, enabledInManualInterview: preferences?.screenshot.enabledInManualInterview, enabledInExamMode: preferences?.screenshot.enabledInExamMode })) return;
-      const mode = writtenTestRunning ? "written-test" : interviewRunning ? "interview" : undefined;
+      const mode = runtimeOperationMode === "WRITTEN_TEST" ? "written-test" : runtimeOperationMode === "INTERVIEW" ? "interview" : undefined;
       if (!mode) return;
       broadcast("shortcut", "middle-mouse-screenshot");
       void answerCapturedScreenshot(mode, createScreenshotRequestId(), "middle-mouse-shortcut").catch((error) => {
@@ -2868,11 +2964,11 @@ if (hasSingleInstanceLock) {
     onNativeBoundsChanged: (panel, bounds, display) => {
       const current = overlaySettingsStore?.getPreferences();
       if (!current) return;
-      const mode = writtenTestController?.running ? "writtenTest" : "interview";
-      const leftKey = mode === "writtenTest" ? "questionWindow" : current.interview.leftPanel === "dialogue" ? "dialogueWindow" : "questionWindow";
+      const mode = runtimeOperationMode === "WRITTEN_TEST" ? "writtenTest" : "interview";
+      const leftKey = "questionWindow";
       const key = panel === "answer" ? "answerWindow" : panel === "control" ? "controlBar" : leftKey;
       const sectionKey = mode === "writtenTest" ? "writtenTest" : "interview";
-      const next = overlaySettingsStore?.setPreferences({ [sectionKey]: { ...(sectionKey === "interview" ? { layoutPreset: "minimal" as const } : {}), [key]: { x: bounds.x - display.workArea.x, y: bounds.y - display.workArea.y, width: bounds.width, height: bounds.height, displayId: display.id, scaleFactor: display.scaleFactor } } });
+      const next = overlaySettingsStore?.setPreferences({ [sectionKey]: { [key]: { x: bounds.x - display.workArea.x, y: bounds.y - display.workArea.y, width: bounds.width, height: bounds.height, displayId: display.id, scaleFactor: display.scaleFactor } } });
       if (next) broadcast("overlay:preferences", next);
     },
     onHUDStateChange: (state) => broadcast("overlay:state", state),

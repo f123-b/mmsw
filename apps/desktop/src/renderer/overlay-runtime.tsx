@@ -4,7 +4,9 @@ import type { RealtimeServerMessage } from "@interview-copilot/protocol";
 import { AnswerThreadStore, answerRelationForQuestion, type AnswerThread, type QuestionCandidate, type QuestionEvent, type SessionState, type TranscriptSnapshot } from "@interview-copilot/shared";
 import type { HUDState, OverlayMode } from "../main/overlay-manager";
 import type { OverlayPreferences } from "../shared/overlay-preferences";
+import type { RuntimeOperationMode } from "../shared/runtime-operation-mode";
 import { OverlayWindowRoot } from "./overlay/OverlayWindowRoot";
+import { answerScreenshotForMode } from "./overlay-runtime-actions";
 import type { OverlayRootProps, OverlaySurface } from "./overlay/OverlayRoot";
 import { RootErrorBoundary } from "./components/ErrorBoundary";
 import { initialRuntimePhaseState, isCommittedQuestionGroup, isDisplayableQuestionGroup, reduceRuntimeMessage, reduceRuntimeQuestion, reduceRuntimeTranscript, sessionPhaseFor, type RuntimePhaseState } from "./overlay/runtime-state";
@@ -60,7 +62,7 @@ interface RuntimeState {
   state: string;
   sessionState: string;
   realtimeState: string;
-  operationMode: "IDLE" | "INTERVIEW" | "WRITTEN_TEST";
+  operationMode: RuntimeOperationMode;
   overlayMode: OverlayMode;
   hudState: HUDState;
   runtimePhases: RuntimePhaseState;
@@ -91,7 +93,7 @@ function useOverlayRuntime(surface: OverlaySurface): RuntimeState {
     let disposed = false;
     let observedOverlayState = false;
     const update = (patch: Partial<RuntimeState>) => { if (!disposed) setState((current) => ({ ...current, ...patch })); };
-    void Promise.all([window.interviewCopilot.overlay.getState(), window.interviewCopilot.overlay.getPreferences(), window.interviewCopilot.overlay.getCaptureProtection(), window.interviewCopilot.writtenTest.getState()]).then(([hudState, preferences, captureProtection, writtenTest]) => update({ ...(observedOverlayState ? {} : { hudState: hudState ?? initialHUDState }), preferences, captureProtection, ...(writtenTest?.running ? { operationMode: "WRITTEN_TEST" as const, sessionState: "RUNNING", runtimePhases: { ...initialRuntimePhaseState, sessionPhase: "LISTENING" as const } } : {}) })).catch(() => undefined);
+    void Promise.all([window.interviewCopilot.overlay.getState(), window.interviewCopilot.overlay.getPreferences(), window.interviewCopilot.overlay.getCaptureProtection()]).then(([hudState, preferences, captureProtection]) => update({ ...(observedOverlayState ? {} : { hudState: hudState ?? initialHUDState }), preferences, captureProtection })).catch(() => undefined);
     const cleanups = [
       window.interviewCopilot.events.onAudio((event) => { if (event.type === "meter") update({ mic: Math.max(0, Math.min(1, event.mic)), system: Math.max(0, Math.min(1, event.system)) }); else if (event.type === "audio_state") setState((current) => ({ ...current, state: event.state, runtimePhases: { ...current.runtimePhases, sessionPhase: sessionPhaseFor(current.sessionState, event.state, current.realtimeState) } })); }),
       window.interviewCopilot.events.onSessionState((sessionState: SessionState) => {
@@ -100,16 +102,15 @@ function useOverlayRuntime(surface: OverlaySurface): RuntimeState {
         setState((current) => ({
           ...current,
           sessionState,
-          operationMode: sessionState === "IDLE" || sessionState === "ENDED" ? "IDLE" : "INTERVIEW",
           runtimePhases: shouldReset
             ? { ...initialRuntimePhaseState, automationMode: current.automationMode, sessionPhase: sessionPhaseFor(sessionState, current.state, current.realtimeState) }
             : { ...current.runtimePhases, sessionPhase: sessionPhaseFor(sessionState, current.state, current.realtimeState) },
           ...(shouldReset ? { question: undefined, answerText: "", answerStreaming: false, answerId: undefined, questionGroups: [], activeQuestionGroupId: undefined, activeAnswerGroupId: undefined, answerThreads: [] } : {})
         }));
       }),
-      window.interviewCopilot.events.onWrittenTestState((writtenTest) => setState((current) => writtenTest.running
-        ? { ...current, operationMode: "WRITTEN_TEST", sessionState: "RUNNING", runtimePhases: { ...initialRuntimePhaseState, sessionPhase: "LISTENING" } }
-        : { ...current, operationMode: "IDLE", sessionState: "IDLE", answerText: "", answerStreaming: false, answerThreads: [], questionGroups: [], question: undefined, remoteTranscript: { source: "remote", final: [] }, micTranscript: { source: "mic", final: [] }, runtimePhases: { ...initialRuntimePhaseState } })),
+      window.interviewCopilot.events.onOperationMode((operationMode) => setState((current) => operationMode === "IDLE"
+        ? { ...current, operationMode, sessionState: "IDLE", answerText: "", answerStreaming: false, answerThreads: [], questionGroups: [], question: undefined, remoteTranscript: { source: "remote", final: [] }, micTranscript: { source: "mic", final: [] }, runtimePhases: { ...initialRuntimePhaseState } }
+        : { ...current, operationMode, sessionState: "RUNNING", runtimePhases: operationMode === "WRITTEN_TEST" ? { ...initialRuntimePhaseState, sessionPhase: "LISTENING" } : current.runtimePhases })),
       window.interviewCopilot.events.onRealtimeState((realtimeState) => setState((current) => ({ ...current, realtimeState, runtimePhases: { ...current.runtimePhases, sessionPhase: sessionPhaseFor(current.sessionState, current.state, realtimeState) } }))),
       window.interviewCopilot.events.onOverlayMode((overlayMode) => update({ overlayMode })),
       window.interviewCopilot.events.onOverlayState((hudState) => { observedOverlayState = true; update({ hudState }); }),
@@ -165,8 +166,8 @@ function OverlayRuntimeApp({ surface }: { surface: OverlaySurface }): JSX.Elemen
     onToggleMode: () => void window.interviewCopilot.overlay.setMode(state.overlayMode === "interactive" ? "passive" : "interactive"),
     onToggleAutomation: async () => { await window.interviewCopilot.interview.setAutomationMode(state.automationMode === "AUTO" ? "MANUAL" : "AUTO"); },
     onAnswerLatest: () => window.interviewCopilot.interview.answerLatest(),
-    onAnswerScreenshot: () => window.interviewCopilot.interview.answerScreenshot(),
-    onEndInterview: () => window.interviewCopilot.interview.stop(),
+    onAnswerScreenshot: () => answerScreenshotForMode(state.operationMode),
+    onEndInterview: () => state.operationMode === "WRITTEN_TEST" ? window.interviewCopilot.writtenTest.stop().then(() => undefined) : window.interviewCopilot.interview.stop(),
     onHideAll: () => void window.interviewCopilot.overlay.hideAll(),
     onShowAll: () => void window.interviewCopilot.overlay.showAll(),
     onTogglePanels: () => void window.interviewCopilot.overlay.toggleAll(),
