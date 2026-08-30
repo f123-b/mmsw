@@ -599,7 +599,7 @@ export * from "./interview/context-anchor-resolver";
 export * from "./interview/topic-boundary-detector";
 export * from "./interview/turn-builder";
 export { QuestionGroupManager } from "./interview/question-group";
-export type { AddQuestionInput, AddQuestionResult, OverlayQuestionGroupView, QuestionGroup, QuestionItem, QuestionItemState, QuestionRelation, QuestionSlotCoverage, QuestionSlotStatus, QuestionThreadItemType } from "./interview/question-group";
+export type { AddQuestionInput, AddQuestionResult, OverlayQuestionGroupView, PendingQuestionContext, QuestionGroup, QuestionItem, QuestionItemState, QuestionRelation, QuestionSlotCoverage, QuestionSlotStatus, QuestionThreadItemType } from "./interview/question-group";
 export * from "./interview/answer-scheduler";
 export * from "./answer/answer-thread-store";
 export * from "./question-trace";

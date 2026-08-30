@@ -2,6 +2,7 @@ import { useEffect, useState, type JSX } from "react";
 import type { OverlayPreferences } from "../../shared/overlay-preferences";
 import { DEFAULT_OVERLAY_PREFERENCES } from "../../shared/overlay-preferences";
 import { DraggableResizablePanel, type OverlayPanelLayout, type OverlayRootProps } from "./OverlayRoot";
+import { primaryRuntimeStatus } from "./runtime-state";
 
 /** ControlWindow deliberately renders only the always-clickable toolbar. */
 export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
@@ -19,12 +20,13 @@ export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
     return () => { disposed = true; unsubscribe(); unsubscribeLayoutEdit(); window.removeEventListener("resize", onResize); };
   }, []);
   const modeLabel = props.operationMode === "WRITTEN_TEST" ? "笔试" : "面试";
-  const statusLabel = !props.hudState.running ? "未开始" : props.answerStreaming ? "正在生成" : props.answerText ? "回答已就绪" : "正在听取";
+  const statusLabel = primaryRuntimeStatus(props.runtimePhases);
+  const answerReady = props.runtimePhases.answerPhase === "READY";
   return <main className="overlay-root control-overlay-root" data-overlay-surface="control" data-hud-state={statusLabel}>
     {preferences.showToolbar && <DraggableResizablePanel panel="toolbar" nativePanel="control" layout={layout} onChange={(_panel, patch) => setLayout((current) => ({ ...current, ...patch }))} onCommit={() => undefined} editMode={layoutEditMode} className="toolbar-panel">
       <div className="floating-toolbar hud-interactive-region" role="toolbar" aria-label={`${modeLabel}控制栏`}>
         <span className="toolbar-audio-mark" aria-hidden="true">≈</span>
-        <div className="toolbar-runtime"><span>{statusLabel}</span></div>
+        <div className="toolbar-runtime"><span>{statusLabel}{answerReady && <small className="toolbar-answer-indicator"> · 回答已就绪</small>}</span></div>
         <span className="toolbar-divider" aria-hidden="true" />
         {!props.hudState.running || props.operationMode === "WRITTEN_TEST" ? null : <div className="toolbar-mode-switch" role="group" aria-label="回答模式"><button className={props.automationMode === "AUTO" ? "selected" : ""} onClick={() => { if (props.automationMode !== "AUTO") void props.onToggleAutomation(); }}>自动</button><button className={props.automationMode === "MANUAL" ? "selected" : ""} onClick={() => { if (props.automationMode !== "MANUAL") void props.onToggleAutomation(); }}>手动</button></div>}
         {preferences.showTranscript && <button className="toolbar-inline-action" onClick={props.onToggleTranscript} aria-label="显示或隐藏问题">问题</button>}

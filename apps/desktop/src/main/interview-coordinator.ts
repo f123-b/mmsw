@@ -244,6 +244,8 @@ export class InterviewCoordinator extends EventEmitter {
   private pendingQuestionTrace: QuestionTrace | undefined;
   private currentQuestionTrace: QuestionTrace | undefined;
   private activeQuestionTrace: QuestionTrace | undefined;
+  /** A pure transition marker changes the next question boundary, but is not a question itself. */
+  private pendingTopicTransition = false;
   private runtimeSessionState: RuntimeSessionState = "idle";
   private readonly runtimeTimers = new RuntimeTimerRegistry();
   private readonly runtimeAbortControllers = new RuntimeAbortRegistry();
@@ -496,6 +498,7 @@ export class InterviewCoordinator extends EventEmitter {
       this.currentQuestionTrace = undefined;
       this.activeQuestionTrace = undefined;
       this.currentQuestion = undefined;
+      this.pendingTopicTransition = false;
       this.runtimeQuestions.clear();
       this.clearRuntimeTimers();
       this.clearRuntimeRegistries();
@@ -508,13 +511,14 @@ export class InterviewCoordinator extends EventEmitter {
       this.clearRemoteAssemblyTimer();
       this.aggregator.clear();
       this.recordRuntimeTrace("INTERVIEW_SESSION_STARTED", {}, { reasonCode: "session-created" });
-      // Audio is the source of truth for interview readiness. Probe is an
-      // optional diagnostic and is intentionally not consulted here.
-      await this.options.audio.start({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true });
-      this.options.onStartupTiming?.("AUDIO_READY");
+      // Connect ASR before opening capture. Audio can deliver its first PCM
+      // packet synchronously from start(); RealtimeSession queues packets
+      // while the socket is opening, so no leading speech is lost.
       this.transition("CONNECTING");
       this.asr.connect({ ...startOptions, ...asrSettings, providerType, url: connectUrl, language: asrSettings?.language ?? (startOptions.language as AsrLanguage | undefined), autoReconnect: true });
       this.options.onStartupTiming?.("ASR_READY");
+      await this.options.audio.start({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true });
+      this.options.onStartupTiming?.("AUDIO_READY");
       return record.id;
     } catch (error) {
       await Promise.resolve(this.options.audio.stop()).catch(() => undefined);
@@ -595,6 +599,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.activeOptions = undefined;
     this.activeProfileId = undefined;
     this.currentQuestion = undefined;
+    this.pendingTopicTransition = false;
     this.questionConfirmedAt.clear();
     this.recentTranscript.length = 0;
     this.aggregator.clear();
@@ -1168,13 +1173,17 @@ export class InterviewCoordinator extends EventEmitter {
         turn: turn ?? this.turnBuilder.build({ id: event.question.turnId ?? event.question.utteranceId, text: event.question.text, receivedAt: event.question.detectedAt }),
         question: event.question,
         now: this.now(),
-        ...(event.type === "question_superseded" ? { relationType: "ASR_REVISION" as const } : {})
+        ...(event.type === "question_superseded" ? { relationType: "ASR_REVISION" as const } : this.pendingTopicTransition ? { relationType: "NEW_TOPIC" as const } : {})
       });
-      event = { ...event, question: groupResult.item.question };
+      const groupedQuestion = this.pendingTopicTransition
+        ? { ...groupResult.item.question, relationType: "NEW_TOPIC" as const, contextRelation: "standalone" as const, parentQuestionId: undefined, rootQuestionId: undefined }
+        : groupResult.item.question;
+      event = { ...event, question: groupedQuestion };
       this.emitQuestionGroupResult(groupResult);
+      this.pendingTopicTransition = false;
       this.markQuestionState(event.question, "confirmed");
       this.recordRuntimeTrace("QUESTION_CONFIRMED", { textLength: event.question.text.length }, { questionId: event.question.id, reasonCode: event.type });
-      this.currentQuestion = event.question;
+      if (groupResult.displayable && groupResult.item.answerable) this.currentQuestion = event.question;
       const trace = this.pendingQuestionTrace ?? new QuestionTrace({ questionTraceId: `question-trace-${event.question.id}`, questionScore: event.question.score, questionType: event.question.detectionType, followUp: event.question.speechAct === "FOLLOW_UP", projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId });
       if (trace.snapshot().questionDetectedAt === undefined) trace.mark("questionDetected", this.now());
       trace.mark("questionConfirmed", this.now());
@@ -1233,9 +1242,12 @@ export class InterviewCoordinator extends EventEmitter {
   private linkQuestionThread(event: QuestionEvent): QuestionEvent {
     if (event.type !== "question_confirmed" && event.type !== "question_superseded") return event;
     const previous = this.currentQuestion;
-    const isFollowUp = event.question.speechAct === "FOLLOW_UP"
+    const isFollowUp = !this.pendingTopicTransition
+      && event.question.relationType !== "NEW_TOPIC"
+      && event.question.contextRelation !== "standalone"
+      && (event.question.speechAct === "FOLLOW_UP"
       || event.question.detectionType === "follow_up"
-      || event.question.category === "followup";
+      || event.question.category === "followup");
     if (!isFollowUp || !previous || previous.id === event.question.id) return event;
     return {
       ...event,
@@ -1368,6 +1380,9 @@ export class InterviewCoordinator extends EventEmitter {
       unresolvedAsr: false
     });
     if (["incomplete", "topic_announcement", "instruction_modifier", "filler"].includes(completion.state)) {
+      if (completion.state === "topic_announcement" || completion.state === "instruction_modifier") {
+        this.stageQuestionContext(utterance, turn, correctedText, completion.state === "topic_announcement" ? "TOPIC_ANNOUNCEMENT" : "INSTRUCTION_MODIFIER");
+      }
       trace.update({ finalScore: 0, decision: "reject", decisionReason: completion.reason }).mark("questionDetected", this.now());
       this.currentQuestionTrace = trace;
       if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
@@ -1422,14 +1437,33 @@ export class InterviewCoordinator extends EventEmitter {
       this.memory.recordQuestion(anchor.text, { questionId: anchor.id, topic: anchor.topic, createdAt: anchor.createdAt });
     }
     if (shouldHardRejectSpeechAct(speech)) {
-      if (speech.speechAct === "TOPIC_ANNOUNCEMENT" || speech.speechAct === "INSTRUCTION_MODIFIER" || /^(?:下一个问题|换个话题|另一个问题|再问一个)/.test(correctedText.trim())) this.recordQuestionThreadFragment(utterance, turn, correctedText, speech.speechAct);
+      if (speech.speechAct === "TOPIC_TRANSITION") {
+        // Keep the boundary as coordinator state. The marker must not enter
+        // QuestionGroupManager, otherwise the overlay gets a fake answerable
+        // group titled “下一个问题”.
+        this.pendingTopicTransition = true;
+      } else if (speech.speechAct === "TOPIC_ANNOUNCEMENT" || speech.speechAct === "INSTRUCTION_MODIFIER") {
+        this.stageQuestionContext(utterance, turn, correctedText, speech.speechAct);
+      }
       trace.update({ finalScore: 0, decision: "reject", decisionReason: speech.reason }).mark("questionDetected", this.now());
       this.currentQuestionTrace = trace;
       if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
       this.emitQuestionTrace();
       return;
     }
-    const resolved = this.anchorResolver.resolve({ text: correctedText, speechAct: speech.speechAct, anchors: anchorSnapshot });
+    const resolvedBase = this.anchorResolver.resolve({ text: correctedText, speechAct: speech.speechAct, anchors: anchorSnapshot });
+    const resolved = this.pendingTopicTransition
+      ? {
+        ...resolvedBase,
+        canonicalQuestion: correctedText,
+        contextRelation: "standalone" as const,
+        parentQuestionId: undefined,
+        rootQuestionId: undefined,
+        inheritedTopic: undefined,
+        anchorUsed: undefined,
+        reason: "pending-topic-transition"
+      }
+      : resolvedBase;
     const canonicalQuestion = resolved.canonicalQuestion;
     const detectionContext = {
       memory: this.memory.snapshot(),
@@ -1503,7 +1537,7 @@ export class InterviewCoordinator extends EventEmitter {
     // Elliptical follow-ups such as “好，说说” are promoted by
     // InterviewBrain immediately when a topic exists in memory.
     if (!decision.isQuestion || !this.activeInterviewId || sessionGeneration !== this.sessionGeneration) {
-      if (promotesStatement || speech.speechAct === "TOPIC_ANCHOR") this.recordQuestionThreadFragment(utterance, turn, canonicalQuestion, speech.speechAct);
+      if (promotesStatement || speech.speechAct === "TOPIC_ANCHOR") this.stageQuestionContext(utterance, turn, canonicalQuestion, speech.speechAct);
       trace.update({ decision: "reject", decisionReason: decision.reason }).mark("questionDetected", this.now());
       this.currentQuestionTrace = trace;
       this.emitQuestionTrace();
@@ -1551,6 +1585,7 @@ export class InterviewCoordinator extends EventEmitter {
           utteranceId: utterance.id,
           segmentIds: [...utterance.segmentIds],
           turnId: turn.id,
+          ...(this.pendingTopicTransition ? { relationType: "NEW_TOPIC" as const, contextRelation: "standalone" as const, parentQuestionId: undefined, rootQuestionId: undefined } : {}),
           ...(resolved.parentQuestionId ? { parentQuestionId: resolved.parentQuestionId } : {}),
           ...(resolved.rootQuestionId ? { rootQuestionId: resolved.rootQuestionId } : {}),
           ...(resolved.anchorUsed ? { anchorId: resolved.anchorUsed.id } : {})
@@ -1708,11 +1743,15 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private emitQuestionGroupUpdate(group: QuestionGroup): void {
+    if (!group.displayable || !group.primaryQuestion) return;
     this.emitRealtimeMessage({
       type: "question_group_updated",
       groupId: group.id,
       title: group.title,
-      primaryQuestion: group.primaryQuestion ?? group.title,
+      primaryQuestion: group.primaryQuestion,
+      displayable: true,
+      hasAnswerableQuestion: group.items.some((item) => item.answerable),
+      status: group.status,
       items: group.items.map((item) => ({ id: item.question.id, questionId: item.question.id, text: item.question.text, type: item.itemType, answerable: item.answerable, state: item.state })),
       slots: group.slots.map((slot) => ({ id: slot.id, text: slot.text, status: slot.status })),
       updatedAt: group.updatedAt
@@ -1724,9 +1763,8 @@ export class InterviewCoordinator extends EventEmitter {
     this.emitQuestionGroupUpdate(result.group);
   }
 
-  private recordQuestionThreadFragment(utterance: TranscriptUtterance, turn: InterviewTurn, text: string, speechAct?: QuestionCandidate["speechAct"]): void {
-    const id = `question-thread-fragment-${utterance.id}`;
-    if (this.questionGroups.getGroupForQuestion(id)) return;
+  private stageQuestionContext(utterance: TranscriptUtterance, turn: InterviewTurn, text: string, speechAct?: QuestionCandidate["speechAct"]): void {
+    const id = `question-context-${utterance.id}`;
     const fragment: QuestionCandidate = {
       id,
       text: text.trim(),
@@ -1741,7 +1779,10 @@ export class InterviewCoordinator extends EventEmitter {
       ...(speechAct ? { speechAct } : {})
     };
     const result = this.questionGroups.add({ turn, question: fragment, now: this.now() });
-    this.emitQuestionGroupResult(result);
+    // A context fragment may decorate an already visible group (for example
+    // an example after the primary question), but a pending fragment never
+    // emits a visible group on its own.
+    if (result.displayable) this.emitQuestionGroupResult(result);
   }
 
   private markQuestionGroup(questionId: string, state: Parameters<QuestionGroupManager["mark"]>[1]): void {

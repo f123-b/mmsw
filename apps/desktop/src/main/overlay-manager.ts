@@ -219,7 +219,12 @@ export class OverlayManager {
     const nextEnabled = Boolean(enabled);
     if (nextEnabled === this.isLayoutEditMode) { this.sendLayoutEditMode(); return; }
     if (nextEnabled) {
-      this.lifecycleState = reduceOverlayLifecycle(this.lifecycleState, { type: "enter-layout-edit" });
+      const nextLifecycleState = reduceOverlayLifecycle(this.lifecycleState, { type: "enter-layout-edit" });
+      // Runtime overlays are native windows that must remain passive during
+      // an interview. The settings canvas is the preview; entering real
+      // window editing is an explicit settings action only.
+      if (nextLifecycleState === this.lifecycleState) { this.sendLayoutEditMode(); return; }
+      this.lifecycleState = nextLifecycleState;
       this.mode = "interactive";
       this.show();
     } else {

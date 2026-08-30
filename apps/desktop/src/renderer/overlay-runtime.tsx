@@ -7,6 +7,7 @@ import type { OverlayPreferences } from "../shared/overlay-preferences";
 import { OverlayWindowRoot } from "./overlay/OverlayWindowRoot";
 import type { OverlayRootProps, OverlaySurface } from "./overlay/OverlayRoot";
 import { RootErrorBoundary } from "./components/ErrorBoundary";
+import { initialRuntimePhaseState, isCommittedQuestionGroup, isDisplayableQuestionGroup, reduceRuntimeMessage, reduceRuntimeQuestion, reduceRuntimeTranscript, sessionPhaseFor, type RuntimePhaseState } from "./overlay/runtime-state";
 
 type QuestionGroup = OverlayRootProps["questionGroups"][number];
 
@@ -17,33 +18,38 @@ function replaceQuestionGroup(groups: QuestionGroup[], question: QuestionCandida
   const groupId = question.groupId ?? `question-group-${question.id}`;
   const current = groups.find((group) => group.id === groupId);
   const item = { id: question.id, questionId: question.id, text: question.text, type: question.threadItemType ?? "NEW_TOPIC", answerable: question.answerable !== false, state: question.status };
-  const next = current ? { ...current, title: current.title || question.text, primaryQuestion: current.primaryQuestion || question.text, items: [...current.items.filter((entry) => entry.id !== item.id), item], updatedAt: Date.now() } : { id: groupId, title: question.text, primaryQuestion: question.text, items: [item], slots: [], updatedAt: Date.now() };
+  if (question.answerable === false) return groups;
+  const next = current ? { ...current, title: current.title, primaryQuestion: current.primaryQuestion ?? question.text, displayable: true, hasAnswerableQuestion: true, items: [...current.items.filter((entry) => entry.id !== item.id), item], updatedAt: Date.now() } : { id: groupId, title: question.text, primaryQuestion: question.text, displayable: true, hasAnswerableQuestion: true, items: [item], slots: [], updatedAt: Date.now() };
   return [...groups.filter((group) => group.id !== groupId), next];
 }
 
 function applyRealtimeMessage(message: RealtimeServerMessage, state: RuntimeState, answerStore: AnswerThreadStore): RuntimeState {
   if (message.type === "question_group_updated") {
-    const group: QuestionGroup = { id: message.groupId, title: message.title, primaryQuestion: message.primaryQuestion, items: message.items, slots: message.slots, updatedAt: message.updatedAt };
-    return { ...state, questionGroups: [...state.questionGroups.filter((item) => item.id !== group.id), group], activeQuestionGroupId: group.id };
+    const group: QuestionGroup = { id: message.groupId, title: message.title, ...(message.primaryQuestion ? { primaryQuestion: message.primaryQuestion } : {}), displayable: message.displayable, hasAnswerableQuestion: message.hasAnswerableQuestion, status: message.status, items: message.items, slots: message.slots, updatedAt: message.updatedAt };
+    if (!isDisplayableQuestionGroup(group)) return state;
+    return isCommittedQuestionGroup(group)
+      ? { ...state, questionGroups: [...state.questionGroups.filter((item) => item.id !== group.id), group], activeQuestionGroupId: group.id, activeAnswerGroupId: group.id, runtimePhases: { ...state.runtimePhases, questionPhase: "COMMITTED", activeQuestionGroupId: group.id, activeAnswerGroupId: group.id } }
+      : { ...state, questionGroups: [...state.questionGroups.filter((item) => item.id !== group.id), group] };
   }
-  if (message.type === "runtime_error") return { ...state, notice: `${message.code}: ${message.message}` };
+  if (message.type === "runtime_error") return { ...state, notice: `${message.code}: ${message.message}`, runtimePhases: reduceRuntimeMessage(state.runtimePhases, message) };
   if (message.type === "answer_start") {
     const question = state.question;
     const groupId = message.groupId ?? question?.groupId;
     answerStore.start({ answerId: message.answerId, questionId: message.questionId, ...(groupId ? { groupId } : {}), title: groupId ? state.questionGroups.find((group) => group.id === groupId)?.title : undefined, questionText: question?.text ?? "截图识别的问题", relation: message.relation ?? (question ? answerRelationForQuestion(question) : "PRIMARY") });
-    return { ...state, answerText: "", answerStreaming: true, answerId: message.answerId, activeQuestionGroupId: groupId ?? state.activeQuestionGroupId, answerMode: message.mode, answerThreads: answerStore.list() };
+    const committedGroupId = groupId && isCommittedQuestionGroup(state.questionGroups.find((group) => group.id === groupId)) ? groupId : undefined;
+    return { ...state, answerText: "", answerStreaming: true, answerId: message.answerId, ...(committedGroupId ? { activeQuestionGroupId: committedGroupId, activeAnswerGroupId: committedGroupId } : {}), answerMode: message.mode, answerThreads: answerStore.list(), runtimePhases: reduceRuntimeMessage({ ...state.runtimePhases, ...(committedGroupId ? { activeQuestionGroupId: committedGroupId, activeAnswerGroupId: committedGroupId } : {}) }, message, committedGroupId) };
   }
   if (message.type === "answer_delta") {
     answerStore.delta(message.answerId, message.delta);
-    return { ...state, answerText: `${state.answerText}${message.delta}`, answerStreaming: true, answerThreads: answerStore.list() };
+    return { ...state, answerText: `${state.answerText}${message.delta}`, answerStreaming: true, answerThreads: answerStore.list(), runtimePhases: reduceRuntimeMessage(state.runtimePhases, message) };
   }
   if (message.type === "answer_end") {
     answerStore.complete(message.answerId, message.text);
-    return { ...state, answerText: message.text, answerStreaming: false, answerId: message.answerId, answerThreads: answerStore.list() };
+    return { ...state, answerText: message.text, answerStreaming: false, answerId: message.answerId, answerThreads: answerStore.list(), runtimePhases: reduceRuntimeMessage(state.runtimePhases, message) };
   }
   if (message.type === "answer_cancelled") {
     answerStore.cancel(message.answerId);
-    return { ...state, answerStreaming: false, answerThreads: answerStore.list() };
+    return { ...state, answerStreaming: false, answerThreads: answerStore.list(), runtimePhases: reduceRuntimeMessage(state.runtimePhases, message) };
   }
   return state;
 }
@@ -57,6 +63,7 @@ interface RuntimeState {
   operationMode: "IDLE" | "INTERVIEW" | "WRITTEN_TEST";
   overlayMode: OverlayMode;
   hudState: HUDState;
+  runtimePhases: RuntimePhaseState;
   automationMode: "MANUAL" | "AUTO";
   answerMode: "FAST" | "NORMAL" | "DEEP";
   question?: QuestionCandidate;
@@ -65,6 +72,7 @@ interface RuntimeState {
   answerId?: string;
   questionGroups: QuestionGroup[];
   activeQuestionGroupId?: string;
+  activeAnswerGroupId?: string;
   answerThreads: AnswerThread[];
   preferences?: OverlayPreferences;
   layoutEditMode: boolean;
@@ -72,7 +80,7 @@ interface RuntimeState {
   notice?: string;
 }
 
-const initialRuntimeState: RuntimeState = { mic: 0, system: 0, state: "STOPPED", sessionState: "IDLE", realtimeState: "disconnected", operationMode: "IDLE", overlayMode: "passive", hudState: initialHUDState, automationMode: "AUTO", answerMode: "NORMAL", answerText: "", answerStreaming: false, questionGroups: [], answerThreads: [], layoutEditMode: false };
+const initialRuntimeState: RuntimeState = { mic: 0, system: 0, state: "STOPPED", sessionState: "IDLE", realtimeState: "disconnected", operationMode: "IDLE", overlayMode: "passive", hudState: initialHUDState, runtimePhases: initialRuntimePhaseState, automationMode: "AUTO", answerMode: "NORMAL", answerText: "", answerStreaming: false, questionGroups: [], answerThreads: [], layoutEditMode: false };
 
 function useOverlayRuntime(surface: OverlaySurface): RuntimeState {
   const [state, setState] = useState<RuntimeState>(() => ({ ...initialRuntimeState, preferences: initialPreferences() }));
@@ -83,19 +91,34 @@ function useOverlayRuntime(surface: OverlaySurface): RuntimeState {
     const update = (patch: Partial<RuntimeState>) => { if (!disposed) setState((current) => ({ ...current, ...patch })); };
     void Promise.all([window.interviewCopilot.overlay.getState(), window.interviewCopilot.overlay.getPreferences(), window.interviewCopilot.overlay.getCaptureProtection()]).then(([hudState, preferences, captureProtection]) => update({ ...(observedOverlayState ? {} : { hudState: hudState ?? initialHUDState }), preferences, captureProtection })).catch(() => undefined);
     const cleanups = [
-      window.interviewCopilot.events.onAudio((event) => { if (event.type === "meter") update({ mic: Math.max(0, Math.min(1, event.mic)), system: Math.max(0, Math.min(1, event.system)) }); else if (event.type === "audio_state") update({ state: event.state }); }),
-      window.interviewCopilot.events.onSessionState((sessionState: SessionState) => update({ sessionState, operationMode: sessionState === "IDLE" || sessionState === "ENDED" ? "IDLE" : "INTERVIEW" })),
-      window.interviewCopilot.events.onRealtimeState((realtimeState) => update({ realtimeState })),
+      window.interviewCopilot.events.onAudio((event) => { if (event.type === "meter") update({ mic: Math.max(0, Math.min(1, event.mic)), system: Math.max(0, Math.min(1, event.system)) }); else if (event.type === "audio_state") setState((current) => ({ ...current, state: event.state, runtimePhases: { ...current.runtimePhases, sessionPhase: sessionPhaseFor(current.sessionState, event.state, current.realtimeState) } })); }),
+      window.interviewCopilot.events.onSessionState((sessionState: SessionState) => {
+        const shouldReset = sessionState === "CREATING" || sessionState === "IDLE" || sessionState === "ENDED";
+        if (shouldReset) answerStore.reset();
+        setState((current) => ({
+          ...current,
+          sessionState,
+          operationMode: sessionState === "IDLE" || sessionState === "ENDED" ? "IDLE" : "INTERVIEW",
+          runtimePhases: shouldReset
+            ? { ...initialRuntimePhaseState, automationMode: current.automationMode, sessionPhase: sessionPhaseFor(sessionState, current.state, current.realtimeState) }
+            : { ...current.runtimePhases, sessionPhase: sessionPhaseFor(sessionState, current.state, current.realtimeState) },
+          ...(shouldReset ? { question: undefined, answerText: "", answerStreaming: false, answerId: undefined, questionGroups: [], activeQuestionGroupId: undefined, activeAnswerGroupId: undefined, answerThreads: [] } : {})
+        }));
+      }),
+      window.interviewCopilot.events.onRealtimeState((realtimeState) => setState((current) => ({ ...current, realtimeState, runtimePhases: { ...current.runtimePhases, sessionPhase: sessionPhaseFor(current.sessionState, current.state, realtimeState) } }))),
       window.interviewCopilot.events.onOverlayMode((overlayMode) => update({ overlayMode })),
       window.interviewCopilot.events.onOverlayState((hudState) => { observedOverlayState = true; update({ hudState }); }),
       window.interviewCopilot.events.onOverlayPreferences((preferences) => update({ preferences })),
       window.interviewCopilot.events.onOverlayCaptureProtection((captureProtection) => update({ captureProtection })),
       window.interviewCopilot.events.onOverlayLayoutEditMode((layoutEditMode) => update({ layoutEditMode })),
-      window.interviewCopilot.events.onAutomationMode((automationMode) => update({ automationMode })),
+      window.interviewCopilot.events.onAutomationMode((automationMode) => setState((current) => ({ ...current, automationMode, runtimePhases: { ...current.runtimePhases, automationMode } }))),
       window.interviewCopilot.events.onAnswerMode((answerMode) => update({ answerMode })),
+      window.interviewCopilot.events.onRealtimeTranscript((snapshot) => setState((current) => ({ ...current, runtimePhases: reduceRuntimeTranscript(current.runtimePhases, snapshot.source, snapshot.final.length > 0) }))),
       window.interviewCopilot.events.onQuestion((event: QuestionEvent) => {
         if (event.type !== "question_confirmed" && event.type !== "question_superseded") return;
-        setState((current) => ({ ...current, question: event.question, questionGroups: replaceQuestionGroup(current.questionGroups, event.question), activeQuestionGroupId: event.question.groupId ?? current.activeQuestionGroupId }));
+        setState((current) => event.question.answerable === false
+          ? { ...current, runtimePhases: reduceRuntimeQuestion(current.runtimePhases, event) }
+          : { ...current, question: event.question, questionGroups: replaceQuestionGroup(current.questionGroups, event.question), runtimePhases: reduceRuntimeQuestion(current.runtimePhases, event) });
       }),
       window.interviewCopilot.events.onRealtimeMessage((message) => setState((current) => applyRealtimeMessage(message, current, answerStore))),
       window.interviewCopilot.events.onOverlayGlobalWheel(({ deltaY }) => { const selector = surface === "answer" ? ".answer-thread-panel" : ".question-thread-panel"; const element = document.querySelector(selector) as HTMLElement | null; if (element) element.scrollTop += deltaY; })
@@ -118,6 +141,7 @@ function OverlayRuntimeApp({ surface }: { surface: OverlaySurface }): JSX.Elemen
     operationMode: state.operationMode,
     overlayMode: state.overlayMode,
     hudState: state.hudState,
+    runtimePhases: state.runtimePhases,
     automationMode: state.automationMode,
     answerMode: state.answerMode,
     question: state.question,
@@ -125,6 +149,7 @@ function OverlayRuntimeApp({ surface }: { surface: OverlaySurface }): JSX.Elemen
     answerStreaming: state.answerStreaming,
     questionGroups: state.questionGroups,
     activeQuestionGroupId: state.activeQuestionGroupId,
+    activeAnswerGroupId: state.activeAnswerGroupId,
     answerThreads: state.answerThreads,
     onToggleMode: () => void window.interviewCopilot.overlay.setMode(state.overlayMode === "interactive" ? "passive" : "interactive"),
     onToggleAutomation: async () => { await window.interviewCopilot.interview.setAutomationMode(state.automationMode === "AUTO" ? "MANUAL" : "AUTO"); },

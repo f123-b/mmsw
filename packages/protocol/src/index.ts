@@ -266,7 +266,13 @@ export const questionGroupUpdatedSchema = z.object({
   type: z.literal("question_group_updated"),
   groupId: z.string().min(1),
   title: z.string(),
-  primaryQuestion: z.string(),
+  // Context-only fragments never reach this wire event. Keep the field
+  // optional for backwards-compatible clients, while new emitters always
+  // provide the committed primary question and display flags.
+  primaryQuestion: z.string().min(1).optional(),
+  displayable: z.boolean().optional(),
+  hasAnswerableQuestion: z.boolean().optional(),
+  status: z.enum(["collecting", "answering", "active", "closed"]).optional(),
   items: z.array(questionGroupItemSchema),
   slots: z.array(questionGroupSlotSchema),
   updatedAt: z.number()

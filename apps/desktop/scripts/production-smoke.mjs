@@ -30,6 +30,10 @@ const visualSmoke = process.env.UI_VISUAL_SMOKE === "true";
 // CI/desktop sandboxes can expose a broken GPU process. The smoke validates
 // window/renderer behavior, so keep it deterministic with software compositing.
 const smokeUserDataDirectory = join(tmpdir(), `interview-copilot-smoke-${process.pid}`);
+// Keep smoke isolated from a developer's real database. Large local history
+// files can exhaust sql.js during the renderer's parallel startup queries and
+// make visual capture look like a window/compositor hang.
+const smokeDataDirectory = join(tmpdir(), `interview-copilot-smoke-data-${process.pid}`);
 const smokeArguments = ["--production-smoke", ...(visualSmoke ? ["--visual-smoke"] : [])];
 const electronSwitches = ["--disable-gpu", "--in-process-gpu", `--user-data-dir=${smokeUserDataDirectory}`];
 const electronArguments = packaged ? [...electronSwitches, ...smokeArguments] : [...electronSwitches, desktopDirectory, ...smokeArguments];
@@ -37,7 +41,7 @@ const electronArguments = packaged ? [...electronSwitches, ...smokeArguments] : 
 const exitCode = await new Promise((resolve) => {
   const child = spawn(electronExecutable, electronArguments, {
     cwd: desktopDirectory,
-    env: { ...process.env, INTERVIEW_COPILOT_DISABLE_GPU: "1" },
+    env: { ...process.env, INTERVIEW_COPILOT_DISABLE_GPU: "1", INTERVIEW_COPILOT_TEST_DATA_PATH: smokeDataDirectory },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
   });

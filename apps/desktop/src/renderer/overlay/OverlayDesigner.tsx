@@ -10,6 +10,7 @@ import { OVERLAY_LABELS } from "./overlay-labels";
 export function OverlayDesigner({ value, onChange, onReset }: { value: OverlayPreferences; onChange: (patch: OverlayPreferencesPatch) => void; onReset: () => void }): JSX.Element {
   const [displays, setDisplays] = useState<OverlayDisplayInfo[]>([]);
   useEffect(() => { void window.interviewCopilot.overlay.getDisplays().then(setDisplays).catch(() => setDisplays([])); }, []);
+  useEffect(() => () => { void window.interviewCopilot.overlay.finishLayoutEditMode(); }, []);
   const activeDisplay = displays.find((display) => display.id === value.questionWindow.displayId) ?? displays[0];
   const display = activeDisplay ?? { id: undefined, workArea: DESIGNER_CANVAS, bounds: { ...DESIGNER_CANVAS }, scaleFactor: 1 };
   const setBehavior = (patch: Partial<OverlayPreferences["behavior"]>) => onChange({ behavior: patch });

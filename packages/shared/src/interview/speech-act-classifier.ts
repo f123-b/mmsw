@@ -8,6 +8,7 @@ export type InterviewSpeechAct =
   | "FOLLOW_UP"
   | "TOPIC_ANCHOR"
   | "TOPIC_ANNOUNCEMENT"
+  | "TOPIC_TRANSITION"
   | "INSTRUCTION_MODIFIER"
   | "ACKNOWLEDGEMENT"
   | "CONTROL"
@@ -43,7 +44,8 @@ export interface SpeechActClassification {
 }
 
 const ACKNOWLEDGEMENT = /^(?:嗯+|呃+|啊+|哦+|好+|好的|对|那|明白了?|知道了?|可以|行)[。！？?！\s，,、]*$/i;
-const CONTROL = /^(?:(?:好|好的|行|可以|嗯+|那)[，,、\s]*)?(?:下一个问题|下一题|换一个问题|换个问题|再来一个(?:问题)?|接下来(?:问)?)(?:[，,、].*)?[。！？?！\s，,、]*$/i;
+const TOPIC_TRANSITION = /^(?:(?:好|好的|行|可以|嗯+|那)[，,、\s]*)?(?:下一个问题|下个问题|下一题|换一个问题|换个问题|换个话题|再来一个(?:问题)?|再问一个(?:问题)?|另一个问题|接下来(?:问)?)[。！？?！\s，,、]*$/i;
+const CONTROL = /^(?:(?:好|好的|行|可以|嗯+|那)[，,、\s]*)?(?:继续|暂停|停止|开始)(?:[。！？?！\s，,、]*)$/i;
 const META_CONVERSATION = /(?:你能看到吗|看得到吗|你能听到吗|听得到吗|你在动鼠标吗|动我鼠标|鼠标|屏幕能看到吗|能看到屏幕|声音听得到吗|卡了吗|软件怎么了|网络卡吗|你怎么知道我这里|你操作我电脑了吗|你操作了吗|能看到我这边|能听到我这边)/i;
 const META_REPAIR = /^(?:你觉得(?:呢)?|怎么(?:回答|答|说)|答案(?:是什么|呢))[。！？?！\s]*$/i;
 const CODE_CONTEXT = /(?:现在|接下来|下面|来)?(?:考你|问你)?(?:一个)?代码题|算法题|编程题/i;
@@ -61,7 +63,7 @@ const ASSERTIVE_STATEMENT = /^(?:我|我们|系统|项目|这个项目|当前项
 const SMALL_TALK = /^(?:你好|您好|谢谢|辛苦了|哈哈|嗨)[。！？?！\s]*$/i;
 const CANDIDATE_SPEECH = /^(?:我|我们|本人|候选人).*(?:负责|做过|参与|实现|采用|使用|认为|觉得|已经|目前|先|会|可以).*[。！!]$/;
 const TOPIC_ANNOUNCEMENT = /^(?:(?:(?:下面聊(?:一下)?|接下来问一个|继续问一个|我们先聊(?:一下)?|先聊(?:一下)?|再聊(?:一下)?|我换个(?:更底层的)?|换个(?:话题|方向)?)(?:\s*(?:RTOS|FreeRTOS|C\+\+基础|底层驱动|通信协议|系统设计|项目经验|异常恢复|CAN|UART|DMA|FOC)(?:这个|相关)?(?:话题|部分|问题)?|(?:更?底层|技术|方向)?(?:的)?(?:话题|问题)?))|(?:RTOS|FreeRTOS|C\+\+基础|底层驱动|通信协议|系统设计|项目经验|异常恢复|CAN|UART|DMA|FOC)(?:这个|相关)?(?:话题|部分|问题)?)[。！？?！\s，,、]*$/iu;
-const INSTRUCTION_MODIFIER = /^(?!.*(?:什么|为什么|为何|怎么|如何|怎样|哪些|哪种|哪个|是否|有没有|吗|呢|[？?]))(?:请你|请)?(?:(?:重点|着重)(?:讲|说|说明|展开)(?:一下|一点)?(?:\s*[^\n。！？?！]{0,30})?|展开一点|具体一点|简单说|控制在\s*\d+\s*(?:秒|分钟)|结合项目(?:说|讲)|只讲)(?:[。！？?！\s，,、]*)$/iu;
+const INSTRUCTION_MODIFIER = /^(?!.*(?:什么|为什么|为何|怎么|如何|怎样|哪些|哪种|哪个|是否|有没有|吗|呢|[？?]))(?:请你|请)?(?:(?:重点|着重)(?:讲|说|说明|展开)(?:一下|一点)?(?:\s*[^\n。！？?！]{0,30})?|展开一点|具体一点|简单说|控制在\s*\d+\s*(?:秒|分钟)|结合项目(?:说|讲)|只讲|[^\n。！？?！]{1,32}角度(?:也)?(?:说|讲|考虑)(?:一下|一点)?)(?:[。！？?！\s，,、]*)$/iu;
 const SELF_INTRODUCTION = /^(?:请你|请|能否|可以)?(?:先)?(?:做|进行|来)(?:一下)?(?:一分钟|一段|个)?自我介绍[。！？?！\s，,、]*$/iu;
 
 const KNOWN_ENTITIES = [
@@ -116,7 +118,7 @@ function isFollowUp(text: string, context: SpeechActContext): boolean {
  * ASR frequently drops the interrogative tail.
  */
 export function shouldHardRejectSpeechAct(classification: SpeechActClassification): boolean {
-  if (["ACKNOWLEDGEMENT", "CONTROL", "META_CONVERSATION", "TOPIC_ANNOUNCEMENT", "INSTRUCTION_MODIFIER"].includes(classification.speechAct)) return true;
+  if (["ACKNOWLEDGEMENT", "CONTROL", "TOPIC_TRANSITION", "META_CONVERSATION", "TOPIC_ANNOUNCEMENT", "INSTRUCTION_MODIFIER"].includes(classification.speechAct)) return true;
   if (SMALL_TALK.test(classification.normalizedText)) return true;
   return classification.speechAct === "STATEMENT" && classification.candidateSpeech === true;
 }
@@ -130,6 +132,7 @@ export class SpeechActClassifier {
     if (!normalizedText) return { speechAct: "STATEMENT", shouldAnswer: false, confidence: 0, normalizedText, reason: "empty", entities };
     if (META_REPAIR.test(normalizedText)) return { speechAct: "META_CONVERSATION", shouldAnswer: false, confidence: 0.98, normalizedText, reason: "meta-repair-prompt", topic, entities };
     if (META_CONVERSATION.test(normalizedText)) return { speechAct: "META_CONVERSATION", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "environment-conversation", topic, entities };
+    if (TOPIC_TRANSITION.test(normalizedText)) return { speechAct: "TOPIC_TRANSITION", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "topic-transition-marker", topic, entities };
     if (CONTROL.test(normalizedText)) return { speechAct: "CONTROL", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "interview-control", topic, entities };
     if (ACKNOWLEDGEMENT.test(normalizedText) || /^(?:那个)[。！？?！\s]*$/i.test(normalizedText)) return { speechAct: "ACKNOWLEDGEMENT", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "acknowledgement", topic, entities };
     if (INSTRUCTION_MODIFIER.test(normalizedText)) return { speechAct: "INSTRUCTION_MODIFIER", shouldAnswer: false, confidence: 0.97, normalizedText, reason: "instruction-modifier", topic, entities };

@@ -47,4 +47,21 @@ describe("interview speech acts", () => {
     expect(classifier.classify("请你先做一分钟自我介绍")).toMatchObject({ speechAct: "ANSWER_REQUEST", shouldAnswer: true });
     expect(classifier.classify("好的开始面试").topic).toBeUndefined();
   });
+
+  it("treats a bare next-question marker as a boundary, not as a question", () => {
+    expect(classifier.classify("下一个问题")).toMatchObject({ speechAct: "TOPIC_TRANSITION", shouldAnswer: false });
+    expect(shouldHardRejectSpeechAct(classifier.classify("下一个问题"))).toBe(true);
+  });
+
+  it("keeps a transition-prefixed complete question answerable", () => {
+    expect(classifier.classify("下个问题，如果现在电机在低速时出现抖动，你会怎样一步步定位和解决？")).toMatchObject({ speechAct: "QUESTION", shouldAnswer: true });
+    expect(classifier.classify("比如低速抖动你会怎么定位？")).toMatchObject({ speechAct: "QUESTION", shouldAnswer: true });
+    expect(classifier.classify("比如低速抖动、电流波形和编码器反馈").shouldAnswer).toBe(false);
+  });
+
+  it("recognizes angle-based answer constraints without turning them into questions", () => {
+    const result = classifier.classify("空间大小和常见风险这几个角度也说一下。");
+    expect(result.speechAct).toBe("INSTRUCTION_MODIFIER");
+    expect(result.shouldAnswer).toBe(false);
+  });
 });

@@ -374,7 +374,14 @@ async function readRendererReadiness(window: BrowserWindow): Promise<RendererRea
 }
 
 async function waitForRendererPaint(window: BrowserWindow): Promise<void> {
-  await window.webContents.executeJavaScript("new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))", true);
+  // Transparent, click-through native overlays may be visible to Electron
+  // while their compositor does not schedule RAF callbacks. Capture should
+  // still proceed with the latest committed frame instead of hanging the
+  // production/visual smoke indefinitely.
+  await Promise.race([
+    window.webContents.executeJavaScript("new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))", true).then(() => undefined).catch(() => undefined),
+    new Promise<void>((resolve) => setTimeout(resolve, 750))
+  ]);
 }
 
 async function waitForWindowVisible(window: BrowserWindow): Promise<void> {

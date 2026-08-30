@@ -19,10 +19,11 @@ describe("Non-destructive Answer Stack real interview regressions", () => {
     const nucleus = manager.add({ turn: nucleusTurn, question: question("c-nucleus-q", nucleusTurn.text, { speechAct: "FOLLOW_UP" }), now: 1_100 });
     const view = nucleus.group as unknown as { primaryQuestion?: string; items: Array<{ itemType?: string; answerable?: boolean }> };
 
-    expect(topic.isNewGroup).toBe(true);
-    expect(nucleus.group.id).toBe(topic.group.id);
+    expect(topic.isNewGroup).toBe(false);
+    expect(topic.displayable).toBe(false);
+    expect(nucleus.group.id).not.toBe(topic.group.id);
     expect(view.primaryQuestion).toBe("C语言里，指针和数组有什么区别？");
-    expect(view.items[0]).toMatchObject({ itemType: "TOPIC_FRAGMENT", answerable: false });
+    expect(view.items[0]).toMatchObject({ itemType: "QUESTION_NUCLEUS", answerable: true });
   });
 
   it("does not create a second pre-token answer for an augmentation", () => {
@@ -71,12 +72,14 @@ describe("Non-destructive Answer Stack real interview regressions", () => {
     const example = manager.add({ turn: questionTurn, question: question("example-q", "比如任务栈溢出和竞态条件"), now: 1_300 });
     const nextTopic = manager.add({ turn: builder.build({ id: "new-topic", text: "下一个问题，讲CAN", startMs: 1_500, endMs: 1_800 }), question: question("new-topic-q", "下一个问题，讲CAN"), now: 1_800 });
 
-    expect(nucleus.group.id).toBe(context.group.id);
+    expect(context.displayable).toBe(false);
+    expect(nucleus.group.id).not.toBe(context.group.id);
     expect(nucleus.group.primaryQuestion).toBe("如果有多个任务同时访问设备状态你怎么设计？");
     expect(constraint.group.constraints).toContain("请从空间大小和常见风险这几个角度也说一下");
     expect(example.group.examples).toContain("比如任务栈溢出和竞态条件");
     expect(nextTopic.group.id).not.toBe(context.group.id);
-    expect(nextTopic.relation?.type).toBe("NEW_TOPIC");
+    expect(nextTopic.displayable).toBe(false);
+    expect(nextTopic.relation).toBeUndefined();
   });
 
   it("reports slot coverage independently from the number of generated answers", () => {

@@ -213,8 +213,8 @@ describe("2026-08-29 real interview runtime pipeline replay", () => {
 
     expect(result.groupUpdates.some((group) => group.primaryQuestion.includes("指针和数组") && group.primaryQuestion.includes("有什么区别"))).toBe(true);
     expect(result.groupUpdates.some((group) => group.items.some((item) => item.type === "ANSWER_CONSTRAINT" && item.answerable === false))).toBe(true);
-    expect([...result.groupUpdates].reverse().find((group: ReplayResult["groupUpdates"][number]) => group.primaryQuestion.includes("下一个问题，讲CAN"))?.primaryQuestion).toContain("下一个问题，讲CAN");
-    expect(result.traceNames.filter((name) => name === "ANSWER_REQUEST_CREATED")).toHaveLength(2);
+    expect(result.groupUpdates.some((group) => group.primaryQuestion.includes("下一个问题，讲CAN"))).toBe(false);
+    expect(result.traceNames.filter((name) => name === "ANSWER_REQUEST_CREATED")).toHaveLength(1);
     vi.useRealTimers();
   });
 });

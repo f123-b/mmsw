@@ -17,12 +17,36 @@ class FakeRealtime extends EventEmitter {
   sendControl(message: unknown): void { this.emit("control", message); }
 }
 
+class OrderedAudio extends FakeAudio {
+  constructor(private readonly order: string[]) { super(); }
+  override start(options: Record<string, unknown>): void { this.order.push("audio-start"); super.start(options); this.emit("pcm-packet", new Uint8Array([1, 2, 3])); }
+}
+
+class OrderedRealtime extends FakeRealtime {
+  constructor(private readonly order: string[]) { super(); }
+  override connect(): void { this.order.push("asr-connect"); super.connect(); }
+  override sendAudio(packet: Uint8Array): void { this.order.push(`pcm-${packet.byteLength}`); super.sendAudio(packet); }
+}
+
 async function* answerChunks(): AsyncGenerator<string> {
   yield "核心回答";
   yield "。";
 }
 
 describe("InterviewCoordinator software E2E", () => {
+  it("connects ASR before capture so the first PCM packet is not dropped", async () => {
+    const order: string[] = [];
+    const audio = new OrderedAudio(order);
+    const realtime = new OrderedRealtime(order);
+    const agent = new AnswerAgent({ "low-latency": { stream: answerChunks } }, new ModelRouter({ "low-latency": "test-model" }));
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent });
+
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
+
+    expect(order.slice(-3)).toEqual(["asr-connect", "audio-start", "pcm-3"]);
+    await coordinator.stop();
+  });
+
   it("runs PCM transport, ASR final, aggregation, question, answer and history", async () => {
     vi.useFakeTimers();
     const audio = new FakeAudio();

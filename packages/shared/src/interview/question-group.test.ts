@@ -77,4 +77,30 @@ describe("QuestionGroupManager", () => {
     expect(followUp.group.status).toBe("active");
     expect(manager.list()).toHaveLength(1);
   });
+
+  it("keeps transition markers and examples pending without creating visible groups", () => {
+    const builder = new TurnBuilder();
+    const manager = new QuestionGroupManager(builder);
+    const transitionTurn = builder.build({ id: "transition", text: "下一个问题", startMs: 0, endMs: 200 });
+    const exampleTurn = builder.build({ id: "example", text: "比如低速抖动、电流波形和编码器反馈", startMs: 300, endMs: 700 });
+    const transition = manager.add({ turn: transitionTurn, question: question("transition-q", transitionTurn.text, { speechAct: "TOPIC_TRANSITION" }), now: 1_000 });
+    const example = manager.add({ turn: exampleTurn, question: question("example-q", exampleTurn.text), now: 1_100 });
+
+    expect(transition.displayable).toBe(false);
+    expect(example.displayable).toBe(false);
+    expect(manager.list()).toHaveLength(0);
+    expect(manager.pendingQuestionContext?.fragments).toEqual(["下一个问题"]);
+    expect(manager.pendingQuestionContext?.examples).toEqual(["比如低速抖动、电流波形和编码器反馈"]);
+  });
+
+  it("promotes a question-shaped example prefix to a real primary question", () => {
+    const builder = new TurnBuilder();
+    const manager = new QuestionGroupManager(builder);
+    const turn = builder.build({ id: "example-question", text: "比如低速抖动你会怎么定位？", startMs: 0, endMs: 500 });
+    const result = manager.add({ turn, question: question("example-question-q", turn.text), now: 1_000 });
+
+    expect(result.displayable).toBe(true);
+    expect(result.group.primaryQuestion).toBe(turn.text);
+    expect(result.item.itemType).toBe("NEW_TOPIC");
+  });
 });
