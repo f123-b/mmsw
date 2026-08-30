@@ -269,6 +269,7 @@ const rendererFile = join(__dirname, "../renderer/index.html");
 const visualSmokeRequested = process.argv.includes("--visual-smoke");
 const captureProtectionSmokeRequested = process.argv.includes("--capture-protection-smoke");
 const nativeMouseSmokeRequested = process.argv.includes("--native-mouse-smoke");
+const performanceSmokeRequested = process.argv.includes("--performance-smoke");
 const captureTestRequested = process.env.INTERVIEW_COPILOT_CAPTURE_TEST === "1";
 const productionSmokeRequested = process.argv.includes("--production-smoke") || visualSmokeRequested;
 const screenshotOperations = new ScreenshotOperationRegistry();
@@ -913,7 +914,7 @@ async function waitForNativeCount(window: BrowserWindow, expected: number): Prom
 
 async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   if (process.platform !== "win32") {
-    process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify({ ok: false, result: "UNSUPPORTED_ENVIRONMENT", reason: "Windows Native mouse smoke requires win32" })}\n`);
+    process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify({ ok: false, result: "SKIPPED_UNSUPPORTED", reason: "Windows Native mouse smoke requires win32" })}\n`);
     app.exit(0);
     return;
   }
@@ -933,7 +934,7 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   const underlaySelfTestHit = await nativeWindowAt(underlaySelfTestPoint);
   const underlaySelfTestRoot = underlaySelfTestHit.match(/root=(\d+)/)?.[1];
   if (underlaySelfTestRoot && underlaySelfTestRoot !== nativeWindowId(underlay)) {
-    const result = { ok: false, result: "UNSUPPORTED_ENVIRONMENT", reason: "The current Windows desktop session does not expose the Electron smoke surface to native input", nativeHit: underlaySelfTestHit, underlayId: nativeWindowId(underlay) };
+    const result = { ok: false, result: "SKIPPED_UNSUPPORTED", reason: "The current Windows desktop session does not expose the Electron smoke surface to native input", nativeHit: underlaySelfTestHit, underlayId: nativeWindowId(underlay) };
     underlay.destroy();
     process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify(result)}\n`);
     app.exit(0);
@@ -1023,7 +1024,7 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   const nativeHitRoot = nativeHitBeforeClick.match(/root=(\d+)/)?.[1];
   const expectedNativeRoots = new Set([nativeWindowId(questionWindow), nativeWindowId(answerWindow), nativeWindowId(controlWindow), nativeWindowId(underlay)]);
   if (nativeHitRoot && !expectedNativeRoots.has(nativeHitRoot)) {
-    const result = { ok: false, result: "UNSUPPORTED_ENVIRONMENT", reason: "The current desktop foreground window is outside the Electron smoke surface; run from an interactive Windows desktop session", nativeHit: nativeHitBeforeClick };
+    const result = { ok: false, result: "SKIPPED_UNSUPPORTED", reason: "The current desktop foreground window is outside the Electron smoke surface; run from an interactive Windows desktop session", nativeHit: nativeHitBeforeClick };
     underlay.destroy();
     manager.exitInterviewMode();
     process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify(result)}\n`);
@@ -1121,6 +1122,155 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   manager.exitInterviewMode();
   const result = { ok: dragged, result: dragged ? "PASS" : "FAIL", questionClickThrough: true, answerClickThrough: true, controlClick: true, dialogueWheel: true, endDialogSingleOwner: true, confirmDialogInteractive: true, confirmTaskbarHidden: confirmConfig.skipTaskbar, confirmHasNoHeavyShadow: !confirmConfig.hasShadow, confirmFocusableDisabled: !confirmConfig.focusable, confirmForegroundPreserved, confirmOwnedByControl, confirmNativeDiagnostics, shortcutOwnedByControl, shortcutTaskbarHidden: !shortcutNativeDiagnostics.appWindow && shortcutNativeDiagnostics.toolWindow, shortcutFocusableDisabled: true, shortcutNativeDiagnostics, cancelRestoresPassthrough: true, endClickStopsInterview: true, layoutEditDrag: dragged, questionWindow: beforeEditBounds, questionWindowAfterDrag: afterEditBounds, mainWindow: !main.isDestroyed() };
   process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify(result)}\n`);
+  app.exit(result.ok ? 0 : 1);
+}
+
+type PerformanceMetricReport = {
+  name: string;
+  status: "PASS" | "FAIL" | "SKIPPED_UNSUPPORTED";
+  targetMs: number;
+  hardMaxMs: number;
+  samples: number[];
+  p50?: number;
+  p95?: number;
+  max?: number;
+  targetMet: boolean;
+  hardFail: boolean;
+  error?: string;
+};
+
+function performancePercentile(samples: number[], percentile: number): number | undefined {
+  if (!samples.length) return undefined;
+  const sorted = [...samples].sort((left, right) => left - right);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * percentile) - 1));
+  return Math.round(sorted[index] * 100) / 100;
+}
+
+async function measurePerformanceMetric(name: string, targetMs: number, hardMaxMs: number, action: () => Promise<number>): Promise<PerformanceMetricReport> {
+  const samples: number[] = [];
+  let error: string | undefined;
+  for (let index = 0; index < 12; index += 1) {
+    try {
+      const elapsed = await action();
+      if (!Number.isFinite(elapsed) || elapsed < 0) throw new Error(`Invalid latency sample: ${elapsed}`);
+      samples.push(Math.round(elapsed * 100) / 100);
+    } catch (cause) {
+      error = String(cause);
+      break;
+    }
+  }
+  const p50 = performancePercentile(samples, 0.5);
+  const p95 = performancePercentile(samples, 0.95);
+  const max = samples.length ? Math.max(...samples) : undefined;
+  return {
+    name,
+    status: samples.length === 12 && !error ? "PASS" : "FAIL",
+    targetMs,
+    hardMaxMs,
+    samples,
+    ...(p50 === undefined ? {} : { p50 }),
+    ...(p95 === undefined ? {} : { p95 }),
+    ...(max === undefined ? {} : { max }),
+    targetMet: p95 !== undefined && p95 <= targetMs,
+    hardFail: max !== undefined && max > hardMaxMs,
+    ...(error ? { error } : {})
+  };
+}
+
+async function waitForPerformanceRenderer(window: BrowserWindow, predicate: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await window.webContents.executeJavaScript(`Boolean((${predicate})())`, true) as boolean) return;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  }
+  throw new Error(`Performance smoke renderer condition timed out: ${predicate}`);
+}
+
+async function runPerformanceSmoke(main: BrowserWindow): Promise<void> {
+  await mainRendererLoad;
+  const manager = overlayManager;
+  if (!manager) throw new Error("PERFORMANCE_OVERLAY_MANAGER_MISSING");
+  await manager.prepare();
+  const questionWindow = manager.currentQuestionWindow;
+  const answerWindow = manager.currentAnswerWindow;
+  const controlWindow = manager.currentControlWindow;
+  if (!questionWindow || !answerWindow || !controlWindow) throw new Error("PERFORMANCE_OVERLAY_WINDOWS_MISSING");
+  await Promise.all([questionWindow, answerWindow, controlWindow].map((window) => waitForRendererLoad(window)));
+  await Promise.all([questionWindow, answerWindow, controlWindow].map((window) => waitForRendererReady(window)));
+  manager.enterInterviewMode();
+  await waitForWindowVisible(questionWindow);
+  await waitForWindowVisible(controlWindow);
+
+  const metrics: PerformanceMetricReport[] = [];
+  metrics.push(await measurePerformanceMetric("toolbar_click_ipc", 40, 200, async () => {
+    const elapsed = await controlWindow.webContents.executeJavaScript(`(() => { const button = document.querySelector("button[aria-label='显示或隐藏左侧面板']"); if (!button) throw new Error("toolbar visibility button missing"); const start = performance.now(); button.click(); return performance.now() - start; })()`, true) as number;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return elapsed;
+  }));
+  // Restore the toolbar state after measuring the real renderer click path.
+  await controlWindow.webContents.executeJavaScript("document.querySelector(\"button[aria-label='显示或隐藏左侧面板']\")?.click()", true);
+  manager.showAll();
+  await waitForWindowVisible(questionWindow);
+
+  metrics.push(await measurePerformanceMetric("overlay_visibility", 75, 500, async () => {
+    manager.hide();
+    const start = performance.now();
+    manager.show();
+    await Promise.all([questionWindow, answerWindow, controlWindow].map((window) => waitForWindowVisible(window)));
+    return performance.now() - start;
+  }));
+
+  metrics.push(await measurePerformanceMetric("wheel_routing", 32, 150, async () => {
+    const point = await questionWindow.webContents.executeJavaScript(`(() => { const region = document.querySelector('.overlay-scroll-region'); if (!region) return undefined; region.innerHTML = Array.from({ length: 24 }, (_, index) => '<p data-performance-fixture>PERFORMANCE_WHEEL_FIXTURE_' + index + '</p>').join(''); region.scrollTop = 0; const rect = region.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }; })()`, true) as { x: number; y: number } | undefined;
+    if (!point) throw new Error("scroll region missing after overlay show-all");
+    const bounds = questionWindow.getBounds();
+    const start = performance.now();
+    manager.handleGlobalWheel(bounds.x + point.x, bounds.y + point.y, 480);
+    await waitForPerformanceRenderer(questionWindow, "() => (document.querySelector('.overlay-scroll-region')?.scrollTop ?? 0) > 0");
+    return performance.now() - start;
+  }));
+  await questionWindow.webContents.executeJavaScript("document.querySelectorAll('[data-performance-fixture]').forEach((node) => node.remove())", true);
+
+  metrics.push(await measurePerformanceMetric("screenshot_ack", 200, 1_000, async () => {
+    const elapsed = await main.webContents.executeJavaScript("(async () => { const start = performance.now(); await window.interviewCopilot.screenshot.capture(); return performance.now() - start; })()", true) as number;
+    return elapsed;
+  }));
+
+  metrics.push(await measurePerformanceMetric("transient_owner", 100, 500, async () => {
+    if (manager.hudState.transientLayer !== "none") manager.toggleShortcuts();
+    const start = performance.now();
+    manager.toggleShortcuts();
+    const transient = manager.currentTransientWindow;
+    if (!transient) throw new Error("transient window missing");
+    await waitForWindowVisible(transient);
+    if (manager.hudState.transientLayer !== "shortcut") throw new Error("shortcut layer did not open");
+    manager.toggleShortcuts();
+    return performance.now() - start;
+  }));
+
+  await main.webContents.executeJavaScript("(() => { const button = [...document.querySelectorAll('button')].find((item) => (item.innerText || '').includes('快捷帮助')); if (!button) throw new Error('settings navigation button missing'); button.click(); return true; })()", true);
+  await waitForPerformanceRenderer(main, "() => Boolean(document.querySelector('.overlay-preferences-card'))");
+  metrics.push(await measurePerformanceMetric("preset_apply_ui", 150, 1_000, async () => {
+    const elapsed = await main.webContents.executeJavaScript(`(async () => { const compact = document.querySelector("[data-testid='designer-preset-compact_split']"); const classic = document.querySelector("[data-testid='designer-preset-classic_split']"); if (!compact || !classic) throw new Error('designer preset controls missing'); compact.click(); await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))); const start = performance.now(); classic.click(); const deadline = performance.now() + 2_000; while (!classic.classList.contains('selected') && performance.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10)); if (!classic.classList.contains('selected')) throw new Error('classic preset was not selected'); return performance.now() - start; })()`, true) as number;
+    return elapsed;
+  }));
+
+  const displayMetric = await main.webContents.executeJavaScript(`(async () => { const select = document.querySelector("select[aria-label='选择显示器']"); const options = select ? [...select.options].map((option) => option.value).filter(Boolean) : []; if (!select || options.length < 2) return { status: 'SKIPPED_UNSUPPORTED', reason: 'Only one display is available' }; const samples = []; for (let index = 0; index < 12; index += 1) { const target = options[index % options.length]; const start = performance.now(); select.value = target; select.dispatchEvent(new Event('change', { bubbles: true })); const deadline = performance.now() + 2_000; while (select.value !== target && performance.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10)); const preferencesDeadline = performance.now() + 2_000; while ((await window.interviewCopilot.overlay.getPreferences()).interview.questionWindow.displayId !== Number(target) && performance.now() < preferencesDeadline) await new Promise((resolve) => setTimeout(resolve, 10)); samples.push(performance.now() - start); } select.value = options[0]; select.dispatchEvent(new Event('change', { bubbles: true })); return { status: 'PASS', samples }; })()`, true) as { status: "PASS" | "SKIPPED_UNSUPPORTED"; samples?: number[]; reason?: string };
+  if (displayMetric.status === "PASS") {
+    const samples = displayMetric.samples ?? [];
+    const p50 = performancePercentile(samples, 0.5);
+    const p95 = performancePercentile(samples, 0.95);
+    const max = samples.length ? Math.max(...samples) : undefined;
+    metrics.push({ name: "display_switch_ui", status: samples.length === 12 ? "PASS" : "FAIL", targetMs: 100, hardMaxMs: 500, samples: samples.map((sample) => Math.round(sample * 100) / 100), ...(p50 === undefined ? {} : { p50 }), ...(p95 === undefined ? {} : { p95 }), ...(max === undefined ? {} : { max }), targetMet: p95 !== undefined && p95 <= 100, hardFail: max !== undefined && max > 500 });
+  } else {
+    metrics.push({ name: "display_switch_ui", status: "SKIPPED_UNSUPPORTED", targetMs: 100, hardMaxMs: 500, samples: [], targetMet: false, hardFail: false, error: displayMetric.reason });
+  }
+
+  manager.exitInterviewMode();
+  const failed = metrics.filter((metric) => metric.status === "FAIL" || metric.hardFail);
+  const result = { ok: failed.length === 0, targetSummary: { p50: "median", p95: "95th percentile", max: "maximum", hardFail: "max > hardMaxMs" }, metrics, environment: { platform: process.platform, displayCount: screen.getAllDisplays().length, displaySwitchStatus: displayMetric.status } };
+  appLogger?.info("PERFORMANCE_SMOKE_RESULT", result);
+  process.stdout.write(`PERFORMANCE_SMOKE_RESULT ${JSON.stringify(result)}\n`);
   app.exit(result.ok ? 0 : 1);
 }
 
@@ -3076,6 +3226,7 @@ if (hasSingleInstanceLock) {
       app.quit();
     }
   } else if (nativeMouseSmokeRequested) await runNativeMouseSmoke(createdMainWindow).catch((error) => { process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify({ ok: false, result: "FAIL", error: String(error) })}\n`); overlayManager?.destroy(); app.exit(1); });
+  else if (performanceSmokeRequested) await runPerformanceSmoke(createdMainWindow).catch((error) => { const result = { ok: false, result: "FAIL", error: String(error) }; appLogger?.error("PERFORMANCE_SMOKE_FAILED", result); process.stdout.write(`PERFORMANCE_SMOKE_RESULT ${JSON.stringify(result)}\n`); app.exit(1); });
   else if (productionSmokeRequested) await runProductionSmoke(createdMainWindow);
   });
 } else {

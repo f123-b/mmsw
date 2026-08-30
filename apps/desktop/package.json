@@ -13,6 +13,8 @@
     "smoke:production": "npm run build && node scripts/production-smoke.mjs",
     "capture-protection:smoke": "npm run build:capture-helper && npm run build && node scripts/capture-protection-smoke.mjs",
     "native:mouse-smoke": "npm run build:capture-helper && npm run build && node scripts/native-mouse-smoke.mjs",
+    "verify:windows-native": "npm run build:capture-helper && npm run build && node scripts/native-mouse-smoke.mjs --require-pass",
+    "performance:smoke": "npm run build && node scripts/performance-smoke.mjs",
     "visual:smoke": "npm run build && node scripts/visual-smoke.mjs",
     "functional:e2e": "npm run build && node scripts/functional-e2e.mjs",
     "realtime:smoke": "npm run build && node scripts/realtime-smoke-e2e.mjs",

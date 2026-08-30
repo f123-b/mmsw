@@ -19,6 +19,8 @@
     "capture-protection:smoke": "npm --workspace apps/desktop run capture-protection:smoke",
     "audio:windows:smoke": "npm --workspace apps/desktop run audio:windows:smoke",
     "capture-helper:build": "npm --workspace apps/desktop run build:capture-helper",
+    "verify:windows-native": "npm --workspace apps/desktop run verify:windows-native",
+    "performance:smoke": "npm --workspace apps/desktop run performance:smoke",
     "visual:smoke": "npm --workspace apps/desktop run visual:smoke",
     "functional:e2e": "npm run ensure:electron-runtime && npm --workspace apps/desktop run functional:e2e",
     "realtime:smoke": "npm run ensure:electron-runtime && npm --workspace @interview-copilot/desktop run realtime:smoke",

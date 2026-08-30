@@ -357,6 +357,12 @@ async function nativeClickPoint(point, client) {
   await sleep(250);
 }
 
+async function pointerDrag(selector, delta, client = main) {
+  const dragged = await client.evaluate(`(() => { const element = document.querySelector(${JSON.stringify(selector)}); if (!element) return false; const rect = element.getBoundingClientRect(); const start = { x: rect.left + rect.width / 2, y: rect.top + Math.min(28, rect.height / 2) }; const event = (type, point) => new PointerEvent(type, { bubbles: true, pointerId: 71, pointerType: 'mouse', clientX: point.x, clientY: point.y, buttons: type === 'pointerup' ? 0 : 1 }); element.dispatchEvent(event('pointerdown', start)); window.dispatchEvent(event('pointermove', { x: start.x + ${delta.x}, y: start.y + ${delta.y} })); window.dispatchEvent(event('pointerup', { x: start.x + ${delta.x}, y: start.y + ${delta.y} })); return true; })()`);
+  if (!dragged) throw new Error(`Pointer drag target not found: ${selector}`);
+  await sleep(300);
+}
+
 async function fillLabel(labelText, value, client = main) {
   const filled = await client.evaluate(`(() => { const label = [...document.querySelectorAll('label')].find((item) => (item.innerText || '').includes(${JSON.stringify(labelText)})); const control = label?.querySelector('input,textarea,select'); if (!control) return false; const setter = Object.getOwnPropertyDescriptor(control.constructor.prototype, 'value')?.set; setter?.call(control, ${JSON.stringify(value)}); control.dispatchEvent(new Event('input', { bubbles: true })); control.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
   if (!filled) throw new Error(`Form control not found: ${labelText}`);
@@ -365,6 +371,12 @@ async function fillLabel(labelText, value, client = main) {
 async function fillSelector(selector, value, client = main) {
   const filled = await client.evaluate(`(() => { const control = document.querySelector(${JSON.stringify(selector)}); if (!control) return false; const setter = Object.getOwnPropertyDescriptor(control.constructor.prototype, 'value')?.set; setter?.call(control, ${JSON.stringify(value)}); control.dispatchEvent(new Event('input', { bubbles: true })); control.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
   if (!filled) throw new Error(`Form control not found: ${selector}`);
+}
+
+async function fillDesignerField(panelLabel, fieldLabel, value) {
+  const filled = await main.evaluate(`(() => { const inspector = document.querySelector(${JSON.stringify(`[aria-label="${panelLabel}尺寸检查器"]`)}); const label = [...(inspector?.querySelectorAll('label') ?? [])].find((item) => (item.innerText || '').trim().startsWith(${JSON.stringify(fieldLabel)})); const control = label?.querySelector('input'); if (!control) return false; const setter = Object.getOwnPropertyDescriptor(control.constructor.prototype, 'value')?.set; setter?.call(control, String(${JSON.stringify(value)})); control.dispatchEvent(new Event('input', { bubbles: true })); control.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
+  if (!filled) throw new Error(`Designer inspector field not found: ${panelLabel}/${fieldLabel}`);
+  await sleep(300);
 }
 
 async function screenshot(name, client = main) {
@@ -393,12 +405,62 @@ try {
   await waitFor(() => Boolean(document.querySelector(".settings-page")));
   await screenshot("01-settings.png");
   await waitFor(() => document.body.innerText.includes("面试悬浮窗"));
-  const overlayPreferencesRoundTrip = await main.evaluate("window.interviewCopilot.overlay.setPreferences({ backgroundOpacity: 0.64, backgroundColor: '#20344f', fontColor: '#f4f8ff', fontSize: 16, showToolbar: true, showTimestamps: false, interview: { layoutPreset: 'classic_split', leftPanel: 'question', showAnswer: true, questionWindow: { width: 470, height: 540, fontSize: 15 }, answerWindow: { width: 760, height: 540, fontSize: 16 } }, writtenTest: { layoutPreset: 'single_reader' }, behavior: { followLatestQuestion: true, followLatestAnswer: true, alwaysOnTop: true, lockPosition: false, mousePassthrough: true }, screenshot: { middleMouseEnabled: true, enabledInManualInterview: true, enabledInExamMode: true, captureMode: 'current_display' } }).then(() => window.interviewCopilot.overlay.getPreferences())");
-  if (overlayPreferencesRoundTrip?.schemaVersion !== 4 || overlayPreferencesRoundTrip?.backgroundOpacity !== 0.64 || overlayPreferencesRoundTrip?.fontSize !== 16 || overlayPreferencesRoundTrip?.showTimestamps !== false || overlayPreferencesRoundTrip?.interview?.layoutPreset !== 'classic_split' || overlayPreferencesRoundTrip?.interview?.questionWindow?.width !== 470 || overlayPreferencesRoundTrip?.interview?.answerWindow?.width !== 760 || overlayPreferencesRoundTrip?.writtenTest?.layoutPreset !== 'single_reader' || overlayPreferencesRoundTrip?.screenshot?.enabledInExamMode !== true) throw new Error(`OVERLAY_PREFERENCES_PERSIST failed: ${JSON.stringify(overlayPreferencesRoundTrip)}`);
+  await clickSelector("[data-testid='designer-preset-classic_split']");
+  const classicDesignerDefault = await main.evaluate("(async () => ({ preferences: await window.interviewCopilot.overlay.getPreferences(), preview: [...document.querySelectorAll('[data-preview-panel]')].map((node) => ({ panel: node.dataset.previewPanel, width: Number(node.dataset.previewWidth), height: Number(node.dataset.previewHeight) })) }))()");
+  if (classicDesignerDefault?.preferences?.interview?.questionWindow?.width !== 420 || classicDesignerDefault.preferences.interview.questionWindow.height !== 500 || classicDesignerDefault.preferences.interview.answerWindow.width !== 680 || classicDesignerDefault.preferences.interview.answerWindow.height !== 500) throw new Error(`DESIGNER_CLASSIC_DEFAULT failed: ${JSON.stringify(classicDesignerDefault)}`);
+  await main.evaluate("document.querySelector('.overlay-preferences-card')?.scrollIntoView({ block: 'center' }); true");
+  await sleep(250);
+  await screenshot("designer_classic_default.png");
+  const beforeDesignerDrag = await main.evaluate("(() => { const node = document.querySelector('[data-preview-panel=question]'); return node ? { x: Number(node.dataset.previewX), y: Number(node.dataset.previewY), width: Number(node.dataset.previewWidth), height: Number(node.dataset.previewHeight) } : undefined; })()");
+  await pointerDrag("[data-preview-panel='question']", { x: 60, y: 30 });
+  const afterDesignerDrag = await main.evaluate("(() => { const node = document.querySelector('[data-preview-panel=question]'); return node ? { x: Number(node.dataset.previewX), y: Number(node.dataset.previewY), width: Number(node.dataset.previewWidth), height: Number(node.dataset.previewHeight) } : undefined; })()");
+  if (!beforeDesignerDrag || !afterDesignerDrag || afterDesignerDrag.x === beforeDesignerDrag.x || afterDesignerDrag.y === beforeDesignerDrag.y || afterDesignerDrag.width !== beforeDesignerDrag.width || afterDesignerDrag.height !== beforeDesignerDrag.height) throw new Error(`DESIGNER_DRAG_PRESERVES_SIZE failed: ${JSON.stringify({ beforeDesignerDrag, afterDesignerDrag })}`);
+  await fillDesignerField("问题导航", "高度", 560);
+  await clickText("答案阅读器");
+  await fillDesignerField("答案阅读器", "高度", 620);
+  const designerCustom = await main.evaluate("window.interviewCopilot.overlay.getPreferences()");
+  if (designerCustom?.interview?.questionWindow?.height !== 560 || designerCustom.interview.answerWindow.height !== 620) throw new Error(`DESIGNER_INSPECTOR_RESIZE_PERSISTS failed: ${JSON.stringify(designerCustom)}`);
+  await screenshot("designer_classic_custom.png");
+  await clickSelector("[data-testid='designer-preset-classic_split']");
+  const reappliedClassic = await main.evaluate("window.interviewCopilot.overlay.getPreferences()");
+  if (reappliedClassic?.interview?.questionWindow?.width !== 420 || reappliedClassic.interview.questionWindow.height !== 500 || reappliedClassic.interview.answerWindow.width !== 680 || reappliedClassic.interview.answerWindow.height !== 500) throw new Error(`DESIGNER_PRESET_REAPPLY failed: ${JSON.stringify(reappliedClassic)}`);
+  await screenshot("designer_classic_reapplied.png");
+  // Recreate the custom dimensions through the Inspector after preset reapply;
+  // runtime parity below therefore consumes a UI-authored preferences state.
+  await clickText("问题导航");
+  await fillDesignerField("问题导航", "高度", 560);
+  await clickText("答案阅读器");
+  await fillDesignerField("答案阅读器", "高度", 620);
+  const overlayPreferencesRoundTrip = await main.evaluate("window.interviewCopilot.overlay.setPreferences({ backgroundOpacity: 0.64, backgroundColor: '#20344f', fontColor: '#f4f8ff', fontSize: 16, showToolbar: true, showTimestamps: false, interview: { layoutPreset: 'classic_split', leftPanel: 'question', showAnswer: true }, writtenTest: { layoutPreset: 'single_reader' }, behavior: { followLatestQuestion: true, followLatestAnswer: true, alwaysOnTop: true, lockPosition: false, mousePassthrough: true }, screenshot: { middleMouseEnabled: true, enabledInManualInterview: true, enabledInExamMode: true, captureMode: 'current_display' } }).then(() => window.interviewCopilot.overlay.getPreferences())");
+  if (overlayPreferencesRoundTrip?.schemaVersion !== 4 || overlayPreferencesRoundTrip?.backgroundOpacity !== 0.64 || overlayPreferencesRoundTrip?.fontSize !== 16 || overlayPreferencesRoundTrip?.showTimestamps !== false || overlayPreferencesRoundTrip?.interview?.layoutPreset !== 'classic_split' || overlayPreferencesRoundTrip?.interview?.questionWindow?.height !== 560 || overlayPreferencesRoundTrip?.interview?.answerWindow?.height !== 620 || overlayPreferencesRoundTrip?.writtenTest?.layoutPreset !== 'single_reader' || overlayPreferencesRoundTrip?.screenshot?.enabledInExamMode !== true) throw new Error(`OVERLAY_PREFERENCES_PERSIST failed: ${JSON.stringify(overlayPreferencesRoundTrip)}`);
+  await clickSelector("[data-testid='designer-preset-compact_split']");
+  await screenshot("designer_compact_split.png");
+  await clickSelector("[data-testid='designer-preset-answer_focus']");
+  await screenshot("designer_answer_focus.png");
+  await clickSelector("[data-testid='designer-preset-minimal']");
+  await screenshot("designer_minimal.png");
+  await clickText("笔试悬浮窗");
+  await waitFor(() => Boolean(document.querySelector("[data-testid='designer-preset-single_reader']")));
+  await clickSelector("[data-testid='designer-preset-single_reader']");
+  await screenshot("designer_written_single_reader.png");
+  const modeDisplayBaseline = await main.evaluate("window.interviewCopilot.overlay.getPreferences().then((preferences) => ({ interview: { id: preferences.interview.questionWindow.displayId, scale: preferences.interview.questionWindow.scaleFactor }, written: { id: preferences.writtenTest.questionWindow.displayId, scale: preferences.writtenTest.questionWindow.scaleFactor } }))");
+  for (let index = 0; index < 20; index += 1) {
+    await clickText("面试悬浮窗");
+    await clickText("笔试悬浮窗");
+  }
+  const modeDisplayAfterSwitch = await main.evaluate("window.interviewCopilot.overlay.getPreferences().then((preferences) => ({ interview: { id: preferences.interview.questionWindow.displayId, scale: preferences.interview.questionWindow.scaleFactor }, written: { id: preferences.writtenTest.questionWindow.displayId, scale: preferences.writtenTest.questionWindow.scaleFactor } }))");
+  if (JSON.stringify(modeDisplayAfterSwitch) !== JSON.stringify(modeDisplayBaseline)) throw new Error(`DESIGNER_MODE_SWITCH_DISPLAY_PERSISTENCE failed: ${JSON.stringify({ modeDisplayBaseline, modeDisplayAfterSwitch })}`);
+  await clickText("面试悬浮窗");
+  await waitFor(() => Boolean(document.querySelector("[data-preview-panel='question']")));
+  await clickSelector("[data-testid='designer-preset-classic_split']");
+  await clickText("问题导航");
+  await fillDesignerField("问题导航", "高度", 560);
+  await clickText("答案阅读器");
+  await fillDesignerField("答案阅读器", "高度", 620);
   await main.evaluate("document.querySelector('.overlay-preferences-card')?.scrollIntoView({ block: 'center' }); true");
   await sleep(250);
   await screenshot("01b-overlay-settings.png");
-  evidence.push("Overlay Preferences UI: PASS; OVERLAY_PREFERENCES_PERSIST: PASS");
+  evidence.push("Overlay Preferences UI: PASS; OVERLAY_PREFERENCES_PERSIST: PASS; DESIGNER_CLASSIC_DEFAULT: PASS; DESIGNER_DRAG_PRESERVES_SIZE: PASS; DESIGNER_INSPECTOR_RESIZE_PERSISTS: PASS; DESIGNER_PRESET_REAPPLY: PASS; DESIGNER_MODE_SWITCH_DISPLAY_PERSISTENCE: PASS (20 switches); DESIGNER_VISUAL_REGRESSION_ARTIFACTS: PASS");
   await clickText("OpenAI 兼容");
   await clickSelector(".primary-service-card .settings-advanced summary");
   await fillLabel("Base URL", `http://127.0.0.1:${mockPort}`);
@@ -746,15 +808,15 @@ try {
   evidence.push("DIALOGUE_WHEEL_SCROLL: PASS; dialogue uses canonical left native window: PASS; wheel did not trigger screenshot: PASS");
 
   const geometryParity = await main.evaluate(`(async () => {
+    const preferences = await window.interviewCopilot.overlay.getPreferences();
     const displays = await window.interviewCopilot.overlay.getDisplays();
-    const display = displays[0];
+    const display = displays.find((item) => item.id === preferences.interview.questionWindow.displayId) ?? displays[0];
     if (!display) return { error: 'display missing' };
     const relative = {
-      questionWindow: { x: 140, y: 90, width: 440, height: 510, displayId: display.id, scaleFactor: display.scaleFactor },
-      answerWindow: { x: 620, y: 90, width: 700, height: 510, displayId: display.id, scaleFactor: display.scaleFactor },
-      controlBar: { x: 720, y: 20, width: 440, height: 44, displayId: display.id, scaleFactor: display.scaleFactor, positionMode: 'custom' }
+      questionWindow: preferences.interview.questionWindow,
+      answerWindow: preferences.interview.answerWindow,
+      controlBar: preferences.interview.controlBar
     };
-    await window.interviewCopilot.overlay.setPreferences({ interview: relative });
     const [question, answer, control] = await Promise.all([
       window.interviewCopilot.overlay.getWindowBounds('question'),
       window.interviewCopilot.overlay.getWindowBounds('answer'),
@@ -766,7 +828,7 @@ try {
   const parityExpected = geometryParity?.relative;
   const close = (actual, expected) => actual && Math.abs(actual.x - (parityDisplay.workArea.x + expected.x)) <= 2 && Math.abs(actual.y - (parityDisplay.workArea.y + expected.y)) <= 2 && Math.abs(actual.width - expected.width) <= 2 && Math.abs(actual.height - expected.height) <= 2;
   if (geometryParity?.error || !parityDisplay || !close(geometryParity.question, parityExpected.questionWindow) || !close(geometryParity.answer, parityExpected.answerWindow) || !close(geometryParity.control, parityExpected.controlBar)) throw new Error(`DESIGNER_RUNTIME_GEOMETRY_PARITY failed: ${JSON.stringify(geometryParity)}`);
-  evidence.push("DESIGNER_RUNTIME_GEOMETRY_PARITY: PASS; relative display coordinates: PASS; BrowserWindow.getBounds within ±2px: PASS");
+  evidence.push("DESIGNER_UI_RUNTIME_GEOMETRY_PARITY: PASS; relative display coordinates: PASS; BrowserWindow.getBounds within ±2px: PASS; no direct geometry injection: PASS");
 
   const beforeManualSend = answerRequests.length;
   const overlayComposerPresent = await overlayAnswer.evaluate("Boolean(document.querySelector('.overlay-answer-composer textarea, .overlay-answer-composer input'))");
@@ -848,10 +910,33 @@ try {
   if ((firstSnapshot.detail?.transcripts ?? []).filter((item) => item.source === "remote").length < 3) throw new Error("History remote transcript count < 3");
   if ((firstSnapshot.detail?.questions ?? []).length < 3 || (firstSnapshot.detail?.answers ?? []).length < 3) throw new Error("History question/answer count < 3");
 
+  await main.evaluate("location.reload()");
+  await waitFor(() => document.documentElement?.dataset.appReady === "true" && document.querySelectorAll("button").length > 0);
+  await clickText("快捷帮助");
+  await waitFor(() => Boolean(document.querySelector(".overlay-preferences-card")));
+  const persistedDesignerLayout = await main.evaluate("window.interviewCopilot.overlay.getPreferences().then((preferences) => ({ schemaVersion: preferences.schemaVersion, layoutPreset: preferences.interview.layoutPreset, question: preferences.interview.questionWindow, answer: preferences.interview.answerWindow, control: preferences.interview.controlBar }))");
+  if (persistedDesignerLayout?.schemaVersion !== 4 || persistedDesignerLayout.layoutPreset !== "classic_split" || persistedDesignerLayout.question?.height !== 560 || persistedDesignerLayout.answer?.height !== 620) throw new Error(`DESIGNER_RELOAD_PERSISTENCE failed: ${JSON.stringify(persistedDesignerLayout)}`);
+  await screenshot("designer_reload_persistence.png");
+  evidence.push("DESIGNER_STOP_RELOAD_SETTINGS_PERSISTENCE: PASS");
+
   const activeProfile = await main.evaluate("window.interviewCopilot.profiles.active()");
   if (!activeProfile?.id) throw new Error("Active profile missing for screenshot-only interview");
   await main.evaluate(`window.interviewCopilot.interview.start(${JSON.stringify({ profileId: activeProfile.id, url: `ws://127.0.0.1:${asrPort}/realtime`, inputDeviceId: "mock-mic", outputDeviceId: "mock-system", automationMode: "MANUAL", answerMode: "NORMAL", providerType: "custom-gateway" })})`);
   await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "RUNNING"), 15_000);
+  const restartGeometry = await main.evaluate(`(async () => {
+    const displays = await window.interviewCopilot.overlay.getDisplays();
+    const display = displays.find((item) => item.id === ${JSON.stringify(persistedDesignerLayout?.question?.displayId ?? null)}) ?? displays[0];
+    const [question, answer, control] = await Promise.all([
+      window.interviewCopilot.overlay.getWindowBounds('question'),
+      window.interviewCopilot.overlay.getWindowBounds('answer'),
+      window.interviewCopilot.overlay.getWindowBounds('control')
+    ]);
+    return { display, question, answer, control };
+  })()`);
+  const restartDisplay = restartGeometry?.display;
+  const closeRestart = (actual, expected) => actual && expected && Math.abs(actual.x - (restartDisplay.workArea.x + expected.x)) <= 2 && Math.abs(actual.y - (restartDisplay.workArea.y + expected.y)) <= 2 && Math.abs(actual.width - expected.width) <= 2 && Math.abs(actual.height - expected.height) <= 2;
+  if (!restartDisplay || !closeRestart(restartGeometry.question, persistedDesignerLayout.question) || !closeRestart(restartGeometry.answer, persistedDesignerLayout.answer) || !closeRestart(restartGeometry.control, persistedDesignerLayout.control)) throw new Error(`DESIGNER_RESTART_RUNTIME_PARITY failed: ${JSON.stringify({ persistedDesignerLayout, restartGeometry })}`);
+  evidence.push("DESIGNER_RESTART_RUNTIME_PARITY: PASS; persisted UI geometry reused after Settings reload: PASS");
   const beforeScreenshotOnly = screenshotOnlyRequests;
   await main.evaluate("window.interviewCopilot.interview.answerScreenshot()");
   await waitForNode(() => screenshotOnlyRequests > beforeScreenshotOnly, 15_000);
@@ -859,6 +944,15 @@ try {
   evidence.push("Screenshot-only: PASS; SCREENSHOT_WITHOUT_CURRENT_QUESTION: PASS");
   await main.evaluate("window.interviewCopilot.interview.stop()");
   await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "ENDED"), 15_000);
+  await clickText("快捷帮助");
+  await waitFor(() => Boolean(document.querySelector(".overlay-preferences-card")));
+  await clickText("笔试悬浮窗");
+  await waitFor(() => Boolean(document.querySelector("[data-testid='designer-preset-split']")));
+  await clickSelector("[data-testid='designer-preset-split']");
+  const writtenDesignerPreferences = await main.evaluate("window.interviewCopilot.overlay.getPreferences()");
+  if (writtenDesignerPreferences?.writtenTest?.layoutPreset !== "split" || writtenDesignerPreferences.writtenTest.showAnswer !== true) throw new Error(`DESIGNER_WRITTEN_SPLIT_UI failed: ${JSON.stringify(writtenDesignerPreferences)}`);
+  await screenshot("designer_written_split.png");
+  evidence.push("DESIGNER_WRITTEN_SPLIT_UI: PASS");
   const writtenStart = await main.evaluate("(async () => { const profile = await window.interviewCopilot.profiles.active(); if (!profile?.id) return false; await window.interviewCopilot.writtenTest.start({ profileId: profile.id, answerMode: 'NORMAL' }); return true; })()");
   if (!writtenStart) throw new Error("Written-test profile was not available");
   const writtenTransientTarget = await waitForTarget((item) => { try { return item.type === "page" && new URL(item.url).searchParams.get("window") === "overlay-transient"; } catch { return false; } }, 5_000);
@@ -867,9 +961,13 @@ try {
   await overlayTransient.command("Runtime.enable");
   await overlayTransient.command("Log.enable");
   await waitFor(() => window.interviewCopilot.writtenTest.getState().then((state) => state.running), 5_000);
-  await waitFor(() => Boolean(document.querySelector('[data-overlay-content=written-test]')), 5_000, overlay);
-   const writtenSingleSurface = await overlay.evaluate("(() => ({ reader: Boolean(document.querySelector('[data-overlay-content=written-test]')), question: Boolean(document.querySelector('[data-overlay-content=question]')), answer: Boolean(document.querySelector('[data-overlay-content=answer]')) }))()");
-   if (!writtenSingleSurface?.reader || writtenSingleSurface.question || writtenSingleSurface.answer) throw new Error(`WRITTEN_SINGLE_READER_SURFACE failed: ${JSON.stringify(writtenSingleSurface)}`);
+  await waitFor(() => Boolean(document.querySelector('[data-overlay-content=written-question]')), 5_000, overlay);
+  await waitFor(() => Boolean(document.querySelector('[data-overlay-content=answer]')), 5_000, overlayAnswer);
+   const writtenSplitSurface = await Promise.all([
+     overlay.evaluate("(() => ({ question: Boolean(document.querySelector('[data-overlay-content=written-question]')), reader: Boolean(document.querySelector('[data-overlay-content=written-test]')) }))()"),
+     overlayAnswer.evaluate("(() => ({ answer: Boolean(document.querySelector('[data-overlay-content=answer]')), reader: Boolean(document.querySelector('[data-overlay-content=written-test]')) }))()")
+   ]);
+   if (!writtenSplitSurface[0]?.question || writtenSplitSurface[0].reader || !writtenSplitSurface[1]?.answer || writtenSplitSurface[1].reader) throw new Error(`WRITTEN_SPLIT_SURFACE failed: ${JSON.stringify(writtenSplitSurface)}`);
    const writtenControlModeDeadline = Date.now() + 5_000;
    let writtenControlMode = false;
    while (Date.now() < writtenControlModeDeadline) {
@@ -879,8 +977,8 @@ try {
    }
    if (!writtenControlMode) throw new Error("WRITTEN_TEST_CONTROL_OPERATION_MODE_NOT_PROPAGATED");
    await assertWrittenScreenshotRoute("WRITTEN_TEST_CONTROL_SCREENSHOT_ROUTE", () => nativeClick(".toolbar-screenshot-action", overlayControl));
-   await waitFor(() => (document.querySelector('.answer-core')?.textContent ?? '').includes('Mock vision answer'), 15_000, overlay);
-   const writtenPreferences = await overlay.evaluate("window.interviewCopilot.overlay.setPreferences({ writtenTest: { layoutPreset: 'split', showAnswer: true } }).then(() => window.interviewCopilot.overlay.getPreferences())");
+    await waitFor(() => (document.querySelector('.answer-core')?.textContent ?? '').includes('Mock vision answer'), 15_000, overlayAnswer);
+   const writtenPreferences = await overlay.evaluate("window.interviewCopilot.overlay.getPreferences()");
   if (writtenPreferences?.writtenTest?.layoutPreset !== "split") throw new Error(`WRITTEN_SPLIT_PREFERENCE failed: ${JSON.stringify(writtenPreferences)}`);
    await waitFor(() => Boolean(document.querySelector('[data-overlay-content=written-question]')), 5_000, overlay);
    await waitFor(() => Boolean(document.querySelector('[data-overlay-content=answer]')), 5_000, overlayAnswer);

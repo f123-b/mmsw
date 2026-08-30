@@ -6,9 +6,11 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 
+const requireNativePass = process.env.REQUIRE_NATIVE_MOUSE_SMOKE === "1" || process.argv.includes("--require-pass");
+
 if (process.platform !== "win32") {
-  console.log("NATIVE_MOUSE_SMOKE_RESULT {\"ok\":false,\"result\":\"UNSUPPORTED_ENVIRONMENT\",\"reason\":\"Windows Native mouse smoke requires win32\"}");
-  process.exit(0);
+  console.log(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify({ ok: false, result: "SKIPPED_UNSUPPORTED", reason: "Windows Native mouse smoke requires win32", required: requireNativePass })}`);
+  process.exit(requireNativePass ? 1 : 0);
 }
 
 const desktopDirectory = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -53,5 +55,9 @@ child.once("exit", async (code, signal) => {
     process.exitCode = 1;
     return;
   }
-  process.exitCode = (result.result === "PASS" || result.result === "UNSUPPORTED_ENVIRONMENT") && code === 0 ? 0 : 1;
+  process.exitCode = result.result === "PASS" && code === 0
+    ? 0
+    : result.result === "SKIPPED_UNSUPPORTED" && !requireNativePass && code === 0
+      ? 0
+      : 1;
 });
