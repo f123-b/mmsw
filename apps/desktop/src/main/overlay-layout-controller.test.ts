@@ -62,8 +62,8 @@ describe("OverlayLayoutController", () => {
       }
     };
     const bounds = resolveOverlayNativeBounds(preferences, { display, defaults });
-    expect(bounds.question).toMatchObject({ x: -1840, y: 120, width: 760, height: 360 });
-    expect(bounds.answer).toMatchObject({ x: -960, y: 160, width: 860, height: 520 });
+    expect(bounds.question).toMatchObject({ x: -1840, y: 120, width: 760, height: 280 });
+    expect(bounds.answer).toMatchObject({ x: -960, y: 160, width: 860, height: 440 });
     expect(bounds.control).toMatchObject({ x: -1888, y: 24, width: 440, height: 44 });
   });
 
@@ -80,7 +80,7 @@ describe("OverlayLayoutController", () => {
   });
 
   it("rounds and clamps direct native bounds to minimum panel sizes", () => {
-    expect(clampOverlayBounds({ x: -500, y: 500, width: 220.4, height: 119.6 }, workArea, 220, 120)).toEqual({
+    expect(clampOverlayBounds({ x: -500, y: 500, width: 220.4, height: 119.6 }, workArea, { minWidth: 220, maxWidth: 2_000, minHeight: 120, maxHeight: 2_000 })).toEqual({
       x: -500,
       y: 500,
       width: 220,

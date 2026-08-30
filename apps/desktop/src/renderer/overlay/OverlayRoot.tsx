@@ -3,7 +3,7 @@ import type { AnswerThread, TranscriptSnapshot } from "@interview-copilot/shared
 import type { HUDLayout, HUDState, OverlayMode } from "../../main/overlay-manager";
 import { DEFAULT_OVERLAY_PREFERENCES, type OverlayPreferences } from "../../shared/overlay-preferences";
 import { resolveOverlayPersistedGeometry, toRelativeOverlayBounds } from "../../shared/overlay-layout";
-import { boundsForPanel, clampDesignerRect, resizeDesignerRect, snapDesignerRect, type DesignerPanel, type ResizeHandle } from "./overlay-designer";
+import { boundsForPanel, clampDesignerRect, resizeDesignerRect, snapDesignerRect, type DesignerPanel, type ResizeHandle, type DesignerGeometryContext } from "./overlay-designer";
 import { isDisplayableQuestionGroup, type RuntimePhaseState } from "./runtime-state";
 import { buildAnswerOverlayViewModel, buildDialogueOverlayViewModel, buildQuestionOverlayViewModel, type AnswerOverlayViewModel, type DialogueSpeakingBlock, type QuestionOverlayViewModel } from "./view-models";
 
@@ -79,9 +79,10 @@ function viewportDefaults(preferences = DEFAULT_OVERLAY_PREFERENCES, surface: Ov
   };
 }
 
-function clampLayout(panel: PanelKey, layout: PanelLayout): PanelLayout {
+function clampLayout(panel: PanelKey, layout: PanelLayout, preferences: OverlayPreferences, operationMode: OverlayRootProps["operationMode"]): PanelLayout {
   const designerPanel: DesignerPanel = panel === "transcript" ? "question" : panel === "answer" ? "answer" : "controlBar";
-  const next = clampDesignerRect({ x: layout.x, y: layout.y, width: layout.width, height: layout.height }, { width: window.innerWidth, height: window.innerHeight }, boundsForPanel(designerPanel));
+  const source = operationMode === "WRITTEN_TEST" ? preferences.writtenTest : preferences.interview;
+  const next = clampDesignerRect({ x: layout.x, y: layout.y, width: layout.width, height: layout.height }, { width: window.innerWidth, height: window.innerHeight }, boundsForPanel({ panel: designerPanel, mode: operationMode === "WRITTEN_TEST" ? "writtenTest" : "interview", preset: source.layoutPreset }));
   return { ...layout, ...next };
 }
 
@@ -93,13 +94,14 @@ function useOverlayLayout(preferences: OverlayPreferences, surface: OverlaySurfa
   const update = useCallback((key: PanelKey, patch: Partial<PanelLayout>, altPressed = false) => setLayout((current) => {
     const nextPanel = { ...current[key], ...patch };
     const designerPanel: DesignerPanel | undefined = key === "transcript" ? "question" : key === "answer" ? "answer" : "controlBar";
+    const source = operationMode === "WRITTEN_TEST" ? preferencesRef.current.writtenTest : preferencesRef.current.interview;
     const snapped = designerPanel && preferencesRef.current.behavior.snapEnabled
-      ? snapDesignerRect(designerPanel, nextPanel, { question: current.transcript, answer: current.answer, controlBar: current.toolbar }, { width: window.innerWidth, height: window.innerHeight }, preferencesRef.current.behavior.snapThreshold, altPressed)
+      ? snapDesignerRect({ panel: designerPanel, mode: operationMode === "WRITTEN_TEST" ? "writtenTest" : "interview", preset: source.layoutPreset }, nextPanel, { question: current.transcript, answer: current.answer, controlBar: current.toolbar }, { width: window.innerWidth, height: window.innerHeight }, preferencesRef.current.behavior.snapThreshold, altPressed)
       : nextPanel;
-    const next = { ...current, [key]: clampLayout(key, { ...nextPanel, ...snapped }) };
+    const next = { ...current, [key]: clampLayout(key, { ...nextPanel, ...snapped }, preferencesRef.current, operationMode) };
     layoutRef.current = next;
     return next;
-  }), []);
+  }), [operationMode]);
   const applyMainLayout = useCallback((_next: HUDLayout) => { const next = viewportDefaults(preferencesRef.current, surface, operationMode); layoutRef.current = next; setLayout(next); }, [surface, operationMode]);
   const clearSavedLayout = useCallback(() => { const next = viewportDefaults(preferencesRef.current, surface, operationMode); layoutRef.current = next; setLayout(next); }, [surface, operationMode]);
   useEffect(() => {
@@ -122,9 +124,11 @@ export interface DraggableResizablePanelProps {
   className: string;
   children: JSX.Element;
   nativePanel?: "question" | "answer" | "control";
+  geometryMode: DesignerGeometryContext["mode"];
+  geometryPreset: DesignerGeometryContext["preset"];
 }
 
-export function DraggableResizablePanel({ panel, layout, onChange, onCommit, editMode, className, children, nativePanel }: DraggableResizablePanelProps): JSX.Element {
+export function DraggableResizablePanel({ panel, layout, onChange, onCommit, editMode, className, children, nativePanel, geometryMode, geometryPreset }: DraggableResizablePanelProps): JSX.Element {
   const [dragging, setDragging] = useState(false);
   const cleanupRef = useRef<(() => void) | undefined>(undefined);
   useEffect(() => () => cleanupRef.current?.(), []);
@@ -154,7 +158,7 @@ export function DraggableResizablePanel({ panel, layout, onChange, onCommit, edi
     const nativeOrigin = nativePanel ? { x: window.screenX, y: window.screenY, width: window.outerWidth, height: window.outerHeight } : undefined;
     const move = (next: PointerEvent) => {
       const designerPanel: DesignerPanel = panel === "transcript" ? "question" : panel === "answer" ? "answer" : "controlBar";
-      const resized = resizeDesignerRect({ x: layout.x, y: layout.y, width: layout.width, height: layout.height }, handle, { x: next.clientX - start.x, y: next.clientY - start.y }, { width: window.innerWidth, height: window.innerHeight }, boundsForPanel(designerPanel), next.altKey);
+      const resized = resizeDesignerRect({ x: layout.x, y: layout.y, width: layout.width, height: layout.height }, handle, { x: next.clientX - start.x, y: next.clientY - start.y }, { width: window.innerWidth, height: window.innerHeight }, boundsForPanel({ panel: designerPanel, mode: geometryMode, preset: geometryPreset }), next.altKey);
       onChange(panel, resized, next.altKey);
       if (nativePanel && nativeOrigin) void window.interviewCopilot.overlay.setWindowBounds(nativePanel, { x: nativeOrigin.x + resized.x - layout.x, y: nativeOrigin.y + resized.y - layout.y, width: nativeOrigin.width + resized.width - layout.width, height: nativeOrigin.height + resized.height - layout.height });
     };
@@ -360,10 +364,10 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
     {props.captureTest && !visualHidden && <div className="capture-test-marker">CAPTURE_PROTECTION_TEST_MARKER_7F32</div>}
     {transcriptVisible && (nativeSurface === "question" && !layoutEditMode
       ? <div ref={nativeContentRef} className="native-content-window native-window-shell question-panel">{singleWrittenReader ? <WrittenTestReaderContent viewModel={answerViewModel} /> : writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} />}</div>
-      : <DraggableResizablePanel panel="transcript" nativePanel={nativeSurface === "question" ? "question" : undefined} layout={{ ...layout.transcript, visible: true, locked: !layoutEditMode && (layout.transcript.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="question-panel">{writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} />}</DraggableResizablePanel>)}
+      : <DraggableResizablePanel panel="transcript" nativePanel={nativeSurface === "question" ? "question" : undefined} geometryMode={writtenTestMode ? "writtenTest" : "interview"} geometryPreset={writtenTestMode ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={{ ...layout.transcript, visible: true, locked: !layoutEditMode && (layout.transcript.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="question-panel">{writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} />}</DraggableResizablePanel>)}
     {answerVisible && !singleWrittenReader && (nativeSurface === "answer" && !layoutEditMode
       ? <div ref={nativeContentRef} className="native-content-window native-window-shell answer-panel"><AnswerOverlayContent viewModel={answerViewModel} /></div>
-      : <DraggableResizablePanel panel="answer" nativePanel={nativeSurface === "answer" ? "answer" : undefined} layout={{ ...layout.answer, visible: true, locked: !layoutEditMode && (layout.answer.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="answer-panel"><AnswerOverlayContent viewModel={answerViewModel} /></DraggableResizablePanel>)}
+      : <DraggableResizablePanel panel="answer" nativePanel={nativeSurface === "answer" ? "answer" : undefined} geometryMode={writtenTestMode ? "writtenTest" : "interview"} geometryPreset={writtenTestMode ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={{ ...layout.answer, visible: true, locked: !layoutEditMode && (layout.answer.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="answer-panel"><AnswerOverlayContent viewModel={answerViewModel} /></DraggableResizablePanel>)}
     {layoutEditMode && !visualHidden && <div className="layout-edit-toolbar hud-interactive-region"><span>布局编辑模式</span><button onClick={() => void window.interviewCopilot.overlay.finishLayoutEditMode()}>完成布局</button></div>}
     {!visualHidden && <div className={`hud-protection-indicator ${protectionTone}`} aria-hidden="true">{effectiveProtectionEnabled ? "◈" : "·"}</div>}
   </main>;

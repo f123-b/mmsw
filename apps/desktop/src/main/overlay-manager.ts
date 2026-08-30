@@ -189,8 +189,11 @@ export class OverlayManager {
     if (!this.isLayoutEditMode) return;
     const window = this.getWindow(panel);
     if (!window) return;
-    const display = this.displayForBounds(bounds);
-    const next = clampOverlayPanelBounds(panel, bounds, display.workArea);
+    // Layout edit is constrained to the mode's target display. A drag whose
+    // pointer crosses another monitor must not create per-panel display state.
+    const display = this.targetDisplay();
+    const modePreferences = this.runtimeLayoutMode === "written_test" ? this.layoutPreferences.writtenTest : this.layoutPreferences.interview;
+    const next = clampOverlayPanelBounds(panel, bounds, display.workArea, this.runtimeLayoutMode, modePreferences.layoutPreset);
     window.setBounds(next, false);
     this.options.onNativeBoundsChanged?.(panel, next, display);
     this.refreshLayout(display.workArea);
@@ -486,10 +489,6 @@ export class OverlayManager {
     const main = this.options.getMainWindow?.();
     const bounds = main && !main.isDestroyed() ? main.getBounds() : undefined;
     const display = bounds ? screen.getDisplayNearestPoint({ x: bounds.x + Math.round(bounds.width / 2), y: bounds.y + Math.round(bounds.height / 2) }) : screen.getPrimaryDisplay();
-    return { id: display.id, bounds: { ...display.bounds }, workArea: { ...display.workArea }, scaleFactor: display.scaleFactor };
-  }
-  private displayForBounds(bounds: OverlayNativeBounds): OverlayDisplayInfo {
-    const display = screen.getDisplayNearestPoint({ x: bounds.x + Math.round(bounds.width / 2), y: bounds.y + Math.round(bounds.height / 2) });
     return { id: display.id, bounds: { ...display.bounds }, workArea: { ...display.workArea }, scaleFactor: display.scaleFactor };
   }
   private targetMonitorBounds(): Electron.Rectangle { return this.targetDisplay().workArea; }

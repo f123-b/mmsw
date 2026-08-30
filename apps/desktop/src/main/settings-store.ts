@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { qwenAsrWebSocketUrl, QWEN_REALTIME_ASR_MODEL, validateLlmModelConfiguration, type AsrLanguage, type AsrProviderType, type ProviderSettings } from "@interview-copilot/shared";
 import { APP_DATA_DIRECTORY, type SqliteDatabase } from "./database";
 import { DEFAULT_OVERLAY_PREFERENCES, type InterviewLayoutPreset, type InterviewLeftPanelMode, type LegacyOverlayLayoutPreset, type OverlayAppearancePreferences, type OverlayBehaviorPreferences, type OverlayControlBarPreferences, type OverlayPreferences, type OverlayPreferencesPatch, type OverlayRegion, type OverlayScreenshotPreferences, type OverlayWindowPreferences, type WrittenTestLayoutPreset } from "../shared/overlay-preferences";
+import { resolveOverlayGeometryConstraints } from "../shared/overlay-layout";
 
 export type { OverlayPreferences, OverlayPreferencesPatch } from "../shared/overlay-preferences";
 
@@ -342,18 +343,18 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
     if (!width || !height) return fallback;
     return { x: coordinate(candidate.x, fallback?.x ?? 0) ?? 0, y: coordinate(candidate.y, fallback?.y ?? 0) ?? 0, width, height };
   };
-  type WindowKind = "question" | "dialogue" | "answer" | "control" | "written-question" | "written-answer";
-  const windowPreferences = (value: Partial<OverlayWindowPreferences> | undefined, fallback: OverlayWindowPreferences, kind: WindowKind): OverlayWindowPreferences => {
-    const isWritten = kind.startsWith("written-");
-    const isQuestion = kind === "question" || kind === "dialogue" || kind === "written-question";
-    const minimumWidth = kind === "control" ? 240 : isWritten ? 480 : isQuestion ? 320 : 480;
-    const maximumWidth = kind === "control" ? 1_200 : isWritten ? 1_200 : isQuestion ? 900 : 1_100;
-    const minimumHeight = kind === "control" ? 36 : isWritten ? 320 : 220;
-    const maximumHeight = kind === "control" ? 100 : isWritten ? 840 : 840;
+  const interviewInput = objectValue(raw.interview);
+  const writtenInput = objectValue(raw.writtenTest);
+  const interviewPreset = enumValue(interviewInput.layoutPreset ?? (input.layoutPreset ? legacyInterviewPreset(input.layoutPreset) : undefined), ["classic_split", "compact_split", "answer_focus", "minimal"] as const, DEFAULT_OVERLAY_PREFERENCES.interview.layoutPreset);
+  const writtenPreset = enumValue(writtenInput.layoutPreset, ["single_reader", "split"] as const, DEFAULT_OVERLAY_PREFERENCES.writtenTest.layoutPreset);
+  type WindowContext = { mode: "interview" | "written_test"; preset: InterviewLayoutPreset | WrittenTestLayoutPreset; panel: "question" | "answer" | "control" };
+  const windowPreferences = (value: Partial<OverlayWindowPreferences> | undefined, fallback: OverlayWindowPreferences, context: WindowContext): OverlayWindowPreferences => {
+    const constraints = resolveOverlayGeometryConstraints(context);
+    const isQuestion = context.panel === "question";
     const backgroundOpacity = number(value?.backgroundOpacity, number(value?.opacity, fallback.backgroundOpacity, 0, 1), 0, 1);
     return {
-      width: number(value?.width, fallback.width, minimumWidth, maximumWidth),
-      height: number(value?.height, fallback.height, minimumHeight, maximumHeight),
+      width: number(value?.width, fallback.width, constraints.minWidth, constraints.maxWidth),
+      height: number(value?.height, fallback.height, constraints.minHeight, constraints.maxHeight),
       ...(coordinate(value?.x, fallback.x) !== undefined ? { x: coordinate(value?.x, fallback.x) } : {}),
       ...(coordinate(value?.y, fallback.y) !== undefined ? { y: coordinate(value?.y, fallback.y) } : {}),
       ...(typeof value?.displayId === "number" && Number.isFinite(value.displayId) ? { displayId: Math.round(value.displayId) } : fallback.displayId !== undefined ? { displayId: fallback.displayId } : {}),
@@ -388,8 +389,6 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
     ...(raw.fontColor !== undefined ? { textColor: raw.fontColor as string } : {}),
     ...(raw.fontSize !== undefined ? { fontSize: raw.fontSize as number } : {})
   };
-  const interviewInput = objectValue(raw.interview);
-  const writtenInput = objectValue(raw.writtenTest);
   const legacyQuestion = { ...legacyWindowPatch, ...objectValue(raw.questionWindow) };
   const legacyAnswer = { ...legacyWindowPatch, ...objectValue(raw.answerWindow) };
   const legacyControl = { ...objectValue(DEFAULT_OVERLAY_PREFERENCES.interview.controlBar), ...objectValue(raw.controlBar) };
@@ -424,7 +423,9 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
   const backgroundOpacity = number(input.backgroundOpacity, DEFAULT_OVERLAY_PREFERENCES.backgroundOpacity, 0, 1);
   const backgroundColor = color(input.backgroundColor, DEFAULT_OVERLAY_PREFERENCES.backgroundColor);
   const fontColor = color(input.fontColor, DEFAULT_OVERLAY_PREFERENCES.fontColor);
-  const control = (value: Partial<OverlayControlBarPreferences>, fallback: OverlayControlBarPreferences): OverlayControlBarPreferences => { const result = windowPreferences(value, fallback, "control") as OverlayControlBarPreferences; result.positionMode = enumValue(value.positionMode, ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right", "custom"] as const, fallback.positionMode); result.orientation = enumValue(value.orientation, ["horizontal", "vertical"] as const, fallback.orientation); return result; };
+  const control = (value: Partial<OverlayControlBarPreferences>, fallback: OverlayControlBarPreferences, context: WindowContext): OverlayControlBarPreferences => { const result = windowPreferences(value, fallback, context) as OverlayControlBarPreferences; result.positionMode = enumValue(value.positionMode, ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right", "custom"] as const, fallback.positionMode); result.orientation = enumValue(value.orientation, ["horizontal", "vertical"] as const, fallback.orientation); return result; };
+  const firstFinite = (...values: unknown[]): number | undefined => values.find((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const syncModeDisplay = <T extends OverlayWindowPreferences>(window: T, displayId: number | undefined, scaleFactor: number | undefined): T => ({ ...window, ...(displayId === undefined ? {} : { displayId }), ...(scaleFactor === undefined ? {} : { scaleFactor }) });
   return {
     schemaVersion: OVERLAY_PREFERENCES_SCHEMA_VERSION,
     backgroundOpacity,
@@ -434,19 +435,19 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
     showToolbar: flag(input.showToolbar, DEFAULT_OVERLAY_PREFERENCES.showToolbar),
     showTimestamps: flag(input.showTimestamps, DEFAULT_OVERLAY_PREFERENCES.showTimestamps),
     interview: {
-      layoutPreset: enumValue(interviewInput.layoutPreset ?? (input.layoutPreset ? legacyInterviewPreset(input.layoutPreset) : undefined), ["classic_split", "compact_split", "answer_focus", "minimal"] as const, DEFAULT_OVERLAY_PREFERENCES.interview.layoutPreset),
+      layoutPreset: interviewPreset,
       leftPanel: enumValue(interviewInput.leftPanel, ["dialogue", "question", "hidden"] as const, input.showTranscript === false ? "hidden" : DEFAULT_OVERLAY_PREFERENCES.interview.leftPanel) as InterviewLeftPanelMode,
-      questionWindow: windowPreferences(canonicalInterviewLeft, { ...DEFAULT_OVERLAY_PREFERENCES.interview.questionWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "question"),
-      dialogueWindow: windowPreferences(interviewDialogueAlias, { ...DEFAULT_OVERLAY_PREFERENCES.interview.dialogueWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "dialogue"),
-      answerWindow: windowPreferences(interviewAnswer, { ...DEFAULT_OVERLAY_PREFERENCES.interview.answerWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "answer"),
-      controlBar: control(interviewControl, { ...DEFAULT_OVERLAY_PREFERENCES.interview.controlBar, backgroundOpacity, backgroundColor, textColor: fontColor }),
+      questionWindow: syncModeDisplay(windowPreferences(canonicalInterviewLeft, { ...DEFAULT_OVERLAY_PREFERENCES.interview.questionWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "interview", preset: interviewPreset, panel: "question" }), firstFinite(canonicalInterviewLeft.displayId, interviewDialogueAlias.displayId, interviewAnswer.displayId, interviewControl.displayId), firstFinite(canonicalInterviewLeft.scaleFactor, interviewDialogueAlias.scaleFactor, interviewAnswer.scaleFactor, interviewControl.scaleFactor)),
+      dialogueWindow: syncModeDisplay(windowPreferences(interviewDialogueAlias, { ...DEFAULT_OVERLAY_PREFERENCES.interview.dialogueWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "interview", preset: interviewPreset, panel: "question" }), firstFinite(canonicalInterviewLeft.displayId, interviewDialogueAlias.displayId, interviewAnswer.displayId, interviewControl.displayId), firstFinite(canonicalInterviewLeft.scaleFactor, interviewDialogueAlias.scaleFactor, interviewAnswer.scaleFactor, interviewControl.scaleFactor)),
+      answerWindow: syncModeDisplay(windowPreferences(interviewAnswer, { ...DEFAULT_OVERLAY_PREFERENCES.interview.answerWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "interview", preset: interviewPreset, panel: "answer" }), firstFinite(canonicalInterviewLeft.displayId, interviewDialogueAlias.displayId, interviewAnswer.displayId, interviewControl.displayId), firstFinite(canonicalInterviewLeft.scaleFactor, interviewDialogueAlias.scaleFactor, interviewAnswer.scaleFactor, interviewControl.scaleFactor)),
+      controlBar: syncModeDisplay(control(interviewControl, { ...DEFAULT_OVERLAY_PREFERENCES.interview.controlBar, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "interview", preset: interviewPreset, panel: "control" }), firstFinite(canonicalInterviewLeft.displayId, interviewDialogueAlias.displayId, interviewAnswer.displayId, interviewControl.displayId), firstFinite(canonicalInterviewLeft.scaleFactor, interviewDialogueAlias.scaleFactor, interviewAnswer.scaleFactor, interviewControl.scaleFactor)),
       showAnswer: flag(interviewInput.showAnswer ?? input.showAnswer, DEFAULT_OVERLAY_PREFERENCES.interview.showAnswer)
     },
     writtenTest: {
-      layoutPreset: enumValue(writtenInput.layoutPreset, ["single_reader", "split"] as const, DEFAULT_OVERLAY_PREFERENCES.writtenTest.layoutPreset) as WrittenTestLayoutPreset,
-      questionWindow: windowPreferences(writtenQuestion, { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.questionWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "written-question"),
-      answerWindow: windowPreferences(writtenAnswer, { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.answerWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "written-answer"),
-      controlBar: control(writtenControl, { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.controlBar, backgroundOpacity, backgroundColor, textColor: fontColor }),
+      layoutPreset: writtenPreset,
+      questionWindow: syncModeDisplay(windowPreferences(writtenQuestion, { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.questionWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "written_test", preset: writtenPreset, panel: "question" }), firstFinite(writtenQuestion.displayId, writtenAnswer.displayId, writtenControl.displayId), firstFinite(writtenQuestion.scaleFactor, writtenAnswer.scaleFactor, writtenControl.scaleFactor)),
+      answerWindow: syncModeDisplay(windowPreferences(writtenAnswer, { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.answerWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "written_test", preset: writtenPreset, panel: "answer" }), firstFinite(writtenQuestion.displayId, writtenAnswer.displayId, writtenControl.displayId), firstFinite(writtenQuestion.scaleFactor, writtenAnswer.scaleFactor, writtenControl.scaleFactor)),
+      controlBar: syncModeDisplay(control(writtenControl, { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.controlBar, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "written_test", preset: writtenPreset, panel: "control" }), firstFinite(writtenQuestion.displayId, writtenAnswer.displayId, writtenControl.displayId), firstFinite(writtenQuestion.scaleFactor, writtenAnswer.scaleFactor, writtenControl.scaleFactor)),
       showAnswer: flag(writtenInput.showAnswer, DEFAULT_OVERLAY_PREFERENCES.writtenTest.showAnswer)
     },
     behavior: behavior(input.behavior),

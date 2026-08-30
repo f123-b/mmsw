@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_OVERLAY_PREFERENCES } from "./overlay-preferences";
-import { resolveOverlayPersistedGeometry, resolveOverlayPresetGeometry } from "./overlay-layout";
+import { resolveOverlayGeometryConstraints, resolveOverlayPersistedGeometry, resolveOverlayPresetGeometry } from "./overlay-layout";
 
 const controlBar = DEFAULT_OVERLAY_PREFERENCES.interview.controlBar;
 
 describe("shared overlay geometry resolver", () => {
+  it("exposes one preset-aware constraint policy", () => {
+    expect(resolveOverlayGeometryConstraints({ mode: "interview", preset: "classic_split", panel: "question" })).toEqual({ minWidth: 320, maxWidth: 900, minHeight: 220, maxHeight: 840 });
+    expect(resolveOverlayGeometryConstraints({ mode: "interview", preset: "minimal", panel: "question" })).toEqual({ minWidth: 320, maxWidth: 760, minHeight: 88, maxHeight: 280 });
+    expect(resolveOverlayGeometryConstraints({ mode: "interview", preset: "minimal", panel: "answer" })).toEqual({ minWidth: 480, maxWidth: 1000, minHeight: 132, maxHeight: 440 });
+    expect(resolveOverlayGeometryConstraints({ mode: "written_test", preset: "split", panel: "answer" })).toEqual({ minWidth: 480, maxWidth: 1200, minHeight: 320, maxHeight: 840 });
+    expect(resolveOverlayGeometryConstraints({ mode: "interview", preset: "classic_split", panel: "control" })).toEqual({ minWidth: 240, maxWidth: 1200, minHeight: 36, maxHeight: 100 });
+  });
+
   it("uses the same classic template for a 1080p work area", () => {
     const geometry = resolveOverlayPresetGeometry({ mode: "interview", preset: "classic_split", workArea: { x: 0, y: 0, width: 1920, height: 1040 }, controlBar: controlBar });
     expect(geometry.question).toMatchObject({ width: 420, height: 500 });

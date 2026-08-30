@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ANSWER_DESIGNER_BOUNDS, applyLayoutPreset, clampDesignerRect, controlBarPosition, interactionModeAllowsOverlayInput, mapPreviewPointToCanvas, modifierPressed, overlayHitRegionAllowsInput, resizeDesignerRect, resizeDesignerRectFromPointer, snapDesignerRect, wheelTargetAtPoint, type DesignerLayout } from "./overlay-designer";
+import { ANSWER_DESIGNER_BOUNDS, applyLayoutPreset, boundsForPanel, clampDesignerPosition, clampDesignerRect, controlBarPosition, interactionModeAllowsOverlayInput, mapPreviewPointToCanvas, modifierPressed, overlayHitRegionAllowsInput, resizeDesignerRect, resizeDesignerRectFromPointer, snapDesignerRect, wheelTargetAtPoint, type DesignerLayout } from "./overlay-designer";
 
 const canvas = { width: 1920, height: 1080 };
 const layout: DesignerLayout = {
@@ -15,8 +15,21 @@ describe("overlay designer geometry", () => {
   });
 
   it("snaps to the screen and neighboring windows, with Alt as an escape hatch", () => {
-    expect(snapDesignerRect("answer", { ...layout.answer, x: 1_235, y: 186 }, layout, canvas, 12)).toMatchObject({ x: 1_240, y: 180 });
-    expect(snapDesignerRect("answer", { ...layout.answer, x: 1_235, y: 186 }, layout, canvas, 12, true)).toMatchObject({ x: 1_235, y: 186 });
+    expect(snapDesignerRect({ panel: "answer", mode: "interview", preset: "classic_split" }, { ...layout.answer, x: 1_235, y: 186 }, layout, canvas, 12)).toMatchObject({ x: 1_240, y: 180 });
+    expect(snapDesignerRect({ panel: "answer", mode: "interview", preset: "classic_split" }, { ...layout.answer, x: 1_235, y: 186 }, layout, canvas, 12, true)).toMatchObject({ x: 1_235, y: 186 });
+  });
+
+  it("preserves stable preset dimensions while dragging", () => {
+    const bounds = boundsForPanel({ panel: "question", mode: "interview", preset: "classic_split" });
+    const moved = clampDesignerPosition({ x: 120, y: 180, width: 420, height: 500 }, canvas, bounds);
+    expect(moved).toMatchObject({ x: 120, y: 180, width: 420, height: 500 });
+  });
+
+  it("uses preset-aware constraints for stable and content-driven layouts", () => {
+    expect(boundsForPanel({ panel: "question", mode: "interview", preset: "classic_split" })).toMatchObject({ minimumHeight: 220, maximumHeight: 840 });
+    expect(boundsForPanel({ panel: "answer", mode: "interview", preset: "answer_focus" })).toMatchObject({ minimumWidth: 480, maximumWidth: 1100, minimumHeight: 220, maximumHeight: 840 });
+    expect(boundsForPanel({ panel: "question", mode: "interview", preset: "minimal" })).toMatchObject({ minimumHeight: 88, maximumHeight: 280 });
+    expect(boundsForPanel({ panel: "answer", mode: "writtenTest", preset: "split" })).toMatchObject({ minimumWidth: 480, maximumWidth: 1200, minimumHeight: 320, maximumHeight: 840 });
   });
 
   it("resizes from all edges without violating limits", () => {

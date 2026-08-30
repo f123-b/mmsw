@@ -221,6 +221,33 @@ describe("OverlaySettingsStore", () => {
     } finally { database.close(); }
   });
 
+  it("normalizes every panel to the canonical mode display and shared preset constraints", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      const next = settings.setPreferences({
+        interview: {
+          layoutPreset: "classic_split",
+          questionWindow: { displayId: 1, scaleFactor: 1, height: 500 },
+          answerWindow: { displayId: 2, scaleFactor: 1.25, height: 700 },
+          controlBar: { displayId: 3, scaleFactor: 1.5, height: 72 }
+        },
+        writtenTest: {
+          layoutPreset: "split",
+          questionWindow: { displayId: 4, scaleFactor: 1.25, height: 600 },
+          answerWindow: { displayId: 5, scaleFactor: 1.5, height: 700 },
+          controlBar: { displayId: 6, scaleFactor: 1, height: 90 }
+        }
+      });
+      expect(next.interview.questionWindow).toMatchObject({ displayId: 1, scaleFactor: 1, height: 500 });
+      expect(next.interview.answerWindow).toMatchObject({ displayId: 1, scaleFactor: 1, height: 700 });
+      expect(next.interview.controlBar).toMatchObject({ displayId: 1, scaleFactor: 1, height: 72 });
+      expect(next.writtenTest.questionWindow).toMatchObject({ displayId: 4, scaleFactor: 1.25, height: 600 });
+      expect(next.writtenTest.answerWindow).toMatchObject({ displayId: 4, scaleFactor: 1.25, height: 700 });
+      expect(next.writtenTest.controlBar).toMatchObject({ displayId: 4, scaleFactor: 1.25, height: 90 });
+    } finally { database.close(); }
+  });
+
   it("defaults to enabled and persists the main-process setting", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {

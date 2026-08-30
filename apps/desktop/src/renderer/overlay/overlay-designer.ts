@@ -1,5 +1,5 @@
 import type { InterviewLayoutPreset, MouseInteractionMode, OverlayControlBarPositionMode, OverlayControlBarOrientation, LegacyOverlayLayoutPreset, WheelRoutingMode, WrittenTestLayoutPreset } from "../../shared/overlay-preferences";
-import { resolveOverlayPresetGeometry, toRelativeOverlayBounds } from "../../shared/overlay-layout";
+import { resolveOverlayGeometryConstraints, resolveOverlayPresetGeometry, toRelativeOverlayBounds, type OverlayGeometryConstraints } from "../../shared/overlay-layout";
 
 export type DesignerPanel = "question" | "answer" | "controlBar";
 
@@ -52,25 +52,53 @@ export interface ResolvedOverlayLayout {
 
 export type ResizeHandle = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
 
-export const QUESTION_DESIGNER_BOUNDS: DesignerBounds = { minimumWidth: 320, maximumWidth: 760, minimumHeight: 88, maximumHeight: 280 };
-export const ANSWER_DESIGNER_BOUNDS: DesignerBounds = { minimumWidth: 480, maximumWidth: 1_000, minimumHeight: 132, maximumHeight: 440 };
-export const CONTROL_BAR_DESIGNER_BOUNDS: DesignerBounds = { minimumWidth: 320, maximumWidth: 560, minimumHeight: 42, maximumHeight: 64 };
+export interface DesignerGeometryContext {
+  panel: DesignerPanel;
+  mode: "interview" | "writtenTest";
+  preset: InterviewLayoutPreset | WrittenTestLayoutPreset;
+}
 
-export function boundsForPanel(panel: DesignerPanel): DesignerBounds {
-  if (panel === "question") return QUESTION_DESIGNER_BOUNDS;
-  if (panel === "answer") return ANSWER_DESIGNER_BOUNDS;
-  return CONTROL_BAR_DESIGNER_BOUNDS;
+function geometryContext(context: DesignerGeometryContext): { mode: "interview" | "written_test"; preset: InterviewLayoutPreset | WrittenTestLayoutPreset; panel: "question" | "answer" | "control" } {
+  return { mode: context.mode === "writtenTest" ? "written_test" : "interview", preset: context.preset, panel: context.panel === "controlBar" ? "control" : context.panel };
+}
+
+function toDesignerBounds(constraints: OverlayGeometryConstraints): DesignerBounds {
+  return { minimumWidth: constraints.minWidth, maximumWidth: constraints.maxWidth, minimumHeight: constraints.minHeight, maximumHeight: constraints.maxHeight };
+}
+
+export function boundsForPanel(context: DesignerGeometryContext): DesignerBounds {
+  return toDesignerBounds(resolveOverlayGeometryConstraints(geometryContext(context)));
+}
+
+// Compatibility exports for extensions that imported the old names. Runtime
+// and Designer code use boundsForPanel({ mode, preset, panel }) instead.
+export const QUESTION_DESIGNER_BOUNDS: DesignerBounds = boundsForPanel({ mode: "interview", preset: "minimal", panel: "question" });
+export const ANSWER_DESIGNER_BOUNDS: DesignerBounds = boundsForPanel({ mode: "interview", preset: "minimal", panel: "answer" });
+export const CONTROL_BAR_DESIGNER_BOUNDS: DesignerBounds = boundsForPanel({ mode: "interview", preset: "classic_split", panel: "controlBar" });
+
+function clampDimension(value: number, minimum: number, maximum: number, canvasMaximum: number): number {
+  const upperBound = Math.min(maximum, Math.max(minimum, canvasMaximum));
+  return Math.max(minimum, Math.min(upperBound, value));
+}
+
+export function clampDesignerSize(rect: DesignerRect, canvas: DesignerCanvas, bounds: DesignerBounds): DesignerRect {
+  const width = clampDimension(rect.width, bounds.minimumWidth, bounds.maximumWidth, canvas.width);
+  const height = clampDimension(rect.height, bounds.minimumHeight, bounds.maximumHeight, canvas.height);
+  return { ...rect, width, height };
+}
+
+/** Clamp only position; valid dimensions are carried through unchanged. */
+export function clampDesignerPosition(rect: DesignerRect, canvas: DesignerCanvas, bounds: DesignerBounds, visibleMargin = 40): DesignerRect {
+  const sized = clampDesignerSize(rect, canvas, bounds);
+  return {
+    ...sized,
+    x: Math.round(Math.max(visibleMargin - sized.width, Math.min(rect.x, canvas.width - visibleMargin))),
+    y: Math.round(Math.max(visibleMargin - sized.height, Math.min(rect.y, canvas.height - visibleMargin)))
+  };
 }
 
 export function clampDesignerRect(rect: DesignerRect, canvas: DesignerCanvas, bounds: DesignerBounds, visibleMargin = 40): DesignerRect {
-  const width = Math.max(bounds.minimumWidth, Math.min(bounds.maximumWidth, Math.min(rect.width, Math.max(bounds.minimumWidth, canvas.width))));
-  const height = Math.max(bounds.minimumHeight, Math.min(bounds.maximumHeight, Math.min(rect.height, Math.max(bounds.minimumHeight, canvas.height))));
-  return {
-    width,
-    height,
-    x: Math.round(Math.max(visibleMargin - width, Math.min(rect.x, canvas.width - visibleMargin))),
-    y: Math.round(Math.max(visibleMargin - height, Math.min(rect.y, canvas.height - visibleMargin)))
-  };
+  return clampDesignerPosition(rect, canvas, bounds, visibleMargin);
 }
 
 function snapValue(value: number, targets: number[], threshold: number): number {
@@ -78,8 +106,10 @@ function snapValue(value: number, targets: number[], threshold: number): number 
   return target === undefined ? value : target;
 }
 
-export function snapDesignerRect(panel: DesignerPanel, rect: DesignerRect, layout: DesignerLayout, canvas: DesignerCanvas, threshold = 12, altPressed = false): DesignerRect {
-  if (altPressed) return clampDesignerRect(rect, canvas, boundsForPanel(panel));
+export function snapDesignerRect(context: DesignerGeometryContext, rect: DesignerRect, layout: DesignerLayout, canvas: DesignerCanvas, threshold = 12, altPressed = false): DesignerRect {
+  const bounds = boundsForPanel(context);
+  if (altPressed) return clampDesignerPosition(rect, canvas, bounds);
+  const panel = context.panel;
   const others = Object.entries(layout).filter(([key]) => key !== panel).map(([, value]) => value as DesignerRect);
   const xTargets = [0, canvas.width - rect.width];
   const yTargets = [0, canvas.height - rect.height];
@@ -87,7 +117,7 @@ export function snapDesignerRect(panel: DesignerPanel, rect: DesignerRect, layou
     xTargets.push(other.x, other.x + other.width, other.x - rect.width, other.x + other.width - rect.width);
     yTargets.push(other.y, other.y + other.height, other.y - rect.height, other.y + other.height - rect.height);
   });
-  return clampDesignerRect({ ...rect, x: snapValue(rect.x, xTargets, threshold), y: snapValue(rect.y, yTargets, threshold) }, canvas, boundsForPanel(panel));
+  return clampDesignerPosition({ ...rect, x: snapValue(rect.x, xTargets, threshold), y: snapValue(rect.y, yTargets, threshold) }, canvas, bounds);
 }
 
 export function resizeDesignerRect(rect: DesignerRect, handle: ResizeHandle, delta: DesignerPoint, canvas: DesignerCanvas, bounds: DesignerBounds, altPressed = false): DesignerRect {
@@ -156,9 +186,10 @@ export function resolveOverlayLayoutPreset(preset: LegacyOverlayLayoutPreset | I
   const workArea = { x: display.workArea.x ?? 0, y: display.workArea.y ?? 0, width: Math.max(1, Math.round(display.workArea.width)), height: Math.max(1, Math.round(display.workArea.height)) };
   const orientation = current?.controlBarOrientation ?? "horizontal";
   const resolved = resolveOverlayPresetGeometry({ mode: "interview", preset: normalized as InterviewLayoutPreset, workArea, controlBar: { width: current?.controlBar?.width ?? 440, height: current?.controlBar?.height ?? 44, orientation } });
-  const question = clampDesignerRect(toRelativeOverlayBounds(resolved.question, workArea), { width: workArea.width, height: workArea.height }, QUESTION_DESIGNER_BOUNDS);
-  const answer = clampDesignerRect(toRelativeOverlayBounds(resolved.answer, workArea), { width: workArea.width, height: workArea.height }, ANSWER_DESIGNER_BOUNDS);
-  const controlBar = clampDesignerRect(toRelativeOverlayBounds(resolved.control, workArea), { width: workArea.width, height: workArea.height }, CONTROL_BAR_DESIGNER_BOUNDS);
+  const canvas = { width: workArea.width, height: workArea.height };
+  const question = clampDesignerRect(toRelativeOverlayBounds(resolved.question, workArea), canvas, boundsForPanel({ mode: "interview", preset: normalized as InterviewLayoutPreset, panel: "question" }));
+  const answer = clampDesignerRect(toRelativeOverlayBounds(resolved.answer, workArea), canvas, boundsForPanel({ mode: "interview", preset: normalized as InterviewLayoutPreset, panel: "answer" }));
+  const controlBar = clampDesignerRect(toRelativeOverlayBounds(resolved.control, workArea), canvas, boundsForPanel({ mode: "interview", preset: normalized as InterviewLayoutPreset, panel: "controlBar" }));
   const positionMode: OverlayControlBarPositionMode = normalized === "compact_split" ? "top_right" : "top_center";
   return {
     questionWindow: question,
@@ -178,9 +209,9 @@ export function resolveWrittenTestLayoutPreset(preset: WrittenTestLayoutPreset, 
   const orientation = current?.controlBarOrientation ?? "horizontal";
   const resolved = resolveOverlayPresetGeometry({ mode: "written_test", preset, workArea, controlBar: { width: current?.controlBar?.width ?? 360, height: current?.controlBar?.height ?? 44, orientation } });
   const canvas = { width: workArea.width, height: workArea.height };
-  const questionWindow = clampDesignerRect(toRelativeOverlayBounds(resolved.question, workArea), canvas, { minimumWidth: 480, maximumWidth: 1_200, minimumHeight: 320, maximumHeight: 840 });
-  const answerWindow = clampDesignerRect(toRelativeOverlayBounds(resolved.answer, workArea), canvas, ANSWER_DESIGNER_BOUNDS);
-  const controlBar = clampDesignerRect(toRelativeOverlayBounds(resolved.control, workArea), canvas, CONTROL_BAR_DESIGNER_BOUNDS);
+  const questionWindow = clampDesignerRect(toRelativeOverlayBounds(resolved.question, workArea), canvas, boundsForPanel({ mode: "writtenTest", preset, panel: "question" }));
+  const answerWindow = clampDesignerRect(toRelativeOverlayBounds(resolved.answer, workArea), canvas, boundsForPanel({ mode: "writtenTest", preset, panel: "answer" }));
+  const controlBar = clampDesignerRect(toRelativeOverlayBounds(resolved.control, workArea), canvas, boundsForPanel({ mode: "writtenTest", preset, panel: "controlBar" }));
   return { questionWindow, answerWindow, controlBar, controlBarOrientation: orientation, controlBarPositionMode: "top_center", ...(display.id === undefined ? {} : { displayId: display.id }), ...(display.scaleFactor === undefined ? {} : { scaleFactor: display.scaleFactor }) };
 }
 
