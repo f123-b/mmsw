@@ -401,9 +401,27 @@ try {
   await waitFor(() => document.documentElement?.dataset.appReady === "true");
   if (answerRequests.length !== 0) throw new Error(`STARTUP_LLM_REQUEST_DETECTED: ${answerRequests.length}`);
   evidence.push("Startup: PASS; STARTUP_NO_LLM_REQUESTS: PASS");
-  await clickText("快捷帮助");
+  await clickText("设置");
   await waitFor(() => Boolean(document.querySelector(".settings-page")));
   await screenshot("01-settings.png");
+  const settingsNav = await main.evaluate(`(() => {
+    const sections = ["general", "overlay", "models", "asr", "retrieval", "shortcuts", "privacy", "about"];
+    return { present: sections.every((section) => Boolean(document.querySelector("[data-testid='settings-nav-" + section + "']"))), count: document.querySelectorAll(".settings-subnav [data-testid^='settings-nav-']").length };
+  })()`);
+  if (!settingsNav?.present || settingsNav.count !== 8) throw new Error(`SETTINGS_SECONDARY_NAV_INVALID: ${JSON.stringify(settingsNav)}`);
+  await clickText("模型与 API");
+  await waitFor(() => Boolean(document.querySelector("[data-testid='settings-models-page']")));
+  if (!(await main.evaluate("document.body.innerText.includes('配置档案') && document.body.innerText.includes('默认模型') && document.body.innerText.includes('高级任务路由')"))) throw new Error("SETTINGS_MODEL_PAGE_INCOMPLETE");
+  await clickText("语音识别");
+  await waitFor(() => Boolean(document.querySelector("[data-testid='settings-asr-page']")));
+  if (!(await main.evaluate("document.body.innerText.includes('捕获设备') && document.body.innerText.includes('当前模式') && document.body.innerText.includes('测试识别设备')"))) throw new Error("SETTINGS_ASR_PAGE_INCOMPLETE");
+  await clickText("检索模型");
+  await waitFor(() => Boolean(document.querySelector("[data-testid='settings-retrieval-page']")));
+  if (!(await main.evaluate("document.body.innerText.includes('Embedding API Key') && document.body.innerText.includes('关键词召回') && document.body.innerText.includes('向量召回')"))) throw new Error("SETTINGS_RETRIEVAL_PAGE_INCOMPLETE");
+  await clickText("常规");
+  await waitFor(() => Boolean(document.querySelector("[data-testid='settings-general-page']")));
+  evidence.push("Settings navigation: PASS (8 secondary sections); Model / ASR / Retrieval separation: PASS; unsupported controls are labeled instead of persisted as fake settings");
+  await clickText("悬浮窗");
   await waitFor(() => document.body.innerText.includes("面试悬浮窗"));
   await clickSelector("[data-testid='designer-preset-classic_split']");
   const classicDesignerDefault = await main.evaluate("(async () => ({ preferences: await window.interviewCopilot.overlay.getPreferences(), preview: [...document.querySelectorAll('[data-preview-panel]')].map((node) => ({ panel: node.dataset.previewPanel, width: Number(node.dataset.previewWidth), height: Number(node.dataset.previewHeight) })) }))()");
@@ -461,15 +479,16 @@ try {
   await sleep(250);
   await screenshot("01b-overlay-settings.png");
   evidence.push("Overlay Preferences UI: PASS; OVERLAY_PREFERENCES_PERSIST: PASS; DESIGNER_CLASSIC_DEFAULT: PASS; DESIGNER_DRAG_PRESERVES_SIZE: PASS; DESIGNER_INSPECTOR_RESIZE_PERSISTS: PASS; DESIGNER_PRESET_REAPPLY: PASS; DESIGNER_MODE_SWITCH_DISPLAY_PERSISTENCE: PASS (20 switches); DESIGNER_VISUAL_REGRESSION_ARTIFACTS: PASS");
+  await clickText("模型与 API");
+  await waitFor(() => Boolean(document.querySelector("[data-testid='settings-models-page']")));
   await clickText("OpenAI 兼容");
-  await clickSelector(".primary-service-card .settings-advanced summary");
   await fillLabel("Base URL", `http://127.0.0.1:${mockPort}`);
   await fillLabel("API Key", "mock-key");
   await fillLabel("默认模型 ID", "mock-model");
-  await clickText("测试所选配置");
+  await clickText("测试连接");
   await waitFor(() => document.body.innerText.includes("正常"));
   await screenshot("02-provider-success.png");
-  await clickText("保存全部设置");
+  await clickSelector("[data-testid='settings-llm-provider'] .dark-pill");
 
   await clickText("档案 / 简历");
   await clickText("新建档案");
@@ -912,7 +931,9 @@ try {
 
   await main.evaluate("location.reload()");
   await waitFor(() => document.documentElement?.dataset.appReady === "true" && document.querySelectorAll("button").length > 0);
-  await clickText("快捷帮助");
+  await clickText("设置");
+  await waitFor(() => Boolean(document.querySelector(".settings-page")));
+  await clickText("悬浮窗");
   await waitFor(() => Boolean(document.querySelector(".overlay-preferences-card")));
   const persistedDesignerLayout = await main.evaluate("window.interviewCopilot.overlay.getPreferences().then((preferences) => ({ schemaVersion: preferences.schemaVersion, layoutPreset: preferences.interview.layoutPreset, question: preferences.interview.questionWindow, answer: preferences.interview.answerWindow, control: preferences.interview.controlBar }))");
   if (persistedDesignerLayout?.schemaVersion !== 4 || persistedDesignerLayout.layoutPreset !== "classic_split" || persistedDesignerLayout.question?.height !== 560 || persistedDesignerLayout.answer?.height !== 620) throw new Error(`DESIGNER_RELOAD_PERSISTENCE failed: ${JSON.stringify(persistedDesignerLayout)}`);
@@ -944,7 +965,9 @@ try {
   evidence.push("Screenshot-only: PASS; SCREENSHOT_WITHOUT_CURRENT_QUESTION: PASS");
   await main.evaluate("window.interviewCopilot.interview.stop()");
   await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "ENDED"), 15_000);
-  await clickText("快捷帮助");
+  await clickText("设置");
+  await waitFor(() => Boolean(document.querySelector(".settings-page")));
+  await clickText("悬浮窗");
   await waitFor(() => Boolean(document.querySelector(".overlay-preferences-card")));
   await clickText("笔试悬浮窗");
   await waitFor(() => Boolean(document.querySelector("[data-testid='designer-preset-split']")));

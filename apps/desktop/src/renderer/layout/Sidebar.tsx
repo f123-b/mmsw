@@ -51,7 +51,8 @@ export function Sidebar({ page, profileName, projects, conversations, onNavigate
       <div className="sidebar-section-label conversation-label">最近对话</div>
       {conversations.length === 0 ? <div className="sidebar-empty">还没有对话</div> : conversations.slice(0, 8).map((conversation) => <button className="sidebar-conversation" key={conversation.id} onClick={() => onOpenConversation(conversation.id)}><span>•</span><span className="sidebar-conversation-title">{conversation.title}</span></button>)}
       <div className="sidebar-bottom">
-        <button className="help-row" onClick={() => onNavigate("settings")}><span className="help-icon">?</span><span>快捷帮助</span></button>
+        <button className={`help-row ${page === "settings" ? "selected" : ""}`} onClick={() => onNavigate("settings")} data-testid="sidebar-settings"><span className="help-icon">⚙</span><span>设置</span></button>
+        <button className="help-row sidebar-help-disabled" type="button" disabled title="帮助中心尚未开放"><span className="help-icon">?</span><span>帮助</span></button>
         <button className="profile-row-bottom" onClick={() => onNavigate("profiles")}>
           <span className="avatar">{(profileName?.[0] ?? "I").toUpperCase()}</span>
           <span className="profile-bottom-copy"><strong>{profileName ?? "默认档案"}</strong><small>当前面试档案</small></span>
