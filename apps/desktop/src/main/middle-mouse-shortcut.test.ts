@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { shouldHandleMiddleMouseShortcut } from "./middle-mouse-shortcut";
+import { describe, expect, it, vi } from "vitest";
+import { routeGlobalMouseEvent, shouldHandleMiddleMouseShortcut } from "./middle-mouse-shortcut";
 
 describe("middle mouse screenshot shortcut", () => {
   it("runs in manual interview and written-test modes, but never in auto interview", () => {
@@ -10,5 +10,14 @@ describe("middle mouse screenshot shortcut", () => {
     expect(shouldHandleMiddleMouseShortcut({ interviewRunning: false, automationMode: "AUTO", writtenTestRunning: true })).toBe(true);
     expect(shouldHandleMiddleMouseShortcut({ interviewRunning: true, automationMode: "MANUAL", writtenTestRunning: false, middleMouseEnabled: false })).toBe(false);
     expect(shouldHandleMiddleMouseShortcut({ interviewRunning: false, automationMode: "AUTO", writtenTestRunning: true, enabledInExamMode: false })).toBe(false);
+  });
+
+  it("keeps middle-click screenshot and wheel routing as separate events", () => {
+    const middleClick = vi.fn();
+    const wheel = vi.fn();
+    routeGlobalMouseEvent({ event: "middle-click" }, middleClick, wheel);
+    routeGlobalMouseEvent({ event: "mouse-wheel", x: 12, y: 34, deltaY: 120 }, middleClick, wheel);
+    expect(middleClick).toHaveBeenCalledTimes(1);
+    expect(wheel).toHaveBeenCalledWith({ event: "mouse-wheel", x: 12, y: 34, deltaY: 120 });
   });
 });

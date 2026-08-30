@@ -126,8 +126,8 @@ describe("OverlaySettingsStore", () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
       const settings = new OverlaySettingsStore(database);
-      const saved = settings.setPreferences({ backgroundOpacity: 0.42, backgroundColor: "#102030", fontColor: "#fefefe", fontSize: 19, showTranscript: false, showTimestamps: false });
-      expect(saved).toMatchObject({ backgroundOpacity: 0.42, backgroundColor: "#102030", fontColor: "#fefefe", fontSize: 19, showTranscript: false, showTimestamps: false, showAnswer: true });
+      const saved = settings.setPreferences({ backgroundOpacity: 0.42, backgroundColor: "#102030", fontColor: "#fefefe", fontSize: 19, showTimestamps: false, interview: { leftPanel: "hidden", showAnswer: true } });
+      expect(saved).toMatchObject({ schemaVersion: 4, backgroundOpacity: 0.42, backgroundColor: "#102030", fontColor: "#fefefe", fontSize: 19, showTimestamps: false, interview: { leftPanel: "hidden", showAnswer: true } });
       expect(new OverlaySettingsStore(database).getPreferences()).toEqual(saved);
       expect(settings.setPreferences({ backgroundOpacity: 3, fontSize: 2, fontColor: "invalid" })).toMatchObject({ backgroundOpacity: 1, fontSize: 12, fontColor: "#f8fbff" });
     } finally { database.close(); }
@@ -138,15 +138,15 @@ describe("OverlaySettingsStore", () => {
     try {
       const settings = new OverlaySettingsStore(database);
       const saved = settings.setPreferences({
-        layoutPreset: "wide",
-        questionWindow: { width: 460, height: 520, fontSize: 15, titleFontSize: 12, lineHeight: 1.7, paragraphGap: 9, padding: 14, opacity: 0.82, blur: 8, radius: 12, shadow: true },
-        answerWindow: { width: 760, height: 520, fontSize: 16, titleFontSize: 12, lineHeight: 1.72, paragraphGap: 10, padding: 16, opacity: 0.86, blur: 10, radius: 12, shadow: true },
+        interview: { layoutPreset: "answer_focus", questionWindow: { width: 460, height: 520, fontSize: 15, titleFontSize: 12, lineHeight: 1.7, paragraphGap: 9, padding: 14, opacity: 0.82, blur: 8, radius: 12, shadow: true }, answerWindow: { width: 760, height: 520, fontSize: 16, titleFontSize: 12, lineHeight: 1.72, paragraphGap: 10, padding: 16, opacity: 0.86, blur: 10, radius: 12, shadow: true } },
+        writtenTest: { layoutPreset: "split", questionWindow: { width: 520, height: 520 }, answerWindow: { width: 760, height: 520 } },
         behavior: { followLatestQuestion: false, followLatestAnswer: true, alwaysOnTop: true, lockPosition: true, mousePassthrough: true, autoDim: false, rememberPosition: true, rememberSize: true, showQuestionStatus: true, showAnswerStatus: true, compactHeader: true },
         screenshot: { middleMouseEnabled: true, enabledInManualInterview: true, enabledInExamMode: true, captureMode: "last_region", fixedRegion: { x: 10, y: 20, width: 800, height: 600 } }
       });
-      expect(saved.layoutPreset).toBe("wide");
-      expect(saved.questionWindow.width).toBe(460);
-      expect(saved.answerWindow.fontSize).toBe(16);
+      expect(saved.interview.layoutPreset).toBe("answer_focus");
+      expect(saved.interview.questionWindow.width).toBe(460);
+      expect(saved.interview.answerWindow.fontSize).toBe(16);
+      expect(saved.writtenTest.layoutPreset).toBe("split");
       expect(saved.behavior.lockPosition).toBe(true);
       expect(saved.screenshot.captureMode).toBe("last_region");
       expect(new OverlaySettingsStore(database).getPreferences()).toEqual(saved);
@@ -158,8 +158,10 @@ describe("OverlaySettingsStore", () => {
     try {
       database.run("INSERT INTO app_state(key, value) VALUES (?, ?)", ["overlay.preferences", JSON.stringify({ backgroundOpacity: 0, backgroundColor: "#102030", fontColor: "#ffffff", fontSize: 10, width: 900, height: 0 })]);
       const preferences = new OverlaySettingsStore(database).getPreferences();
-      expect(preferences.questionWindow).toMatchObject({ width: 760, height: 180, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
-      expect(preferences.answerWindow).toMatchObject({ width: 900, height: 220, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
+      expect(preferences.schemaVersion).toBe(4);
+      expect(preferences.interview.questionWindow).toMatchObject({ width: 900, height: 620, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
+      expect(preferences.interview.answerWindow).toMatchObject({ width: 900, height: 620, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
+      expect(preferences.writtenTest.questionWindow).toMatchObject({ width: 900, height: 640, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
       expect(preferences.behavior.interactionMode).toBe("click_through");
       expect(preferences.appearance.mode).toBe("glass");
       expect(new OverlaySettingsStore(database).setPreferences({ behavior: { mousePassthrough: true } }).behavior.interactionMode).toBe("click_through");
@@ -172,10 +174,10 @@ describe("OverlaySettingsStore", () => {
       database.run("INSERT INTO app_state(key, value) VALUES (?, ?)", ["overlay.preferences", JSON.stringify({ behavior: { interactionMode: "interactive", mousePassthrough: false, lockLayout: false }, questionWindow: { width: 500 } })]);
       const settings = new OverlaySettingsStore(database);
       const migrated = settings.getPreferences();
-      expect(migrated.schemaVersion).toBe(3);
+      expect(migrated.schemaVersion).toBe(4);
       expect(migrated.behavior).toMatchObject({ interactionMode: "click_through", mousePassthrough: true, lockLayout: true });
       const storedAfterMigration = database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", ["overlay.preferences"]);
-      expect(JSON.parse(storedAfterMigration?.value ?? "{}").schemaVersion).toBe(3);
+      expect(JSON.parse(storedAfterMigration?.value ?? "{}").schemaVersion).toBe(4);
 
       const edited = settings.setPreferences({ behavior: { interactionMode: "interactive", lockLayout: false } });
       expect(edited.behavior).toMatchObject({ interactionMode: "interactive", mousePassthrough: false, lockLayout: false });
@@ -188,8 +190,9 @@ describe("OverlaySettingsStore", () => {
     try {
       database.run("INSERT INTO app_state(key, value) VALUES (?, ?)", ["overlay.preferences", JSON.stringify({ schemaVersion: 2, layoutPreset: "standard", controlBar: { width: 680, height: 50 } })]);
       const preferences = new OverlaySettingsStore(database).getPreferences();
-      expect(preferences.schemaVersion).toBe(3);
-      expect(preferences.controlBar).toMatchObject({ width: 440, height: 44 });
+      expect(preferences.schemaVersion).toBe(4);
+      expect(preferences.interview.layoutPreset).toBe("classic_split");
+      expect(preferences.interview.controlBar).toMatchObject({ width: 680, height: 50 });
     } finally { database.close(); }
   });
 
@@ -212,20 +215,18 @@ describe("OverlaySettingsStore", () => {
     try {
       const settings = new OverlaySettingsStore(database);
       const saved = settings.setPreferences({
-        questionWindow: { width: 2_000, height: 1, fontSize: 40, backgroundOpacity: 0, textOpacity: 1, borderOpacity: 0 },
-        answerWindow: { width: 2_000, height: 1, fontSize: 40 },
-        controlBar: { x: 144, y: 280, positionMode: "custom", orientation: "vertical" },
+        interview: { questionWindow: { width: 2_000, height: 1, fontSize: 40, backgroundOpacity: 0, textOpacity: 1, borderOpacity: 0 }, answerWindow: { width: 2_000, height: 1, fontSize: 40 }, controlBar: { x: 144, y: 280, positionMode: "custom", orientation: "vertical" } },
         appearance: { mode: "text_only", radius: 99 },
         behavior: { interactionMode: "full_passthrough", snapEnabled: false, snapThreshold: 99 }
       });
-      expect(saved.questionWindow).toMatchObject({ width: 760, height: 88, fontSize: 32, backgroundOpacity: 0, textOpacity: 1, borderOpacity: 0 });
-      expect(saved.answerWindow).toMatchObject({ width: 1_000, height: 132, fontSize: 40 });
-      expect(saved.controlBar).toMatchObject({ x: 144, y: 280, positionMode: "custom", orientation: "vertical" });
+      expect(saved.interview.questionWindow).toMatchObject({ width: 900, height: 220, fontSize: 32, backgroundOpacity: 0, textOpacity: 1, borderOpacity: 0 });
+      expect(saved.interview.answerWindow).toMatchObject({ width: 1_100, height: 220, fontSize: 40 });
+      expect(saved.interview.controlBar).toMatchObject({ x: 144, y: 280, positionMode: "custom", orientation: "vertical" });
       expect(saved.appearance).toMatchObject({ mode: "text_only", radius: 32 });
       expect(saved.behavior).toMatchObject({ interactionMode: "full_passthrough", mousePassthrough: true, snapEnabled: false, snapThreshold: 16 });
 
-      const partial = settings.setPreferences({ controlBar: { x: 210, y: 310, width: 720, height: 72 } });
-      expect(partial.controlBar).toMatchObject({ x: 210, y: 310, width: 720, height: 72, positionMode: "custom", orientation: "vertical" });
+      const partial = settings.setPreferences({ interview: { controlBar: { x: 210, y: 310, width: 720, height: 72 } } });
+      expect(partial.interview.controlBar).toMatchObject({ x: 210, y: 310, width: 720, height: 72, positionMode: "custom", orientation: "vertical" });
     } finally {
       database.close();
     }
@@ -235,9 +236,9 @@ describe("OverlaySettingsStore", () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
       const settings = new OverlaySettingsStore(database);
-      expect(settings.setPreferences({ layoutPreset: "standard" }).layoutPreset).toBe("standard");
-      expect(settings.setPreferences({ answerWindow: { x: 640 } }).layoutPreset).toBe("custom");
-      expect(settings.setPreferences({ layoutPreset: "wide", answerWindow: { x: 700, width: 940 } }).layoutPreset).toBe("wide");
+      expect(settings.setPreferences({ interview: { layoutPreset: "classic_split" } }).interview.layoutPreset).toBe("classic_split");
+      expect(settings.setPreferences({ interview: { answerWindow: { x: 640 } } }).interview.layoutPreset).toBe("minimal");
+      expect(settings.setPreferences({ interview: { layoutPreset: "answer_focus", answerWindow: { x: 700, width: 940 } } }).interview.layoutPreset).toBe("answer_focus");
     } finally { database.close(); }
   });
 
@@ -246,16 +247,15 @@ describe("OverlaySettingsStore", () => {
     try {
       const settings = new OverlaySettingsStore(database);
       settings.setPreferences({
-        layoutPreset: "custom",
-        questionWindow: { x: 900, y: 500, width: 760, height: 800 },
-        answerWindow: { x: 20, y: 40, width: 1_200, height: 900 },
-        controlBar: { x: 20, y: 20, positionMode: "custom" }
+        interview: { layoutPreset: "minimal", questionWindow: { x: 900, y: 500, width: 760, height: 800 }, answerWindow: { x: 20, y: 40, width: 1_200, height: 900 }, controlBar: { x: 20, y: 20, positionMode: "custom" } },
+        writtenTest: { layoutPreset: "split", questionWindow: { x: 100 }, answerWindow: { x: 200 } }
       });
       const next = settings.resetLayout();
-      expect(next.layoutPreset).toBe("standard");
-      expect(next.questionWindow.x).toBeUndefined();
-      expect(next.answerWindow.x).toBeUndefined();
-      expect(next.controlBar.positionMode).toBe("top_center");
+      expect(next.interview.layoutPreset).toBe("classic_split");
+      expect(next.interview.questionWindow.x).toBeUndefined();
+      expect(next.interview.answerWindow.x).toBeUndefined();
+      expect(next.interview.controlBar.positionMode).toBe("top_center");
+      expect(next.writtenTest.layoutPreset).toBe("single_reader");
       expect(next.behavior.lockLayout).toBe(true);
     } finally {
       database.close();
@@ -266,9 +266,9 @@ describe("OverlaySettingsStore", () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
       const settings = new OverlaySettingsStore(database);
-      settings.setPreferences({ behavior: { interactionMode: "interactive", lockLayout: false }, appearance: { mode: "text_only" }, questionWindow: { x: 900 } });
+      settings.setPreferences({ behavior: { interactionMode: "interactive", lockLayout: false }, appearance: { mode: "text_only" }, interview: { questionWindow: { x: 900 } } });
       const layoutReset = settings.resetLayout();
-      expect(layoutReset.questionWindow.x).toBeUndefined();
+      expect(layoutReset.interview.questionWindow.x).toBeUndefined();
       expect(layoutReset.behavior.interactionMode).toBe("interactive");
       expect(layoutReset.appearance.mode).toBe("text_only");
       const interactionReset = settings.resetInteraction();

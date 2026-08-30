@@ -17,11 +17,15 @@ export function middleMouseHelperCandidates(resourcesPath: string, appPath: stri
   ];
 }
 
-export interface GlobalMouseEvent {
-  event: "middle-click" | "mouse-wheel";
-  x?: number;
-  y?: number;
-  deltaY?: number;
+export type GlobalMouseEvent =
+  | { event: "middle-click" }
+  | { event: "mouse-wheel"; x?: number; y?: number; deltaY?: number }
+  | { event: "error"; error?: string };
+
+export function routeGlobalMouseEvent(event: GlobalMouseEvent, onMiddleClick: () => void, onMouseEvent?: (event: GlobalMouseEvent) => void, onDiagnostic?: (message: string) => void): void {
+  if (event.event === "middle-click") onMiddleClick();
+  else if (event.event === "mouse-wheel") onMouseEvent?.(event);
+  else if (event.event === "error") onDiagnostic?.(`MIDDLE_MOUSE_WATCH_ERROR: ${event.error ?? "unknown"}`);
 }
 
 export class MiddleMouseShortcutManager {
@@ -42,9 +46,7 @@ export class MiddleMouseShortcutManager {
       for (const line of lines) {
         try {
           const event = JSON.parse(line) as GlobalMouseEvent & { error?: string };
-          if (event.event === "middle-click") this.onMiddleClick();
-          else if (event.event === "mouse-wheel") this.onMouseEvent?.(event);
-          else if (event.event === "error") this.onDiagnostic?.(`MIDDLE_MOUSE_WATCH_ERROR: ${event.error ?? "unknown"}`);
+          routeGlobalMouseEvent(event, this.onMiddleClick, this.onMouseEvent, this.onDiagnostic);
         } catch { /* ignore helper noise */ }
       }
     });

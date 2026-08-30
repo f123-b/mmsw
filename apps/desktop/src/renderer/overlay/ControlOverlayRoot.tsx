@@ -20,6 +20,9 @@ export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
     return () => { disposed = true; unsubscribe(); unsubscribeLayoutEdit(); window.removeEventListener("resize", onResize); };
   }, []);
   const modeLabel = props.operationMode === "WRITTEN_TEST" ? "笔试" : "面试";
+  const interviewMode = props.operationMode !== "WRITTEN_TEST";
+  const interviewPreferences = preferences.interview;
+  const writtenPreferences = preferences.writtenTest;
   const statusLabel = primaryRuntimeStatus(props.runtimePhases);
   const answerReady = props.runtimePhases.answerPhase === "READY";
   return <main className="overlay-root control-overlay-root" data-overlay-surface="control" data-hud-state={statusLabel}>
@@ -28,10 +31,11 @@ export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
         <span className="toolbar-audio-mark" aria-hidden="true">≈</span>
         <div className="toolbar-status-inline" data-testid="toolbar-status"><i aria-hidden="true" /><span>{statusLabel}</span></div>
         <span className="toolbar-divider" aria-hidden="true" />
-        {!props.hudState.running || props.operationMode === "WRITTEN_TEST" ? null : <div className="toolbar-mode-switch" role="group" aria-label="回答模式"><button className={props.automationMode === "AUTO" ? "selected" : ""} onClick={() => { if (props.automationMode !== "AUTO") void props.onToggleAutomation(); }}>自动</button><button className={props.automationMode === "MANUAL" ? "selected" : ""} onClick={() => { if (props.automationMode !== "MANUAL") void props.onToggleAutomation(); }}>手动</button></div>}
+        {!props.hudState.running || !interviewMode ? <button className="toolbar-screenshot-action" onClick={() => void props.onAnswerScreenshot()} title="截图识别并回答">截图</button> : <div className="toolbar-mode-switch" role="group" aria-label="回答模式"><button className={props.automationMode === "AUTO" ? "selected" : ""} onClick={() => { if (props.automationMode !== "AUTO") void props.onToggleAutomation(); }}>自动</button><button className={props.automationMode === "MANUAL" ? "selected" : ""} onClick={() => { if (props.automationMode !== "MANUAL") void props.onToggleAutomation(); }}>手动</button></div>}
         {answerReady && <span className="toolbar-answer-ready-dot" title="回答已就绪" aria-label="回答已就绪" />}
-        {preferences.showTranscript && <button className="toolbar-icon-action" onClick={props.onToggleTranscript} title="显示或隐藏问题" aria-label="显示或隐藏问题" aria-pressed={props.hudState.transcriptVisible}>◫</button>}
-        {preferences.showAnswer && <button className="toolbar-icon-action" onClick={props.onToggleAnswer} title="显示或隐藏回答" aria-label="显示或隐藏回答" aria-pressed={props.hudState.answerVisible}>◧</button>}
+        {interviewMode && interviewPreferences.leftPanel !== "hidden" && <button className="toolbar-icon-action" onClick={props.onToggleTranscript} title="显示或隐藏左侧面板" aria-label="显示或隐藏左侧面板" aria-pressed={props.hudState.transcriptVisible}>◫</button>}
+        {interviewMode && interviewPreferences.showAnswer && <button className="toolbar-icon-action" onClick={props.onToggleAnswer} title="显示或隐藏回答" aria-label="显示或隐藏回答" aria-pressed={props.hudState.answerVisible}>◧</button>}
+        {!interviewMode && writtenPreferences.layoutPreset === "split" && <button className="toolbar-icon-action" onClick={props.onToggleAnswer} title="显示或隐藏回答" aria-label="显示或隐藏回答" aria-pressed={props.hudState.answerVisible}>◧</button>}
         <button className="toolbar-icon-action" onClick={props.onToggleShortcuts} title="打开快捷操作" aria-label="打开快捷操作">…</button>
         <button className="toolbar-end-button" onClick={props.onRequestEndInterview} title={`结束${modeLabel} Ctrl+Alt+Q`} aria-label={`结束${modeLabel}`}>结束</button>
       </div>

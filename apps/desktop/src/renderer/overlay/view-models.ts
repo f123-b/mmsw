@@ -1,4 +1,4 @@
-import type { AnswerThread } from "@interview-copilot/shared";
+import type { AnswerThread, TranscriptSnapshot } from "@interview-copilot/shared";
 
 export interface QuestionOverlayGroup {
   id: string;
@@ -23,6 +23,14 @@ export interface AnswerOverlayViewModel {
   streaming: boolean;
   hasOlderAnswers: boolean;
   olderAnswerCount: number;
+}
+
+export interface DialogueSpeakingBlock {
+  id: string;
+  speaker: "interviewer" | "candidate";
+  label: "面试官" | "我";
+  text: string;
+  startMs: number;
 }
 
 function displayable(group: QuestionOverlayGroup): boolean {
@@ -50,11 +58,24 @@ export function buildAnswerOverlayViewModel(threads: AnswerThread[], activeGroup
   const latest = active?.answers.at(-1);
   const answer = latest?.answerText || fallbackAnswer;
   const question = latest?.questionText || active?.title || fallbackQuestion;
+  const totalAnswers = threads.reduce((count, thread) => count + thread.answers.length, 0);
+  const olderAnswerCount = Math.max(0, totalAnswers - (latest ? 1 : 0));
   return {
     ...(question ? { question } : {}),
     answer,
     streaming: streaming || latest?.status === "generating",
-    hasOlderAnswers: Boolean(active && threads.some((thread) => thread.groupId !== active.groupId)),
-    olderAnswerCount: active ? threads.filter((thread) => thread.groupId !== active.groupId).reduce((count, thread) => count + thread.answers.length, 0) : 0
+    hasOlderAnswers: olderAnswerCount > 0,
+    olderAnswerCount
   };
+}
+
+/** UI-only dialogue projection. It deliberately keeps no transcript history outside the latest blocks. */
+export function buildDialogueOverlayViewModel(remote: TranscriptSnapshot | undefined, mic: TranscriptSnapshot | undefined, maxBlocks = 8): DialogueSpeakingBlock[] {
+  const blocks = [
+    ...(remote?.final ?? []).map((segment) => ({ id: `remote-${segment.id}`, speaker: "interviewer" as const, label: "面试官" as const, text: segment.text.trim(), startMs: segment.startMs })),
+    ...(mic?.final ?? []).map((segment) => ({ id: `mic-${segment.id}`, speaker: "candidate" as const, label: "我" as const, text: segment.text.trim(), startMs: segment.startMs })),
+    ...(remote?.partial?.text?.trim() ? [{ id: `remote-partial-${remote.partial.id}`, speaker: "interviewer" as const, label: "面试官" as const, text: remote.partial.text.trim(), startMs: remote.partial.startMs }] : []),
+    ...(mic?.partial?.text?.trim() ? [{ id: `mic-partial-${mic.partial.id}`, speaker: "candidate" as const, label: "我" as const, text: mic.partial.text.trim(), startMs: mic.partial.startMs }] : [])
+  ].filter((block) => block.text.length > 0).sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id));
+  return blocks.slice(-Math.max(4, Math.min(8, maxBlocks)));
 }

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type JSX, type RefObject } from "react";
-import type { AnswerThread } from "@interview-copilot/shared";
+import type { AnswerThread, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { HUDLayout, HUDState, OverlayMode } from "../../main/overlay-manager";
 import { DEFAULT_OVERLAY_PREFERENCES, type OverlayPreferences } from "../../shared/overlay-preferences";
 import { applyLayoutPreset, boundsForPanel, clampDesignerRect, resizeDesignerRect, snapDesignerRect, type DesignerPanel, type ResizeHandle } from "./overlay-designer";
 import { isDisplayableQuestionGroup, type RuntimePhaseState } from "./runtime-state";
-import { buildAnswerOverlayViewModel, buildQuestionOverlayViewModel, type AnswerOverlayViewModel, type QuestionOverlayViewModel } from "./view-models";
+import { buildAnswerOverlayViewModel, buildDialogueOverlayViewModel, buildQuestionOverlayViewModel, type AnswerOverlayViewModel, type DialogueSpeakingBlock, type QuestionOverlayViewModel } from "./view-models";
 
 type PanelKey = "toolbar" | "transcript" | "answer";
 export type OverlaySurface = "question" | "answer" | "control" | "transient";
@@ -33,6 +33,8 @@ export interface OverlayRootProps {
   activeQuestionGroupId?: string;
   activeAnswerGroupId?: string;
   answerThreads: AnswerThread[];
+  remoteTranscript?: TranscriptSnapshot;
+  micTranscript?: TranscriptSnapshot;
   onToggleMode: () => void;
   onToggleAutomation: () => Promise<void> | void;
   onAnswerLatest: () => Promise<void>;
@@ -65,12 +67,14 @@ function viewportDefaults(preferences = DEFAULT_OVERLAY_PREFERENCES, surface: Ov
   if (surface === "control") return { ...defaults, toolbar: { ...defaults.toolbar, width: window.innerWidth, height: window.innerHeight }, transcript: { ...defaults.transcript, visible: false }, answer: { ...defaults.answer, visible: false } };
   if (surface === "question") return { ...defaults, toolbar: { ...defaults.toolbar, visible: false }, transcript: { ...defaults.transcript, width: window.innerWidth, height: window.innerHeight }, answer: { ...defaults.answer, visible: false } };
   if (surface === "answer") return { ...defaults, toolbar: { ...defaults.toolbar, visible: false }, transcript: { ...defaults.transcript, visible: false }, answer: { ...defaults.answer, width: window.innerWidth, height: window.innerHeight } };
-  const resolved = applyLayoutPreset(preferences.layoutPreset, { workArea: { width: window.innerWidth, height: window.innerHeight } }, {
-    questionWindow: { x: preferences.questionWindow.x ?? 120, y: preferences.questionWindow.y ?? 180, width: preferences.questionWindow.width, height: preferences.questionWindow.height },
-    answerWindow: { x: preferences.answerWindow.x ?? 570, y: preferences.answerWindow.y ?? 180, width: preferences.answerWindow.width, height: preferences.answerWindow.height },
-    controlBar: { x: preferences.controlBar.x ?? 620, y: preferences.controlBar.y ?? 24, width: preferences.controlBar.width, height: preferences.controlBar.height },
-    controlBarOrientation: preferences.controlBar.orientation,
-    controlBarPositionMode: preferences.controlBar.positionMode
+  const interview = preferences.interview;
+  const leftWindow = interview.leftPanel === "dialogue" ? interview.dialogueWindow : interview.questionWindow;
+  const resolved = applyLayoutPreset(interview.layoutPreset, { workArea: { width: window.innerWidth, height: window.innerHeight } }, {
+    questionWindow: { x: leftWindow.x ?? 120, y: leftWindow.y ?? 180, width: leftWindow.width, height: leftWindow.height },
+    answerWindow: { x: interview.answerWindow.x ?? 570, y: interview.answerWindow.y ?? 180, width: interview.answerWindow.width, height: interview.answerWindow.height },
+    controlBar: { x: interview.controlBar.x ?? 620, y: interview.controlBar.y ?? 24, width: interview.controlBar.width, height: interview.controlBar.height },
+    controlBarOrientation: interview.controlBar.orientation,
+    controlBarPositionMode: interview.controlBar.positionMode
   });
   return {
     toolbar: { ...defaults.toolbar, x: resolved.controlBar.x, y: resolved.controlBar.y, width: resolved.controlBar.width, height: resolved.controlBar.height },
@@ -109,7 +113,7 @@ function useOverlayLayout(preferences: OverlayPreferences, surface?: OverlaySurf
       layoutRef.current = merged;
       return merged;
     });
-  }, [surface, preferences.layoutPreset, preferences.questionWindow.x, preferences.questionWindow.y, preferences.questionWindow.width, preferences.questionWindow.height, preferences.answerWindow.x, preferences.answerWindow.y, preferences.answerWindow.width, preferences.answerWindow.height, preferences.controlBar.x, preferences.controlBar.y, preferences.controlBar.width, preferences.controlBar.height, preferences.controlBar.orientation, preferences.controlBar.positionMode]);
+  }, [surface, preferences.interview.layoutPreset, preferences.interview.leftPanel, preferences.interview.questionWindow.x, preferences.interview.questionWindow.y, preferences.interview.questionWindow.width, preferences.interview.questionWindow.height, preferences.interview.dialogueWindow.x, preferences.interview.dialogueWindow.y, preferences.interview.dialogueWindow.width, preferences.interview.dialogueWindow.height, preferences.interview.answerWindow.x, preferences.interview.answerWindow.y, preferences.interview.answerWindow.width, preferences.interview.answerWindow.height, preferences.interview.controlBar.x, preferences.interview.controlBar.y, preferences.interview.controlBar.width, preferences.interview.controlBar.height, preferences.interview.controlBar.orientation, preferences.interview.controlBar.positionMode]);
   return [layout, update, applyMainLayout, clearSavedLayout, () => layoutRef.current];
 }
 
@@ -214,22 +218,92 @@ function AnswerCore({ text }: { text: string }): JSX.Element {
   return <>{blocks}</>;
 }
 
+function useScrollFollow(ref: RefObject<HTMLDivElement | null>, contentKey: string, enabled = true): { following: boolean; onScroll: () => void; follow: () => void } {
+  const [following, setFollowing] = useState(true);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || !enabled || !following) return;
+    element.scrollTop = element.scrollHeight;
+  }, [contentKey, enabled, following, ref]);
+  const onScroll = () => {
+    const element = ref.current;
+    if (!element) return;
+    setFollowing(element.scrollHeight - element.scrollTop - element.clientHeight < 18);
+  };
+  const follow = () => {
+    const element = ref.current;
+    if (!element) return;
+    element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
+    setFollowing(true);
+  };
+  return { following, onScroll, follow };
+}
+
+function LatestButton({ visible, onClick }: { visible: boolean; onClick: () => void }): JSX.Element | null {
+  return visible ? <button type="button" className="overlay-latest-button hud-interactive-region" onClick={onClick}>回到最新</button> : null;
+}
+
 function QuestionOverlayContent({ groups, viewModel }: { groups: OverlayRootProps["questionGroups"]; viewModel: QuestionOverlayViewModel }): JSX.Element {
   const older = groups.filter((group) => isDisplayableQuestionGroup(group) && group.id !== viewModel.activeGroupId).reverse();
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const follow = useScrollFollow(scrollRef, `${viewModel.currentQuestion ?? ""}:${viewModel.currentFollowUp ?? ""}:${older.length}`);
   return <section className="overlay-panel-card question-card question-overlay-content" data-overlay-content="question" aria-label="当前问题">
-    <div className="overlay-content-status"><span className="content-status-dot" />{viewModel.status === "detected" ? "已识别" : "正在听取"}</div>
-    <p className="current-question-text">{compactText(viewModel.currentQuestion)}</p>
-    {viewModel.currentFollowUp && <div className="current-follow-up"><span>追问</span><strong>{compactText(viewModel.currentFollowUp, 220)}</strong></div>}
-    {viewModel.hasHistory && <details className="overlay-history"><summary>历史 {viewModel.historyCount}</summary>{older.map((group) => <p className="overlay-history-item" key={group.id}>{compactText(group.primaryQuestion ?? group.title, 180)}</p>)}</details>}
+    <div ref={scrollRef} className="overlay-scroll-region" onScroll={follow.onScroll} tabIndex={0}>
+      <div className="overlay-content-status"><span className="content-status-dot" />{viewModel.status === "detected" ? "已识别" : "正在听取"}</div>
+      <p className="current-question-text">{compactText(viewModel.currentQuestion)}</p>
+      {viewModel.currentFollowUp && <div className="current-follow-up"><span>追问</span><strong>{compactText(viewModel.currentFollowUp, 220)}</strong></div>}
+      {viewModel.hasHistory && <details className="overlay-history"><summary>历史 {viewModel.historyCount}</summary>{older.map((group) => <p className="overlay-history-item" key={group.id}>{compactText(group.primaryQuestion ?? group.title, 180)}</p>)}</details>}
+    </div>
+    <LatestButton visible={!follow.following} onClick={follow.follow} />
   </section>;
 }
 
 function AnswerOverlayContent({ viewModel }: { viewModel: AnswerOverlayViewModel }): JSX.Element {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const follow = useScrollFollow(scrollRef, `${viewModel.answer}:${viewModel.streaming}`);
   return <section className="overlay-panel-card answer-card answer-overlay-content" data-overlay-content="answer" aria-label="当前回答">
-    {viewModel.question && <p className="answer-context-question">{compactText(viewModel.question, 220)}</p>}
-    {viewModel.streaming && <div className="answer-content-status generating"><span className="content-status-dot" />生成中</div>}
-    <div className="answer-core">{viewModel.answer ? <AnswerCore text={viewModel.answer} /> : <p className="overlay-empty">等待回答</p>}{viewModel.streaming && <span className="answer-cursor">▌</span>}</div>
-    {viewModel.hasOlderAnswers && <details className="overlay-history"><summary>历史回答 {viewModel.olderAnswerCount}</summary></details>}
+    <div ref={scrollRef} className="overlay-scroll-region" onScroll={follow.onScroll} tabIndex={0}>
+      {viewModel.question && <p className="answer-context-question">{compactText(viewModel.question, 220)}</p>}
+      {viewModel.streaming && <div className="answer-content-status generating"><span className="content-status-dot" />生成中</div>}
+      <div className="answer-core">{viewModel.answer ? <AnswerCore text={viewModel.answer} /> : <p className="overlay-empty">等待回答</p>}{viewModel.streaming && <span className="answer-cursor">▌</span>}</div>
+      {viewModel.hasOlderAnswers && <details className="overlay-history"><summary>历史回答 {viewModel.olderAnswerCount}</summary></details>}
+    </div>
+    <LatestButton visible={!follow.following} onClick={follow.follow} />
+  </section>;
+}
+
+function DialogueOverlayContent({ blocks }: { blocks: DialogueSpeakingBlock[] }): JSX.Element {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const follow = useScrollFollow(scrollRef, blocks.map((block) => block.id).join("|"));
+  return <section className="overlay-panel-card dialogue-card dialogue-overlay-content" data-overlay-content="dialogue" aria-label="面试对话">
+    <div ref={scrollRef} className="overlay-scroll-region" onScroll={follow.onScroll} tabIndex={0}>
+      <div className="overlay-content-status"><span className="content-status-dot" />最近对话</div>
+      {blocks.length === 0 ? <p className="overlay-empty">等待面试对话</p> : blocks.map((block) => <div className={`dialogue-block dialogue-${block.speaker}`} key={block.id}><strong>{block.label}</strong><p>{block.text}</p></div>)}
+    </div>
+    <LatestButton visible={!follow.following} onClick={follow.follow} />
+  </section>;
+}
+
+function WrittenQuestionContent({ viewModel }: { viewModel: AnswerOverlayViewModel }): JSX.Element {
+  return <section className="overlay-panel-card written-question-card written-question-content" data-overlay-content="written-question" aria-label="截图识别的问题">
+    <div className="overlay-content-status"><span className="content-status-dot" />笔试 · 识别题目</div>
+    <p className="current-question-text">{compactText(viewModel.question, 600)}</p>
+  </section>;
+}
+
+function WrittenTestReaderContent({ viewModel }: { viewModel: AnswerOverlayViewModel }): JSX.Element {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const follow = useScrollFollow(scrollRef, `${viewModel.question}:${viewModel.answer}:${viewModel.streaming}`);
+  return <section className="overlay-panel-card written-reader-card written-reader-content" data-overlay-content="written-test" aria-label="笔试阅读器">
+    <div ref={scrollRef} className="overlay-scroll-region" onScroll={follow.onScroll} tabIndex={0}>
+      <div className="overlay-content-status"><span className="content-status-dot" />笔试 · {viewModel.answer ? "回答" : "等待截图"}</div>
+      <h2>截图识别的问题</h2>
+      <p className="written-reader-question">{compactText(viewModel.question, 600)}</p>
+      <div className="written-reader-divider" />
+      <h2>AI 回答</h2>
+      <div className="answer-core">{viewModel.answer ? <AnswerCore text={viewModel.answer} /> : <p className="overlay-empty">按 Ctrl + Alt + S 截图识别并回答</p>}{viewModel.streaming && <span className="answer-cursor">▌</span>}</div>
+    </div>
+    <LatestButton visible={!follow.following} onClick={follow.follow} />
   </section>;
 }
 
@@ -244,7 +318,6 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   const [layout, updateLayout, applyMainLayout, clearSavedLayout, getCurrentLayout] = useOverlayLayout(preferences, nativeSurface);
   const [layoutEditMode, setLayoutEditMode] = useState(false);
   const [runtimeProtection, setRuntimeProtection] = useState<{ requested: boolean; osFlagApplied: boolean; displayCaptureVerified: boolean | null; lastError?: string }>();
-  const [answerSending, setAnswerSending] = useState(false);
   const nativeContentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     let disposed = false;
@@ -259,29 +332,34 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
     return () => { disposed = true; unsubscribePreferences(); unsubscribeLayout(); unsubscribeLayoutEdit(); unsubscribeProtection(); unsubscribeCommands(); };
   }, [applyMainLayout, clearSavedLayout]);
   const visualHidden = (!props.hudState.running && !layoutEditMode) || props.hudState.shareMode;
-  const transcriptVisible = !visualHidden && !writtenTestMode && (!nativeSurface || nativeSurface === "question") && panel !== "answer" && preferences.showTranscript && (layoutEditMode || props.hudState.transcriptVisible);
-  const answerVisible = !visualHidden && (!nativeSurface || nativeSurface === "answer") && panel !== "question" && preferences.showAnswer && (layoutEditMode || props.hudState.answerVisible);
+  const interviewPreferences = preferences.interview;
+  const writtenPreferences = preferences.writtenTest;
+  const leftPanel = writtenTestMode ? "question" : interviewPreferences.leftPanel;
+  const transcriptVisible = !visualHidden && leftPanel !== "hidden" && (!nativeSurface || nativeSurface === "question") && panel !== "answer" && (layoutEditMode || props.hudState.transcriptVisible);
+  const answerVisible = !visualHidden && (!nativeSurface || nativeSurface === "answer") && panel !== "question" && (writtenTestMode ? writtenPreferences.showAnswer : interviewPreferences.showAnswer) && (layoutEditMode || props.hudState.answerVisible);
+  const singleWrittenReader = writtenTestMode && writtenPreferences.layoutPreset === "single_reader";
   const displayedGroups = layoutEditMode && props.questionGroups.length === 0 ? DESIGNER_QUESTION_GROUPS : props.questionGroups;
   const displayedThreads = layoutEditMode && props.answerThreads.length === 0 ? DESIGNER_ANSWER_THREADS : props.answerThreads;
   const questionViewModel = buildQuestionOverlayViewModel(displayedGroups, props.activeQuestionGroupId, props.question?.text);
   const answerViewModel = buildAnswerOverlayViewModel(displayedThreads, props.activeAnswerGroupId, props.question?.text, props.answerText, props.answerStreaming);
-  useNativeContentSize(nativeSurface === "question" ? "question" : nativeSurface === "answer" ? "answer" : undefined, nativeContentRef, !layoutEditMode && !visualHidden);
+  const dialogueBlocks = buildDialogueOverlayViewModel(props.remoteTranscript, props.micTranscript);
+  useNativeContentSize(nativeSurface === "question" ? "question" : nativeSurface === "answer" ? "answer" : undefined, nativeContentRef, !layoutEditMode && !visualHidden && !writtenTestMode && interviewPreferences.layoutPreset === "minimal");
   const persistLayout = useCallback(() => {
     const current = getCurrentLayout();
     const patch = (panelLayout: PanelLayout) => ({ x: panelLayout.x, y: panelLayout.y, width: panelLayout.width, height: panelLayout.height });
-    void window.interviewCopilot.overlay.setPreferences({ questionWindow: patch(current.transcript), answerWindow: patch(current.answer), controlBar: patch(current.toolbar) });
+    const leftPatch = patch(current.transcript);
+    void window.interviewCopilot.overlay.setPreferences({ interview: { questionWindow: leftPatch, dialogueWindow: leftPatch, answerWindow: patch(current.answer), controlBar: patch(current.toolbar) } });
   }, [getCurrentLayout]);
   const effectiveProtectionEnabled = runtimeProtection?.requested ?? props.captureProtectionEnabled;
   const protectionTone = !effectiveProtectionEnabled ? "off" : runtimeProtection?.displayCaptureVerified === true ? "verified" : "requested";
-  const submitScreenshot = async () => { if (answerSending) return; setAnswerSending(true); try { await props.onAnswerScreenshot(); } finally { setAnswerSending(false); } };
   return <main className="overlay-root" data-overlay-surface={nativeSurface ?? "designer"} data-hud-mode={props.hudState.mode} data-share-mode={props.hudState.shareMode ? "on" : "off"} data-overlay-mode={props.overlayMode} data-layout-edit-mode={layoutEditMode ? "on" : "off"} data-appearance-mode={preferences.appearance.mode}>
     {props.captureTest && !visualHidden && <div className="capture-test-marker">CAPTURE_PROTECTION_TEST_MARKER_7F32</div>}
     {transcriptVisible && (nativeSurface === "question" && !layoutEditMode
-      ? <div ref={nativeContentRef} className="native-content-window question-panel"><QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} /></div>
-      : <DraggableResizablePanel panel="transcript" nativePanel={nativeSurface === "question" ? "question" : undefined} layout={{ ...layout.transcript, visible: true, locked: !layoutEditMode && (layout.transcript.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="question-panel"><QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} /></DraggableResizablePanel>)}
-    {answerVisible && (nativeSurface === "answer" && !layoutEditMode
-      ? <div ref={nativeContentRef} className="native-content-window answer-panel"><AnswerOverlayContent viewModel={answerViewModel} /></div>
-      : <DraggableResizablePanel panel="answer" nativePanel={nativeSurface === "answer" ? "answer" : undefined} layout={{ ...layout.answer, visible: true, locked: !layoutEditMode && (layout.answer.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="answer-panel"><div className="answer-content-stack"><AnswerOverlayContent viewModel={answerViewModel} />{writtenTestMode && <div className="written-test-action hud-interactive-region"><span>按 Ctrl+Alt+S 截取当前题目</span><button onClick={() => void submitScreenshot()} disabled={answerSending}>截图回答</button></div>}</div></DraggableResizablePanel>)}
+      ? <div ref={nativeContentRef} className="native-content-window native-window-shell question-panel">{singleWrittenReader ? <WrittenTestReaderContent viewModel={answerViewModel} /> : writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} />}</div>
+      : <DraggableResizablePanel panel="transcript" nativePanel={nativeSurface === "question" ? "question" : undefined} layout={{ ...layout.transcript, visible: true, locked: !layoutEditMode && (layout.transcript.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="question-panel">{writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} />}</DraggableResizablePanel>)}
+    {answerVisible && !singleWrittenReader && (nativeSurface === "answer" && !layoutEditMode
+      ? <div ref={nativeContentRef} className="native-content-window native-window-shell answer-panel"><AnswerOverlayContent viewModel={answerViewModel} /></div>
+      : <DraggableResizablePanel panel="answer" nativePanel={nativeSurface === "answer" ? "answer" : undefined} layout={{ ...layout.answer, visible: true, locked: !layoutEditMode && (layout.answer.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="answer-panel"><AnswerOverlayContent viewModel={answerViewModel} /></DraggableResizablePanel>)}
     {layoutEditMode && !visualHidden && <div className="layout-edit-toolbar hud-interactive-region"><span>布局编辑模式</span><button onClick={() => void window.interviewCopilot.overlay.finishLayoutEditMode()}>完成布局</button></div>}
     {!visualHidden && <div className={`hud-protection-indicator ${protectionTone}`} aria-hidden="true">{effectiveProtectionEnabled ? "◈" : "·"}</div>}
   </main>;

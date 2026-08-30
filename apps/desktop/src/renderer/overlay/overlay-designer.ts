@@ -1,4 +1,4 @@
-import type { MouseInteractionMode, OverlayControlBarPositionMode, OverlayControlBarOrientation, OverlayLayoutPreset, WheelRoutingMode } from "../../shared/overlay-preferences";
+import type { InterviewLayoutPreset, MouseInteractionMode, OverlayControlBarPositionMode, OverlayControlBarOrientation, LegacyOverlayLayoutPreset, WheelRoutingMode, WrittenTestLayoutPreset } from "../../shared/overlay-preferences";
 
 export type DesignerPanel = "question" | "answer" | "controlBar";
 
@@ -167,25 +167,24 @@ function fitPresetPanels(canvas: DesignerCanvas, questionSize: Pick<DesignerRect
  * the settings designer both use this function so changing a preset cannot
  * silently leave the previous coordinates in place.
  */
-export function resolveOverlayLayoutPreset(preset: OverlayLayoutPreset, display: DesignerDisplay, current?: Partial<ResolvedOverlayLayout>): ResolvedOverlayLayout {
+export function resolveOverlayLayoutPreset(preset: LegacyOverlayLayoutPreset | InterviewLayoutPreset, display: DesignerDisplay, current?: Partial<ResolvedOverlayLayout>): ResolvedOverlayLayout {
   const canvas = { width: Math.max(1, Math.round(display.workArea.width)), height: Math.max(1, Math.round(display.workArea.height)) };
-  const margin = preset === "dual_screen" ? 28 : 40;
-  const sizes = preset === "compact"
-    ? { question: { width: 360, height: 150 }, answer: { width: 520, height: 180 }, gap: 12 }
-    : preset === "wide"
-      ? { question: { width: 460, height: 240 }, answer: { width: 760, height: 360 }, gap: 18 }
-      : preset === "dual_screen"
-        ? { question: { width: 440, height: 220 }, answer: { width: 700, height: 360 }, gap: 24 }
+  const normalized = preset === "compact" ? "compact_split" : preset === "standard" || preset === "dual_screen" ? "classic_split" : preset === "wide" ? "answer_focus" : preset === "transparent" || preset === "custom" ? "minimal" : preset;
+  const margin = normalized === "minimal" ? 40 : 28;
+  const sizes = normalized === "compact_split"
+    ? { question: { width: 340, height: 520 }, answer: { width: 540, height: 520 }, gap: 14 }
+    : normalized === "answer_focus"
+      ? { question: { width: 360, height: 620 }, answer: { width: 760, height: 620 }, gap: 24 }
+      : normalized === "classic_split"
+        ? { question: { width: 420, height: 620 }, answer: { width: 680, height: 620 }, gap: 24 }
         : { question: { width: 410, height: 180 }, answer: { width: 620, height: 220 }, gap: 16 };
-  const panels = preset === "custom" && current?.questionWindow && current.answerWindow
-    ? { question: { ...current.questionWindow }, answer: { ...current.answerWindow } }
-    : fitPresetPanels(canvas, sizes.question, sizes.answer, sizes.gap, margin);
+  const panels = normalized === "minimal" && current?.questionWindow && current.answerWindow ? { question: { ...current.questionWindow }, answer: { ...current.answerWindow } } : fitPresetPanels(canvas, sizes.question, sizes.answer, sizes.gap, margin);
   const question = clampDesignerRect(panels.question, canvas, QUESTION_DESIGNER_BOUNDS);
   const answer = clampDesignerRect(panels.answer, canvas, ANSWER_DESIGNER_BOUNDS);
-  const orientation = preset === "dual_screen" ? "vertical" : current?.controlBarOrientation ?? "horizontal";
+  const orientation = current?.controlBarOrientation ?? "horizontal";
   const controlSize = orientation === "vertical" ? { width: 54, height: 220 } : { width: Math.min(480, Math.max(360, canvas.width - 2 * margin)), height: 44 };
-  const positionMode = preset === "custom" ? current?.controlBarPositionMode ?? "custom" : preset === "compact" ? "top_right" : preset === "wide" ? "bottom_center" : "top_center";
-  const customPoint = preset === "custom" && current?.controlBar ? { x: current.controlBar.x, y: current.controlBar.y } : undefined;
+  const positionMode = normalized === "minimal" ? current?.controlBarPositionMode ?? "top_center" : normalized === "compact_split" ? "top_right" : "top_center";
+  const customPoint = normalized === "minimal" && current?.controlBar ? { x: current.controlBar.x, y: current.controlBar.y } : undefined;
   const controlPoint = controlBarPosition(positionMode, orientation, canvas, controlSize, customPoint);
   const controlBar = clampDesignerRect({ ...controlPoint, ...controlSize }, canvas, CONTROL_BAR_DESIGNER_BOUNDS);
   return {
@@ -200,6 +199,17 @@ export function resolveOverlayLayoutPreset(preset: OverlayLayoutPreset, display:
 }
 
 export const applyLayoutPreset = resolveOverlayLayoutPreset;
+
+export function resolveWrittenTestLayoutPreset(preset: WrittenTestLayoutPreset, display: DesignerDisplay, current?: Partial<ResolvedOverlayLayout>): ResolvedOverlayLayout {
+  const canvas = { width: Math.max(1, Math.round(display.workArea.width)), height: Math.max(1, Math.round(display.workArea.height)) };
+  const height = Math.max(360, Math.min(760, canvas.height - 180));
+  const controlBar = clampDesignerRect({ x: Math.round((canvas.width - 360) / 2), y: 28, width: 360, height: 44 }, canvas, CONTROL_BAR_DESIGNER_BOUNDS);
+  if (preset === "single_reader") return { questionWindow: clampDesignerRect({ x: Math.round((canvas.width - 920) / 2), y: 104, width: 920, height }, canvas, { minimumWidth: 480, maximumWidth: 1_200, minimumHeight: 320, maximumHeight: 840 }), answerWindow: clampDesignerRect({ x: Math.round((canvas.width - 700) / 2), y: 104, width: 700, height }, canvas, ANSWER_DESIGNER_BOUNDS), controlBar, controlBarOrientation: "horizontal", controlBarPositionMode: "top_center", ...(display.id === undefined ? {} : { displayId: display.id }), ...(display.scaleFactor === undefined ? {} : { scaleFactor: display.scaleFactor }) };
+  const gap = 24;
+  const total = 520 + gap + 700;
+  const left = Math.max(28, Math.round((canvas.width - total) / 2));
+  return { questionWindow: clampDesignerRect({ x: left, y: 104, width: 520, height }, canvas, { minimumWidth: 480, maximumWidth: 1_200, minimumHeight: 320, maximumHeight: 840 }), answerWindow: clampDesignerRect({ x: left + 520 + gap, y: 104, width: 700, height }, canvas, { minimumWidth: 480, maximumWidth: 1_200, minimumHeight: 320, maximumHeight: 840 }), controlBar, controlBarOrientation: "horizontal", controlBarPositionMode: "top_center", ...(display.id === undefined ? {} : { displayId: display.id }), ...(display.scaleFactor === undefined ? {} : { scaleFactor: display.scaleFactor }) };
+}
 
 export function mapPreviewPointToCanvas(point: DesignerPoint, preview: DesignerCanvas, canvas: DesignerCanvas): DesignerPoint {
   return { x: Math.round(point.x * canvas.width / Math.max(1, preview.width)), y: Math.round(point.y * canvas.height / Math.max(1, preview.height)) };

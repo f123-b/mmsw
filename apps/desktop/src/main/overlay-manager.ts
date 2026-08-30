@@ -6,7 +6,7 @@ import { initialHUDState, reduceHUDState, type HUDAction, type HUDState, type Ov
 import { calculateHUDLayout, type HUDLayout, type HUDWorkArea } from "./hud-layout";
 import { DEFAULT_OVERLAY_PREFERENCES, type MouseInteractionMode, type OverlayBehaviorPreferences, type OverlayPreferences, type WheelRoutingMode } from "../shared/overlay-preferences";
 import { initialOverlayLifecycleState, isOverlayLayoutEditing, reduceOverlayLifecycle, type OverlayLifecycleState } from "./overlay-lifecycle";
-import { clampOverlayPanelBounds, contentDrivenHeight, resolveOverlayNativeBounds, type OverlayContentPanel, type OverlayNativeBounds, type OverlayNativePanel } from "./overlay-layout-controller";
+import { clampOverlayPanelBounds, contentDrivenHeight, resolveOverlayNativeBounds, type OverlayContentPanel, type OverlayNativeBounds, type OverlayNativePanel, type OverlayRuntimeLayoutMode } from "./overlay-layout-controller";
 import type { InterviewStartupEvent } from "./interview-startup-timing";
 
 export { applyOverlayMode, nextOverlayMode } from "./overlay-mode";
@@ -67,16 +67,13 @@ export class OverlayManager {
   private temporaryInteractionModifier: "ctrl" | "alt" | "shift" | "ctrl_shift" = "ctrl";
   private temporaryInteraction = false;
   private lifecycleState: OverlayLifecycleState = initialOverlayLifecycleState;
+  private runtimeLayoutMode: OverlayRuntimeLayoutMode = "interview";
   private hudStateValue: HUDState = { ...initialHUDState };
   private hudLayoutValue: HUDLayout = calculateHUDLayout({ x: 0, y: 0, width: 1440, height: 900 });
   private captureProtectionEnabled: boolean;
   private captureProtectionState: CaptureProtectionState;
   private readonly capabilities: CaptureProtectionCapabilities;
-  private layoutPreferences: Pick<OverlayPreferences, "questionWindow" | "answerWindow" | "controlBar"> = {
-    questionWindow: { ...DEFAULT_OVERLAY_PREFERENCES.questionWindow },
-    answerWindow: { ...DEFAULT_OVERLAY_PREFERENCES.answerWindow },
-    controlBar: { ...DEFAULT_OVERLAY_PREFERENCES.controlBar }
-  };
+  private layoutPreferences: OverlayPreferences = DEFAULT_OVERLAY_PREFERENCES;
 
   constructor(private readonly options: OverlayManagerOptions) {
     this.captureProtectionEnabled = options.captureProtectionEnabled ?? true;
@@ -113,8 +110,8 @@ export class OverlayManager {
   get captureProtectionStatus(): CaptureProtectionState { return this.captureProtectionState; }
   get captureProtectionCapabilities(): CaptureProtectionCapabilities { return this.capabilities; }
 
-  enterInterviewMode(): BrowserWindow { return this.enterHUDMode(); }
-  enterWrittenTestMode(): BrowserWindow { return this.enterHUDMode(); }
+  enterInterviewMode(): BrowserWindow { this.runtimeLayoutMode = "interview"; return this.enterHUDMode(); }
+  enterWrittenTestMode(): BrowserWindow { this.runtimeLayoutMode = "written_test"; return this.enterHUDMode(); }
 
   private enterHUDMode(): BrowserWindow {
     this.lifecycleState = reduceOverlayLifecycle(this.lifecycleState, { type: "start-interview" });
@@ -131,6 +128,7 @@ export class OverlayManager {
     this.mode = "interactive";
     this.applyMode();
     this.hide();
+    this.runtimeLayoutMode = "interview";
   }
 
   showAll(): void { this.transition({ type: "show-all" }); }
@@ -166,10 +164,11 @@ export class OverlayManager {
 
   resetLayout(): void { this.applyNativeBounds(); }
 
-  applyLayoutPreferences(preferences: Pick<OverlayPreferences, "questionWindow" | "answerWindow" | "controlBar">): void {
-    this.layoutPreferences = { questionWindow: { ...preferences.questionWindow }, answerWindow: { ...preferences.answerWindow }, controlBar: { ...preferences.controlBar } };
+  applyLayoutPreferences(preferences: OverlayPreferences): void {
+    this.layoutPreferences = preferences;
     this.applyNativeBounds();
     this.refreshLayout(this.targetMonitorBounds());
+    this.syncPanelVisibility();
   }
 
   setShareMode(enabled: boolean): void {
@@ -193,6 +192,7 @@ export class OverlayManager {
 
   setContentSize(panel: OverlayContentPanel, measuredHeight: number): boolean {
     if (!Number.isFinite(measuredHeight)) return false;
+    if (this.runtimeLayoutMode !== "interview" || this.layoutPreferences.interview.layoutPreset !== "minimal") return true;
     const window = this.getWindow(panel);
     if (!window || this.isLayoutEditMode) return false;
     const current = window.getBounds();
@@ -212,6 +212,7 @@ export class OverlayManager {
     this.currentTransientWindow?.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
     if (!this.isLayoutEditMode) this.mode = this.interactionMode === "interactive" ? "interactive" : "passive";
     this.applyMode();
+    this.syncPanelVisibility();
   }
 
   get currentInteractionMode(): MouseInteractionMode { return this.interactionMode; }
@@ -275,19 +276,32 @@ export class OverlayManager {
     this.applyNativeBounds();
     this.applyMode();
     this.applyCaptureProtection();
-    if (!this.hudStateValue.shareMode) {
-      for (const [panel, window] of [["question", this.currentQuestionWindow], ["answer", this.currentAnswerWindow], ["control", this.currentControlWindow]] as const) {
-        if (!window) continue;
-        window.showInactive();
-        this.options.onStartupTiming?.(panel === "question" ? "QUESTION_VISIBLE" : panel === "answer" ? "ANSWER_VISIBLE" : "CONTROL_VISIBLE");
-      }
-    }
+    this.syncPanelVisibility();
     this.syncTransientWindow();
     return questionWindow;
   }
 
   hide(): void { for (const window of this.currentWindows) window.hide(); this.currentTransientWindow?.hide(); }
   toggle(): void { if (this.currentWindows.some((window) => window.isVisible())) this.hide(); else this.show(); }
+
+  private syncPanelVisibility(): void {
+    const visible = new Set<OverlayNativePanel>();
+    const layoutEditing = this.isLayoutEditMode;
+    if (!this.hudStateValue.shareMode && (layoutEditing || (this.hudStateValue.running && this.hudStateValue.panelVisible))) {
+      const leftPanel = this.runtimeLayoutMode === "interview" ? this.layoutPreferences.interview.leftPanel : "question";
+      if (leftPanel !== "hidden") visible.add("question");
+      if (this.runtimeLayoutMode === "interview" ? (layoutEditing || this.hudStateValue.answerVisible) && this.layoutPreferences.interview.showAnswer : (layoutEditing || this.hudStateValue.answerVisible) && this.layoutPreferences.writtenTest.showAnswer && this.layoutPreferences.writtenTest.layoutPreset === "split") visible.add("answer");
+    }
+    if (!this.hudStateValue.shareMode && (layoutEditing || (this.hudStateValue.running && this.hudStateValue.topBarVisible)) && this.layoutPreferences.showToolbar) visible.add("control");
+    for (const panel of ["question", "answer", "control"] as const) {
+      const window = this.getWindow(panel);
+      if (!window) continue;
+      if (visible.has(panel)) {
+        window.showInactive();
+        this.options.onStartupTiming?.(panel === "question" ? "QUESTION_VISIBLE" : panel === "answer" ? "ANSWER_VISIBLE" : "CONTROL_VISIBLE");
+      } else window.hide();
+    }
+  }
   setMode(mode: OverlayMode): void {
     this.mode = this.hudStateValue.shareMode ? "passive" : mode;
     this.transition({ type: "set-mouse-mode", mode: this.mode === "interactive" ? "interactive" : "passthrough" });
@@ -340,6 +354,7 @@ export class OverlayManager {
     this.hudStateValue = reduceHUDState(this.hudStateValue, action);
     this.options.onHUDStateChange?.(this.hudStateValue);
     this.sendHudState();
+    this.syncPanelVisibility();
     // A lifecycle action such as hide-all, stop, or share-mode can close a
     // transient without going through setTransientLayer(). Keep the native
     // owner in lockstep with the reducer so a stale clickable window cannot
@@ -382,7 +397,8 @@ export class OverlayManager {
   private ensureTransientWindow(): BrowserWindow {
     const existing = this.currentTransientWindow;
     if (existing) return existing;
-    const configuration: BrowserWindowConstructorOptions = { ...this.transientBounds("shortcut"), title: "Interview Copilot Transient", frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false } };
+    const owner = this.currentControlWindow ?? this.ensureWindow("control");
+    const configuration: BrowserWindowConstructorOptions = { ...this.transientBounds("shortcut"), title: "Interview Copilot Transient", parent: owner, modal: false, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: true, acceptFirstMouse: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false } };
     const window = new BrowserWindow(configuration);
     this.transientWindowValue = window;
     window.setAlwaysOnTop(this.alwaysOnTop, this.alwaysOnTop ? "screen-saver" : undefined);
@@ -447,20 +463,13 @@ export class OverlayManager {
     const display = this.targetDisplay();
     const workArea = display.workArea;
     const defaults = calculateHUDLayout(workArea);
-    const resolved = resolveOverlayNativeBounds(this.layoutPreferences, { display, defaults: { question: defaults.transcript, answer: defaults.answer, control: defaults.toolbar } });
-    const controlPreference = this.layoutPreferences.controlBar;
-    if (controlPreference.positionMode !== "custom") {
-      const gap = 24;
-      const control = resolved.control;
-      const x = controlPreference.positionMode.endsWith("right") ? workArea.x + workArea.width - control.width - gap : controlPreference.positionMode.endsWith("left") ? workArea.x + gap : workArea.x + Math.round((workArea.width - control.width) / 2);
-      const y = controlPreference.positionMode.startsWith("bottom") ? workArea.y + workArea.height - control.height - gap : workArea.y + gap;
-      resolved.control = { ...control, x, y };
-    }
+    const resolved = resolveOverlayNativeBounds(this.layoutPreferences, { display, defaults: { question: defaults.transcript, answer: defaults.answer, control: defaults.toolbar } }, this.runtimeLayoutMode);
     return panel ? resolved[panel] : resolved;
   }
 
   private targetDisplay(): OverlayDisplayInfo {
-    const preferredId = this.layoutPreferences.questionWindow.displayId;
+    const activeLeft = this.runtimeLayoutMode === "written_test" ? this.layoutPreferences.writtenTest.questionWindow : this.layoutPreferences.interview.leftPanel === "dialogue" ? this.layoutPreferences.interview.dialogueWindow : this.layoutPreferences.interview.questionWindow;
+    const preferredId = activeLeft.displayId;
     const preferred = preferredId === undefined ? undefined : screen.getAllDisplays().find((display) => display.id === preferredId);
     if (preferred) return { id: preferred.id, bounds: { ...preferred.bounds }, workArea: { ...preferred.workArea }, scaleFactor: preferred.scaleFactor };
     const main = this.options.getMainWindow?.();

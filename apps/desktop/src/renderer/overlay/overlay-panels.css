@@ -1,9 +1,11 @@
-.native-content-window { width: 100%; min-width: 0; height: auto; min-height: 0; overflow: hidden; }
+.native-content-window { box-sizing: border-box; width: 100%; min-width: 0; height: 100%; min-height: 0; overflow: hidden; padding: 10px; }
 .question-panel { width: 100%; min-width: 0; }
 .answer-panel { width: 100%; min-width: 0; }
 
 .overlay-panel-card {
+  box-sizing: border-box;
   width: 100%;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -15,8 +17,11 @@
   color: rgba(255, 255, 255, .94);
 }
 
-.question-overlay-content { display: grid; max-height: 280px; gap: 10px; overflow-y: auto; padding: 14px 16px; }
-.answer-overlay-content { display: grid; max-height: 440px; gap: 10px; overflow-y: auto; padding: 15px 17px 16px; }
+.question-overlay-content, .answer-overlay-content, .dialogue-overlay-content, .written-reader-content { position: relative; display: grid; grid-template-rows: minmax(0, 1fr); gap: 0; overflow: hidden; padding: 12px 13px; }
+.overlay-scroll-region { min-height: 0; height: 100%; overflow-y: auto; overflow-x: hidden; padding: 1px 3px 10px 1px; scrollbar-gutter: stable; overscroll-behavior: contain; }
+.overlay-scroll-region:focus-visible { outline: 1px solid rgba(155, 210, 255, .55); outline-offset: -2px; border-radius: 7px; }
+.overlay-latest-button { position: absolute; right: 12px; bottom: 10px; z-index: 2; border: 1px solid rgba(255, 255, 255, .2); border-radius: 999px; padding: 4px 8px; background: rgba(17, 28, 44, .9); color: rgba(248, 251, 255, .82); font-size: 10px; }
+.overlay-latest-button:hover { background: rgba(55, 79, 108, .95); color: #fff; }
 .overlay-content-status, .answer-content-status { display: flex; align-items: center; gap: 6px; color: rgba(255, 255, 255, .62); font-size: 10px; }
 .content-status-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #81d3a2; }
 .answer-content-status.generating .content-status-dot { background: #ffd27e; box-shadow: 0 0 0 3px rgba(255, 210, 126, .12); }
@@ -37,5 +42,13 @@
 .overlay-history summary { cursor: pointer; color: rgba(255, 255, 255, .58); font-size: 10px; }
 .overlay-history-item { display: block; width: 100%; margin: 6px 0 0; color: rgba(255, 255, 255, .7); font-size: 11px; line-height: 1.4; }
 .answer-content-stack { width: 100%; }
-.written-test-action { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 0 0; color: rgba(255, 255, 255, .58); font-size: 10px; }
-.written-test-action button { border-radius: 6px; padding: 5px 8px; background: rgba(255, 255, 255, .1); color: #fff; font-size: 11px; }
+.dialogue-block { margin: 0 0 12px; }
+.dialogue-block strong { display: block; margin-bottom: 3px; color: rgba(255, 255, 255, .56); font-size: 10px; font-weight: 600; }
+.dialogue-block p { margin: 0; color: rgba(255, 255, 255, .9); font-size: 13px; line-height: 1.52; overflow-wrap: anywhere; }
+.dialogue-candidate p { color: #d6f0ff; }
+.written-reader-content h2 { margin: 12px 0 6px; color: rgba(255, 255, 255, .72); font-size: 11px; font-weight: 600; }
+.written-reader-content h2:first-of-type { margin-top: 12px; }
+.written-reader-question { margin: 0; color: rgba(255, 255, 255, .96); font-size: 16px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.written-reader-divider { height: 1px; margin: 14px 0 4px; background: rgba(255, 255, 255, .14); }
+.written-question-content { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 12px; padding: 14px 16px; }
+.written-question-content .current-question-text { min-height: 0; overflow-y: auto; }

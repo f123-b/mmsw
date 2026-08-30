@@ -1,4 +1,8 @@
-export type OverlayLayoutPreset = "compact" | "standard" | "wide" | "dual_screen" | "transparent" | "custom";
+export type LegacyOverlayLayoutPreset = "compact" | "standard" | "wide" | "dual_screen" | "transparent" | "custom";
+export type InterviewLayoutPreset = "classic_split" | "compact_split" | "answer_focus" | "minimal";
+export type WrittenTestLayoutPreset = "single_reader" | "split";
+export type OverlayLayoutPreset = InterviewLayoutPreset | WrittenTestLayoutPreset;
+export type InterviewLeftPanelMode = "dialogue" | "question" | "hidden";
 export type ScreenshotCaptureMode = "full_screen" | "current_display" | "fixed_region" | "last_region" | "interactive";
 export type OverlayAppearanceMode = "glass" | "translucent" | "text_only" | "custom";
 export type OverlayTextShadow = "none" | "soft" | "medium";
@@ -40,13 +44,31 @@ export interface OverlayWindowPreferences {
   radius: number;
   shadow: boolean;
   border: boolean;
-  /** Legacy alias. It is kept in persisted settings for backward compatibility. */
+  /** Legacy alias kept inside the style object for existing user settings. */
   opacity: number;
 }
 
 export interface OverlayControlBarPreferences extends OverlayWindowPreferences {
   positionMode: OverlayControlBarPositionMode;
   orientation: OverlayControlBarOrientation;
+}
+
+export interface OverlayInterviewPreferences {
+  layoutPreset: InterviewLayoutPreset;
+  leftPanel: InterviewLeftPanelMode;
+  questionWindow: OverlayWindowPreferences;
+  dialogueWindow: OverlayWindowPreferences;
+  answerWindow: OverlayWindowPreferences;
+  controlBar: OverlayControlBarPreferences;
+  showAnswer: boolean;
+}
+
+export interface OverlayWrittenTestPreferences {
+  layoutPreset: WrittenTestLayoutPreset;
+  questionWindow: OverlayWindowPreferences;
+  answerWindow: OverlayWindowPreferences;
+  controlBar: OverlayControlBarPreferences;
+  showAnswer: boolean;
 }
 
 export interface OverlayBehaviorPreferences {
@@ -92,20 +114,15 @@ export interface OverlayScreenshotPreferences {
 }
 
 export interface OverlayPreferences {
-  /** Persisted schema version. Missing values are treated as the legacy v1 schema. */
-  schemaVersion: number;
+  schemaVersion: 4;
   backgroundOpacity: number;
   backgroundColor: string;
   fontColor: string;
   fontSize: number;
   showToolbar: boolean;
-  showTranscript: boolean;
-  showAnswer: boolean;
   showTimestamps: boolean;
-  layoutPreset: OverlayLayoutPreset;
-  questionWindow: OverlayWindowPreferences;
-  answerWindow: OverlayWindowPreferences;
-  controlBar: OverlayControlBarPreferences;
+  interview: OverlayInterviewPreferences;
+  writtenTest: OverlayWrittenTestPreferences;
   behavior: OverlayBehaviorPreferences;
   appearance: OverlayAppearancePreferences;
   screenshot: OverlayScreenshotPreferences;
@@ -113,19 +130,43 @@ export interface OverlayPreferences {
   previewCustomColor: string;
 }
 
-export interface OverlayPreferencesPatch extends Omit<Partial<OverlayPreferences>, "questionWindow" | "answerWindow" | "controlBar" | "behavior" | "appearance" | "screenshot"> {
-  questionWindow?: Partial<OverlayWindowPreferences>;
-  answerWindow?: Partial<OverlayWindowPreferences>;
-  controlBar?: Partial<OverlayControlBarPreferences>;
+export interface OverlayPreferencesPatch {
+  schemaVersion?: number;
+  backgroundOpacity?: number;
+  backgroundColor?: string;
+  fontColor?: string;
+  fontSize?: number;
+  showToolbar?: boolean;
+  showTimestamps?: boolean;
+  interview?: Partial<Omit<OverlayInterviewPreferences, "questionWindow" | "dialogueWindow" | "answerWindow" | "controlBar">> & {
+    questionWindow?: Partial<OverlayWindowPreferences>;
+    dialogueWindow?: Partial<OverlayWindowPreferences>;
+    answerWindow?: Partial<OverlayWindowPreferences>;
+    controlBar?: Partial<OverlayControlBarPreferences>;
+  };
+  writtenTest?: Partial<Omit<OverlayWrittenTestPreferences, "questionWindow" | "answerWindow" | "controlBar">> & {
+    questionWindow?: Partial<OverlayWindowPreferences>;
+    answerWindow?: Partial<OverlayWindowPreferences>;
+    controlBar?: Partial<OverlayControlBarPreferences>;
+  };
   behavior?: Partial<OverlayBehaviorPreferences>;
   appearance?: Partial<OverlayAppearancePreferences>;
   screenshot?: Partial<OverlayScreenshotPreferences>;
+  previewBackground?: OverlayPreviewBackground;
+  previewCustomColor?: string;
   /** Flat fields from the pre-designer settings schema. */
   width?: number;
   height?: number;
   x?: number;
   y?: number;
   opacity?: number;
+  /** v3 compatibility aliases; normalized values are always nested in v4. */
+  layoutPreset?: LegacyOverlayLayoutPreset;
+  questionWindow?: Partial<OverlayWindowPreferences>;
+  answerWindow?: Partial<OverlayWindowPreferences>;
+  controlBar?: Partial<OverlayControlBarPreferences>;
+  showTranscript?: boolean;
+  showAnswer?: boolean;
 }
 
 const sharedWindowDefaults = {
@@ -142,56 +183,76 @@ const sharedWindowDefaults = {
   blur: 10,
   radius: 12,
   shadow: true,
-  border: false
+  border: false,
+  opacity: 0.84
+};
+
+const questionWindow = {
+  width: 420,
+  height: 620,
+  fontSize: 14,
+  ...sharedWindowDefaults,
+  fontWeight: 600 as OverlayFontWeight,
+  itemGap: 7,
+  backgroundOpacity: 0.84
+};
+
+const dialogueWindow = {
+  ...questionWindow,
+  width: 460,
+  fontWeight: 400 as OverlayFontWeight
+};
+
+const answerWindow = {
+  width: 680,
+  height: 620,
+  fontSize: 14,
+  ...sharedWindowDefaults,
+  lineHeight: 1.62,
+  backgroundOpacity: 0.88,
+  opacity: 0.88
+};
+
+const controlBar = {
+  width: 440,
+  height: 44,
+  fontSize: 13,
+  ...sharedWindowDefaults,
+  titleFontSize: 13,
+  fontWeight: 500 as OverlayFontWeight,
+  lineHeight: 1.2,
+  paragraphGap: 0,
+  itemGap: 5,
+  padding: 8,
+  backgroundOpacity: 0.86,
+  opacity: 0.86,
+  positionMode: "top_center" as const,
+  orientation: "horizontal" as const
 };
 
 export const DEFAULT_OVERLAY_PREFERENCES: OverlayPreferences = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   backgroundOpacity: 0.78,
   backgroundColor: "#1d304a",
   fontColor: "#f8fbff",
   fontSize: 14,
   showToolbar: true,
-  showTranscript: true,
-  showAnswer: true,
   showTimestamps: true,
-  layoutPreset: "standard",
-  questionWindow: {
-    width: 410,
-    height: 180,
-    fontSize: 14,
-    ...sharedWindowDefaults,
-    fontWeight: 600,
-    lineHeight: 1.55,
-    itemGap: 7,
-    backgroundOpacity: 0.84,
-    opacity: 0.84
+  interview: {
+    layoutPreset: "classic_split",
+    leftPanel: "question",
+    questionWindow: { ...questionWindow },
+    dialogueWindow: { ...dialogueWindow },
+    answerWindow: { ...answerWindow },
+    controlBar: { ...controlBar },
+    showAnswer: true
   },
-  answerWindow: {
-    width: 620,
-    height: 220,
-    fontSize: 14,
-    ...sharedWindowDefaults,
-    lineHeight: 1.62,
-    paragraphGap: 8,
-    backgroundOpacity: 0.88,
-    opacity: 0.88
-  },
-  controlBar: {
-    width: 440,
-    height: 44,
-    fontSize: 13,
-    ...sharedWindowDefaults,
-    titleFontSize: 13,
-    fontWeight: 500,
-    lineHeight: 1.2,
-    paragraphGap: 0,
-    itemGap: 5,
-    padding: 8,
-    backgroundOpacity: 0.86,
-    opacity: 0.86,
-    positionMode: "top_center",
-    orientation: "horizontal"
+  writtenTest: {
+    layoutPreset: "single_reader",
+    questionWindow: { ...answerWindow, width: 900, height: 640 },
+    answerWindow: { ...answerWindow, width: 700, height: 640 },
+    controlBar: { ...controlBar, width: 360 },
+    showAnswer: true
   },
   behavior: {
     followLatestQuestion: true,

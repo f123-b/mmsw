@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { qwenAsrWebSocketUrl, QWEN_REALTIME_ASR_MODEL, validateLlmModelConfiguration, type AsrLanguage, type AsrProviderType, type ProviderSettings } from "@interview-copilot/shared";
 import { APP_DATA_DIRECTORY, type SqliteDatabase } from "./database";
-import { DEFAULT_OVERLAY_PREFERENCES, type OverlayAppearancePreferences, type OverlayBehaviorPreferences, type OverlayControlBarPreferences, type OverlayPreferences, type OverlayPreferencesPatch, type OverlayRegion, type OverlayScreenshotPreferences, type OverlayWindowPreferences } from "../shared/overlay-preferences";
+import { DEFAULT_OVERLAY_PREFERENCES, type InterviewLayoutPreset, type InterviewLeftPanelMode, type LegacyOverlayLayoutPreset, type OverlayAppearancePreferences, type OverlayBehaviorPreferences, type OverlayControlBarPreferences, type OverlayPreferences, type OverlayPreferencesPatch, type OverlayRegion, type OverlayScreenshotPreferences, type OverlayWindowPreferences, type WrittenTestLayoutPreset } from "../shared/overlay-preferences";
 
 export type { OverlayPreferences, OverlayPreferencesPatch } from "../shared/overlay-preferences";
 
@@ -282,43 +282,49 @@ export interface OverlayCaptureProtectionSettings {
   captureProtection: boolean;
 }
 
-export const OVERLAY_PREFERENCES_SCHEMA_VERSION = 3;
+export const OVERLAY_PREFERENCES_SCHEMA_VERSION = 4;
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? { ...(value as Record<string, unknown>) } : {};
+}
+
+function legacyInterviewPreset(value: unknown): InterviewLayoutPreset {
+  const map: Record<LegacyOverlayLayoutPreset, InterviewLayoutPreset> = { compact: "compact_split", standard: "classic_split", wide: "answer_focus", dual_screen: "classic_split", transparent: "minimal", custom: "minimal" };
+  return typeof value === "string" && value in map ? map[value as LegacyOverlayLayoutPreset] : "classic_split";
+}
 
 export function migrateOverlayPreferences(input: unknown): { value: OverlayPreferencesPatch; migrated: boolean } {
-  const source = input && typeof input === "object" ? { ...(input as Record<string, unknown>) } : {};
+  const source = objectValue(input);
   const version = typeof source.schemaVersion === "number" && Number.isFinite(source.schemaVersion) ? Math.floor(source.schemaVersion) : 1;
-  const behavior = source.behavior && typeof source.behavior === "object" ? { ...(source.behavior as Record<string, unknown>) } : {};
-  const controlBar = source.controlBar && typeof source.controlBar === "object" ? { ...(source.controlBar as Record<string, unknown>) } : undefined;
-  const questionWindow = source.questionWindow && typeof source.questionWindow === "object" ? { ...(source.questionWindow as Record<string, unknown>) } : undefined;
-  const answerWindow = source.answerWindow && typeof source.answerWindow === "object" ? { ...(source.answerWindow as Record<string, unknown>) } : undefined;
-  const legacyGeometry = source.layoutPreset !== "custom" && (
-    (controlBar?.width === 680 && typeof controlBar.height === "number" && controlBar.height >= 50) ||
-    (questionWindow?.width === 430 && typeof questionWindow.height === "number" && questionWindow.height >= 400) ||
-    (answerWindow?.width === 680 && typeof answerWindow.height === "number" && answerWindow.height >= 400)
-  );
-  if (version >= OVERLAY_PREFERENCES_SCHEMA_VERSION && !legacyGeometry) return { value: source as OverlayPreferencesPatch, migrated: false };
-  if (legacyGeometry || version < OVERLAY_PREFERENCES_SCHEMA_VERSION) {
-    if (controlBar && (controlBar.width === 680 || (typeof controlBar.height === "number" && controlBar.height >= 50))) {
-      controlBar.width = DEFAULT_OVERLAY_PREFERENCES.controlBar.width;
-      controlBar.height = DEFAULT_OVERLAY_PREFERENCES.controlBar.height;
-      source.controlBar = controlBar;
-    }
-    if (questionWindow && questionWindow.height !== undefined && Number(questionWindow.height) >= 400) {
-      questionWindow.width = DEFAULT_OVERLAY_PREFERENCES.questionWindow.width;
-      questionWindow.height = DEFAULT_OVERLAY_PREFERENCES.questionWindow.height;
-      source.questionWindow = questionWindow;
-    }
-    if (answerWindow && answerWindow.height !== undefined && Number(answerWindow.height) >= 400) {
-      answerWindow.width = DEFAULT_OVERLAY_PREFERENCES.answerWindow.width;
-      answerWindow.height = DEFAULT_OVERLAY_PREFERENCES.answerWindow.height;
-      source.answerWindow = answerWindow;
-    }
-  }
-  source.schemaVersion = OVERLAY_PREFERENCES_SCHEMA_VERSION;
-  source.behavior = version < OVERLAY_PREFERENCES_SCHEMA_VERSION
-    ? { ...behavior, interactionMode: "click_through", mousePassthrough: true, lockLayout: true, lockPosition: true }
-    : behavior;
-  return { value: source as OverlayPreferencesPatch, migrated: true };
+  if (version >= OVERLAY_PREFERENCES_SCHEMA_VERSION && source.interview && source.writtenTest) return { value: source as OverlayPreferencesPatch, migrated: false };
+  const oldBehavior = objectValue(source.behavior);
+  const oldQuestion = objectValue(source.questionWindow);
+  const oldAnswer = objectValue(source.answerWindow);
+  const oldControl = objectValue(source.controlBar);
+  const oldInterview = objectValue(source.interview);
+  const oldWritten = objectValue(source.writtenTest);
+  const showQuestion = source.showTranscript !== false;
+  const showAnswer = source.showAnswer !== false;
+  const interview: Record<string, unknown> = {
+    ...oldInterview,
+    layoutPreset: legacyInterviewPreset(source.layoutPreset),
+    leftPanel: showQuestion ? "question" : "hidden",
+    questionWindow: { ...oldQuestion },
+    dialogueWindow: { ...oldQuestion },
+    answerWindow: { ...oldAnswer },
+    controlBar: { ...oldControl },
+    showAnswer
+  };
+  const writtenTest: Record<string, unknown> = {
+    ...oldWritten,
+    layoutPreset: "single_reader" as WrittenTestLayoutPreset,
+    questionWindow: { ...objectValue(oldWritten.questionWindow), ...oldAnswer },
+    answerWindow: { ...objectValue(oldWritten.answerWindow), ...oldAnswer },
+    controlBar: { ...objectValue(oldWritten.controlBar), ...oldControl },
+    showAnswer
+  };
+  const value: Record<string, unknown> = { ...source, schemaVersion: OVERLAY_PREFERENCES_SCHEMA_VERSION, behavior: version < 4 ? { ...oldBehavior, interactionMode: "click_through", mousePassthrough: true, lockLayout: true, lockPosition: true } : oldBehavior, interview, writtenTest };
+  return { value: value as OverlayPreferencesPatch, migrated: true };
 }
 
 export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): OverlayPreferences {
@@ -336,11 +342,14 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
     if (!width || !height) return fallback;
     return { x: coordinate(candidate.x, fallback?.x ?? 0) ?? 0, y: coordinate(candidate.y, fallback?.y ?? 0) ?? 0, width, height };
   };
-  const windowPreferences = (value: Partial<OverlayWindowPreferences> | undefined, fallback: OverlayWindowPreferences, kind: "question" | "answer" | "control"): OverlayWindowPreferences => {
-    const minimumWidth = kind === "question" ? 320 : kind === "answer" ? 480 : 120;
-    const maximumWidth = kind === "question" ? 760 : kind === "answer" ? 1_000 : 1_200;
-    const minimumHeight = kind === "question" ? 88 : kind === "answer" ? 132 : 36;
-    const maximumHeight = kind === "question" ? 280 : kind === "answer" ? 440 : 100;
+  type WindowKind = "question" | "dialogue" | "answer" | "control" | "written-question" | "written-answer";
+  const windowPreferences = (value: Partial<OverlayWindowPreferences> | undefined, fallback: OverlayWindowPreferences, kind: WindowKind): OverlayWindowPreferences => {
+    const isWritten = kind.startsWith("written-");
+    const isQuestion = kind === "question" || kind === "dialogue" || kind === "written-question";
+    const minimumWidth = kind === "control" ? 240 : isWritten ? 480 : isQuestion ? 320 : 480;
+    const maximumWidth = kind === "control" ? 1_200 : isWritten ? 1_200 : isQuestion ? 900 : 1_100;
+    const minimumHeight = kind === "control" ? 36 : isWritten ? 320 : 220;
+    const maximumHeight = kind === "control" ? 100 : isWritten ? 840 : 840;
     const backgroundOpacity = number(value?.backgroundOpacity, number(value?.opacity, fallback.backgroundOpacity, 0, 1), 0, 1);
     return {
       width: number(value?.width, fallback.width, minimumWidth, maximumWidth),
@@ -349,7 +358,7 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
       ...(coordinate(value?.y, fallback.y) !== undefined ? { y: coordinate(value?.y, fallback.y) } : {}),
       ...(typeof value?.displayId === "number" && Number.isFinite(value.displayId) ? { displayId: Math.round(value.displayId) } : fallback.displayId !== undefined ? { displayId: fallback.displayId } : {}),
       ...(typeof value?.scaleFactor === "number" && Number.isFinite(value.scaleFactor) ? { scaleFactor: Math.max(0.5, Math.min(4, value.scaleFactor)) } : fallback.scaleFactor !== undefined ? { scaleFactor: fallback.scaleFactor } : {}),
-      fontSize: number(value?.fontSize, fallback.fontSize, kind === "question" ? 10 : kind === "answer" ? 10 : 9, kind === "question" ? 32 : kind === "answer" ? 40 : 24),
+      fontSize: number(value?.fontSize, fallback.fontSize, 9, isQuestion ? 32 : 40),
       titleFontSize: number(value?.titleFontSize, fallback.titleFontSize, 9, 40),
       fontWeight: typeof value?.fontWeight === "number" && (value.fontWeight === 400 || value.fontWeight === 500 || value.fontWeight === 600) ? value.fontWeight : fallback.fontWeight,
       lineHeight: number(value?.lineHeight, fallback.lineHeight, 1.1, 2.2),
@@ -379,62 +388,32 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
     ...(raw.fontColor !== undefined ? { textColor: raw.fontColor as string } : {}),
     ...(raw.fontSize !== undefined ? { fontSize: raw.fontSize as number } : {})
   };
-  const questionInput = { ...legacyWindowPatch, ...(input.questionWindow ?? {}) };
-  const answerInput = { ...legacyWindowPatch, ...(input.answerWindow ?? {}) };
-  const controlInput = { ...DEFAULT_OVERLAY_PREFERENCES.controlBar, ...(input.controlBar ?? {}) };
-  const behaviorInput = input.behavior;
-  const legacyInteraction = behaviorInput && !Object.prototype.hasOwnProperty.call(behaviorInput, "interactionMode") && Object.prototype.hasOwnProperty.call(behaviorInput, "mousePassthrough")
-    ? (behaviorInput.mousePassthrough ? "click_through" : "interactive")
-    : undefined;
-  const legacyLock = behaviorInput && !Object.prototype.hasOwnProperty.call(behaviorInput, "lockLayout") && Object.prototype.hasOwnProperty.call(behaviorInput, "lockPosition")
-    ? behaviorInput.lockPosition
-    : undefined;
+  const interviewInput = objectValue(raw.interview);
+  const writtenInput = objectValue(raw.writtenTest);
+  const legacyQuestion = { ...legacyWindowPatch, ...objectValue(raw.questionWindow) };
+  const legacyAnswer = { ...legacyWindowPatch, ...objectValue(raw.answerWindow) };
+  const legacyControl = { ...objectValue(DEFAULT_OVERLAY_PREFERENCES.interview.controlBar), ...objectValue(raw.controlBar) };
+  const interviewQuestion = { ...legacyQuestion, ...objectValue(interviewInput.questionWindow) };
+  const interviewDialogue = { ...legacyQuestion, ...objectValue(interviewInput.dialogueWindow) };
+  const interviewAnswer = { ...legacyAnswer, ...objectValue(interviewInput.answerWindow) };
+  const interviewControl = { ...legacyControl, ...objectValue(interviewInput.controlBar) };
+  const writtenQuestion = { ...objectValue(DEFAULT_OVERLAY_PREFERENCES.writtenTest.questionWindow), ...legacyAnswer, ...objectValue(writtenInput.questionWindow) };
+  const writtenAnswer = { ...objectValue(DEFAULT_OVERLAY_PREFERENCES.writtenTest.answerWindow), ...legacyAnswer, ...objectValue(writtenInput.answerWindow) };
+  const writtenControl = { ...objectValue(DEFAULT_OVERLAY_PREFERENCES.writtenTest.controlBar), ...legacyControl, ...objectValue(writtenInput.controlBar) };
+  const behaviorInput = raw.behavior && typeof raw.behavior === "object" ? input.behavior : undefined;
+  const legacyInteraction = behaviorInput && !Object.prototype.hasOwnProperty.call(behaviorInput, "interactionMode") && Object.prototype.hasOwnProperty.call(behaviorInput, "mousePassthrough") ? (behaviorInput.mousePassthrough ? "click_through" : "interactive") : undefined;
+  const legacyLock = behaviorInput && !Object.prototype.hasOwnProperty.call(behaviorInput, "lockLayout") && Object.prototype.hasOwnProperty.call(behaviorInput, "lockPosition") ? behaviorInput.lockPosition : undefined;
   const behavior = (value: Partial<OverlayBehaviorPreferences> | undefined): OverlayBehaviorPreferences => {
     const interactionMode = enumValue(value?.interactionMode ?? legacyInteraction, ["interactive", "click_through", "full_passthrough"] as const, DEFAULT_OVERLAY_PREFERENCES.behavior.interactionMode);
     const lockLayout = flag(value?.lockLayout ?? legacyLock, DEFAULT_OVERLAY_PREFERENCES.behavior.lockLayout);
-    return {
-      ...DEFAULT_OVERLAY_PREFERENCES.behavior,
-      followLatestQuestion: flag(value?.followLatestQuestion, DEFAULT_OVERLAY_PREFERENCES.behavior.followLatestQuestion),
-      followLatestAnswer: flag(value?.followLatestAnswer, DEFAULT_OVERLAY_PREFERENCES.behavior.followLatestAnswer),
-      alwaysOnTop: flag(value?.alwaysOnTop, DEFAULT_OVERLAY_PREFERENCES.behavior.alwaysOnTop),
-      lockLayout,
-      lockPosition: lockLayout,
-      interactionMode,
-      mousePassthrough: interactionMode !== "interactive",
-      wheelRouting: enumValue(value?.wheelRouting, ["overlay_under_cursor", "underlying_app", "dual"] as const, DEFAULT_OVERLAY_PREFERENCES.behavior.wheelRouting),
-      temporaryInteractionModifier: enumValue(value?.temporaryInteractionModifier, ["ctrl", "alt", "shift", "ctrl_shift"] as const, DEFAULT_OVERLAY_PREFERENCES.behavior.temporaryInteractionModifier),
-      snapEnabled: flag(value?.snapEnabled, DEFAULT_OVERLAY_PREFERENCES.behavior.snapEnabled),
-      snapThreshold: number(value?.snapThreshold, DEFAULT_OVERLAY_PREFERENCES.behavior.snapThreshold, 8, 16),
-      liveApply: flag(value?.liveApply, DEFAULT_OVERLAY_PREFERENCES.behavior.liveApply),
-      autoDim: flag(value?.autoDim, DEFAULT_OVERLAY_PREFERENCES.behavior.autoDim),
-      rememberPosition: flag(value?.rememberPosition, DEFAULT_OVERLAY_PREFERENCES.behavior.rememberPosition),
-      rememberSize: flag(value?.rememberSize, DEFAULT_OVERLAY_PREFERENCES.behavior.rememberSize),
-      showQuestionStatus: flag(value?.showQuestionStatus, DEFAULT_OVERLAY_PREFERENCES.behavior.showQuestionStatus),
-      showAnswerStatus: flag(value?.showAnswerStatus, DEFAULT_OVERLAY_PREFERENCES.behavior.showAnswerStatus),
-      compactHeader: flag(value?.compactHeader, DEFAULT_OVERLAY_PREFERENCES.behavior.compactHeader)
-    };
+    return { ...DEFAULT_OVERLAY_PREFERENCES.behavior, followLatestQuestion: flag(value?.followLatestQuestion, DEFAULT_OVERLAY_PREFERENCES.behavior.followLatestQuestion), followLatestAnswer: flag(value?.followLatestAnswer, DEFAULT_OVERLAY_PREFERENCES.behavior.followLatestAnswer), alwaysOnTop: flag(value?.alwaysOnTop, DEFAULT_OVERLAY_PREFERENCES.behavior.alwaysOnTop), lockLayout, lockPosition: lockLayout, interactionMode, mousePassthrough: interactionMode !== "interactive", wheelRouting: enumValue(value?.wheelRouting, ["overlay_under_cursor", "underlying_app", "dual"] as const, DEFAULT_OVERLAY_PREFERENCES.behavior.wheelRouting), temporaryInteractionModifier: enumValue(value?.temporaryInteractionModifier, ["ctrl", "alt", "shift", "ctrl_shift"] as const, DEFAULT_OVERLAY_PREFERENCES.behavior.temporaryInteractionModifier), snapEnabled: flag(value?.snapEnabled, DEFAULT_OVERLAY_PREFERENCES.behavior.snapEnabled), snapThreshold: number(value?.snapThreshold, DEFAULT_OVERLAY_PREFERENCES.behavior.snapThreshold, 8, 16), liveApply: flag(value?.liveApply, DEFAULT_OVERLAY_PREFERENCES.behavior.liveApply), autoDim: flag(value?.autoDim, DEFAULT_OVERLAY_PREFERENCES.behavior.autoDim), rememberPosition: flag(value?.rememberPosition, DEFAULT_OVERLAY_PREFERENCES.behavior.rememberPosition), rememberSize: flag(value?.rememberSize, DEFAULT_OVERLAY_PREFERENCES.behavior.rememberSize), showQuestionStatus: flag(value?.showQuestionStatus, DEFAULT_OVERLAY_PREFERENCES.behavior.showQuestionStatus), showAnswerStatus: flag(value?.showAnswerStatus, DEFAULT_OVERLAY_PREFERENCES.behavior.showAnswerStatus), compactHeader: flag(value?.compactHeader, DEFAULT_OVERLAY_PREFERENCES.behavior.compactHeader) };
   };
-  const appearance = (value: Partial<OverlayAppearancePreferences> | undefined): OverlayAppearancePreferences => ({
-    mode: enumValue(value?.mode, ["glass", "translucent", "text_only", "custom"] as const, DEFAULT_OVERLAY_PREFERENCES.appearance.mode),
-    blur: number(value?.blur, DEFAULT_OVERLAY_PREFERENCES.appearance.blur, 0, 40),
-    radius: number(value?.radius, DEFAULT_OVERLAY_PREFERENCES.appearance.radius, 0, 32),
-    shadow: flag(value?.shadow, DEFAULT_OVERLAY_PREFERENCES.appearance.shadow),
-    border: flag(value?.border, DEFAULT_OVERLAY_PREFERENCES.appearance.border),
-    textShadow: enumValue(value?.textShadow, ["none", "soft", "medium"] as const, DEFAULT_OVERLAY_PREFERENCES.appearance.textShadow),
-    textOutline: value?.textOutline === 0.5 || value?.textOutline === 1 ? value.textOutline : 0
-  });
-  const screenshot = (value: Partial<OverlayScreenshotPreferences> | undefined): OverlayScreenshotPreferences => {
-    const captureMode = enumValue(value?.captureMode, ["full_screen", "current_display", "fixed_region", "last_region", "interactive"] as const, DEFAULT_OVERLAY_PREFERENCES.screenshot.captureMode);
-    const fixedRegion = region(value?.fixedRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.fixedRegion);
-    const lastRegion = region(value?.lastRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.lastRegion);
-    return { middleMouseEnabled: flag(value?.middleMouseEnabled, DEFAULT_OVERLAY_PREFERENCES.screenshot.middleMouseEnabled), enabledInManualInterview: flag(value?.enabledInManualInterview, DEFAULT_OVERLAY_PREFERENCES.screenshot.enabledInManualInterview), enabledInExamMode: flag(value?.enabledInExamMode, DEFAULT_OVERLAY_PREFERENCES.screenshot.enabledInExamMode), captureMode, ...(fixedRegion ? { fixedRegion } : {}), ...(lastRegion ? { lastRegion } : {}) };
-  };
+  const appearance = (value: Partial<OverlayAppearancePreferences> | undefined): OverlayAppearancePreferences => ({ mode: enumValue(value?.mode, ["glass", "translucent", "text_only", "custom"] as const, DEFAULT_OVERLAY_PREFERENCES.appearance.mode), blur: number(value?.blur, DEFAULT_OVERLAY_PREFERENCES.appearance.blur, 0, 40), radius: number(value?.radius, DEFAULT_OVERLAY_PREFERENCES.appearance.radius, 0, 32), shadow: flag(value?.shadow, DEFAULT_OVERLAY_PREFERENCES.appearance.shadow), border: flag(value?.border, DEFAULT_OVERLAY_PREFERENCES.appearance.border), textShadow: enumValue(value?.textShadow, ["none", "soft", "medium"] as const, DEFAULT_OVERLAY_PREFERENCES.appearance.textShadow), textOutline: value?.textOutline === 0.5 || value?.textOutline === 1 ? value.textOutline : 0 });
+  const screenshot = (value: Partial<OverlayScreenshotPreferences> | undefined): OverlayScreenshotPreferences => { const captureMode = enumValue(value?.captureMode, ["full_screen", "current_display", "fixed_region", "last_region", "interactive"] as const, DEFAULT_OVERLAY_PREFERENCES.screenshot.captureMode); const fixedRegion = region(value?.fixedRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.fixedRegion); const lastRegion = region(value?.lastRegion, DEFAULT_OVERLAY_PREFERENCES.screenshot.lastRegion); return { middleMouseEnabled: flag(value?.middleMouseEnabled, DEFAULT_OVERLAY_PREFERENCES.screenshot.middleMouseEnabled), enabledInManualInterview: flag(value?.enabledInManualInterview, DEFAULT_OVERLAY_PREFERENCES.screenshot.enabledInManualInterview), enabledInExamMode: flag(value?.enabledInExamMode, DEFAULT_OVERLAY_PREFERENCES.screenshot.enabledInExamMode), captureMode, ...(fixedRegion ? { fixedRegion } : {}), ...(lastRegion ? { lastRegion } : {}) }; };
   const backgroundOpacity = number(input.backgroundOpacity, DEFAULT_OVERLAY_PREFERENCES.backgroundOpacity, 0, 1);
   const backgroundColor = color(input.backgroundColor, DEFAULT_OVERLAY_PREFERENCES.backgroundColor);
   const fontColor = color(input.fontColor, DEFAULT_OVERLAY_PREFERENCES.fontColor);
-  const controlBar = windowPreferences(controlInput, DEFAULT_OVERLAY_PREFERENCES.controlBar, "control") as OverlayControlBarPreferences;
-  controlBar.positionMode = enumValue(controlInput.positionMode, ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right", "custom"] as const, DEFAULT_OVERLAY_PREFERENCES.controlBar.positionMode);
-  controlBar.orientation = enumValue(controlInput.orientation, ["horizontal", "vertical"] as const, DEFAULT_OVERLAY_PREFERENCES.controlBar.orientation);
+  const control = (value: Partial<OverlayControlBarPreferences>, fallback: OverlayControlBarPreferences): OverlayControlBarPreferences => { const result = windowPreferences(value, fallback, "control") as OverlayControlBarPreferences; result.positionMode = enumValue(value.positionMode, ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right", "custom"] as const, fallback.positionMode); result.orientation = enumValue(value.orientation, ["horizontal", "vertical"] as const, fallback.orientation); return result; };
   return {
     schemaVersion: OVERLAY_PREFERENCES_SCHEMA_VERSION,
     backgroundOpacity,
@@ -442,13 +421,23 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
     fontColor,
     fontSize: number(input.fontSize, DEFAULT_OVERLAY_PREFERENCES.fontSize, 12, 40),
     showToolbar: flag(input.showToolbar, DEFAULT_OVERLAY_PREFERENCES.showToolbar),
-    showTranscript: flag(input.showTranscript, DEFAULT_OVERLAY_PREFERENCES.showTranscript),
-    showAnswer: flag(input.showAnswer, DEFAULT_OVERLAY_PREFERENCES.showAnswer),
     showTimestamps: flag(input.showTimestamps, DEFAULT_OVERLAY_PREFERENCES.showTimestamps),
-    layoutPreset: enumValue(input.layoutPreset, ["compact", "standard", "wide", "dual_screen", "transparent", "custom"] as const, DEFAULT_OVERLAY_PREFERENCES.layoutPreset),
-    questionWindow: windowPreferences(questionInput, { ...DEFAULT_OVERLAY_PREFERENCES.questionWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "question"),
-    answerWindow: windowPreferences(answerInput, { ...DEFAULT_OVERLAY_PREFERENCES.answerWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "answer"),
-    controlBar,
+    interview: {
+      layoutPreset: enumValue(interviewInput.layoutPreset ?? (input.layoutPreset ? legacyInterviewPreset(input.layoutPreset) : undefined), ["classic_split", "compact_split", "answer_focus", "minimal"] as const, DEFAULT_OVERLAY_PREFERENCES.interview.layoutPreset),
+      leftPanel: enumValue(interviewInput.leftPanel, ["dialogue", "question", "hidden"] as const, input.showTranscript === false ? "hidden" : DEFAULT_OVERLAY_PREFERENCES.interview.leftPanel) as InterviewLeftPanelMode,
+      questionWindow: windowPreferences(interviewQuestion, { ...DEFAULT_OVERLAY_PREFERENCES.interview.questionWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "question"),
+      dialogueWindow: windowPreferences(interviewDialogue, { ...DEFAULT_OVERLAY_PREFERENCES.interview.dialogueWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "dialogue"),
+      answerWindow: windowPreferences(interviewAnswer, { ...DEFAULT_OVERLAY_PREFERENCES.interview.answerWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "answer"),
+      controlBar: control(interviewControl, { ...DEFAULT_OVERLAY_PREFERENCES.interview.controlBar, backgroundOpacity, backgroundColor, textColor: fontColor }),
+      showAnswer: flag(interviewInput.showAnswer ?? input.showAnswer, DEFAULT_OVERLAY_PREFERENCES.interview.showAnswer)
+    },
+    writtenTest: {
+      layoutPreset: enumValue(writtenInput.layoutPreset, ["single_reader", "split"] as const, DEFAULT_OVERLAY_PREFERENCES.writtenTest.layoutPreset) as WrittenTestLayoutPreset,
+      questionWindow: windowPreferences(writtenQuestion, { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.questionWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "written-question"),
+      answerWindow: windowPreferences(writtenAnswer, { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.answerWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, "written-answer"),
+      controlBar: control(writtenControl, { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.controlBar, backgroundOpacity, backgroundColor, textColor: fontColor }),
+      showAnswer: flag(writtenInput.showAnswer, DEFAULT_OVERLAY_PREFERENCES.writtenTest.showAnswer)
+    },
     behavior: behavior(input.behavior),
     appearance: appearance(input.appearance),
     screenshot: screenshot(input.screenshot),
@@ -507,15 +496,39 @@ export class OverlaySettingsStore {
 
   setPreferences(input: OverlayPreferencesPatch): OverlayPreferences {
     const current = this.getPreferences();
-    const geometryPatch = [input.questionWindow, input.answerWindow, input.controlBar].some((value) => value && ["x", "y", "width", "height"].some((key) => Object.prototype.hasOwnProperty.call(value, key)));
-    const manualLayoutPatch = input.layoutPreset === undefined && geometryPatch ? { layoutPreset: "custom" as const } : {};
     const legacyBehaviorPatch = input.behavior && !Object.prototype.hasOwnProperty.call(input.behavior, "interactionMode") && Object.prototype.hasOwnProperty.call(input.behavior, "mousePassthrough")
       ? { interactionMode: input.behavior.mousePassthrough ? "click_through" as const : "interactive" as const }
       : {};
     const legacyLockPatch = input.behavior && !Object.prototype.hasOwnProperty.call(input.behavior, "lockLayout") && Object.prototype.hasOwnProperty.call(input.behavior, "lockPosition")
       ? { lockLayout: input.behavior.lockPosition }
       : {};
-    const next = normalizeOverlayPreferences({ ...current, ...manualLayoutPatch, ...input, questionWindow: { ...current.questionWindow, ...(input.questionWindow ?? {}) }, answerWindow: { ...current.answerWindow, ...(input.answerWindow ?? {}) }, controlBar: { ...current.controlBar, ...(input.controlBar ?? {}) }, behavior: { ...current.behavior, ...legacyBehaviorPatch, ...legacyLockPatch, ...(input.behavior ?? {}) }, appearance: { ...current.appearance, ...(input.appearance ?? {}) }, screenshot: { ...current.screenshot, ...(input.screenshot ?? {}) } });
+    const interviewInput = input.interview ?? {};
+    const writtenInput = input.writtenTest ?? {};
+    const interviewGeometryChanged = [interviewInput.questionWindow, interviewInput.dialogueWindow, interviewInput.answerWindow, interviewInput.controlBar].some((window) => window && ["x", "y", "width", "height"].some((key) => Object.prototype.hasOwnProperty.call(window, key)));
+    const manualInterviewPreset = interviewInput.layoutPreset === undefined && interviewGeometryChanged ? { layoutPreset: "minimal" as const } : {};
+    const next = normalizeOverlayPreferences({
+      ...current,
+      ...input,
+      interview: {
+        ...current.interview,
+        ...interviewInput,
+        ...manualInterviewPreset,
+        questionWindow: { ...current.interview.questionWindow, ...(interviewInput.questionWindow ?? {}) },
+        dialogueWindow: { ...current.interview.dialogueWindow, ...(interviewInput.dialogueWindow ?? {}) },
+        answerWindow: { ...current.interview.answerWindow, ...(interviewInput.answerWindow ?? {}) },
+        controlBar: { ...current.interview.controlBar, ...(interviewInput.controlBar ?? {}) }
+      },
+      writtenTest: {
+        ...current.writtenTest,
+        ...writtenInput,
+        questionWindow: { ...current.writtenTest.questionWindow, ...(writtenInput.questionWindow ?? {}) },
+        answerWindow: { ...current.writtenTest.answerWindow, ...(writtenInput.answerWindow ?? {}) },
+        controlBar: { ...current.writtenTest.controlBar, ...(writtenInput.controlBar ?? {}) }
+      },
+      behavior: { ...current.behavior, ...legacyBehaviorPatch, ...legacyLockPatch, ...(input.behavior ?? {}) },
+      appearance: { ...current.appearance, ...(input.appearance ?? {}) },
+      screenshot: { ...current.screenshot, ...(input.screenshot ?? {}) }
+    });
     this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.preferencesKey, JSON.stringify(next)]);
     this.database.flushNow();
     return next;
@@ -525,10 +538,19 @@ export class OverlaySettingsStore {
     const current = this.getPreferences();
     const next = normalizeOverlayPreferences({
       ...current,
-      layoutPreset: DEFAULT_OVERLAY_PREFERENCES.layoutPreset,
-      questionWindow: { ...DEFAULT_OVERLAY_PREFERENCES.questionWindow },
-      answerWindow: { ...DEFAULT_OVERLAY_PREFERENCES.answerWindow },
-      controlBar: { ...DEFAULT_OVERLAY_PREFERENCES.controlBar }
+      interview: {
+        ...DEFAULT_OVERLAY_PREFERENCES.interview,
+        questionWindow: { ...DEFAULT_OVERLAY_PREFERENCES.interview.questionWindow },
+        dialogueWindow: { ...DEFAULT_OVERLAY_PREFERENCES.interview.dialogueWindow },
+        answerWindow: { ...DEFAULT_OVERLAY_PREFERENCES.interview.answerWindow },
+        controlBar: { ...DEFAULT_OVERLAY_PREFERENCES.interview.controlBar }
+      },
+      writtenTest: {
+        ...DEFAULT_OVERLAY_PREFERENCES.writtenTest,
+        questionWindow: { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.questionWindow },
+        answerWindow: { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.answerWindow },
+        controlBar: { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.controlBar }
+      }
     });
     this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.preferencesKey, JSON.stringify(next)]);
     this.database.flushNow();

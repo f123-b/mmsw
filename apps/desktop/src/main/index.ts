@@ -1092,6 +1092,7 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
     await waitForRendererPaint(questionWindow);
     snapshots["overlay-question-short.png"] = join(visualArtifactDirectory, "overlay-question-short.png");
     await writeFile(snapshots["overlay-question-short.png"], await captureVisibleWindow(questionWindow));
+    snapshots["classic_split_question.png"] = snapshots["overlay-question-short.png"];
 
     await answerWindow.webContents.executeJavaScript("(() => { const context = document.querySelector('.answer-context-question'); if (context) context.textContent = '为什么中断服务程序要快进快出？'; const core = document.querySelector('.answer-core'); if (core) core.textContent = '只在中断里完成采样、清状态和投递事件，耗时计算交给后台任务。'; })()", true);
     await new Promise((resolve) => setTimeout(resolve, 220));
@@ -1101,15 +1102,59 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 300));
     snapshots["overlay-answer-long.png"] = join(visualArtifactDirectory, "overlay-answer-long.png");
     await writeFile(snapshots["overlay-answer-long.png"], await captureVisibleWindow(answerWindow));
+    snapshots["classic_split_long_answer.png"] = snapshots["overlay-answer-long.png"];
+
+    const applyVisualPreferences = async (patch: OverlayPreferencesPatch): Promise<void> => {
+      const next = overlaySettingsStore?.setPreferences(patch);
+      if (!next) throw new Error("VISUAL_OVERLAY_PREFERENCES_STORE_MISSING");
+      manager.applyPreferences(next.behavior);
+      manager.applyLayoutPreferences(next);
+      broadcast("overlay:preferences", next);
+      await waitForRendererPaint(questionWindow);
+      await waitForRendererPaint(answerWindow);
+    };
+    await applyVisualPreferences({ interview: { leftPanel: "dialogue" } });
+    await questionWindow.webContents.executeJavaScript("(() => { const region = document.querySelector('.overlay-scroll-region'); if (region) region.innerHTML = '<div class=\"overlay-content-status\"><span class=\"content-status-dot\"></span>最近对话</div><div class=\"dialogue-block\"><strong>面试官</strong><p>请解释一下中断服务程序为什么要快进快出。</p></div><div class=\"dialogue-block dialogue-candidate\"><strong>我</strong><p>中断只做采样、清状态和投递事件，耗时计算放到后台任务。</p></div>'; })()", true);
+    await waitForRendererPaint(questionWindow);
+    snapshots["classic_split_dialogue.png"] = join(visualArtifactDirectory, "classic_split_dialogue.png");
+    await writeFile(snapshots["classic_split_dialogue.png"], await captureVisibleWindow(questionWindow));
+    for (const preset of ["compact_split", "answer_focus"] as const) {
+      await applyVisualPreferences({ interview: { layoutPreset: preset, leftPanel: "question" } });
+      snapshots[`${preset}.png`] = join(visualArtifactDirectory, `${preset}.png`);
+      await writeFile(snapshots[`${preset}.png`], await captureVisibleWindow(questionWindow));
+    }
+    await applyVisualPreferences({ interview: { layoutPreset: "minimal", leftPanel: "question" } });
+    snapshots["minimal.png"] = join(visualArtifactDirectory, "minimal.png");
+    await writeFile(snapshots["minimal.png"], await captureVisibleWindow(questionWindow));
+
+    writtenTestController?.start({ profileId: "visual-smoke", answerMode: "NORMAL" });
+    manager.enterWrittenTestMode();
+    await applyVisualPreferences({ writtenTest: { layoutPreset: "single_reader", showAnswer: true } });
+    await waitForWindowVisible(questionWindow);
+    await questionWindow.webContents.executeJavaScript("(() => { const q = document.querySelector('.written-reader-question'); if (q) q.textContent = '给定数组和目标值，请设计一个时间复杂度 O(n) 的查找算法。'; const answer = document.querySelector('.answer-core'); if (answer) answer.textContent = '使用哈希表保存已经遍历的元素，查询补数即可在 O(n) 时间内完成。'; })()", true);
+    await waitForRendererPaint(questionWindow);
+    snapshots["written_single_reader.png"] = join(visualArtifactDirectory, "written_single_reader.png");
+    await writeFile(snapshots["written_single_reader.png"], await captureVisibleWindow(questionWindow));
+    await applyVisualPreferences({ writtenTest: { layoutPreset: "split", showAnswer: true } });
+    await waitForWindowVisible(answerWindow);
+    await answerWindow.webContents.executeJavaScript("(() => { const context = document.querySelector('.answer-context-question'); if (context) context.textContent = '笔试截图题：如何设计 O(n) 查找？'; const core = document.querySelector('.answer-core'); if (core) core.textContent = '使用哈希表保存已经遍历的元素，查询补数即可在 O(n) 时间内完成。'; })()", true);
+    await waitForRendererPaint(answerWindow);
+    snapshots["written_split.png"] = join(visualArtifactDirectory, "written_split.png");
+    await writeFile(snapshots["written_split.png"], await captureVisibleWindow(answerWindow));
+    writtenTestController?.stop();
+    manager.exitWrittenTestMode();
+    await applyVisualPreferences({ interview: { layoutPreset: "classic_split", leftPanel: "question" } });
 
     manager.toggleShortcuts();
     await new Promise((resolve) => setTimeout(resolve, 260));
     snapshots["overlay-shortcut.png"] = join(visualArtifactDirectory, "overlay-shortcut.png");
     await writeFile(snapshots["overlay-shortcut.png"], await captureVisibleWindow(transientWindow));
+    snapshots["shortcut_menu.png"] = snapshots["overlay-shortcut.png"];
     manager.requestEndInterviewConfirmation();
     await new Promise((resolve) => setTimeout(resolve, 260));
     snapshots["overlay-end-confirm.png"] = join(visualArtifactDirectory, "overlay-end-confirm.png");
     await writeFile(snapshots["overlay-end-confirm.png"], await captureVisibleWindow(transientWindow));
+    snapshots["end_confirm.png"] = snapshots["overlay-end-confirm.png"];
     manager.cancelEndInterviewConfirmation();
     visualArtifacts = { main: mainArtifact, overlay: overlayArtifact, snapshots };
     appLogger?.info("PRODUCTION_SCREENSHOTS_CAPTURED", visualArtifacts);
@@ -2821,8 +2866,13 @@ if (hasSingleInstanceLock) {
       broadcast("overlay:capture-protection-diagnostic", { event, fields });
     },
     onNativeBoundsChanged: (panel, bounds, display) => {
-      const key = panel === "question" ? "questionWindow" : panel === "answer" ? "answerWindow" : "controlBar";
-      const next = overlaySettingsStore?.setPreferences({ [key]: { x: bounds.x - display.workArea.x, y: bounds.y - display.workArea.y, width: bounds.width, height: bounds.height, displayId: display.id, scaleFactor: display.scaleFactor } });
+      const current = overlaySettingsStore?.getPreferences();
+      if (!current) return;
+      const mode = writtenTestController?.running ? "writtenTest" : "interview";
+      const leftKey = mode === "writtenTest" ? "questionWindow" : current.interview.leftPanel === "dialogue" ? "dialogueWindow" : "questionWindow";
+      const key = panel === "answer" ? "answerWindow" : panel === "control" ? "controlBar" : leftKey;
+      const sectionKey = mode === "writtenTest" ? "writtenTest" : "interview";
+      const next = overlaySettingsStore?.setPreferences({ [sectionKey]: { ...(sectionKey === "interview" ? { layoutPreset: "minimal" as const } : {}), [key]: { x: bounds.x - display.workArea.x, y: bounds.y - display.workArea.y, width: bounds.width, height: bounds.height, displayId: display.id, scaleFactor: display.scaleFactor } } });
       if (next) broadcast("overlay:preferences", next);
     },
     onHUDStateChange: (state) => broadcast("overlay:state", state),
