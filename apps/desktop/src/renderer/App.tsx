@@ -435,7 +435,7 @@ const useAudioStore = create<AudioStore>((set) => ({
   micDetected: false,
   systemDetected: false,
   overlayMode: "interactive",
-  hudState: { running: false, panelVisible: false, transcriptVisible: false, answerVisible: false, shortcutVisible: false, shareMode: false, topBarVisible: false, mouseMode: "passthrough", mode: "HIDDEN" },
+  hudState: { running: false, panelVisible: false, transcriptVisible: false, answerVisible: false, transientLayer: "none", shareMode: false, topBarVisible: false, mouseMode: "passthrough", mode: "HIDDEN" },
   runtimePhases: initialRuntimePhaseState,
   sessionState: "IDLE",
   operationMode: "IDLE",
@@ -803,7 +803,7 @@ function TaskModelRoutingPanel({ values, onChange }: { values: Record<TaskModelK
 }
 
 export function App(): JSX.Element {
-  const overlaySurface = useMemo(() => { const mode = new URLSearchParams(window.location.search).get("window"); return mode === "overlay-control" ? "control" : mode === "overlay-question" ? "question" : mode === "overlay-answer" ? "answer" : mode === "overlay" ? "content" : undefined; }, []);
+  const overlaySurface = useMemo(() => { const mode = new URLSearchParams(window.location.search).get("window"); return mode === "overlay-control" ? "control" : mode === "overlay-question" ? "question" : mode === "overlay-answer" ? "answer" : undefined; }, []);
   const isOverlay = Boolean(overlaySurface);
   const captureTest = useMemo(() => new URLSearchParams(window.location.search).get("capture-test") === "1", []);
   const store = useAudioStore();

@@ -146,7 +146,7 @@ const sharedWindowDefaults = {
 };
 
 export const DEFAULT_OVERLAY_PREFERENCES: OverlayPreferences = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   backgroundOpacity: 0.78,
   backgroundColor: "#1d304a",
   fontColor: "#f8fbff",
@@ -157,8 +157,8 @@ export const DEFAULT_OVERLAY_PREFERENCES: OverlayPreferences = {
   showTimestamps: true,
   layoutPreset: "standard",
   questionWindow: {
-    width: 430,
-    height: 500,
+    width: 410,
+    height: 180,
     fontSize: 14,
     ...sharedWindowDefaults,
     fontWeight: 600,
@@ -168,8 +168,8 @@ export const DEFAULT_OVERLAY_PREFERENCES: OverlayPreferences = {
     opacity: 0.84
   },
   answerWindow: {
-    width: 680,
-    height: 500,
+    width: 620,
+    height: 220,
     fontSize: 14,
     ...sharedWindowDefaults,
     lineHeight: 1.62,
@@ -178,8 +178,8 @@ export const DEFAULT_OVERLAY_PREFERENCES: OverlayPreferences = {
     opacity: 0.88
   },
   controlBar: {
-    width: 680,
-    height: 58,
+    width: 440,
+    height: 44,
     fontSize: 13,
     ...sharedWindowDefaults,
     titleFontSize: 13,

@@ -26,13 +26,14 @@ export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
     {preferences.showToolbar && <DraggableResizablePanel panel="toolbar" nativePanel="control" layout={layout} onChange={(_panel, patch) => setLayout((current) => ({ ...current, ...patch }))} onCommit={() => undefined} editMode={layoutEditMode} className="toolbar-panel">
       <div className="floating-toolbar hud-interactive-region" role="toolbar" aria-label={`${modeLabel}控制栏`}>
         <span className="toolbar-audio-mark" aria-hidden="true">≈</span>
-        <div className="toolbar-runtime"><span>{statusLabel}{answerReady && <small className="toolbar-answer-indicator"> · 回答已就绪</small>}</span></div>
+        <div className="toolbar-status-inline" data-testid="toolbar-status"><i aria-hidden="true" /><span>{statusLabel}</span></div>
         <span className="toolbar-divider" aria-hidden="true" />
         {!props.hudState.running || props.operationMode === "WRITTEN_TEST" ? null : <div className="toolbar-mode-switch" role="group" aria-label="回答模式"><button className={props.automationMode === "AUTO" ? "selected" : ""} onClick={() => { if (props.automationMode !== "AUTO") void props.onToggleAutomation(); }}>自动</button><button className={props.automationMode === "MANUAL" ? "selected" : ""} onClick={() => { if (props.automationMode !== "MANUAL") void props.onToggleAutomation(); }}>手动</button></div>}
-        {preferences.showTranscript && <button className="toolbar-inline-action" onClick={props.onToggleTranscript} aria-label="显示或隐藏问题">问题</button>}
-        {preferences.showAnswer && <button className="toolbar-inline-action" onClick={props.onToggleAnswer} aria-label="显示或隐藏回答">回答</button>}
-        <button className="toolbar-inline-action toolbar-shortcut-toggle" onClick={props.onToggleShortcuts} aria-label="打开快捷操作">快捷</button>
-        <button className="toolbar-end-button" onClick={props.onRequestEndInterview} aria-label={modeLabel === "笔试" ? "结束笔试" : "结束面试"}>结束{modeLabel}</button>
+        {answerReady && <span className="toolbar-answer-ready-dot" title="回答已就绪" aria-label="回答已就绪" />}
+        {preferences.showTranscript && <button className="toolbar-icon-action" onClick={props.onToggleTranscript} title="显示或隐藏问题" aria-label="显示或隐藏问题" aria-pressed={props.hudState.transcriptVisible}>◫</button>}
+        {preferences.showAnswer && <button className="toolbar-icon-action" onClick={props.onToggleAnswer} title="显示或隐藏回答" aria-label="显示或隐藏回答" aria-pressed={props.hudState.answerVisible}>◧</button>}
+        <button className="toolbar-icon-action" onClick={props.onToggleShortcuts} title="打开快捷操作" aria-label="打开快捷操作">…</button>
+        <button className="toolbar-end-button" onClick={props.onRequestEndInterview} title={`结束${modeLabel} Ctrl+Alt+Q`} aria-label={`结束${modeLabel}`}>结束</button>
       </div>
     </DraggableResizablePanel>}
   </main>;

@@ -336,7 +336,16 @@ export class OverlayManager {
     this.sendHudState();
   }
 
-  private transition(action: HUDAction): void { this.hudStateValue = reduceHUDState(this.hudStateValue, action); this.options.onHUDStateChange?.(this.hudStateValue); this.sendHudState(); }
+  private transition(action: HUDAction): void {
+    this.hudStateValue = reduceHUDState(this.hudStateValue, action);
+    this.options.onHUDStateChange?.(this.hudStateValue);
+    this.sendHudState();
+    // A lifecycle action such as hide-all, stop, or share-mode can close a
+    // transient without going through setTransientLayer(). Keep the native
+    // owner in lockstep with the reducer so a stale clickable window cannot
+    // remain on screen.
+    this.syncTransientWindow();
+  }
   private sendHudState(): void { this.sendToWindows("overlay:state", this.hudStateValue); }
 
   private refreshLayout(_bounds: Electron.Rectangle): void {

@@ -1,30 +1,35 @@
-/* The only runtime toolbar contract. Native control bounds and this box are both 680×58. */
-.toolbar-panel { width: 100%; height: 58px; }
+.toolbar-panel { width: 100%; height: 100%; }
+
 .floating-toolbar {
-  box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 7px;
   width: 100%;
-  height: 58px;
-  min-height: 58px;
-  padding: 0 12px;
+  height: 100%;
+  min-height: 42px;
+  padding: 4px 8px;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, .32);
-  border-radius: 18px;
-  background: rgba(42, 54, 72, .82);
-  box-shadow: 0 8px 22px rgba(14, 24, 38, .22), inset 0 1px 0 rgba(255, 255, 255, .16);
-  backdrop-filter: blur(18px) saturate(125%);
-  color: rgba(255, 255, 255, .96);
-  font-size: 14px;
+  border: 1px solid rgba(255, 255, 255, .2);
+  border-radius: 12px;
+  background: rgba(30, 45, 65, .9);
+  box-shadow: 0 8px 22px rgba(14, 24, 38, .2);
+  backdrop-filter: blur(16px) saturate(120%);
+  color: rgba(255, 255, 255, .94);
+  font-size: 12px;
 }
-.toolbar-audio-mark { display: grid; width: 34px; height: 34px; flex: 0 0 34px; place-items: center; border-radius: 50%; background: rgba(116, 181, 255, .16); color: #9bd2ff; font-size: 22px; line-height: 1; }
-.toolbar-runtime { display: inline-flex; align-items: center; justify-content: center; min-width: 72px; color: inherit; font-size: 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.toolbar-divider { width: 1px; height: 28px; flex: 0 0 1px; background: rgba(255, 255, 255, .24); }
-.toolbar-mode-switch { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 auto; border: 1px solid rgba(255, 255, 255, .22); border-radius: 999px; padding: 2px; background: rgba(255, 255, 255, .07); }
-.toolbar-mode-switch button { min-width: 50px; border-radius: 999px; padding: 7px 10px; background: transparent; color: rgba(255, 255, 255, .88); }
-.toolbar-mode-switch button.selected { background: rgba(242, 249, 255, .86); color: #245f9f; }
-.toolbar-inline-action { display: inline-flex; align-items: center; flex: 0 0 auto; border-radius: 8px; padding: 8px 7px; background: transparent; color: rgba(255, 255, 255, .9); white-space: nowrap; }
-.toolbar-inline-action:hover, .toolbar-inline-action.active { background: rgba(255, 255, 255, .13); color: #fff; }
-.toolbar-end-button { flex: 0 0 auto; margin-left: auto; border: 1px solid rgba(255, 145, 135, .82); border-radius: 999px; padding: 8px 14px; background: rgba(126, 46, 48, .2); color: #ffb2a9; white-space: nowrap; }
+
+.toolbar-audio-mark { display: grid; width: 24px; height: 24px; flex: 0 0 24px; place-items: center; border-radius: 50%; background: rgba(116, 181, 255, .14); color: #9bd2ff; font-size: 16px; line-height: 1; }
+.toolbar-runtime { display: none; }
+.toolbar-status-inline { display: inline-flex; min-width: 0; flex: 1 1 auto; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap; }
+.toolbar-status-inline i { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #81d3a2; box-shadow: 0 0 0 3px rgba(129, 211, 162, .12); }
+.toolbar-status-inline span { overflow: hidden; text-overflow: ellipsis; }
+.toolbar-divider { width: 1px; height: 22px; flex: 0 0 1px; background: rgba(255, 255, 255, .16); }
+.toolbar-mode-switch { display: inline-flex; align-items: center; gap: 1px; flex: 0 0 auto; border: 1px solid rgba(255, 255, 255, .18); border-radius: 999px; padding: 2px; background: rgba(255, 255, 255, .06); }
+.toolbar-mode-switch button { min-width: 35px; border-radius: 999px; padding: 4px 6px; background: transparent; color: rgba(255, 255, 255, .76); font-size: 11px; }
+.toolbar-mode-switch button.selected { background: rgba(242, 249, 255, .88); color: #245f9f; }
+.toolbar-icon-action { display: inline-grid; width: 27px; height: 27px; flex: 0 0 27px; place-items: center; border-radius: 7px; background: transparent; color: rgba(255, 255, 255, .82); font-size: 17px; line-height: 1; }
+.toolbar-icon-action:hover, .toolbar-icon-action[aria-pressed="true"] { background: rgba(255, 255, 255, .12); color: #fff; }
+.toolbar-answer-ready-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #73dfa1; box-shadow: 0 0 0 3px rgba(115, 223, 161, .1); }
+.toolbar-end-button { flex: 0 0 auto; margin-left: 2px; border: 1px solid rgba(255, 145, 135, .7); border-radius: 7px; padding: 5px 9px; background: rgba(126, 46, 48, .2); color: #ffb2a9; font-size: 11px; white-space: nowrap; }
 .toolbar-end-button:hover { background: rgba(255, 125, 115, .24); color: #fff; }
+.toolbar-vertical .floating-toolbar { flex-direction: column; height: auto; }

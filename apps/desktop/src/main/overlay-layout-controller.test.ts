@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampOverlayBounds, resolveOverlayNativeBounds, type OverlayNativeBounds } from "./overlay-layout-controller";
+import { clampOverlayBounds, contentDrivenHeight, resolveOverlayNativeBounds, type OverlayNativeBounds } from "./overlay-layout-controller";
 
 const workArea: OverlayNativeBounds = { x: -1920, y: 0, width: 1920, height: 1040 };
 const display = { workArea };
@@ -42,5 +42,13 @@ describe("OverlayLayoutController", () => {
       width: 220,
       height: 120
     });
+  });
+
+  it("clamps measured runtime content instead of preserving legacy panel heights", () => {
+    expect(contentDrivenHeight("question", 62)).toBe(88);
+    expect(contentDrivenHeight("question", 181)).toBe(181);
+    expect(contentDrivenHeight("question", 1_000)).toBe(280);
+    expect(contentDrivenHeight("answer", 90)).toBe(132);
+    expect(contentDrivenHeight("answer", 800)).toBe(440);
   });
 });

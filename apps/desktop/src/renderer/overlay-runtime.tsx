@@ -11,7 +11,7 @@ import { initialRuntimePhaseState, isCommittedQuestionGroup, isDisplayableQuesti
 
 type QuestionGroup = OverlayRootProps["questionGroups"][number];
 
-const initialHUDState: HUDState = { running: false, panelVisible: false, transcriptVisible: false, answerVisible: false, shortcutVisible: false, shareMode: false, topBarVisible: false, mouseMode: "passthrough", mode: "HIDDEN" };
+const initialHUDState: HUDState = { running: false, panelVisible: false, transcriptVisible: false, answerVisible: false, transientLayer: "none", shareMode: false, topBarVisible: false, mouseMode: "passthrough", mode: "HIDDEN" };
 const initialPreferences = (): OverlayPreferences | undefined => undefined;
 
 function replaceQuestionGroup(groups: QuestionGroup[], question: QuestionCandidate): QuestionGroup[] {
@@ -121,7 +121,7 @@ function useOverlayRuntime(surface: OverlaySurface): RuntimeState {
           : { ...current, question: event.question, questionGroups: replaceQuestionGroup(current.questionGroups, event.question), runtimePhases: reduceRuntimeQuestion(current.runtimePhases, event) });
       }),
       window.interviewCopilot.events.onRealtimeMessage((message) => setState((current) => applyRealtimeMessage(message, current, answerStore))),
-      window.interviewCopilot.events.onOverlayGlobalWheel(({ deltaY }) => { const selector = surface === "answer" ? ".answer-thread-panel" : ".question-thread-panel"; const element = document.querySelector(selector) as HTMLElement | null; if (element) element.scrollTop += deltaY; })
+      window.interviewCopilot.events.onOverlayGlobalWheel(({ deltaY }) => { const selector = surface === "answer" ? '[data-overlay-content="answer"]' : '[data-overlay-content="question"]'; const element = document.querySelector(selector) as HTMLElement | null; if (element) element.scrollTop += deltaY; })
     ];
     return () => { disposed = true; cleanups.forEach((cleanup) => cleanup()); };
   }, [answerStore, surface]);
@@ -179,4 +179,5 @@ export function mountOverlayRenderer(surface: OverlaySurface): void {
   if (!rootElement) return;
   createRoot(rootElement).render(<StrictMode><RootErrorBoundary><OverlayRuntimeApp surface={surface} /></RootErrorBoundary></StrictMode>);
   document.documentElement.dataset.appReady = "true";
+  window.interviewCopilot.diagnostics.markRendererReady();
 }
