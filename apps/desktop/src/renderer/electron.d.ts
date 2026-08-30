@@ -1,4 +1,4 @@
-import type { AudioProcessState, AudioStartOptions } from "../main/audio-manager";
+import type { AudioDiagnosticsReport, AudioProcessState, AudioStartOptions } from "../main/audio-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
 import type { ScreenshotDiagnostics, ScreenshotTraceEvent } from "../main/screenshot-pipeline";
 import type { AudioDevices, AudioSidecarEvent } from "@interview-copilot/protocol";
@@ -32,6 +32,7 @@ declare global {
         stop(): Promise<void>;
         probe(options?: Pick<AudioStartOptions, "inputDeviceId" | "outputDeviceId">): Promise<import("@interview-copilot/protocol").ProbeResult>;
         listDevices(): Promise<AudioDevices>;
+        getDiagnostics(): Promise<AudioDiagnosticsReport>;
       };
       overlay: {
         show(): Promise<void>;

@@ -44,25 +44,17 @@ pub fn enumerate(host: &Host) -> Result<DeviceList, String> {
 }
 
 pub fn select_input(host: &Host, id: Option<&str>) -> Result<Device, String> {
-    if let Some(id) = id {
-        return host
-            .input_devices()
-            .map_err(|error| error.to_string())?
-            .find(|device| device_id(device) == id)
-            .ok_or_else(|| format!("microphone not found: {id}"));
-    }
-    host.default_input_device()
-        .ok_or_else(|| "default microphone not found".to_string())
+    let mut devices = host.input_devices().map_err(|error| error.to_string())?.collect::<Vec<_>>();
+    let requested = id.and_then(|wanted| devices.iter().position(|device| device_id(device) == wanted));
+    if let Some(index) = requested { return Ok(devices.swap_remove(index)); }
+    if let Some(default) = host.default_input_device() { return Ok(default); }
+    devices.pop().ok_or_else(|| "no microphone device available".to_string())
 }
 
 pub fn select_output(host: &Host, id: Option<&str>) -> Result<Device, String> {
-    if let Some(id) = id {
-        return host
-            .output_devices()
-            .map_err(|error| error.to_string())?
-            .find(|device| device_id(device) == id)
-            .ok_or_else(|| format!("loopback output not found: {id}"));
-    }
-    host.default_output_device()
-        .ok_or_else(|| "default output device not found".to_string())
+    let mut devices = host.output_devices().map_err(|error| error.to_string())?.collect::<Vec<_>>();
+    let requested = id.and_then(|wanted| devices.iter().position(|device| device_id(device) == wanted));
+    if let Some(index) = requested { return Ok(devices.swap_remove(index)); }
+    if let Some(default) = host.default_output_device() { return Ok(default); }
+    devices.pop().ok_or_else(|| "no loopback output device available".to_string())
 }

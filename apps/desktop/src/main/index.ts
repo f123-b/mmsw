@@ -314,7 +314,13 @@ function userFacingError(error: unknown): string {
     ["AUDIO_PROBE_PROCESS_CRASHED", "音频检测程序异常退出"],
     ["AUDIO_PROBE_MIC_FAILED", "麦克风输入不可用"],
     ["AUDIO_PROBE_SYSTEM_FAILED", "系统音频回采不可用"],
-    ["AUDIO_PROBE_REQUIRED", "请先完成一次音频检测"],
+    ["AUDIO_CAPTURE_TIMEOUT", "音频初始化超时，请检查设备权限后重试"],
+    ["NO_AUDIO_CHANNEL_AVAILABLE", "麦克风和系统音频都不可用，请检查权限或重新选择设备"],
+    ["AUDIO_PERMISSION_DENIED", "音频权限被拒绝，请在 Windows 隐私设置中允许麦克风访问"],
+    ["AUDIO_DEVICE_GONE", "音频设备已断开，系统将尝试切换到默认设备"],
+    ["AUDIO_STREAM_OPEN_FAILED", "音频流打开失败，已保留可用声道并继续尝试"],
+    ["PROTOCOL_BROKEN", "音频进程协议异常，请重启应用后重试"],
+    ["AUDIO_PROBE_REQUIRED", "音频检测是可选项，正式面试会直接尝试启动采集"],
     ["ASR_AUTH_FAILED", "当前语音供应商的 API Key 未配置或未授权，请前往模型与服务设置"],
     ["ASR_CONNECT_FAILED", "ASR 连接失败，请检查 ASR 设置或本地服务"],
     ["LLM_NOT_CONFIGURED", "未配置 LLM API Key，请前往设置"],
@@ -1646,6 +1652,7 @@ function registerIpc(): void {
   ipcMain.handle("audio:stop", () => audioManager.stop());
   ipcMain.handle("audio:probe", (_event, options: AudioStartOptions) => audioManager.probe(options));
   ipcMain.handle("audio:list-devices", () => productionSmokeRequested ? { inputs: [], outputs: [] } : audioManager.listDevices());
+  ipcMain.handle("audio:get-diagnostics", () => audioManager.getDiagnostics());
    ipcMain.handle("overlay:show", () => { overlayManager?.enterInterviewMode(); return true; });
    ipcMain.handle("overlay:toggle", () => { overlayManager?.toggle(); return true; });
    ipcMain.handle("overlay:show-all", () => { overlayManager?.showAll(); return true; });
@@ -1782,8 +1789,8 @@ function registerIpc(): void {
       // "Error invoking remote method ...: Error: CODE: message". Splitting
       // at the first colon therefore loses the real diagnostic code and used
       // to turn every failed probe into the generic AUDIO_DEVICE_FAILED.
-      const code = raw.match(/\b(?:AUDIO|ASR|LLM|PROFILE|PROJECT|JOB_TARGET|SIDECAR|DATABASE)_[A-Z0-9_]+\b/)?.[0] ?? "AUDIO_DEVICE_FAILED";
-      const allowed = new Set(["AUDIO_BUSY", "AUDIO_DEVICE_FAILED", "AUDIO_PROBE_REQUIRED", "AUDIO_PROBE_FAILED", "AUDIO_PROBE_MIC_FAILED", "AUDIO_PROBE_SYSTEM_FAILED", "AUDIO_PROBE_PROCESS_FAILED", "AUDIO_PROBE_PROCESS_CRASHED", "AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT", "AUDIO_PROBE_TIMEOUT", "ASR_AUTH_FAILED", "ASR_CONNECT_FAILED", "LLM_NOT_CONFIGURED", "LLM_CONNECT_FAILED", "PROFILE_NOT_FOUND", "SIDECAR_NOT_FOUND", "DATABASE_ERROR"]);
+      const code = raw.match(/\b(?:NO_AUDIO_CHANNEL_AVAILABLE|PROTOCOL_BROKEN|AUDIO_[A-Z0-9_]+|ASR_[A-Z0-9_]+|LLM_[A-Z0-9_]+|PROFILE_[A-Z0-9_]+|PROJECT_[A-Z0-9_]+|JOB_TARGET_[A-Z0-9_]+|SIDECAR_[A-Z0-9_]+|DATABASE_[A-Z0-9_]+)\b/)?.[0] ?? "AUDIO_DEVICE_FAILED";
+      const allowed = new Set(["AUDIO_BUSY", "AUDIO_DEVICE_FAILED", "AUDIO_CAPTURE_TIMEOUT", "NO_AUDIO_CHANNEL_AVAILABLE", "AUDIO_PERMISSION_DENIED", "AUDIO_DEVICE_GONE", "AUDIO_STREAM_OPEN_FAILED", "PROTOCOL_BROKEN", "AUDIO_PROBE_REQUIRED", "AUDIO_PROBE_FAILED", "AUDIO_PROBE_MIC_FAILED", "AUDIO_PROBE_SYSTEM_FAILED", "AUDIO_PROBE_PROCESS_FAILED", "AUDIO_PROBE_PROCESS_CRASHED", "AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT", "AUDIO_PROBE_TIMEOUT", "ASR_AUTH_FAILED", "ASR_CONNECT_FAILED", "LLM_NOT_CONFIGURED", "LLM_CONNECT_FAILED", "PROFILE_NOT_FOUND", "SIDECAR_NOT_FOUND", "DATABASE_ERROR"]);
       const mappedCode = allowed.has(code) ? code : raw.includes("ASR") ? "ASR_CONNECT_FAILED" : raw.includes("LLM") ? "LLM_CONNECT_FAILED" : raw.includes("database") ? "DATABASE_ERROR" : "AUDIO_DEVICE_FAILED";
       const message = userFacingError(error);
       broadcast("runtime:error", { code: mappedCode, message, recoverable: mappedCode !== "PROFILE_NOT_FOUND" && mappedCode !== "SIDECAR_NOT_FOUND" });

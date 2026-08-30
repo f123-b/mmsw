@@ -76,7 +76,6 @@ export interface InterviewAudioPort {
   start(options: AudioStartOptions): void | Promise<void>;
   stop(): void | Promise<void>;
   waitForIdle?(timeoutMs?: number): Promise<void>;
-  hasValidProbe?(options: Pick<AudioStartOptions, "inputDeviceId" | "outputDeviceId">): boolean;
   on(event: "pcm-packet" | "event" | "diagnostic", listener: (...args: any[]) => void): this;
 }
 
@@ -458,7 +457,6 @@ export class InterviewCoordinator extends EventEmitter {
       if (providerType === "custom-gateway" && !connectUrl.trim()) throw new Error("Custom ASR Gateway URL is required");
       await this.options.audio.waitForIdle?.();
       if (this.options.audio.isRunning) throw new Error("AUDIO_BUSY: audio sidecar is still running");
-      if (this.options.audio.hasValidProbe && !this.options.audio.hasValidProbe({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId })) throw new Error("AUDIO_PROBE_REQUIRED: a successful mic and system probe is required before formal capture");
       const automationMode = startOptions.automationMode ?? this.defaultAutomationMode;
       this.transition("CREATING");
       const startedAt = this.now();
@@ -510,12 +508,13 @@ export class InterviewCoordinator extends EventEmitter {
       this.clearRemoteAssemblyTimer();
       this.aggregator.clear();
       this.recordRuntimeTrace("INTERVIEW_SESSION_STARTED", {}, { reasonCode: "session-created" });
-      this.transition("CONNECTING");
-      // The real interview path deliberately omits meterOnly so PCM reaches ASR.
-      this.asr.connect({ ...startOptions, ...asrSettings, providerType, url: connectUrl, language: asrSettings?.language ?? (startOptions.language as AsrLanguage | undefined), autoReconnect: true });
-      this.options.onStartupTiming?.("ASR_READY");
+      // Audio is the source of truth for interview readiness. Probe is an
+      // optional diagnostic and is intentionally not consulted here.
       await this.options.audio.start({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true });
       this.options.onStartupTiming?.("AUDIO_READY");
+      this.transition("CONNECTING");
+      this.asr.connect({ ...startOptions, ...asrSettings, providerType, url: connectUrl, language: asrSettings?.language ?? (startOptions.language as AsrLanguage | undefined), autoReconnect: true });
+      this.options.onStartupTiming?.("ASR_READY");
       return record.id;
     } catch (error) {
       await Promise.resolve(this.options.audio.stop()).catch(() => undefined);

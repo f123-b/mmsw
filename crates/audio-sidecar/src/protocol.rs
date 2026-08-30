@@ -35,6 +35,18 @@ pub struct CaptureStats {
     pub callback_count: u64,
     pub sample_count: u64,
     pub peak: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_callback_ms: Option<u64>,
 }
 
 impl CaptureStats {
@@ -42,6 +54,7 @@ impl CaptureStats {
         Self {
             sample_rate,
             channels,
+            state: Some("UNAVAILABLE"),
             ..Self::default()
         }
     }
@@ -57,10 +70,51 @@ impl CaptureStats {
         self.stream_ok = self.callback_count > 0 && self.sample_count > 0;
         self.ok = self.stream_ok;
         self.signal_detected = self.peak >= 0.01;
+        self.state = Some(if self.signal_detected { "READY" } else { "SILENT" });
     }
 
     pub fn stream_ok(&self) -> bool {
         self.callback_count > 0 && self.sample_count > 0
+    }
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelCapability {
+    pub state: &'static str,
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channels: Option<u16>,
+    pub signal_detected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_callback_ms: Option<u64>,
+}
+
+impl ChannelCapability {
+    pub fn from_stats(stats: &CaptureStats) -> Self {
+        let state = stats.state.unwrap_or(if stats.stream_ok { "READY" } else { "UNAVAILABLE" });
+        Self {
+            state,
+            available: stats.stream_ok,
+            device_id: stats.device_id.clone(),
+            device_name: stats.device_name.clone(),
+            sample_rate: Some(stats.sample_rate),
+            channels: Some(stats.channels),
+            signal_detected: stats.signal_detected,
+            error: stats.error.clone(),
+            code: stats.code.clone(),
+            first_callback_ms: stats.first_callback_ms,
+        }
     }
 }
 
@@ -80,6 +134,8 @@ pub enum Event {
     #[serde(rename = "audio_state")]
     State {
         state: &'static str,
+        #[serde(rename = "captureMode", skip_serializing_if = "Option::is_none")]
+        capture_mode: Option<&'static str>,
         timestamp: u128,
     },
     #[serde(rename = "audio_health")]
@@ -98,8 +154,30 @@ pub enum Event {
     Probe {
         mic: CaptureStats,
         system: CaptureStats,
+        #[serde(rename = "captureMode", skip_serializing_if = "Option::is_none")]
+        capture_mode: Option<&'static str>,
         #[serde(rename = "durationMs")]
         duration_ms: u64,
+        timestamp: u128,
+    },
+    #[serde(rename = "audio_capability")]
+    Capability {
+        #[serde(rename = "captureMode")]
+        capture_mode: &'static str,
+        mic: ChannelCapability,
+        system: ChannelCapability,
+        timestamp: u128,
+        source: &'static str,
+    },
+    #[serde(rename = "audio_probe_trace")]
+    Trace {
+        stage: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        channel: Option<&'static str>,
+        #[serde(rename = "elapsedMs")]
+        elapsed_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
         timestamp: u128,
     },
     #[serde(rename = "audio_buffer")]
@@ -128,6 +206,8 @@ pub enum Event {
     #[serde(rename = "audio_error")]
     Error {
         component: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
         reason: String,
         recoverable: bool,
         timestamp: u128,
@@ -166,6 +246,12 @@ mod tests {
                 callback_count: 50,
                 sample_count: 2_400_000,
                 peak: 0.43,
+                state: None,
+                device_id: None,
+                device_name: None,
+                error: None,
+                code: None,
+                first_callback_ms: None,
             },
             system: CaptureStats {
                 ok: true,
@@ -176,7 +262,14 @@ mod tests {
                 callback_count: 50,
                 sample_count: 4_800_000,
                 peak: 0.0,
+                state: None,
+                device_id: None,
+                device_name: None,
+                error: None,
+                code: None,
+                first_callback_ms: None,
             },
+            capture_mode: None,
             duration_ms: 2_000,
             timestamp: 123,
         })

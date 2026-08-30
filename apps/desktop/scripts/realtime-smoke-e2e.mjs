@@ -85,6 +85,14 @@ async function waitForTarget(predicate, timeoutMs = 15_000) {
   }
   throw new Error(`RUNTIME_E2E_TIMEOUT waiting for target\n${childOutput.slice(-3_000)}`);
 }
+async function closeTarget(target) {
+  if (!target?.webSocketDebuggerUrl) return;
+  const socket = new WebSocket(target.webSocketDebuggerUrl);
+  await new Promise((resolve) => { socket.once("open", resolve); socket.once("error", resolve); });
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression: "window.close()", awaitPromise: false, returnByValue: false } }));
+  await sleep(75);
+  socket.close();
+}
 function connectTarget(target) {
   const socket = new WebSocket(target.webSocketDebuggerUrl);
   const commands = new Map();
@@ -146,11 +154,11 @@ try {
     return profile.id;
   })()`);
   if (!configured) throw new Error("Realtime smoke setup failed");
-  await main.evaluate(`window.interviewCopilot.audio.probe({ inputDeviceId: 'mock-mic', outputDeviceId: 'mock-system' })`);
+  // Formal capture must be usable without running the optional probe first.
   const startedAt = Date.now();
   await main.evaluate(`window.interviewCopilot.interview.start(${JSON.stringify({ profileId: configured, url: `ws://127.0.0.1:${asrPort}/realtime`, providerType: "custom-gateway", model: "mock-asr", inputDeviceId: "mock-mic", outputDeviceId: "mock-system", automationMode: "AUTO", answerMode: "NORMAL" })})`);
   await waitFor(() => window.interviewCopilot.session.getState().then((state) => state === "RUNNING"), main);
-  const overlayTarget = await waitForTarget((item) => { try { return item.type === "page" && new URL(item.url).searchParams.get("window") === "overlay"; } catch { return false; } });
+  const overlayTarget = await waitForTarget((item) => { try { return item.type === "page" && new URL(item.url).searchParams.get("window") === "overlay-answer"; } catch { return false; } });
   overlay = connectTarget(overlayTarget);
   await new Promise((resolve, reject) => { overlay.socket.once("open", resolve); overlay.socket.once("error", reject); });
   await overlay.command("Runtime.enable");
@@ -179,9 +187,9 @@ try {
   // Close both renderer windows without waiting for a response from a target
   // that is intentionally being destroyed. Electron's before-quit handler
   // then runs the normal application shutdown controller.
-  overlay.send("Runtime.evaluate", { expression: "window.close()", awaitPromise: false, returnByValue: false });
-  overlayControl.socket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression: "window.close()", awaitPromise: false, returnByValue: false } }));
-  main.send("Runtime.evaluate", { expression: "window.close()", awaitPromise: false, returnByValue: false });
+  for (const target of await targets()) {
+    if (target.type === "page") await closeTarget(target);
+  }
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("RUNTIME_E2E_TIMEOUT Electron did not exit after successful idle")), 10_000);
     child.once("exit", (code) => { clearTimeout(timer); if (code && code !== 0) reject(new Error(`Electron exited with ${code}`)); else resolve(); });

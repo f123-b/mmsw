@@ -35,15 +35,60 @@ export const audioMeterSchema = z.object({
 
 export const audioErrorSchema = z.object({
   type: z.literal("audio_error"),
-  component: z.enum(["mic", "loopback", "resampler", "device", "process"]),
+  component: z.enum(["mic", "loopback", "resampler", "device", "process", "permission"]),
+  code: z.string().min(1).optional(),
   reason: z.string().min(1),
   recoverable: z.boolean().default(true),
   timestamp: z.number().int().nonnegative().optional()
 });
 
+export const audioChannelStateSchema = z.enum([
+  "READY",
+  "SILENT",
+  "UNAVAILABLE",
+  "PERMISSION_DENIED",
+  "DEVICE_GONE",
+  "OPEN_FAILED",
+  "TIMEOUT"
+]);
+
+export const audioCaptureModeSchema = z.enum(["dual", "system_only", "mic_only"]);
+
+export const audioChannelCapabilitySchema = z.object({
+  state: audioChannelStateSchema,
+  available: z.boolean(),
+  deviceId: z.string().optional(),
+  deviceName: z.string().optional(),
+  sampleRate: z.number().int().nonnegative().optional(),
+  channels: z.number().int().nonnegative().optional(),
+  signalDetected: z.boolean().default(false),
+  error: z.string().optional(),
+  code: z.string().optional(),
+  firstCallbackMs: z.number().int().nonnegative().optional()
+});
+
+export const audioCapabilitySchema = z.object({
+  type: z.literal("audio_capability"),
+  captureMode: audioCaptureModeSchema,
+  mic: audioChannelCapabilitySchema,
+  system: audioChannelCapabilitySchema,
+  timestamp: z.number().int().nonnegative(),
+  source: z.enum(["probe", "capture", "recovery"]).optional()
+});
+
+export const audioProbeTraceSchema = z.object({
+  type: z.literal("audio_probe_trace"),
+  stage: z.enum(["sidecar_spawned", "device_enumerated", "config_resolved", "stream_built", "stream_started", "first_callback", "result_emitted", "process_exited"]),
+  channel: z.enum(["mic", "system"]).optional(),
+  elapsedMs: z.number().int().nonnegative(),
+  details: z.string().optional(),
+  timestamp: z.number().int().nonnegative()
+});
+
 export const audioStateSchema = z.object({
   type: z.literal("audio_state"),
   state: z.enum(["STARTING", "READY", "DEGRADED", "RECOVERING", "FAILED"]),
+  captureMode: audioCaptureModeSchema.optional(),
   timestamp: z.number().int().nonnegative()
 });
 
@@ -55,13 +100,21 @@ export const probeChannelResultSchema = z.object({
   channels: z.number().int().nonnegative(),
   peak: z.number().min(0).max(1),
   callbackCount: z.number().int().nonnegative(),
-  sampleCount: z.number().int().nonnegative()
+  sampleCount: z.number().int().nonnegative(),
+  state: audioChannelStateSchema.optional(),
+  deviceId: z.string().optional(),
+  deviceName: z.string().optional(),
+  error: z.string().optional(),
+  code: z.string().optional(),
+  firstCallbackMs: z.number().int().nonnegative().optional()
 });
 
 export const probeResultSchema = z.object({
   type: z.literal("probe_result"),
   mic: probeChannelResultSchema,
   system: probeChannelResultSchema,
+  captureMode: audioCaptureModeSchema.optional(),
+  trace: z.array(audioProbeTraceSchema).optional(),
   durationMs: z.number().int().nonnegative(),
   timestamp: z.number().int().nonnegative()
 });
@@ -89,6 +142,8 @@ export const audioSidecarEventSchema = z.discriminatedUnion("type", [
   audioMeterSchema,
   audioErrorSchema,
   audioStateSchema,
+  audioCapabilitySchema,
+  audioProbeTraceSchema,
   probeResultSchema,
   audioBufferSchema,
   audioDriftSchema
@@ -266,6 +321,11 @@ export type AudioDevices = z.infer<typeof audioDevicesSchema>;
 export type AudioHealth = z.infer<typeof audioHealthSchema>;
 export type AudioMeter = z.infer<typeof audioMeterSchema>;
 export type AudioError = z.infer<typeof audioErrorSchema>;
+export type AudioChannelState = z.infer<typeof audioChannelStateSchema>;
+export type AudioCaptureMode = z.infer<typeof audioCaptureModeSchema>;
+export type AudioChannelCapability = z.infer<typeof audioChannelCapabilitySchema>;
+export type AudioCapability = z.infer<typeof audioCapabilitySchema>;
+export type AudioProbeTrace = z.infer<typeof audioProbeTraceSchema>;
 export type AudioStateEvent = z.infer<typeof audioStateSchema>;
 export type ProbeChannelResult = z.infer<typeof probeChannelResultSchema>;
 export type ProbeResult = z.infer<typeof probeResultSchema>;

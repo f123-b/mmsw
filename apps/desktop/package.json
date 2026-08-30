@@ -16,6 +16,7 @@
     "visual:smoke": "npm run build && node scripts/visual-smoke.mjs",
     "functional:e2e": "npm run build && node scripts/functional-e2e.mjs",
     "realtime:smoke": "npm run build && node scripts/realtime-smoke-e2e.mjs",
+    "audio:windows:smoke": "node scripts/audio-windows-smoke.mjs",
     "screenshot:smoke": "npm run build && node scripts/screenshot-smoke-e2e.mjs",
     "benchmark:screenshot-vision": "vitest run src/main/screenshot-vision-benchmark.test.ts --reporter=verbose",
     "benchmark:realtime-runtime": "vitest run src/main/runtime-diagnostics.test.ts src/main/interview-runtime.test.ts --reporter=verbose",

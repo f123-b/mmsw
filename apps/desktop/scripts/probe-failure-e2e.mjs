@@ -11,18 +11,28 @@ const repositoryRoot = join(desktopDirectory, "..", "..");
 const electronExecutable = process.env.ELECTRON_EXECUTABLE ?? join(repositoryRoot, "node_modules", "electron", "dist", "electron.exe");
 const audioSidecar = join(desktopDirectory, "src", "main", "test-audio-sidecar.mjs");
 const behaviors = [
-  ["mic-fail", "AUDIO_PROBE_MIC_FAILED"],
-  ["system-fail", "AUDIO_PROBE_SYSTEM_FAILED"],
-  ["both-fail", "AUDIO_PROBE_FAILED"],
-  ["timeout", "AUDIO_PROBE_TIMEOUT"],
-  ["nonzero-after-result", "AUDIO_PROBE_PROCESS_FAILED"],
-  ["exit-without-result", "AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT"],
-  ["crash", "AUDIO_PROBE_PROCESS_CRASHED"]
+  ["mic-fail", "partial", "system_only"],
+  ["system-fail", "partial", "mic_only"],
+  ["both-fail", "blocked", "NO_AUDIO_CHANNEL_AVAILABLE"],
+  ["timeout", "probe-failed", "AUDIO_PROBE_TIMEOUT"],
+  ["nonzero-after-result", "probe-failed", "AUDIO_PROBE_PROCESS_FAILED"],
+  ["exit-without-result", "probe-failed", "AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT"],
+  ["crash", "probe-failed", "AUDIO_PROBE_PROCESS_CRASHED"]
 ];
 
 if (!existsSync(electronExecutable) || !existsSync(audioSidecar)) throw new Error("Probe E2E dependencies are missing");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function removeUserData(path) {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try { await rm(path, { recursive: true, force: true }); return; }
+    catch (error) {
+      if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(error?.code)) throw error;
+      await sleep(250 + attempt * 100);
+    }
+  }
+  throw new Error(`Unable to remove E2E user data after retries: ${path}`);
+}
 async function targets(port) {
   try { return await (await fetch(`http://127.0.0.1:${port}/json`)).json(); } catch { return []; }
 }
@@ -67,10 +77,10 @@ const asrServer = new WebSocketServer({ port: 0, host: "127.0.0.1" });
 asrServer.on("connection", () => undefined);
 await new Promise((resolve) => asrServer.once("listening", resolve));
 const asrPort = asrServer.address().port;
-for (const [index, [behavior, expectedCode]] of behaviors.entries()) {
+for (const [index, [behavior, formalExpectation, expectedCode]] of behaviors.entries()) {
   const port = 9450 + index;
   const userData = join(repositoryRoot, `.probe-failure-e2e-${behavior}`);
-  await rm(userData, { recursive: true, force: true });
+  await removeUserData(userData);
   await mkdir(userData, { recursive: true });
   const child = spawn(electronExecutable, [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`, desktopDirectory], {
     cwd: desktopDirectory,
@@ -84,22 +94,35 @@ for (const [index, [behavior, expectedCode]] of behaviors.entries()) {
     await new Promise((resolve, reject) => { renderer.socket.once("open", resolve); renderer.socket.once("error", reject); });
     await renderer.command("Runtime.enable");
     await renderer.evaluate("new Promise((resolve) => { const check = () => document.documentElement?.dataset.appReady === 'true' ? resolve(true) : setTimeout(check, 100); check(); })");
-    const probeError = await renderer.evaluate("window.interviewCopilot.audio.probe({ inputDeviceId: 'mock-mic', outputDeviceId: 'mock-system' }).then(() => '').catch((error) => String(error))");
-    if (!probeError.includes(expectedCode)) throw new Error(`${behavior}: expected ${expectedCode}, got ${probeError}`);
+    const probeResult = await renderer.evaluate("window.interviewCopilot.audio.probe({ inputDeviceId: 'mock-mic', outputDeviceId: 'mock-system' }).then((result) => ({ ok: true, result })).catch((error) => ({ ok: false, error: String(error) }))");
+    if (formalExpectation === "partial") {
+      if (!probeResult.ok || probeResult.result?.captureMode !== expectedCode) throw new Error(`${behavior}: expected structured ${expectedCode} probe result, got ${JSON.stringify(probeResult)}`);
+    } else if (formalExpectation === "probe-failed" && (probeResult.ok || !probeResult.error.includes(expectedCode))) {
+      throw new Error(`${behavior}: expected ${expectedCode}, got ${JSON.stringify(probeResult)}`);
+    }
     const profileId = await renderer.evaluate("(async () => { const profiles = await window.interviewCopilot.profiles.list(); const profile = profiles[0] ?? await window.interviewCopilot.profiles.save({ name: 'Probe E2E', language: 'zh-CN', skills: [], knowledgeBaseIds: [] }); return profile?.id; })()");
     if (!profileId) throw new Error(`${behavior}: profile setup failed`);
     await renderer.evaluate(`window.interviewCopilot.settings.update('llm', ${JSON.stringify({ providerName: "Mock LLM", baseUrl: `http://127.0.0.1:${llmPort}`, model: "mock-model", apiKey: "mock-key", timeoutMs: 2_000, maxRetries: 0 })})`);
     await renderer.evaluate(`window.interviewCopilot.settings.update('asr', ${JSON.stringify({ providerName: "Custom WebSocket ASR Gateway", providerType: "custom-gateway", baseUrl: `ws://127.0.0.1:${asrPort}/realtime`, model: "mock-asr", language: "zh-CN", apiKey: "", timeoutMs: 2_000, maxRetries: 0 })})`);
-    const formalError = await renderer.evaluate(`window.interviewCopilot.interview.start(${JSON.stringify({ profileId, url: `ws://127.0.0.1:${asrPort}/realtime`, inputDeviceId: "mock-mic", outputDeviceId: "mock-system", automationMode: "MANUAL", answerMode: "NORMAL", providerType: "custom-gateway" })}).then(() => '').catch((error) => String(error))`);
-    if (!formalError.includes("AUDIO_PROBE_REQUIRED")) throw new Error(`${behavior}: formal capture was not blocked: ${formalError}`);
+    const formalResult = await renderer.evaluate(`window.interviewCopilot.interview.start(${JSON.stringify({ profileId, url: `ws://127.0.0.1:${asrPort}/realtime`, inputDeviceId: "mock-mic", outputDeviceId: "mock-system", automationMode: "MANUAL", answerMode: "NORMAL", providerType: "custom-gateway" })}).then((id) => ({ ok: true, id })).catch((error) => ({ ok: false, error: String(error) }))`);
+    if (formalExpectation === "blocked") {
+      if (formalResult.ok || !formalResult.error.includes(expectedCode)) throw new Error(`${behavior}: expected formal block ${expectedCode}, got ${JSON.stringify(formalResult)}`);
+    } else if (!formalResult.ok) {
+      throw new Error(`${behavior}: formal capture unexpectedly failed: ${JSON.stringify(formalResult)}`);
+    }
+    if (formalExpectation !== "blocked") {
+      await renderer.evaluate("new Promise((resolve) => { const deadline = Date.now() + 5_000; const check = () => window.interviewCopilot.interview.getState().then((state) => state?.running ? resolve(true) : Date.now() >= deadline ? resolve(false) : setTimeout(check, 100)); check(); })");
+    }
     const state = await renderer.evaluate("window.interviewCopilot.interview.getState()");
-    if (state?.running) throw new Error(`${behavior}: interview became running after failed probe`);
-    evidence.push(`PROBE_${behavior.toUpperCase().replaceAll("-", "_")}: PASS; FORMAL_CAPTURE_BLOCKED: PASS`);
+    if (formalExpectation === "blocked" && state?.running) throw new Error(`${behavior}: interview became running after both channels failed`);
+    if (formalExpectation !== "blocked" && !state?.running) throw new Error(`${behavior}: interview did not start after optional probe result`);
+    if (state?.running) await renderer.evaluate("window.interviewCopilot.interview.stop()");
+    evidence.push(`PROBE_${behavior.toUpperCase().replaceAll("-", "_")}: PASS; FORMAL_${formalExpectation.toUpperCase()}: PASS`);
     renderer.socket.close();
   } finally {
     child.kill();
-    await sleep(250);
-    await rm(userData, { recursive: true, force: true });
+    await Promise.race([new Promise((resolve) => child.once("close", resolve)), sleep(2_000)]);
+    await removeUserData(userData);
   }
 }
 

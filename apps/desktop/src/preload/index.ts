@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { AudioProcessState, AudioStartOptions } from "../main/audio-manager";
+import type { AudioDiagnosticsReport, AudioProcessState, AudioStartOptions } from "../main/audio-manager";
 import type { ScreenshotResult } from "../main/screenshot-manager";
 import type { ScreenshotDiagnostics, ScreenshotTraceEvent } from "../main/screenshot-pipeline";
 import type { AudioDevices, AudioSidecarEvent } from "@interview-copilot/protocol";
@@ -58,7 +58,8 @@ const api = {
     start: (options?: AudioStartOptions) => ipcRenderer.invoke("audio:start", options),
     stop: () => ipcRenderer.invoke("audio:stop"),
     probe: (options?: Pick<AudioStartOptions, "inputDeviceId" | "outputDeviceId">) => ipcRenderer.invoke("audio:probe", options),
-    listDevices: (): Promise<AudioDevices> => ipcRenderer.invoke("audio:list-devices")
+    listDevices: (): Promise<AudioDevices> => ipcRenderer.invoke("audio:list-devices"),
+    getDiagnostics: (): Promise<AudioDiagnosticsReport> => ipcRenderer.invoke("audio:get-diagnostics")
   },
   overlay: {
     show: () => ipcRenderer.invoke("overlay:show"),

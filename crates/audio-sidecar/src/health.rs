@@ -3,29 +3,21 @@ use crate::protocol::{emit, timestamp, Event};
 pub fn starting() {
     emit(&Event::State {
         state: "STARTING",
-        timestamp: timestamp(),
-    });
-}
-pub fn ready() {
-    emit(&Event::Health {
-        mic: "ok",
-        loopback: "ok",
-        timestamp: timestamp(),
-    });
-    emit(&Event::State {
-        state: "READY",
+        capture_mode: None,
         timestamp: timestamp(),
     });
 }
 pub fn failed(reason: String) {
     emit(&Event::Error {
         component: "process",
+        code: Some(if reason.contains("NO_AUDIO_CHANNEL_AVAILABLE") { "NO_AUDIO_CHANNEL_AVAILABLE".to_string() } else { "AUDIO_CAPTURE_FAILED".to_string() }),
         reason,
-        recoverable: true,
+        recoverable: false,
         timestamp: timestamp(),
     });
     emit(&Event::State {
         state: "FAILED",
+        capture_mode: None,
         timestamp: timestamp(),
     });
 }

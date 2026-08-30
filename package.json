@@ -17,6 +17,7 @@
     "ensure:electron-runtime": "node tools/ensure-electron-runtime.mjs",
     "smoke:production": "npm --workspace apps/desktop run smoke:production",
     "capture-protection:smoke": "npm --workspace apps/desktop run capture-protection:smoke",
+    "audio:windows:smoke": "npm --workspace apps/desktop run audio:windows:smoke",
     "capture-helper:build": "npm --workspace apps/desktop run build:capture-helper",
     "visual:smoke": "npm --workspace apps/desktop run visual:smoke",
     "functional:e2e": "npm run ensure:electron-runtime && npm --workspace apps/desktop run functional:e2e",

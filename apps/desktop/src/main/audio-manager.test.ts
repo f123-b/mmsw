@@ -21,7 +21,7 @@ describe("AudioManager recovery backoff", () => {
   });
 });
 
-describe("AudioManager probe lifecycle", () => {
+describe("AudioManager capability-driven lifecycle", () => {
   beforeEach(() => {
     process.env.INTERVIEW_COPILOT_AUDIO_SIDECAR = sidecar;
     process.env.INTERVIEW_COPILOT_NODE_EXECUTABLE = process.execPath;
@@ -38,126 +38,75 @@ describe("AudioManager probe lifecycle", () => {
     delete process.env.INTERVIEW_COPILOT_AUDIO_PROBE_TIMEOUT_MS;
   });
 
-  it("PROBE_COMPLETES_BEFORE_INTERVIEW_START", async () => {
-    const result = await manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
-    expect(result.mic.ok && result.system.ok).toBe(true);
-    expect(manager.isRunning).toBe(false);
+  it("starts formal capture without a prior probe", async () => {
     await manager.start({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system", meterOnly: false, autoRecover: true });
     expect(manager.runningKind).toBe("capture");
-    expect(manager.runningOptions.meterOnly).toBe(false);
+    expect(manager.currentCapability?.captureMode).toBe("dual");
   });
 
-  it("PROBE_TIMEOUT", async () => {
-    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "timeout";
-    process.env.INTERVIEW_COPILOT_AUDIO_PROBE_TIMEOUT_MS = "100";
-    await expect(manager.probe()).rejects.toThrow("AUDIO_PROBE_TIMEOUT");
-    expect(manager.isRunning).toBe(false);
+  it.each([
+    ["mic-fail", "system_only"],
+    ["system-fail", "mic_only"]
+  ] as const)("starts in %s degraded mode when one channel fails", async (behavior, mode) => {
+    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = behavior;
+    await manager.start({ meterOnly: false, autoRecover: true });
+    expect(manager.currentCapability?.captureMode).toBe(mode);
+    expect(manager.isRunning).toBe(true);
   });
 
-  it("PROBE_PROCESS_EXIT_WITHOUT_RESULT", async () => {
-    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "exit-without-result";
-    await expect(manager.probe()).rejects.toThrow("AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT");
-  });
-
-  it("PROBE_MIC_FAILED_BLOCKS_START", async () => {
-    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "mic-fail";
-    await expect(manager.probe()).rejects.toThrow("AUDIO_PROBE_MIC_FAILED");
-    await expect(manager.start({ meterOnly: false })).rejects.toThrow("AUDIO_PROBE_REQUIRED");
-  });
-
-  it("PROBE_SYSTEM_FAILED_BLOCKS_START", async () => {
-    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "system-fail";
-    await expect(manager.probe()).rejects.toThrow("AUDIO_PROBE_SYSTEM_FAILED");
-    await expect(manager.start({ meterOnly: false })).rejects.toThrow("AUDIO_PROBE_REQUIRED");
-  });
-
-  it("PROBE_BOTH_FAILED_BLOCKS_START", async () => {
+  it("only blocks formal capture when both channels are unavailable", async () => {
     process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "both-fail";
-    await expect(manager.probe()).rejects.toThrow("AUDIO_PROBE_FAILED");
-    await expect(manager.start({ meterOnly: false })).rejects.toThrow("AUDIO_PROBE_REQUIRED");
+    await expect(manager.start({ meterOnly: false, autoRecover: false })).rejects.toThrow("NO_AUDIO_CHANNEL_AVAILABLE");
   });
 
-  it("PROBE_EXIT_NONZERO_AFTER_RESULT", async () => {
-    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "nonzero-after-result";
-    await expect(manager.probe()).rejects.toThrow("AUDIO_PROBE_PROCESS_FAILED");
-    await expect(manager.start({ meterOnly: false })).rejects.toThrow("AUDIO_PROBE_REQUIRED");
-  });
-
-  it("PROBE_DEVICE_CHANGE_INVALIDATES_RESULT", async () => {
-    await manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
-    await expect(manager.start({ inputDeviceId: "another-mic", outputDeviceId: "mock-system", meterOnly: false })).rejects.toThrow("AUDIO_PROBE_REQUIRED");
-  });
-
-  it("PROBE_SECOND_ATTEMPT_INVALIDATES_OLD_SUCCESS", async () => {
-    await manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
-    expect(manager.hasValidProbe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).toBe(true);
-    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "timeout";
-    process.env.INTERVIEW_COPILOT_AUDIO_PROBE_TIMEOUT_MS = "100";
-    await expect(manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).rejects.toThrow("AUDIO_PROBE_TIMEOUT");
-    expect(manager.hasValidProbe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).toBe(false);
-  });
-
-  it("PROBE_CRASH_INVALIDATES_OLD_SUCCESS", async () => {
-    await manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
-    expect(manager.hasValidProbe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).toBe(true);
-    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "crash";
-    await expect(manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).rejects.toThrow("AUDIO_PROBE_PROCESS_CRASHED");
-    expect(manager.hasValidProbe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).toBe(false);
-  });
-
-  it("PROBE_EXIT_WITHOUT_RESULT_INVALIDATES_OLD_SUCCESS", async () => {
-    await manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
-    expect(manager.hasValidProbe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).toBe(true);
-    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "exit-without-result";
-    await expect(manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).rejects.toThrow("AUDIO_PROBE_PROCESS_EXIT_WITHOUT_RESULT");
-    expect(manager.hasValidProbe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).toBe(false);
-  });
-
-  it("PROBE_FAILED_RESULT_INVALIDATES_OLD_SUCCESS", async () => {
-    await manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
-    expect(manager.hasValidProbe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).toBe(true);
+  it("returns structured partial probe results instead of rejecting one channel", async () => {
     process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "mic-fail";
-    await expect(manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).rejects.toThrow("AUDIO_PROBE_MIC_FAILED");
-    expect(manager.hasValidProbe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).toBe(false);
+    const result = await manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
+    expect(result.mic.streamOk).toBe(false);
+    expect(result.mic.state).toBe("OPEN_FAILED");
+    expect(result.system.streamOk).toBe(true);
+    expect(result.captureMode).toBe("system_only");
   });
 
-  it("PROBE_SUCCESS_REVALIDATES_CURRENT_DEVICES", async () => {
+  it("keeps the last known good probe while a later probe times out", async () => {
     await manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
+    expect(manager.getDiagnostics().lastKnownGood?.result.mic.streamOk).toBe(true);
     process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "timeout";
-    process.env.INTERVIEW_COPILOT_AUDIO_PROBE_TIMEOUT_MS = "100";
+    process.env.INTERVIEW_COPILOT_AUDIO_PROBE_TIMEOUT_MS = "250";
     await expect(manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).rejects.toThrow("AUDIO_PROBE_TIMEOUT");
-    delete process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR;
-    delete process.env.INTERVIEW_COPILOT_AUDIO_PROBE_TIMEOUT_MS;
-    await manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
-    expect(manager.hasValidProbe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).toBe(true);
+    expect(manager.getDiagnostics().lastKnownGood?.result.mic.streamOk).toBe(true);
+    expect(manager.getDiagnostics().lastKnownGood?.result.mic.streamOk).toBe(true);
   });
 
-  it("INTERVIEW_START_WHILE_PROBE_RUNNING", async () => {
+  it("treats a silent callback stream as usable", async () => {
+    process.env.INTERVIEW_COPILOT_TEST_PROBE_BEHAVIOR = "silent";
+    const result = await manager.probe();
+    expect(result.mic.streamOk).toBe(true);
+    expect(result.mic.signalDetected).toBe(false);
+    expect(result.mic.state).toBe("SILENT");
+    expect(manager.getDiagnostics().trace.some((event) => event.stage === "result_emitted")).toBe(true);
+  });
+
+  it("allows formal capture to interrupt an optional probe", async () => {
     const probe = manager.probe();
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    await expect(manager.start({ meterOnly: false })).rejects.toThrow("AUDIO_BUSY");
-    await probe;
+    const probeHandled = probe.catch((error) => error as Error);
+    await expect(manager.start({ meterOnly: false, autoRecover: false })).resolves.toBeUndefined();
+    await expect(probeHandled).resolves.toMatchObject({ message: expect.stringContaining("AUDIO_PROBE_STOPPED") });
   });
 
-  it("PROBE_REENTRY_RETURNS_THE_EXISTING_PROMISE", async () => {
+  it("deduplicates an in-flight probe for the same device selection", async () => {
     const first = manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
     const second = manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
-    const five = Array.from({ length: 5 }, () => manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" }));
     expect(second).toBe(first);
-    expect(five.every((probe) => probe === first)).toBe(true);
-    await expect(Promise.all([first, second, ...five])).resolves.toHaveLength(7);
-    expect(manager.hasValidProbe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" })).toBe(true);
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
   });
 
-  it("PROBE_REENTRY_WITH_DIFFERENT_DEVICES_IS_BUSY", async () => {
-    const first = manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
-    await expect(manager.probe({ inputDeviceId: "another-mic", outputDeviceId: "mock-system" })).rejects.toThrow("AUDIO_PROBE_BUSY");
-    await first;
-  });
-
-  it("PROBE_SUCCESS_ALLOWS_FORMAL_CAPTURE", async () => {
-    await manager.probe();
-    await manager.start({ meterOnly: false, autoRecover: true });
-    expect(manager.runningOptions).toMatchObject({ meterOnly: false, autoRecover: true });
+  it("preserves independent PCM startup diagnostics", async () => {
+    await manager.start({ meterOnly: false, autoRecover: false });
+    const diagnostics = manager.getDiagnostics();
+    expect(diagnostics.sidecarExists).toBe(true);
+    expect(diagnostics.trace.some((event) => event.stage === "sidecar_spawned")).toBe(true);
+    expect(diagnostics.capability?.mic.available).toBe(true);
+    expect(diagnostics.capability?.system.available).toBe(true);
   });
 });

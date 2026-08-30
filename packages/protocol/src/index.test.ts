@@ -76,4 +76,15 @@ describe("audio protocol", () => {
       timestamp: 123
     }))).toMatchObject({ type: "audio_drift", driftMs: 40 });
   });
+
+  it("accepts partial capability and silent channel states", () => {
+    expect(parseAudioSidecarEvent(JSON.stringify({
+      type: "audio_capability",
+      captureMode: "system_only",
+      mic: { state: "OPEN_FAILED", available: false, signalDetected: false, code: "AUDIO_STREAM_OPEN_FAILED" },
+      system: { state: "SILENT", available: true, signalDetected: false, sampleRate: 48_000, channels: 2 },
+      source: "capture",
+      timestamp: 123
+    }))).toMatchObject({ type: "audio_capability", captureMode: "system_only", system: { state: "SILENT", available: true } });
+  });
 });
