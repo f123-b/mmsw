@@ -70,6 +70,9 @@ describe("Claim-level grounding regression", () => {
     expect(answers[1]).toContain("最小实验");
     expect(answers[0]).not.toMatch(WHOLE_ANSWER_FALLBACK);
     expect(answers[1]).not.toMatch(WHOLE_ANSWER_FALLBACK);
-    expect(answers[2]).toContain("不能编造");
+    // Identity abstentions remain an internal ClaimGate decision. The live
+    // stream must not surface the audit/safety fallback copy.
+    expect(answers[2]).not.toContain("不能编造");
+    expect(answers[2]).not.toMatch(WHOLE_ANSWER_FALLBACK);
   });
 });

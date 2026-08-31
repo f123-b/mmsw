@@ -1,5 +1,6 @@
 const MODEL_OPENING = /^(?:这个问题(?:可以从以下几个方面回答|可以这样回答)|下面从以下几个方面回答)[：:，,、\s]*/;
 const MODEL_OPENING_PREFIXES = ["这个问题可以从以下几个方面回答", "这个问题可以这样回答", "下面从以下几个方面回答"];
+const CLAIM_GATE_AUDIT_TEXT = /(?:claim.?gate|blocked.?claim|unsupported.?claim|fallback.?answer|internal.?audit|个人事实当前没有被确认|当前资料(?:里)?没有确认|我不会把项目事实说成个人经历|不能编造|不把推测说成经历|不乱报|资料标签|修正过程)/iu;
 
 export function sanitizeStreamingAnswer(text: string): string {
   return text
@@ -8,6 +9,15 @@ export function sanitizeStreamingAnswer(text: string): string {
     .replace(/\n{3,}/g, "\n\n")
     .replace(MODEL_OPENING, "")
     .trimStart();
+}
+
+/** ClaimGate explanations belong in telemetry, never in the interview HUD. */
+export function stripClaimGateAuditText(text: string): string {
+  return text
+    .split(/(?<=[。！？!?；;\n])/u)
+    .filter((sentence) => !CLAIM_GATE_AUDIT_TEXT.test(sentence))
+    .join("")
+    .trim();
 }
 
 /** Deterministic stream cleanup; it never rewrites technical content. */

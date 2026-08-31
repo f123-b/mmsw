@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { AnswerAgent, classifyAnswerQuestion, ContextRouter, ModelRouter, PromptBuilder, StableAnswerStateMachine, type AnswerProvider } from "./answer";
 import { createEvidenceSnapshot } from "./answer/evidence-context";
 import { InterviewAnswerFormatter } from "./answer/interview-answer-formatter";
-import { StreamingAnswerSanitizer } from "./answer/streaming-answer-sanitizer";
+import { StreamingAnswerSanitizer, stripClaimGateAuditText } from "./answer/streaming-answer-sanitizer";
 
 async function* chunks(values: string[]): AsyncGenerator<string> {
   for (const value of values) yield value;
@@ -288,6 +288,31 @@ describe("Answer routing and generation", () => {
     )) if (event.type === "answer_end") final = event.text;
     expect(final).toContain("ADC");
     expect(final).not.toContain("当前资料");
+  });
+
+  it("never exposes ClaimGate audit or fallback text in a live stream", async () => {
+    const provider: AnswerProvider = {
+      stream: async function* () {
+        yield "我负责了一个项目，最后解决了所有问题。";
+        yield "通用上可以先定位根因，再做回归验证。";
+      }
+    };
+    const deltas: string[] = [];
+    let final = "";
+    for await (const event of new AnswerAgent({ normal: provider }, new ModelRouter({ normal: "test-model" })).stream(
+      { id: "claim-stream-safe", text: "介绍一下你负责的项目" },
+      "NORMAL",
+      {},
+      undefined,
+      { directDisplay: false, emitDeltas: true, allowQualityRepair: false, formatAnswer: false }
+    )) {
+      if (event.type === "answer_delta") deltas.push(event.delta);
+      if (event.type === "answer_end") final = event.text;
+    }
+    const visible = `${deltas.join("")} ${final}`;
+    expect(visible).toContain("定位根因");
+    expect(visible).not.toMatch(/ClaimGate|fallback|blocked.?claim|当前资料|不能编造|不把推测说成经历/iu);
+    expect(stripClaimGateAuditText("claim-gate rewrite。保留技术结论。")).toBe("保留技术结论。");
   });
 
   it("sanitizes safe presentation noise without rewriting technical content", () => {

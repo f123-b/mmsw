@@ -4,7 +4,7 @@ import { SpokenAnswerFormatter } from "./answer/spoken-answer-formatter";
 import { AnswerPlanner, type AnswerPlan } from "./answer/answer-planner";
 import { SpokenQualityChecker } from "./answer/spoken-quality-checker";
 import { answerStrategyFor, classifyAnswerQuestion, type AnswerQuestionKind } from "./answer/answer-strategy";
-import { sanitizeStreamingAnswer, StreamingAnswerSanitizer } from "./answer/streaming-answer-sanitizer";
+import { sanitizeStreamingAnswer, StreamingAnswerSanitizer, stripClaimGateAuditText } from "./answer/streaming-answer-sanitizer";
 import { normalizeTechnicalTerms } from "./terminology";
 import { PersonalAnswerValidator, QuestionAnalyzer } from "./knowledge/index";
 import type { FollowUpContext } from "./follow-up-context";
@@ -452,7 +452,9 @@ class StreamingSentenceClaimGate {
     // claims safe without blocking the rest of the stream.
     const sentenceResult = new ClaimGate().check({ ...this.input, answer: sentence });
     this.elapsed += Math.max(0, performance.now() - startedAt);
-    return sentenceResult.rewrittenAnswer ?? sentenceResult.fallbackAnswer ?? sentence;
+    if (sentenceResult.decision === "abstain") return "";
+    const candidate = sentenceResult.decision === "allow" ? sentence : sentenceResult.rewrittenAnswer ?? "";
+    return stripClaimGateAuditText(candidate);
   }
 }
 
@@ -704,7 +706,7 @@ export class AnswerAgent {
       intent
     });
     if (claimGate.decision !== "allow") {
-      formattedText = claimGate.rewrittenAnswer ?? claimGate.fallbackAnswer ?? formattedText;
+      formattedText = stripClaimGateAuditText(claimGate.rewrittenAnswer ?? "");
       quality = {
         ...quality,
         score: Math.min(quality.score, claimGate.score),
@@ -713,6 +715,7 @@ export class AnswerAgent {
         needsRepair: false
       };
     }
+    formattedText = stripClaimGateAuditText(formattedText);
     quality = {
       ...quality,
       claimGateDecision: claimGate.decision,
