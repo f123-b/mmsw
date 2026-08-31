@@ -14,7 +14,7 @@ import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session
 import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, analyzeQuestionNucleus, AnswerAgent, AgentToolRegistry, buildDynamicTechnicalLexicon, buildSessionTerminologyContext, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeInterviewDirectionSelection, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectAliasResolver, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, resolveInterviewDomainContext, retrieveProfileExperience, routeKnowledge, SessionStateMachine, TechnicalTerminologyNormalizer, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type InterviewDirectionSelection, type InterviewTerminologyPreview, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TerminologyRolloutMode, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
-import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteResumeAnalysisRepository, SqliteRetrievalRepository, SqliteSkillSuggestionRepository, SqliteTerminologyRepository, type SqliteDatabase } from "./database";
+import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteResumeAnalysisRepository, SqliteResumeProjectLinkRepository, SqliteProfileSelfIntroductionRepository, SqliteRetrievalRepository, SqliteSkillSuggestionRepository, SqliteTerminologyRepository, type SqliteDatabase } from "./database";
 import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type OverlayPreferences, type OverlayPreferencesPatch, type ProviderSection } from "./settings-store";
 import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnection } from "./provider-preflight";
 import { INTERVIEW_STARTUP_EVENTS, InterviewStartupTiming, type InterviewStartupEvent } from "./interview-startup-timing";
@@ -224,6 +224,8 @@ let projectRepository: SqliteProjectRepository | undefined;
 let projectMemoryRepository: SqliteProjectMemoryRepository | undefined;
 let profileBuilderRepository: SqliteProfileBuilderRepository | undefined;
 let resumeAnalysisRepository: SqliteResumeAnalysisRepository | undefined;
+let resumeProjectLinkRepository: SqliteResumeProjectLinkRepository | undefined;
+let profileSelfIntroductionRepository: SqliteProfileSelfIntroductionRepository | undefined;
 let skillSuggestionRepository: SqliteSkillSuggestionRepository | undefined;
 let profileBuilderService: ProfileBuilderService | undefined;
 let projectMemoryService: ProjectMemoryService | undefined;
@@ -2515,6 +2517,18 @@ function registerIpc(): void {
     interviewContextCache.release();
     return saved;
   });
+  ipcMain.handle("resume-project-links:list", (_event, profileId: string, resumeHash?: string) => resumeProjectLinkRepository?.list(profileId, resumeHash) ?? []);
+  ipcMain.handle("resume-project-links:save", (_event, input: Parameters<SqliteResumeProjectLinkRepository["save"]>[0]) => resumeProjectLinkRepository?.save(input));
+  ipcMain.handle("resume-project-links:confirm", (_event, linkId: string) => resumeProjectLinkRepository?.confirm(linkId));
+  ipcMain.handle("resume-project-links:delete", (_event, linkId: string) => resumeProjectLinkRepository?.delete(linkId) ?? false);
+  ipcMain.handle("self-introduction:get", (_event, profileId: string, resumeHash?: string) => profileSelfIntroductionRepository?.get(profileId, resumeHash));
+  ipcMain.handle("self-introduction:save", (_event, input: Parameters<SqliteProfileSelfIntroductionRepository["save"]>[0]) => profileSelfIntroductionRepository?.save(input));
+  ipcMain.handle("self-introduction:approve", (_event, input: { id: string; resumeHash?: string }) => profileSelfIntroductionRepository?.approve(input.id, input.resumeHash));
+  ipcMain.handle("self-introduction:continue-using", (_event, input: { id: string; resumeHash: string }) => profileSelfIntroductionRepository?.rebindToCurrent(input.id, input.resumeHash));
+  ipcMain.handle("self-introduction:upload", async (_event, input: { profileId: string; resumeHash: string; filename: string; mimeType: string; bytes: Uint8Array; targetDurationSeconds?: number; language?: string }) => {
+    const parsed = await parseDocument({ documentId: `self-introduction-${Date.now()}`, filename: input.filename, mimeType: input.mimeType, bytes: input.bytes });
+    return profileSelfIntroductionRepository?.save({ profileId: input.profileId, resumeHash: input.resumeHash, text: parsed.text, source: "uploaded", approved: false, targetDurationSeconds: input.targetDurationSeconds, language: input.language });
+  });
   ipcMain.handle("knowledge:list-bases", () => knowledgeRepository?.listKnowledgeBases() ?? []);
   ipcMain.handle("knowledge:create-base", (_event, name: string) => knowledgeRepository?.createKnowledgeBase(name));
   ipcMain.handle("knowledge:rename-base", (_event, knowledgeBaseId: string, name: string) => knowledgeRepository?.renameKnowledgeBase(knowledgeBaseId, name));
@@ -3015,6 +3029,8 @@ if (hasSingleInstanceLock) {
     projectMemoryRepository = new SqliteProjectMemoryRepository(database);
     profileBuilderRepository = new SqliteProfileBuilderRepository(database);
     resumeAnalysisRepository = new SqliteResumeAnalysisRepository(database);
+    resumeProjectLinkRepository = new SqliteResumeProjectLinkRepository(database);
+    profileSelfIntroductionRepository = new SqliteProfileSelfIntroductionRepository(database);
     skillSuggestionRepository = new SqliteSkillSuggestionRepository(database);
     conversationRepository = new SqliteConversationRepository(database);
     terminologyRepository = new SqliteTerminologyRepository(database);

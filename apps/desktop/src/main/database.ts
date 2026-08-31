@@ -860,6 +860,35 @@ export class SqliteDatabase {
         );
         CREATE INDEX IF NOT EXISTS terminology_user_corrections_profile_idx ON terminology_user_corrections(profile_id, created_at DESC);
       `],
+      [37, `
+        CREATE TABLE IF NOT EXISTS resume_project_links (
+          id TEXT PRIMARY KEY,
+          profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+          resume_hash TEXT NOT NULL,
+          resume_project_id TEXT NOT NULL,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          source TEXT NOT NULL DEFAULT 'auto_suggested',
+          confidence REAL NOT NULL DEFAULT 0,
+          confirmed INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(profile_id, resume_hash, resume_project_id, project_id)
+        );
+        CREATE INDEX IF NOT EXISTS resume_project_links_lookup_idx ON resume_project_links(profile_id, resume_hash, confirmed, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS profile_self_introductions (
+          id TEXT PRIMARY KEY,
+          profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+          resume_hash TEXT NOT NULL,
+          text TEXT NOT NULL,
+          source TEXT NOT NULL DEFAULT 'manual',
+          approved INTEGER NOT NULL DEFAULT 0,
+          target_duration_seconds INTEGER,
+          language TEXT NOT NULL DEFAULT 'zh-CN',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS profile_self_introductions_lookup_idx ON profile_self_introductions(profile_id, resume_hash, approved, updated_at DESC);
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -1091,6 +1120,148 @@ export class SqliteResumeAnalysisRepository {
       if (parsed && parsed.version === RESUME_ANALYSIS_VERSION) artifact = parsed;
     } catch { artifact = undefined; }
     return { profileId: String(row.profileId), resumeHash: String(row.resumeHash), analyzerVersion: Number(row.analyzerVersion), analysisQuality: String(row.analysisQuality) === "structured" ? "structured" : "fallback", ...(artifact ? { artifact } : {}), status: current && Boolean(artifact) ? "current" : "stale", createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
+  }
+}
+
+export type ResumeProjectLinkSource = "manual" | "auto_suggested";
+
+export interface ResumeProjectLinkRecord {
+  id: string;
+  profileId: string;
+  resumeHash: string;
+  resumeProjectId: string;
+  projectId: string;
+  source: ResumeProjectLinkSource;
+  confidence: number;
+  confirmed: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ResumeProjectLinkInput {
+  id?: string;
+  profileId: string;
+  resumeHash: string;
+  resumeProjectId: string;
+  projectId: string;
+  source?: ResumeProjectLinkSource;
+  confidence?: number;
+  confirmed?: boolean;
+}
+
+export class SqliteResumeProjectLinkRepository {
+  constructor(private readonly database: SqliteDatabase) {}
+
+  list(profileId: string, resumeHash?: string): ResumeProjectLinkRecord[] {
+    const rows = resumeHash
+      ? this.database.all<Record<string, unknown>>("SELECT id, profile_id AS profileId, resume_hash AS resumeHash, resume_project_id AS resumeProjectId, project_id AS projectId, source, confidence, confirmed, created_at AS createdAt, updated_at AS updatedAt FROM resume_project_links WHERE profile_id = ? AND resume_hash = ? ORDER BY confirmed DESC, confidence DESC, updated_at DESC", [profileId, resumeHash])
+      : this.database.all<Record<string, unknown>>("SELECT id, profile_id AS profileId, resume_hash AS resumeHash, resume_project_id AS resumeProjectId, project_id AS projectId, source, confidence, confirmed, created_at AS createdAt, updated_at AS updatedAt FROM resume_project_links WHERE profile_id = ? ORDER BY confirmed DESC, confidence DESC, updated_at DESC", [profileId]);
+    return rows.map((row) => this.hydrate(row));
+  }
+
+  get(id: string): ResumeProjectLinkRecord | undefined {
+    const row = this.database.first<Record<string, unknown>>("SELECT id, profile_id AS profileId, resume_hash AS resumeHash, resume_project_id AS resumeProjectId, project_id AS projectId, source, confidence, confirmed, created_at AS createdAt, updated_at AS updatedAt FROM resume_project_links WHERE id = ?", [id]);
+    return row ? this.hydrate(row) : undefined;
+  }
+
+  save(input: ResumeProjectLinkInput, now = Date.now()): ResumeProjectLinkRecord {
+    const resumeProjectId = input.resumeProjectId.trim();
+    const projectId = input.projectId.trim();
+    if (!input.profileId || !input.resumeHash || !resumeProjectId || !projectId) throw new Error("RESUME_PROJECT_LINK_REQUIRED");
+    const existing = this.database.first<{ id: string; created_at: number }>("SELECT id, created_at FROM resume_project_links WHERE profile_id = ? AND resume_hash = ? AND resume_project_id = ? AND project_id = ?", [input.profileId, input.resumeHash, resumeProjectId, projectId]);
+    const recordId = input.id ?? existing?.id ?? id("resume-project-link", now);
+    this.database.run("INSERT INTO resume_project_links(id, profile_id, resume_hash, resume_project_id, project_id, source, confidence, confirmed, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(profile_id, resume_hash, resume_project_id, project_id) DO UPDATE SET source=excluded.source, confidence=excluded.confidence, confirmed=excluded.confirmed, updated_at=excluded.updated_at", [recordId, input.profileId, input.resumeHash, resumeProjectId, projectId, input.source ?? "manual", Math.max(0, Math.min(1, input.confidence ?? (input.confirmed ? 1 : 0))), input.confirmed ? 1 : 0, existing?.created_at ?? now, now]);
+    this.database.flushNow();
+    return this.get(recordId) ?? this.list(input.profileId, input.resumeHash)[0];
+  }
+
+  confirm(id: string, now = Date.now()): ResumeProjectLinkRecord | undefined {
+    this.database.run("UPDATE resume_project_links SET source = 'manual', confirmed = 1, confidence = CASE WHEN confidence < 1 THEN 1 ELSE confidence END, updated_at = ? WHERE id = ?", [now, id]);
+    this.database.flushNow();
+    return this.get(id);
+  }
+
+  delete(id: string): boolean {
+    this.database.run("DELETE FROM resume_project_links WHERE id = ?", [id]);
+    this.database.flushNow();
+    return true;
+  }
+
+  private hydrate(row: Record<string, unknown>): ResumeProjectLinkRecord {
+    return { id: String(row.id), profileId: String(row.profileId), resumeHash: String(row.resumeHash), resumeProjectId: String(row.resumeProjectId), projectId: String(row.projectId), source: row.source === "manual" ? "manual" : "auto_suggested", confidence: Math.max(0, Math.min(1, Number(row.confidence ?? 0))), confirmed: Number(row.confirmed) !== 0, createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
+  }
+}
+
+export type ProfileSelfIntroductionSource = "manual" | "uploaded" | "ai_generated";
+export type ProfileSelfIntroductionStatus = "current" | "stale";
+
+export interface ProfileSelfIntroductionRecord {
+  id: string;
+  profileId: string;
+  resumeHash: string;
+  text: string;
+  source: ProfileSelfIntroductionSource;
+  approved: boolean;
+  targetDurationSeconds?: number;
+  language: string;
+  status: ProfileSelfIntroductionStatus;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ProfileSelfIntroductionInput {
+  id?: string;
+  profileId: string;
+  resumeHash: string;
+  text: string;
+  source?: ProfileSelfIntroductionSource;
+  approved?: boolean;
+  targetDurationSeconds?: number;
+  language?: string;
+}
+
+export class SqliteProfileSelfIntroductionRepository {
+  constructor(private readonly database: SqliteDatabase) {}
+
+  get(profileId: string, currentResumeHash?: string): ProfileSelfIntroductionRecord | undefined {
+    const row = this.database.first<Record<string, unknown>>("SELECT id, profile_id AS profileId, resume_hash AS resumeHash, text, source, approved, target_duration_seconds AS targetDurationSeconds, language, created_at AS createdAt, updated_at AS updatedAt FROM profile_self_introductions WHERE profile_id = ? ORDER BY updated_at DESC LIMIT 1", [profileId]);
+    return row ? this.hydrate(row, currentResumeHash) : undefined;
+  }
+
+  save(input: ProfileSelfIntroductionInput, now = Date.now()): ProfileSelfIntroductionRecord {
+    const text = input.text.trim();
+    if (!input.profileId || !input.resumeHash || !text) throw new Error("SELF_INTRODUCTION_REQUIRED");
+    const existing = input.id ? this.getById(input.id) : undefined;
+    const recordId = input.id ?? id("self-introduction", now);
+    this.database.run("INSERT INTO profile_self_introductions(id, profile_id, resume_hash, text, source, approved, target_duration_seconds, language, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET profile_id=excluded.profile_id, resume_hash=excluded.resume_hash, text=excluded.text, source=excluded.source, approved=excluded.approved, target_duration_seconds=excluded.target_duration_seconds, language=excluded.language, updated_at=excluded.updated_at", [recordId, input.profileId, input.resumeHash, text, input.source ?? "manual", input.approved ? 1 : 0, input.targetDurationSeconds ?? null, input.language ?? "zh-CN", existing?.createdAt ?? now, now]);
+    this.database.flushNow();
+    return this.getById(recordId) as ProfileSelfIntroductionRecord;
+  }
+
+  approve(id: string, currentResumeHash?: string, now = Date.now()): ProfileSelfIntroductionRecord | undefined {
+    const record = this.getById(id);
+    if (!record || (currentResumeHash !== undefined && record.resumeHash !== currentResumeHash)) throw new Error("SELF_INTRODUCTION_STALE");
+    this.database.run("UPDATE profile_self_introductions SET approved = 1, updated_at = ? WHERE id = ?", [now, id]);
+    this.database.flushNow();
+    return this.getById(id);
+  }
+
+  rebindToCurrent(id: string, currentResumeHash: string, now = Date.now()): ProfileSelfIntroductionRecord | undefined {
+    const record = this.getById(id);
+    if (!record || !currentResumeHash) return undefined;
+    this.database.run("UPDATE profile_self_introductions SET resume_hash = ?, approved = 1, updated_at = ? WHERE id = ?", [currentResumeHash, now, id]);
+    this.database.flushNow();
+    return this.getById(id);
+  }
+
+  private getById(id: string): ProfileSelfIntroductionRecord | undefined {
+    const row = this.database.first<Record<string, unknown>>("SELECT id, profile_id AS profileId, resume_hash AS resumeHash, text, source, approved, target_duration_seconds AS targetDurationSeconds, language, created_at AS createdAt, updated_at AS updatedAt FROM profile_self_introductions WHERE id = ?", [id]);
+    return row ? this.hydrate(row) : undefined;
+  }
+
+  private hydrate(row: Record<string, unknown>, currentResumeHash?: string): ProfileSelfIntroductionRecord {
+    const duration = row.targetDurationSeconds === null || row.targetDurationSeconds === undefined ? undefined : Number(row.targetDurationSeconds);
+    return { id: String(row.id), profileId: String(row.profileId), resumeHash: String(row.resumeHash), text: String(row.text), source: row.source === "uploaded" || row.source === "ai_generated" ? row.source : "manual", approved: Number(row.approved) !== 0, ...(duration ? { targetDurationSeconds: duration } : {}), language: String(row.language || "zh-CN"), status: currentResumeHash !== undefined && String(row.resumeHash) !== currentResumeHash ? "stale" : "current", createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt) };
   }
 }
 

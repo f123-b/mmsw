@@ -16,7 +16,7 @@ import type { OverlayPreferences, OverlayPreferencesPatch, TencentValidationStat
 import type { SessionState } from "@interview-copilot/shared";
 import type { ChatAction, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectQaGenerationResult, ProjectQuestionBankImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord, SkillSuggestion, SkillSuggestionStatus } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankRelationInput, QuestionBankRouteQuery, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord, ResumeAnalysisRecord } from "../main/database";
+import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankRelationInput, QuestionBankRouteQuery, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord, ResumeAnalysisRecord, ResumeProjectLinkInput, ResumeProjectLinkRecord, ProfileSelfIntroductionInput, ProfileSelfIntroductionRecord } from "../main/database";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 import type { ModelCatalogResult } from "../main/model-catalog";
@@ -172,6 +172,19 @@ const api = {
     get: (profileId: string): Promise<ResumeAnalysisRecord | undefined> => ipcRenderer.invoke("resume-analysis:get", profileId),
     getJob: (jobId: string): Promise<ProfileAnalysisJob | undefined> => ipcRenderer.invoke("resume-analysis:get-job", jobId),
     cancel: (jobId: string): Promise<ProfileAnalysisJob | undefined> => ipcRenderer.invoke("resume-analysis:cancel", jobId)
+  },
+  resumeProjectLinks: {
+    list: (profileId: string, resumeHash?: string): Promise<ResumeProjectLinkRecord[]> => ipcRenderer.invoke("resume-project-links:list", profileId, resumeHash),
+    save: (input: ResumeProjectLinkInput): Promise<ResumeProjectLinkRecord | undefined> => ipcRenderer.invoke("resume-project-links:save", input),
+    confirm: (linkId: string): Promise<ResumeProjectLinkRecord | undefined> => ipcRenderer.invoke("resume-project-links:confirm", linkId),
+    delete: (linkId: string): Promise<boolean> => ipcRenderer.invoke("resume-project-links:delete", linkId)
+  },
+  selfIntroduction: {
+    get: (profileId: string, resumeHash?: string): Promise<ProfileSelfIntroductionRecord | undefined> => ipcRenderer.invoke("self-introduction:get", profileId, resumeHash),
+    save: (input: ProfileSelfIntroductionInput): Promise<ProfileSelfIntroductionRecord | undefined> => ipcRenderer.invoke("self-introduction:save", input),
+    approve: (id: string, resumeHash?: string): Promise<ProfileSelfIntroductionRecord | undefined> => ipcRenderer.invoke("self-introduction:approve", { id, resumeHash }),
+    continueUsing: (id: string, resumeHash: string): Promise<ProfileSelfIntroductionRecord | undefined> => ipcRenderer.invoke("self-introduction:continue-using", { id, resumeHash }),
+    upload: (input: { profileId: string; resumeHash: string; filename: string; mimeType: string; bytes: Uint8Array; targetDurationSeconds?: number; language?: string }): Promise<ProfileSelfIntroductionRecord | undefined> => ipcRenderer.invoke("self-introduction:upload", input)
   },
   projectMemory: {
     get: (profileId: string) => ipcRenderer.invoke("project-memory:get", profileId),

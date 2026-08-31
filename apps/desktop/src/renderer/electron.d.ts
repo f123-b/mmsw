@@ -14,7 +14,7 @@ import type { SessionState } from "@interview-copilot/shared";
 import type { RuntimeOperationMode } from "../shared/runtime-operation-mode";
 import type { ChatAction, KnowledgeDocumentType, Profile, ProfileInput, ProjectAnalysisJob, ProjectFact, ProjectMaterialImportReport, ProjectMemorySnapshot, ProjectQaGenerationResult, ProjectQuestionBankImportReport, ProjectSourceRole, ProviderSettings, QuestionBankCoverageResult, QuestionBankJobProfileRecord, QuestionBankQuestionRecord, QuestionBankRelationRecord, QuestionBankRouteResult, QuestionBankSkillRecord, QuestionBankAnswerCardRecord, SkillSuggestion, SkillSuggestionStatus } from "@interview-copilot/shared";
 import type { LlmModelProfileInput, OverlayPreferences, OverlayPreferencesPatch, ProviderCenterPublicConfig, PublicProviderSettings, ProviderSection, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
-import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectAnalysisState, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankRelationInput, QuestionBankRouteQuery, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord, ResumeAnalysisRecord } from "../main/database";
+import type { ConversationMessageRecord, ConversationRecord, JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectAnalysisState, ProjectMemoryStats, ProjectRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankJobProfileInput, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankRelationInput, QuestionBankRouteQuery, QuestionBankSkillInput, QuestionBankSkillPointInput, RetrievalRunRecord, ResumeAnalysisRecord, ResumeProjectLinkInput, ResumeProjectLinkRecord, ProfileSelfIntroductionInput, ProfileSelfIntroductionRecord } from "../main/database";
 import type { ProfileAnalysisJob } from "../main/profile-analysis-job";
 import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provider-preflight";
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
@@ -143,6 +143,19 @@ declare global {
         get(profileId: string): Promise<ResumeAnalysisRecord | undefined>;
         getJob(jobId: string): Promise<ProfileAnalysisJob | undefined>;
         cancel(jobId: string): Promise<ProfileAnalysisJob | undefined>;
+      };
+      resumeProjectLinks: {
+        list(profileId: string, resumeHash?: string): Promise<ResumeProjectLinkRecord[]>;
+        save(input: ResumeProjectLinkInput): Promise<ResumeProjectLinkRecord | undefined>;
+        confirm(linkId: string): Promise<ResumeProjectLinkRecord | undefined>;
+        delete(linkId: string): Promise<boolean>;
+      };
+      selfIntroduction: {
+        get(profileId: string, resumeHash?: string): Promise<ProfileSelfIntroductionRecord | undefined>;
+        save(input: ProfileSelfIntroductionInput): Promise<ProfileSelfIntroductionRecord | undefined>;
+        approve(id: string, resumeHash?: string): Promise<ProfileSelfIntroductionRecord | undefined>;
+        continueUsing(id: string, resumeHash: string): Promise<ProfileSelfIntroductionRecord | undefined>;
+        upload(input: { profileId: string; resumeHash: string; filename: string; mimeType: string; bytes: Uint8Array; targetDurationSeconds?: number; language?: string }): Promise<ProfileSelfIntroductionRecord | undefined>;
       };
       projectMemory: {
         get(profileId: string): Promise<ProjectMemorySnapshot | undefined>;

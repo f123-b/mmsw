@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, SqliteTerminologyRepository } from "./database";
+import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteResumeProjectLinkRepository, SqliteProfileSelfIntroductionRepository, SqliteRetrievalRepository, SqliteTerminologyRepository } from "./database";
 import type { ProjectUnderstanding } from "@interview-copilot/shared";
 
 describe("SQLite persistence", () => {
@@ -254,7 +254,7 @@ describe("SQLite persistence", () => {
   it("applies migration 23 ownership and technical memory semantics", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(36);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(37);
       expect(database.all<{ name: string }>("PRAGMA table_info(projects)").map((row) => row.name)).toEqual(expect.arrayContaining(["ownership_mode", "ownership_note"]));
       expect(database.all<{ name: string }>("PRAGMA table_info(project_facts)").map((row) => row.name)).toEqual(expect.arrayContaining(["experience_relation", "value_json"]));
       new SqliteProfileRepository(database).save({ id: "profile-v4", name: "V4", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
@@ -516,7 +516,7 @@ describe("SQLite persistence", () => {
       first.close();
       const second = await SqliteDatabase.open(filePath);
       try {
-      expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(36);
+      expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(37);
         const repaired = new SqliteProjectMemoryRepository(second);
         repaired.repairProjectTechnicalSemantics("project-migration");
         expect(repaired.listFacts(profile.id, "project-migration", { includeStale: true, includeRejected: true })).toHaveLength(2);
@@ -555,7 +555,7 @@ describe("SQLite persistence", () => {
       expect(memory.getUnderstandingSnapshot(project.id, "hash-a")?.understanding.summary).toContain("可缓存");
       expect(memory.getSnapshot(profile.id).understandings?.[0]?.projectId).toBe(project.id);
       expect(memory.getUnderstandingSnapshot(project.id, "different-hash")).toBeUndefined();
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(36);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(37);
     } finally { database.close(); }
   });
 
@@ -611,6 +611,28 @@ describe("SQLite persistence", () => {
       const assistant = conversations.addMessage({ conversationId: conversation.id, role: "assistant", content: response.text, status: "completed", structuredResponse: response });
       expect(conversations.get(conversation.id)?.messages.find((message) => message.id === assistant.id)?.structuredResponse).toEqual(response);
       expect(questionBank.coverage().overallCoverage).toBe(100);
+    } finally { database.close(); }
+  });
+
+  it("persists explicit resume project links and marks self introduction stale after resume hash changes", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const profiles = new SqliteProfileRepository(database);
+      const profile = profiles.save({ name: "链接测试", language: "zh-CN", skills: [], knowledgeBaseIds: [] });
+      const projects = new SqliteProjectRepository(database);
+      const project = projects.create("支付项目", profile.id);
+      const links = new SqliteResumeProjectLinkRepository(database);
+      const link = links.save({ profileId: profile.id, resumeHash: "resume-a", resumeProjectId: "resume-project-1", projectId: project.id, source: "auto_suggested", confidence: 0.91 });
+      expect(link.confirmed).toBe(false);
+      expect(links.confirm(link.id)?.confirmed).toBe(true);
+      expect(links.list(profile.id, "resume-a")).toHaveLength(1);
+      const introductions = new SqliteProfileSelfIntroductionRepository(database);
+      const intro = introductions.save({ profileId: profile.id, resumeHash: "resume-a", text: "我是一名嵌入式工程师。", source: "manual" });
+      expect(introductions.get(profile.id, "resume-a")).toMatchObject({ id: intro.id, status: "current", approved: false });
+      introductions.approve(intro.id, "resume-a");
+      expect(introductions.get(profile.id, "resume-b")).toMatchObject({ id: intro.id, status: "stale", approved: true });
+      expect(() => introductions.approve(intro.id, "resume-b")).toThrow("SELF_INTRODUCTION_STALE");
+      expect(introductions.rebindToCurrent(intro.id, "resume-b")?.resumeHash).toBe("resume-b");
     } finally { database.close(); }
   });
 });
