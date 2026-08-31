@@ -39,7 +39,7 @@ interface ProfileWorkspacePageProps {
   projects: ProjectRecord[];
   resumeProjectLinks: ResumeProjectLinkRecord[];
   selfIntroduction?: ProfileSelfIntroductionRecord;
-  onSaveResumeProjectLink: (resumeProjectId: string, projectId: string) => void;
+  onSaveResumeProjectLink: (resumeProjectId: string, projectId: string, confirmed?: boolean) => void;
   onCreateProjectForResume: (resumeProjectId: string, name: string) => void;
   onSaveSelfIntroduction: (text: string, targetDurationSeconds: number, language: string) => void;
   onUploadSelfIntroduction: (file: File) => void;

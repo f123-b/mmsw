@@ -2548,17 +2548,19 @@ function registerIpc(): void {
     return saved;
   });
   ipcMain.handle("resume-project-links:list", (_event, profileId: string, resumeHash?: string) => resumeProjectLinkRepository?.list(profileId, resumeHash) ?? []);
-  ipcMain.handle("resume-project-links:save", (_event, input: Parameters<SqliteResumeProjectLinkRepository["save"]>[0]) => resumeProjectLinkRepository?.save({ ...input, resumeHash: input.resumeHash || currentResumeHash(input.profileId) }));
-  ipcMain.handle("resume-project-links:confirm", (_event, linkId: string) => resumeProjectLinkRepository?.confirm(linkId));
-  ipcMain.handle("resume-project-links:delete", (_event, linkId: string) => resumeProjectLinkRepository?.delete(linkId) ?? false);
+  ipcMain.handle("resume-project-links:save", (_event, input: Parameters<SqliteResumeProjectLinkRepository["save"]>[0]) => { const result = resumeProjectLinkRepository?.save({ ...input, resumeHash: input.resumeHash || currentResumeHash(input.profileId) }); releaseInterviewCaches(); return result; });
+  ipcMain.handle("resume-project-links:confirm", (_event, linkId: string) => { const result = resumeProjectLinkRepository?.confirm(linkId); releaseInterviewCaches(); return result; });
+  ipcMain.handle("resume-project-links:delete", (_event, linkId: string) => { const result = resumeProjectLinkRepository?.delete(linkId) ?? false; releaseInterviewCaches(); return result; });
   ipcMain.handle("self-introduction:get", (_event, profileId: string, resumeHash?: string) => profileSelfIntroductionRepository?.get(profileId, resumeHash ?? currentResumeHash(profileId)));
-  ipcMain.handle("self-introduction:save", (_event, input: Parameters<SqliteProfileSelfIntroductionRepository["save"]>[0]) => profileSelfIntroductionRepository?.save({ ...input, resumeHash: input.resumeHash || currentResumeHash(input.profileId) }));
-  ipcMain.handle("self-introduction:approve", (_event, input: { id: string; resumeHash?: string }) => { const record = profileSelfIntroductionRepository?.getById(input.id); return profileSelfIntroductionRepository?.approve(input.id, input.resumeHash ?? (record ? currentResumeHash(record.profileId) : undefined)); });
-  ipcMain.handle("self-introduction:continue-using", (_event, input: { id: string; resumeHash: string }) => { const record = profileSelfIntroductionRepository?.getById(input.id); return record ? profileSelfIntroductionRepository?.rebindToCurrent(input.id, input.resumeHash || currentResumeHash(record.profileId)) : undefined; });
-  ipcMain.handle("self-introduction:generate", (_event, input: { profileId: string; targetDurationSeconds?: number; language?: string }) => generateSelfIntroduction(input.profileId, input.targetDurationSeconds, input.language));
+  ipcMain.handle("self-introduction:save", (_event, input: Parameters<SqliteProfileSelfIntroductionRepository["save"]>[0]) => { const result = profileSelfIntroductionRepository?.save({ ...input, resumeHash: input.resumeHash || currentResumeHash(input.profileId) }); releaseInterviewCaches(); return result; });
+  ipcMain.handle("self-introduction:approve", (_event, input: { id: string; resumeHash?: string }) => { const record = profileSelfIntroductionRepository?.getById(input.id); const result = profileSelfIntroductionRepository?.approve(input.id, input.resumeHash ?? (record ? currentResumeHash(record.profileId) : undefined)); releaseInterviewCaches(); return result; });
+  ipcMain.handle("self-introduction:continue-using", (_event, input: { id: string; resumeHash: string }) => { const record = profileSelfIntroductionRepository?.getById(input.id); const result = record ? profileSelfIntroductionRepository?.rebindToCurrent(input.id, input.resumeHash || currentResumeHash(record.profileId)) : undefined; releaseInterviewCaches(); return result; });
+  ipcMain.handle("self-introduction:generate", async (_event, input: { profileId: string; targetDurationSeconds?: number; language?: string }) => { const result = await generateSelfIntroduction(input.profileId, input.targetDurationSeconds, input.language); releaseInterviewCaches(); return result; });
   ipcMain.handle("self-introduction:upload", async (_event, input: { profileId: string; resumeHash: string; filename: string; mimeType: string; bytes: Uint8Array; targetDurationSeconds?: number; language?: string }) => {
     const parsed = await parseDocument({ documentId: `self-introduction-${Date.now()}`, filename: input.filename, mimeType: input.mimeType, bytes: input.bytes });
-    return profileSelfIntroductionRepository?.save({ profileId: input.profileId, resumeHash: input.resumeHash || currentResumeHash(input.profileId), text: parsed.text, source: "uploaded", approved: false, targetDurationSeconds: input.targetDurationSeconds, language: input.language });
+    const result = profileSelfIntroductionRepository?.save({ profileId: input.profileId, resumeHash: input.resumeHash || currentResumeHash(input.profileId), text: parsed.text, source: "uploaded", approved: false, targetDurationSeconds: input.targetDurationSeconds, language: input.language });
+    releaseInterviewCaches();
+    return result;
   });
   ipcMain.handle("knowledge:list-bases", () => knowledgeRepository?.listKnowledgeBases() ?? []);
   ipcMain.handle("knowledge:create-base", (_event, name: string) => knowledgeRepository?.createKnowledgeBase(name));
@@ -2591,8 +2593,10 @@ function registerIpc(): void {
       if ((documentType === "project" || documentType === "technical-doc") && input.profileId && projectMemoryService) {
         const requestedRole = input.sourceRole && input.sourceRole !== "auto" ? input.sourceRole : undefined;
         const assignment = projectMemoryService.assignDocument(input.profileId, saved.id, input.projectId, requestedRole);
+        releaseInterviewCaches();
         return { ...saved, projectAssignment: assignment, ...(assignment.status === "needs_assignment" ? { error: assignment.message } : {}) };
       }
+      releaseInterviewCaches();
       return saved;
     } catch (error) {
       const saved = knowledgeRepository.saveDocument({ id: document.id, ...parsed, knowledgeBaseId: knowledgeBase.id, documentType, status: "error", error: String(error) });
@@ -2602,16 +2606,19 @@ function registerIpc(): void {
   ipcMain.handle("knowledge:ingest-project-materials", async (_event, input: { profileId: string; projectId: string; knowledgeBaseId: string; files: import("@interview-copilot/shared").ProjectMaterialImportFile[] }) => {
     if (!projectMemoryService) throw new Error("Project Memory is still initializing");
     const report = await projectMemoryService.importProjectMaterials(input);
+    releaseInterviewCaches();
     return report;
   });
   ipcMain.handle("knowledge:ingest-project-question-bank", async (_event, input: { profileId: string; projectId: string; filename: string; mimeType: string; bytes: Uint8Array }) => {
     if (!questionBankRepository) throw new Error("Question Bank is still initializing");
     const bytes = normalizeDocumentBytes(input.bytes);
     const parsed = await parseDocument({ documentId: `project-qa-${Date.now()}`, filename: input.filename, mimeType: input.mimeType, bytes });
-    return questionBankRepository.importProjectText(input.profileId, input.projectId, parsed.text, input.filename);
+    const report = questionBankRepository.importProjectText(input.profileId, input.projectId, parsed.text, input.filename);
+    releaseInterviewCaches();
+    return report;
   });
-  ipcMain.handle("knowledge:delete", (_event, documentId: string) => { for (const assignment of projectMemoryRepository?.sourcesFor("document", documentId) ?? []) projectMemoryRepository?.unassignSource(assignment.projectId, "document", documentId); knowledgeRepository?.deleteDocument(documentId); return true; });
-  ipcMain.handle("knowledge:update-type", (_event, documentId: string, documentType: KnowledgeDocumentType) => knowledgeRepository?.updateDocumentType(documentId, documentType));
+  ipcMain.handle("knowledge:delete", (_event, documentId: string) => { for (const assignment of projectMemoryRepository?.sourcesFor("document", documentId) ?? []) projectMemoryRepository?.unassignSource(assignment.projectId, "document", documentId); knowledgeRepository?.deleteDocument(documentId); releaseInterviewCaches(); return true; });
+  ipcMain.handle("knowledge:update-type", (_event, documentId: string, documentType: KnowledgeDocumentType) => { const result = knowledgeRepository?.updateDocumentType(documentId, documentType); releaseInterviewCaches(); return result; });
   ipcMain.handle("knowledge:reindex", async (_event, documentId: string) => {
     if (!knowledgeRepository) throw new Error("Knowledge database is still initializing");
     const document = knowledgeRepository.getDocument(documentId);
@@ -2622,9 +2629,11 @@ function registerIpc(): void {
       await embedKnowledgeChunks(chunks, embeddingSettings);
       knowledgeRepository.replaceChunks(document.id, chunks);
       const saved = knowledgeRepository.saveDocument({ ...document, status: "ready", error: undefined });
+      releaseInterviewCaches();
       return saved;
     } catch (error) {
       const saved = knowledgeRepository.saveDocument({ ...document, status: "error", error: String(error) });
+      releaseInterviewCaches();
       return saved;
     }
   });
@@ -2650,8 +2659,8 @@ function registerIpc(): void {
   ipcMain.handle("question-bank:coverage", (_event, jobProfileId?: string) => questionBankRepository?.coverage(jobProfileId) ?? { overallCoverage: 0, topics: [], missingSkills: [], generatedAt: Date.now() });
   ipcMain.handle("question-bank:save-job", (_event, input: Parameters<SqliteQuestionBankRepository["saveJobProfile"]>[0]) => questionBankRepository?.saveJobProfile(input));
   ipcMain.handle("question-bank:import-text", (_event, input: { text: string; filename?: string; includeProject?: boolean; includeBehavioral?: boolean }) => questionBankRepository?.importText(input.text, input.filename, { includeProject: input.includeProject, includeBehavioral: input.includeBehavioral }));
-  ipcMain.handle("question-bank:generate-answers", (_event, input?: { questionIds?: string[]; onlyUnanswered?: boolean }) => generateQuestionBankAnswers(input));
-  ipcMain.handle("question-bank:generate-project-qa", (_event, projectId: string) => generateProjectQuestionBank(projectId));
+  ipcMain.handle("question-bank:generate-answers", async (_event, input?: { questionIds?: string[]; onlyUnanswered?: boolean }) => { const result = await generateQuestionBankAnswers(input); releaseInterviewCaches(); return result; });
+  ipcMain.handle("question-bank:generate-project-qa", async (_event, projectId: string) => { const result = await generateProjectQuestionBank(projectId); releaseInterviewCaches(); return result; });
   ipcMain.handle("question-bank:match", (_event, text: string) => questionBankRepository?.matchQuestion(text));
   ipcMain.handle("profile-builder:get", (_event, profileId: string) => profileBuilderService?.get(profileId));
   ipcMain.handle("profile-builder:list-skill-suggestions", (_event, profileId: string, status?: import("@interview-copilot/shared").SkillSuggestionStatus) => skillSuggestionRepository?.list(profileId, status) ?? []);

@@ -1678,12 +1678,12 @@ export function App(): JSX.Element {
   const addSkill = async () => { if (!selectedProfile) return; const name = await requestDialog({ kind: "form", title: "新增 Skill", label: "Skill 名称", required: true }); if (typeof name !== "string" || !name.trim()) return; const content = await requestDialog({ kind: "form", title: "Skill 内容", label: "内容", multiline: true, confirmLabel: "保存" }); const skill = { id: `skill-${Date.now()}`, name: name.trim(), description: "", content: typeof content === "string" ? content : "", tags: [] }; const updated = await window.interviewCopilot.profiles.save({ ...selectedProfile, skills: [...selectedProfile.skills, skill] }); if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); };
   const editSkill = async (skillId: string) => { if (!selectedProfile) return; const skill = selectedProfile.skills.find((item) => item.id === skillId); if (!skill) return; const content = await requestDialog({ kind: "form", title: `编辑 Skill：${skill.name}`, label: "内容", defaultValue: skill.content, multiline: true, confirmLabel: "保存" }); if (typeof content !== "string") return; const updated = await window.interviewCopilot.profiles.save({ ...selectedProfile, skills: selectedProfile.skills.map((item) => item.id === skillId ? { ...item, content } : item) }); if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); };
   const removeProfileMaterial = async (kind: "resume" | "jobDescription") => { if (!selectedProfile) return; const updated = await window.interviewCopilot.profiles.removeMaterial(selectedProfile.id, kind); if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); if (kind === "resume") { setResumeAnalysis(undefined); void window.interviewCopilot.selfIntroduction.get(profileId).then(setSelfIntroduction).catch(() => setSelfIntroduction(undefined)); } };
-  const saveResumeProjectLink = async (resumeProjectId: string, projectId: string) => {
+  const saveResumeProjectLink = async (resumeProjectId: string, projectId: string, confirmed = true) => {
     if (!profileId) return;
     try {
-      const saved = await window.interviewCopilot.resumeProjectLinks.save({ profileId, resumeHash: "", resumeProjectId, projectId, source: "manual", confidence: 1, confirmed: true });
+      const saved = await window.interviewCopilot.resumeProjectLinks.save({ profileId, resumeHash: "", resumeProjectId, projectId, source: confirmed ? "manual" : "auto_suggested", confidence: confirmed ? 1 : 0.88, confirmed });
       if (saved) setResumeProjectLinks((current) => [saved, ...current.filter((item) => !(item.resumeProjectId === saved.resumeProjectId && item.projectId === saved.projectId))]);
-      store.setNotice("Resume 项目关联已确认");
+      store.setNotice(confirmed ? "Resume 项目关联已确认" : "已保存项目关联建议，确认后才会影响路由");
     } catch (error) { store.setNotice(`项目关联失败：${userFacingError(error)}`); }
   };
   const createProjectForResume = async (resumeProjectId: string, name: string) => {
