@@ -87,6 +87,8 @@ import {
   type RepositoryManifest,
   type RepositorySourceFile,
   type RepositorySkippedFile
+  , type TechnicalDomain
+  , type TechnicalTerm
 } from "@interview-copilot/shared";
 import type { ChatCancelReason, ChatMessageStatus, ChatResponse, ChatStreamTelemetry } from "@interview-copilot/shared";
 
@@ -832,6 +834,32 @@ export class SqliteDatabase {
         );
         CREATE INDEX IF NOT EXISTS resume_analyses_profile_idx ON resume_analyses(profile_id, updated_at DESC);
       `],
+      [36, `
+        CREATE TABLE IF NOT EXISTS terminology_custom_terms (
+          id TEXT PRIMARY KEY,
+          profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+          canonical TEXT NOT NULL,
+          aliases_json TEXT NOT NULL DEFAULT '[]',
+          phonetic_aliases_json TEXT NOT NULL DEFAULT '[]',
+          domains_json TEXT NOT NULL DEFAULT '[]',
+          tags_json TEXT NOT NULL DEFAULT '[]',
+          priority INTEGER NOT NULL DEFAULT 120,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(profile_id, canonical)
+        );
+        CREATE INDEX IF NOT EXISTS terminology_custom_terms_profile_idx ON terminology_custom_terms(profile_id, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS terminology_user_corrections (
+          id TEXT PRIMARY KEY,
+          profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+          raw TEXT NOT NULL,
+          canonical TEXT NOT NULL,
+          confidence REAL NOT NULL,
+          source TEXT NOT NULL DEFAULT 'user',
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS terminology_user_corrections_profile_idx ON terminology_user_corrections(profile_id, created_at DESC);
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -858,6 +886,59 @@ export async function openAppDatabase(appDataPath: string): Promise<SqliteDataba
   const directory = join(appDataPath, APP_DATA_DIRECTORY);
   await mkdir(directory, { recursive: true });
   return SqliteDatabase.open(join(directory, "interview-copilot.sqlite"));
+}
+
+export interface TerminologyCustomTermInput {
+  profileId: string;
+  canonical: string;
+  aliases?: string[];
+  phoneticAliases?: string[];
+  domains?: TechnicalDomain[];
+  tags?: string[];
+  priority?: number;
+}
+
+export interface TerminologyUserCorrectionRecord {
+  id: string;
+  profileId: string;
+  raw: string;
+  canonical: string;
+  confidence: number;
+  source: "user";
+  createdAt: number;
+}
+
+export class SqliteTerminologyRepository {
+  constructor(private readonly database: SqliteDatabase) {}
+
+  listTerms(profileId: string): TechnicalTerm[] {
+    return this.database.all<{ id: string; canonical: string; aliases_json: string; phonetic_aliases_json: string; domains_json: string; tags_json: string; priority: number }>("SELECT id, canonical, aliases_json, phonetic_aliases_json, domains_json, tags_json, priority FROM terminology_custom_terms WHERE profile_id = ? ORDER BY updated_at DESC", [profileId]).map((row) => ({ id: row.id, canonical: row.canonical, aliases: safeJson<string[]>(row.aliases_json) ?? [], phoneticAliases: safeJson<string[]>(row.phonetic_aliases_json) ?? [], domains: safeJson<TechnicalDomain[]>(row.domains_json) ?? ["common_cs"], tags: safeJson<string[]>(row.tags_json) ?? [], source: "user", priority: row.priority }));
+  }
+
+  addTerm(input: TerminologyCustomTermInput, now = Date.now()): TechnicalTerm {
+    const canonical = input.canonical.trim();
+    if (!canonical) throw new Error("TERMINOLOGY_CANONICAL_REQUIRED");
+    const term: TechnicalTerm = { id: id("terminology", now), canonical, aliases: [...new Set([canonical, ...(input.aliases ?? [])].map((value) => value.trim()).filter(Boolean))], phoneticAliases: [...new Set((input.phoneticAliases ?? []).map((value) => value.trim()).filter(Boolean))], domains: input.domains?.length ? input.domains : ["common_cs"], tags: input.tags ?? [], source: "user", priority: input.priority ?? 120 };
+    this.database.run("INSERT INTO terminology_custom_terms(id, profile_id, canonical, aliases_json, phonetic_aliases_json, domains_json, tags_json, priority, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(profile_id, canonical) DO UPDATE SET aliases_json=excluded.aliases_json, phonetic_aliases_json=excluded.phonetic_aliases_json, domains_json=excluded.domains_json, tags_json=excluded.tags_json, priority=excluded.priority, updated_at=excluded.updated_at", [term.id, input.profileId, term.canonical, JSON.stringify(term.aliases), JSON.stringify(term.phoneticAliases), JSON.stringify(term.domains), JSON.stringify(term.tags), term.priority, now, now]);
+    return this.listTerms(input.profileId).find((item) => item.canonical === term.canonical) ?? term;
+  }
+
+  deleteTerm(profileId: string, canonical: string): boolean {
+    this.database.run("DELETE FROM terminology_custom_terms WHERE profile_id = ? AND canonical = ?", [profileId, canonical]);
+    return true;
+  }
+
+  learnCorrection(profileId: string, raw: string, canonical: string, confidence = 1, now = Date.now()): TerminologyUserCorrectionRecord {
+    const record = { id: id("terminology-correction", now), profileId, raw: raw.trim(), canonical: canonical.trim(), confidence: Math.max(0, Math.min(1, confidence)), source: "user" as const, createdAt: now };
+    if (!record.raw || !record.canonical) throw new Error("TERMINOLOGY_CORRECTION_REQUIRED");
+    this.database.run("INSERT INTO terminology_user_corrections(id, profile_id, raw, canonical, confidence, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [record.id, record.profileId, record.raw, record.canonical, record.confidence, record.source, record.createdAt]);
+    this.addTerm({ profileId, canonical: record.canonical, aliases: [record.raw], priority: 130 }, now);
+    return record;
+  }
+
+  listCorrections(profileId: string): TerminologyUserCorrectionRecord[] {
+    return this.database.all<{ id: string; profile_id: string; raw: string; canonical: string; confidence: number; source: "user"; created_at: number }>("SELECT id, profile_id, raw, canonical, confidence, source, created_at FROM terminology_user_corrections WHERE profile_id = ? ORDER BY created_at DESC", [profileId]).map((row) => ({ id: row.id, profileId: row.profile_id, raw: row.raw, canonical: row.canonical, confidence: row.confidence, source: "user", createdAt: row.created_at }));
+  }
 }
 
 export class SqliteProfileRepository {

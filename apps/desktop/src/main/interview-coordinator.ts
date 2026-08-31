@@ -12,7 +12,6 @@ import {
   normalizeTechnicalTerms,
   buildDynamicTechnicalLexicon,
   classifyQuestionSemanticFrame,
-  resolveContextualTerminology,
   ContextAnchorResolver,
   ContextAnchorStore,
   AnswerScheduler,
@@ -31,6 +30,9 @@ import {
   QuestionDetector2,
   SessionStateMachine,
   PendingQuestionDraftAssembler,
+  TechnicalTerminologyNormalizer,
+  buildSessionTerminologyContext,
+  splitIntraSegmentQuestions,
   type PendingQuestionDraft,
   type PendingQuestionDraftUpdate,
   TurnCompletionGate,
@@ -55,6 +57,8 @@ import {
   type FollowUpContext,
   type VisionInput,
   type QuestionGroup
+  , type SessionTerminologyContext
+  , type TerminologyRolloutMode
 } from "@interview-copilot/shared";
 import type { AudioStartOptions } from "./audio-manager";
 import type { RealtimeConnectOptions, RealtimeConnectionState } from "./realtime-session";
@@ -105,6 +109,8 @@ export interface InterviewStartOptions extends Omit<RealtimeConnectOptions, "aut
   answerMode: AnswerMode;
   language?: string;
   terminologyLexicon?: DynamicTechnicalLexicon;
+  terminologyContext?: SessionTerminologyContext;
+  terminologyMode?: TerminologyRolloutMode;
 }
 
 export interface InterviewContextSelection {
@@ -139,6 +145,8 @@ export interface InterviewCoordinatorOptions {
   history?: InterviewHistoryPort;
   contextProvider?: (question: QuestionCandidate, profileId: string, recentTranscript: string[], context?: InterviewContextSelection) => AnswerContextInput | Promise<AnswerContextInput>;
   terminologyLexiconProvider?: (profileId: string, projectId?: string, jobTargetId?: string) => DynamicTechnicalLexicon | Promise<DynamicTechnicalLexicon>;
+  terminologyContextProvider?: (profileId: string, projectId?: string, jobTargetId?: string) => SessionTerminologyContext | Promise<SessionTerminologyContext>;
+  terminologyModeProvider?: (profileId: string) => TerminologyRolloutMode;
   asrSettingsProvider?: (profileId: string) => Pick<RealtimeConnectOptions, "providerType" | "providerName" | "model" | "language" | "url">;
   interviewBrain?: InterviewBrain;
   now?: () => number;
@@ -207,6 +215,7 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly anchorResolver = new ContextAnchorResolver();
   private readonly anchorStore: ContextAnchorStore;
   private sessionTerminologyLexicon: DynamicTechnicalLexicon = buildDynamicTechnicalLexicon();
+  private readonly sessionTerminologyNormalizer = new TechnicalTerminologyNormalizer({ mode: "high_confidence" });
   private readonly turnBuilder = new TurnBuilder();
   private readonly questionGroups = new QuestionGroupManager(this.turnBuilder);
   private readonly answerScheduler = new AnswerScheduler();
@@ -494,6 +503,12 @@ export class InterviewCoordinator extends EventEmitter {
       const providedLexicon = startOptions.terminologyLexicon ?? this.options.terminologyLexiconProvider?.(startOptions.profileId, startOptions.projectId, startOptions.jobTargetId);
       if (providedLexicon && typeof (providedLexicon as PromiseLike<DynamicTechnicalLexicon>).then === "function") this.sessionTerminologyLexicon = await (providedLexicon as Promise<DynamicTechnicalLexicon>);
       else this.sessionTerminologyLexicon = (providedLexicon as DynamicTechnicalLexicon | undefined) ?? buildDynamicTechnicalLexicon({ recentTopics: [startOptions.projectId].filter((value): value is string => Boolean(value)) });
+      const providedTerminologyContext = startOptions.terminologyContext ?? this.options.terminologyContextProvider?.(startOptions.profileId, startOptions.projectId, startOptions.jobTargetId);
+      let terminologyContext: SessionTerminologyContext;
+      if (providedTerminologyContext && typeof (providedTerminologyContext as PromiseLike<SessionTerminologyContext>).then === "function") terminologyContext = await (providedTerminologyContext as Promise<SessionTerminologyContext>);
+      else terminologyContext = providedTerminologyContext as SessionTerminologyContext | undefined ?? buildSessionTerminologyContext({ recentTopics: [startOptions.projectId].filter((value): value is string => Boolean(value)) });
+      this.sessionTerminologyNormalizer.setContext(terminologyContext);
+      this.sessionTerminologyNormalizer.setMode(startOptions.terminologyMode ?? this.options.terminologyModeProvider?.(startOptions.profileId) ?? "high_confidence");
       this.detector.reset();
       this.questionGroups.reset();
       this.answerScheduler.reset();
@@ -1170,7 +1185,12 @@ export class InterviewCoordinator extends EventEmitter {
     });
     this.asr.on("transcript", (snapshot: unknown, rawSegment: TranscriptSegment) => {
       const receivedAt = this.now();
-      const segmentTerminology = resolveContextualTerminology(rawSegment.text, { contextText: this.memory.contextText(), topics: [this.anchorStore.snapshot(receivedAt).currentTopic].filter((topic): topic is string => Boolean(topic)), lexicon: this.sessionTerminologyLexicon });
+      const segmentTerminology = this.sessionTerminologyNormalizer.normalizeTranscript(rawSegment.text, {
+        contextText: this.memory.contextText(),
+        currentTopic: this.anchorStore.snapshot(receivedAt).currentTopic,
+        legacyLexicon: this.sessionTerminologyLexicon,
+        partial: !rawSegment.final
+      });
       const segment: TranscriptSegment = { ...rawSegment, text: segmentTerminology.canonicalText };
       if (!this.activeInterviewId || this.runtimeSessionState !== "running") {
         this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "transcript", source: segment.source, final: segment.final, textLength: segment.text.length }, { reasonCode: "inactive-session" });
@@ -1181,8 +1201,8 @@ export class InterviewCoordinator extends EventEmitter {
       else this.recordRuntimeTrace("ASR_PARTIAL_RECEIVED", { source: segment.source, textLength: segment.text.length }, { reasonCode: "asr-partial" });
       this.emit("event", { type: "transcript", snapshot, segment });
       if (segment.final) {
-        const transcriptVariants = resolveContextualTerminology(rawSegment.text, { contextText: this.memory.contextText(), topics: [this.anchorStore.snapshot(receivedAt).currentTopic].filter((topic): topic is string => Boolean(topic)), lexicon: this.sessionTerminologyLexicon });
-        this.history.addTranscript({ interviewId: this.activeInterviewId, source: segment.source, text: segment.text, rawText: rawSegment.text, normalizedText: transcriptVariants.normalizedText, canonicalText: transcriptVariants.canonicalText, terminologyCorrections: transcriptVariants.corrections, startMs: segment.startMs, endMs: segment.endMs, final: true, confidence: segment.confidence });
+        this.history.addTranscript({ interviewId: this.activeInterviewId, source: segment.source, text: segment.text, rawText: rawSegment.text, normalizedText: segmentTerminology.normalizedText, canonicalText: segmentTerminology.canonicalText, terminologyCorrections: segmentTerminology.corrections, startMs: segment.startMs, endMs: segment.endMs, final: true, confidence: segment.confidence });
+        this.emitTelemetry("TERMINOLOGY_METRICS", { mode: segmentTerminology.mode, durationMs: segmentTerminology.normalizationMs, correctionsApplied: segmentTerminology.metrics.correctionsApplied, highConfidenceCorrections: segmentTerminology.metrics.highConfidenceCorrections, mediumCandidates: segmentTerminology.metrics.mediumCandidates, correctionRejected: segmentTerminology.metrics.correctionRejected });
         this.recentTranscript.push(`${segment.source === "remote" ? "面试官" : "我"}：${segment.text}`);
         while (this.recentTranscript.length > 12) this.recentTranscript.shift();
         if (segment.source === "mic") {
@@ -1362,6 +1382,25 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private enqueueFinalUtterance(utterance: TranscriptUtterance): void {
+    const parts = splitIntraSegmentQuestions(utterance.rawText ?? utterance.text);
+    if (parts.length > 1) {
+      const duration = Math.max(1, utterance.endMs - utterance.startMs);
+      parts.forEach((part, index) => {
+        const startRatio = part.startOffset / Math.max(1, (utterance.rawText ?? utterance.text).length);
+        const endRatio = part.endOffset / Math.max(1, (utterance.rawText ?? utterance.text).length);
+        this.enqueueFinalUtterance({
+          ...utterance,
+          id: `${utterance.id}:part-${index + 1}`,
+          text: part.text,
+          rawText: part.text,
+          segmentIds: [...utterance.segmentIds, `${utterance.id}:part-${index + 1}`],
+          startMs: utterance.startMs + Math.round(duration * startRatio),
+          endMs: utterance.startMs + Math.round(duration * endRatio)
+        });
+      });
+      this.recordRuntimeTrace("QUESTION_DRAFT_UPDATED", { splitParts: parts.length, segmentLength: utterance.text.length }, { reasonCode: "intra-segment-question-split" });
+      return;
+    }
     const sessionGeneration = this.sessionGeneration;
     // Keep final utterances serialized when the local classifier is enabled.
     // This prevents a later short fragment from overtaking the assembled
@@ -1535,14 +1574,13 @@ export class InterviewCoordinator extends EventEmitter {
     const previousTranscript = this.recentTranscript.slice(0, -1);
     const contextText = this.memory.contextText(previousTranscript);
     const anchorSnapshot = this.anchorStore.snapshot(detectionStartedAt);
-    const terminology = resolveContextualTerminology(utterance.text, {
+    const terminology = this.sessionTerminologyNormalizer.normalizeTranscript(utterance.rawText ?? utterance.text, {
       contextText,
-      entities: this.memory.snapshot().entities,
-      topics: [anchorSnapshot.currentTopic].filter((topic): topic is string => Boolean(topic)),
       previousQuestion: anchorSnapshot.lastConfirmedQuestion?.text,
-      lexicon: this.sessionTerminologyLexicon
+      currentTopic: anchorSnapshot.currentTopic,
+      legacyLexicon: this.sessionTerminologyLexicon
     });
-    const correctedText = terminology.text;
+    const correctedText = terminology.canonicalText;
     const completion = this.turnCompletionGate.decide(correctedText, { currentTopic: anchorSnapshot.currentTopic });
     trace.update({
       turnCompletionState: completion.state,
@@ -1554,6 +1592,7 @@ export class InterviewCoordinator extends EventEmitter {
       unresolvedAsr: false
     });
     this.recordRuntimeTrace("QUESTION_LOCAL_ANALYSIS_STARTED", { textLength: correctedText.length }, { reasonCode: "final-utterance" });
+    this.emitTelemetry("TERMINOLOGY_METRICS", { mode: terminology.mode, durationMs: terminology.normalizationMs, correctionsApplied: terminology.metrics.correctionsApplied, highConfidenceCorrections: terminology.metrics.highConfidenceCorrections, mediumCandidates: terminology.metrics.mediumCandidates, correctionRejected: terminology.metrics.correctionRejected });
     if (["incomplete", "topic_announcement", "instruction_modifier", "filler"].includes(completion.state)) {
       if (completion.state === "topic_announcement" || completion.state === "instruction_modifier") {
         this.stageQuestionContext(utterance, turn, correctedText, completion.state === "topic_announcement" ? "TOPIC_ANNOUNCEMENT" : "INSTRUCTION_MODIFIER");

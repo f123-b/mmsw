@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository } from "./database";
+import { SqliteConversationRepository, SqliteDatabase, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteRetrievalRepository, SqliteTerminologyRepository } from "./database";
 import type { ProjectUnderstanding } from "@interview-copilot/shared";
 
 describe("SQLite persistence", () => {
@@ -49,6 +49,20 @@ describe("SQLite persistence", () => {
     } finally {
       database.close();
     }
+  });
+
+  it("persists only user terminology and explicit correction learning", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      new SqliteProfileRepository(database).save({ id: "profile-terms", name: "术语测试", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 90, updatedAt: 90 }, 90);
+      const terminology = new SqliteTerminologyRepository(database);
+      terminology.addTerm({ profileId: "profile-terms", canonical: "FOC2", aliases: ["foc two"], domains: ["embedded"], priority: 140 }, 100);
+      expect(terminology.listTerms("profile-terms")).toMatchObject([{ canonical: "FOC2", source: "user", priority: 140 }]);
+      const learned = terminology.learnCorrection("profile-terms", "I two C", "I2C", 0.98, 110);
+      expect(learned).toMatchObject({ raw: "I two C", canonical: "I2C", source: "user", confidence: 0.98 });
+      expect(terminology.listCorrections("profile-terms")).toHaveLength(1);
+      expect(terminology.listTerms("profile-terms").find((term) => term.canonical === "I2C")?.aliases).toContain("I two C");
+    } finally { database.close(); }
   });
 
   it("round-trips question groups and answer thread relations without losing legacy history", async () => {
@@ -240,7 +254,7 @@ describe("SQLite persistence", () => {
   it("applies migration 23 ownership and technical memory semantics", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(35);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(36);
       expect(database.all<{ name: string }>("PRAGMA table_info(projects)").map((row) => row.name)).toEqual(expect.arrayContaining(["ownership_mode", "ownership_note"]));
       expect(database.all<{ name: string }>("PRAGMA table_info(project_facts)").map((row) => row.name)).toEqual(expect.arrayContaining(["experience_relation", "value_json"]));
       new SqliteProfileRepository(database).save({ id: "profile-v4", name: "V4", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
@@ -453,7 +467,7 @@ describe("SQLite persistence", () => {
       first.close();
       const second = await SqliteDatabase.open(filePath);
       try {
-      expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(35);
+      expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(36);
         const repaired = new SqliteProjectMemoryRepository(second);
         repaired.repairProjectTechnicalSemantics("project-migration");
         expect(repaired.listFacts(profile.id, "project-migration", { includeStale: true, includeRejected: true })).toHaveLength(2);
@@ -492,7 +506,7 @@ describe("SQLite persistence", () => {
       expect(memory.getUnderstandingSnapshot(project.id, "hash-a")?.understanding.summary).toContain("可缓存");
       expect(memory.getSnapshot(profile.id).understandings?.[0]?.projectId).toBe(project.id);
       expect(memory.getUnderstandingSnapshot(project.id, "different-hash")).toBeUndefined();
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(35);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(36);
     } finally { database.close(); }
   });
 

@@ -5,7 +5,7 @@ import "./overlay-simplified.css";
 import { create } from "zustand";
 import type { AudioCapability, AudioChannelCapability, AudioDevices, AudioDrift, AudioSidecarEvent, ProbeChannelResult, ProbeResult, RealtimeServerMessage } from "@interview-copilot/protocol";
 import { AnswerThreadStore, QUESTION_BANK_BANK_LABELS, QUESTION_BANK_BANK_TYPES, QUESTION_BANK_TYPE_LABELS, QUESTION_BANK_TYPES, answerRelationForQuestion, validateLlmModelConfiguration, type AnswerThread, type OverlayAnswerRelation } from "@interview-copilot/shared";
-import { QWEN_REALTIME_ASR_MODEL, QWEN_REALTIME_ASR_URL, type AsrProviderType, type ChatAction, type ChatResponse, type ProjectAnalysisJob, type ProjectFact, type ProjectMaterialImportReport, type ProjectMemorySnapshot, type ProjectQaGenerationResult, type ProjectQuestionBankImportReport, type ProjectSourceRole, type QuestionBankBankType, type QuestionBankCoverageResult, type QuestionBankJobProfileRecord, type QuestionBankQuestionRecord, type QuestionBankSkillRecord, type QuestionBankType, type QuestionCandidate, type QuestionEvent, type SessionState, type SkillSuggestion, type SkillSuggestionStatus, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { QWEN_REALTIME_ASR_MODEL, QWEN_REALTIME_ASR_URL, type AsrProviderType, type ChatAction, type ChatResponse, type ProjectAnalysisJob, type ProjectFact, type ProjectMaterialImportReport, type ProjectMemorySnapshot, type ProjectQaGenerationResult, type ProjectQuestionBankImportReport, type ProjectSourceRole, type QuestionBankBankType, type QuestionBankCoverageResult, type QuestionBankJobProfileRecord, type QuestionBankQuestionRecord, type QuestionBankSkillRecord, type QuestionBankType, type QuestionCandidate, type QuestionEvent, type SessionState, type SkillSuggestion, type SkillSuggestionStatus, type TechnicalDomain, type TechnicalTerm, type TerminologyRolloutMode, type TranscriptSnapshot } from "@interview-copilot/shared";
 import type { Profile } from "@interview-copilot/shared";
 import type { JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectMemoryStats, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, RetrievalRunRecord, ResumeAnalysisRecord } from "../main/database";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
@@ -33,6 +33,9 @@ import { initialRuntimePhaseState, isCommittedQuestionGroup, isDisplayableQuesti
 import { answerScreenshotForMode } from "./overlay-runtime-actions";
 import { SettingsPage, type SettingsSection } from "./settings/SettingsPage";
 import { HelpPage, OnboardingModal } from "./help/HelpPage";
+
+type AppNoticeKind = "progress" | "success" | "info" | "warning" | "error";
+interface AppNotice { kind: AppNoticeKind; text: string; autoDismissMs?: number; }
 
 
 interface ChatMessage {
@@ -405,7 +408,7 @@ interface AudioStore {
   activeAnswerGroupId?: string;
   answerThreads: AnswerThread[];
   screenshot?: ScreenshotResult;
-  notice?: string;
+  notice?: AppNotice;
   applyEvent: (event: AudioSidecarEvent) => void;
   setOverlayMode: (mode: OverlayMode) => void;
   setHUDState: (state: HUDState) => void;
@@ -416,7 +419,7 @@ interface AudioStore {
   setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => void;
   clearProbe: () => void;
   setScreenshot: (screenshot: ScreenshotResult) => void;
-  setNotice: (notice?: string) => void;
+  setNotice: (notice?: string | AppNotice) => void;
   setRealtimeState: (state: string) => void;
   setAsrDiagnostics: (diagnostics: AsrRuntimeDiagnostics) => void;
   applyTranscript: (snapshot: TranscriptSnapshot) => void;
@@ -429,6 +432,17 @@ const answerThreadStore = new AnswerThreadStore();
 const questionsById = new Map<string, QuestionCandidate>();
 const answerQuestionIds = new Map<string, string>();
 const questionGroupsById = new Map<string, OverlayQuestionGroupView>();
+let noticeDismissTimer: ReturnType<typeof setTimeout> | undefined;
+
+function putNotice(set: (value: Partial<AudioStore> | ((current: AudioStore) => Partial<AudioStore>)) => void, input?: string | AppNotice): void {
+  if (noticeDismissTimer) clearTimeout(noticeDismissTimer);
+  noticeDismissTimer = undefined;
+  const notice = typeof input === "string" ? (input ? { kind: "info" as const, text: input } : undefined) : input;
+  set({ notice });
+  if (notice?.autoDismissMs) {
+    noticeDismissTimer = setTimeout(() => { noticeDismissTimer = undefined; set((current) => current.notice === notice ? { notice: undefined } : {}); }, notice.autoDismissMs);
+  }
+}
 
 const useAudioStore = create<AudioStore>((set) => ({
   mic: 0,
@@ -475,12 +489,12 @@ const useAudioStore = create<AudioStore>((set) => ({
       };
     }
     if (event.type === "audio_state") return { state: event.state, runtimePhases: { ...current.runtimePhases, sessionPhase: sessionPhaseFor(current.sessionState, event.state, current.realtimeState) } };
-    if (event.type === "audio_capability") return { capability: event, state: event.captureMode === "dual" ? "READY" : "DEGRADED", probeError: undefined, notice: event.captureMode === "dual" ? current.notice : `音频已降级为 ${event.captureMode}，缺失声道将补零，面试仍可继续`, runtimePhases: { ...current.runtimePhases, sessionPhase: sessionPhaseFor(current.sessionState, event.captureMode === "dual" ? "READY" : "DEGRADED", current.realtimeState) } };
+    if (event.type === "audio_capability") return { capability: event, state: event.captureMode === "dual" ? "READY" : "DEGRADED", probeError: undefined, notice: event.captureMode === "dual" ? current.notice : { kind: "warning", text: `音频已降级为 ${event.captureMode}，缺失声道将补零，面试仍可继续` }, runtimePhases: { ...current.runtimePhases, sessionPhase: sessionPhaseFor(current.sessionState, event.captureMode === "dual" ? "READY" : "DEGRADED", current.realtimeState) } };
     if (event.type === "probe_result") return { probeResult: event, probeError: undefined, state: event.captureMode === "dual" ? "READY" : event.captureMode ? "DEGRADED" : "FAILED" };
     if (event.type === "audio_probe_trace") return current;
     if (event.type === "audio_buffer") return { bufferStats: event };
     if (event.type === "audio_drift") return { drift: event };
-    return { state: event.recoverable ? "DEGRADED" : "FAILED", notice: event.reason, probeError: event.reason };
+    return { state: event.recoverable ? "DEGRADED" : "FAILED", notice: { kind: event.recoverable ? "warning" : "error", text: event.reason }, probeError: event.reason };
   }),
   setOverlayMode: (overlayMode) => set({ overlayMode }),
   setHUDState: (hudState) => set({ hudState }),
@@ -500,6 +514,9 @@ const useAudioStore = create<AudioStore>((set) => ({
         : { ...current.runtimePhases, sessionPhase: sessionPhaseFor(sessionState, current.state, current.realtimeState) },
       ...(shouldReset ? { question: undefined, answerText: "", answerStreaming: false, answerId: undefined, answerHistory: [], questionGroups: [], activeQuestionGroupId: undefined, activeAnswerGroupId: undefined, answerThreads: [], remoteTranscript: { source: "remote", final: [] }, micTranscript: { source: "mic", final: [] }, questionDiagnostics: [] } : {})
     }));
+    if (sessionState === "CREATING") putNotice(set, { kind: "progress", text: "面试正在建立音频与识别连接…" });
+    if (sessionState === "RUNNING") putNotice(set, { kind: "success", text: "面试已连接，正在监听问题", autoDismissMs: 1_200 });
+    if (sessionState === "ERROR") putNotice(set, { kind: "error", text: "面试连接失败，请检查音频和 ASR 设置" });
   },
   setWrittenTestState: (writtenTest) => {
     stableAnswer.reset();
@@ -514,7 +531,7 @@ const useAudioStore = create<AudioStore>((set) => ({
   setAnswerMode: (answerMode) => set({ answerMode }),
   clearProbe: () => set({ probeError: undefined }),
   setScreenshot: (screenshot) => set({ screenshot }),
-  setNotice: (notice) => set({ notice }),
+  setNotice: (notice) => putNotice(set, notice),
   setRealtimeState: (realtimeState) => set((current) => ({ realtimeState, runtimePhases: { ...current.runtimePhases, sessionPhase: sessionPhaseFor(current.sessionState, current.state, realtimeState) } })),
   setAsrDiagnostics: (asrDiagnostics) => set({ asrDiagnostics }),
   applyTranscript: (snapshot) => set((current) => snapshot.source === "remote"
@@ -542,7 +559,7 @@ const useAudioStore = create<AudioStore>((set) => ({
       }));
       return;
     }
-    if (message.type === "runtime_error") { set((current) => ({ notice: `${message.code}: ${message.message}${message.recoverable ? " · 可重试" : ""}`, runtimePhases: reduceRuntimeMessage(current.runtimePhases, message) })); return; }
+    if (message.type === "runtime_error") { putNotice(set, { kind: message.recoverable ? "warning" : "error", text: `${message.code}: ${message.message}${message.recoverable ? " · 可重试" : ""}` }); set((current) => ({ runtimePhases: reduceRuntimeMessage(current.runtimePhases, message) })); return; }
     if (message.type === "answer_start") answerQuestionIds.set(message.answerId, message.questionId);
     const messageQuestionId = message.type === "answer_start" ? message.questionId : "answerId" in message ? answerQuestionIds.get(message.answerId) : undefined;
     const pairedQuestion = messageQuestionId ? questionsById.get(messageQuestionId) : undefined;
@@ -861,6 +878,8 @@ export function App(): JSX.Element {
   const [embeddingModel, setEmbeddingModel] = useState("text-embedding-3-small");
   const [embeddingApiKey, setEmbeddingApiKey] = useState("");
   const [providerTests, setProviderTests] = useState<Record<string, string>>({});
+  const [terminologyMode, setTerminologyMode] = useState<TerminologyRolloutMode>("high_confidence");
+  const [terminologyTerms, setTerminologyTerms] = useState<TechnicalTerm[]>([]);
   const [modelCatalogs, setModelCatalogs] = useState<Partial<Record<"llm" | "asr" | "embedding", ModelCatalogResult>>>({});
   const [modelCatalogLoading, setModelCatalogLoading] = useState<Partial<Record<"llm" | "asr" | "embedding", boolean>>>({});
   const [captureProtection, setCaptureProtection] = useState<CaptureProtectionState>({ platform: "win32", supported: false, requested: true, osFlagApplied: false, enabled: true, applied: false, externalCaptureVerified: null, displayCaptureVerified: null, windowCaptureVerified: null });
@@ -1174,6 +1193,34 @@ export function App(): JSX.Element {
     if (interviewProjectId && !projectMemory?.projects.some((project) => project.id === interviewProjectId)) setInterviewProjectId("");
   }, [interviewJobTargetId, interviewProjectId, jobTargets, projectMemory]);
 
+  useEffect(() => {
+    if (!profileId) return;
+    void window.interviewCopilot.terminology.get(profileId).then((config) => { setTerminologyMode(config.mode); setTerminologyTerms(config.terms); }).catch(() => undefined);
+  }, [profileId]);
+
+  const changeTerminologyMode = async (mode: TerminologyRolloutMode): Promise<void> => {
+    try { const next = await window.interviewCopilot.terminology.setMode(mode); setTerminologyMode(next); store.setNotice({ kind: "success", text: `术语模式已切换为 ${next}` }); }
+    catch (error) { store.setNotice(`术语模式保存失败：${userFacingError(error)}`); }
+  };
+  const addTerminologyTerm = async (input: { profileId: string; canonical: string; aliases?: string[]; phoneticAliases?: string[]; domains?: TechnicalDomain[] }): Promise<void> => {
+    try { const term = await window.interviewCopilot.terminology.addTerm(input); if (term) setTerminologyTerms((current) => [term, ...current.filter((item) => item.canonical !== term.canonical)]); store.setNotice("自定义术语已保存"); }
+    catch (error) { store.setNotice(`术语保存失败：${userFacingError(error)}`); }
+  };
+  const deleteTerminologyTerm = async (canonical: string): Promise<void> => {
+    await window.interviewCopilot.terminology.deleteTerm(profileId, canonical);
+    setTerminologyTerms((current) => current.filter((term) => term.canonical !== canonical));
+    store.setNotice("自定义术语已删除");
+  };
+  const learnTerminologyCorrection = async (raw: string, canonical: string): Promise<void> => {
+    await window.interviewCopilot.terminology.learnCorrection(profileId, raw, canonical, 1);
+    const config = await window.interviewCopilot.terminology.get(profileId);
+    setTerminologyTerms(config.terms);
+  };
+  const testTerminology = async (text: string): Promise<unknown> => {
+    try { return await window.interviewCopilot.terminology.test(profileId, text); }
+    catch (error) { store.setNotice(`术语测试失败：${userFacingError(error)}`); return { error: userFacingError(error) }; }
+  };
+
   const startAudio = async () => {
     persistDevice("interview-copilot.input-device", inputDeviceId);
     persistDevice("interview-copilot.output-device", outputDeviceId);
@@ -1189,9 +1236,10 @@ export function App(): JSX.Element {
       persistDevice("interview-copilot.input-device", inputDeviceId);
       persistDevice("interview-copilot.output-device", outputDeviceId);
       setSetupOpen(false);
-      store.setNotice("面试正在启动，悬浮窗即将显示…");
+      store.setNotice({ kind: "progress", text: "面试正在启动：准备音频、ASR 和悬浮窗…" });
       await window.interviewCopilot.profiles.selectActive(profileId);
       await window.interviewCopilot.interview.start({ profileId, projectId: interviewProjectId || undefined, jobTargetId: interviewJobTargetId || undefined, url: asrProviderType === "custom-gateway" ? asrUrl : undefined, gatewayToken: asrProviderType === "custom-gateway" ? realtimeTicket.trim() || undefined : undefined, language: selectedProfile?.language, inputDeviceId, outputDeviceId, automationMode: store.automationMode, answerMode, providerType: asrProviderType });
+      store.setNotice({ kind: "success", text: "面试已启动，正在等待面试官问题", autoDismissMs: 1_800 });
     } catch (error) {
       setSetupOpen(true);
       store.setNotice(`面试启动失败：${userFacingError(error)}`);
@@ -1783,7 +1831,7 @@ export function App(): JSX.Element {
       : undefined;
   const modernPageContent = specialPageContent ?? (() => {
     if (page === "settings") {
-      return <SettingsPage section={settingsSection} onSectionChange={setSettingsSection} profiles={profiles} activeProfileId={profileId} onActiveProfileChange={(next) => { setProfileId(next); void window.interviewCopilot.profiles.selectActive(next); }} answerMode={answerMode} onAnswerModeChange={setAnswerMode} providerSettings={providerSettings} llmProfiles={llmProfiles} activeLlmProfileId={activeLlmProfileId} llmProfileId={llmProfileId} llmProfileName={llmProfileName} onLlmProfileNameChange={setLlmProfileName} onLlmProfileSelect={selectLlmProfile} onLlmProfileActivate={() => void activateLlmProfile(llmProfileId)} onLlmProfileNew={startNewLlmProfile} onLlmProfileDelete={() => void deleteLlmProfile()} llm={{ providerName: llmProviderName, baseUrl: llmBaseUrl, apiKey: llmApiKey, model: llmModel, fastModel, normalModel, deepModel, visionModel, onProviderNameChange: setLlmProviderName, onBaseUrlChange: setLlmBaseUrl, onApiKeyChange: setLlmApiKey, onModelChange: setLlmModel, onFastModelChange: setFastModel, onNormalModelChange: setNormalModel, onDeepModelChange: setDeepModel, onVisionModelChange: setVisionModel }} routing={{ values: { fallbackModel, questionRecognitionModel, profileBuilderModel, projectAnalyzerModel, questionBankModel, chatModel, postInterviewModel, preparationModel }, onChange: (key, value) => { const setters: Record<string, (next: string) => void> = { fallbackModel: setFallbackModel, questionRecognitionModel: setQuestionRecognitionModel, profileBuilderModel: setProfileBuilderModel, projectAnalyzerModel: setProjectAnalyzerModel, questionBankModel: setQuestionBankModel, chatModel: setChatModel, postInterviewModel: setPostInterviewModel, preparationModel: setPreparationModel }; setters[key]?.(value); } }} asr={{ providerType: asrProviderType, baseUrl: asrBaseUrl, model: asrModel, language: asrLanguage, apiKey: asrApiKey, onProviderTypeChange: (next) => { setAsrProviderType(next); setModelCatalogs((current) => ({ ...current, asr: undefined })); if (next === "qwen") { setAsrBaseUrl(QWEN_REALTIME_ASR_URL); setAsrModel(QWEN_REALTIME_ASR_MODEL); } else if (next === "deepgram") { setAsrBaseUrl("wss://api.deepgram.com/v1/listen"); setAsrModel("nova-3"); } else if (next === "funasr-local") { setAsrBaseUrl("ws://127.0.0.1:8765"); setAsrModel("funasr-nano:q8"); } }, onBaseUrlChange: setAsrBaseUrl, onModelChange: setAsrModel, onLanguageChange: setAsrLanguage, onApiKeyChange: setAsrApiKey, diagnostics: store.asrDiagnostics, devices, inputDeviceId, outputDeviceId, onInputDeviceChange: (next) => { setInputDeviceId(next); persistDevice("interview-copilot.input-device", next); }, onOutputDeviceChange: (next) => { setOutputDeviceId(next); persistDevice("interview-copilot.output-device", next); }, probing, onProbe: () => void probeAudio() }} embedding={{ baseUrl: embeddingBaseUrl, model: embeddingModel, apiKey: embeddingApiKey, onBaseUrlChange: setEmbeddingBaseUrl, onModelChange: setEmbeddingModel, onApiKeyChange: setEmbeddingApiKey }} modelCatalogs={modelCatalogs} modelCatalogLoading={modelCatalogLoading} providerTests={providerTests} onChooseLlmPreset={chooseLlmPreset} onFetchModels={(section) => void fetchProviderModels(section)} onTestProvider={(section) => void testProvider(section)} onSaveLlmProfile={saveLlmProfileFromSettings} onSaveAsr={saveAsrSettings} onSaveEmbedding={saveEmbeddingSettings} overlayPreferences={overlayPreferences} onOverlayChange={(patch) => { void window.interviewCopilot.overlay.setPreferences(patch).then(setOverlayPreferences).catch((error) => store.setNotice(`悬浮窗设置保存失败：${userFacingError(error)}`)); }} onOverlayReset={() => { void window.interviewCopilot.overlay.resetLayout().then(() => window.interviewCopilot.overlay.getPreferences()).then(setOverlayPreferences).catch((error) => store.setNotice(`悬浮窗布局重置失败：${userFacingError(error)}`)); }} captureProtectionPanel={<CaptureProtectionSettings status={captureProtection} validation={tencentValidation} onToggle={(enabled) => void toggleCaptureProtection(enabled)} onValidate={validateTencent} />} />;
+      return <SettingsPage section={settingsSection} onSectionChange={setSettingsSection} profiles={profiles} activeProfileId={profileId} onActiveProfileChange={(next) => { setProfileId(next); void window.interviewCopilot.profiles.selectActive(next); }} answerMode={answerMode} onAnswerModeChange={setAnswerMode} providerSettings={providerSettings} llmProfiles={llmProfiles} activeLlmProfileId={activeLlmProfileId} llmProfileId={llmProfileId} llmProfileName={llmProfileName} onLlmProfileNameChange={setLlmProfileName} onLlmProfileSelect={selectLlmProfile} onLlmProfileActivate={() => void activateLlmProfile(llmProfileId)} onLlmProfileNew={startNewLlmProfile} onLlmProfileDelete={() => void deleteLlmProfile()} llm={{ providerName: llmProviderName, baseUrl: llmBaseUrl, apiKey: llmApiKey, model: llmModel, fastModel, normalModel, deepModel, visionModel, onProviderNameChange: setLlmProviderName, onBaseUrlChange: setLlmBaseUrl, onApiKeyChange: setLlmApiKey, onModelChange: setLlmModel, onFastModelChange: setFastModel, onNormalModelChange: setNormalModel, onDeepModelChange: setDeepModel, onVisionModelChange: setVisionModel }} routing={{ values: { fallbackModel, questionRecognitionModel, profileBuilderModel, projectAnalyzerModel, questionBankModel, chatModel, postInterviewModel, preparationModel }, onChange: (key, value) => { const setters: Record<string, (next: string) => void> = { fallbackModel: setFallbackModel, questionRecognitionModel: setQuestionRecognitionModel, profileBuilderModel: setProfileBuilderModel, projectAnalyzerModel: setProjectAnalyzerModel, questionBankModel: setQuestionBankModel, chatModel: setChatModel, postInterviewModel: setPostInterviewModel, preparationModel: setPreparationModel }; setters[key]?.(value); } }} asr={{ providerType: asrProviderType, baseUrl: asrBaseUrl, model: asrModel, language: asrLanguage, apiKey: asrApiKey, onProviderTypeChange: (next) => { setAsrProviderType(next); setModelCatalogs((current) => ({ ...current, asr: undefined })); if (next === "qwen") { setAsrBaseUrl(QWEN_REALTIME_ASR_URL); setAsrModel(QWEN_REALTIME_ASR_MODEL); } else if (next === "deepgram") { setAsrBaseUrl("wss://api.deepgram.com/v1/listen"); setAsrModel("nova-3"); } else if (next === "funasr-local") { setAsrBaseUrl("ws://127.0.0.1:8765"); setAsrModel("funasr-nano:q8"); } }, onBaseUrlChange: setAsrBaseUrl, onModelChange: setAsrModel, onLanguageChange: setAsrLanguage, onApiKeyChange: setAsrApiKey, diagnostics: store.asrDiagnostics, devices, inputDeviceId, outputDeviceId, onInputDeviceChange: (next) => { setInputDeviceId(next); persistDevice("interview-copilot.input-device", next); }, onOutputDeviceChange: (next) => { setOutputDeviceId(next); persistDevice("interview-copilot.output-device", next); }, probing, onProbe: () => void probeAudio() }} embedding={{ baseUrl: embeddingBaseUrl, model: embeddingModel, apiKey: embeddingApiKey, onBaseUrlChange: setEmbeddingBaseUrl, onModelChange: setEmbeddingModel, onApiKeyChange: setEmbeddingApiKey }} modelCatalogs={modelCatalogs} modelCatalogLoading={modelCatalogLoading} providerTests={providerTests} onChooseLlmPreset={chooseLlmPreset} onFetchModels={(section) => void fetchProviderModels(section)} onTestProvider={(section) => void testProvider(section)} onSaveLlmProfile={saveLlmProfileFromSettings} onSaveAsr={saveAsrSettings} onSaveEmbedding={saveEmbeddingSettings} overlayPreferences={overlayPreferences} onOverlayChange={(patch) => { void window.interviewCopilot.overlay.setPreferences(patch).then(setOverlayPreferences).catch((error) => store.setNotice(`悬浮窗设置保存失败：${userFacingError(error)}`)); }} onOverlayReset={() => { void window.interviewCopilot.overlay.resetLayout().then(() => window.interviewCopilot.overlay.getPreferences()).then(setOverlayPreferences).catch((error) => store.setNotice(`悬浮窗布局重置失败：${userFacingError(error)}`)); }} terminology={{ profileId, mode: terminologyMode, terms: terminologyTerms, onModeChange: changeTerminologyMode, onAddTerm: addTerminologyTerm, onDeleteTerm: deleteTerminologyTerm, onLearnCorrection: learnTerminologyCorrection, onTest: testTerminology }} captureProtectionPanel={<CaptureProtectionSettings status={captureProtection} validation={tencentValidation} onToggle={(enabled) => void toggleCaptureProtection(enabled)} onValidate={validateTencent} />} />;
     }
    if (String(page) === "personal-memory") return <><PersonalMemoryPage memory={projectMemory} stats={projectMemoryStats} rebuilding={projectMemoryRunning} onRebuild={() => void rebuildProjectMemory()} /><MemoryGovernancePanel memory={projectMemory} facts={projectFacts} jobTargets={jobTargets} analysisRuns={knowledgeAnalysisRuns} retrievalRuns={retrievalRuns} onVerifyFact={verifyProjectFact} /></>;
     if (String(page) === "knowledge") return <KnowledgePage knowledgeBases={knowledgeBases} knowledgeBaseId={knowledgeBaseId} knowledgeDocuments={knowledgeDocuments} requestDialog={requestDialog} onSelectBase={setKnowledgeBaseId} onCreateBase={async (name) => { const created = await window.interviewCopilot.knowledge.createBase(name); if (created) { setKnowledgeBases((current) => [created, ...current]); setKnowledgeBaseId(created.id); setKnowledgeDocuments([]); } }} onRenameBase={async (id, name) => { const updated = await window.interviewCopilot.knowledge.renameBase(id, name); if (updated) setKnowledgeBases((current) => current.map((item) => item.id === updated.id ? updated : item)); }} onDeleteBase={async (id, name) => { const confirmed = await requestDialog({ kind: "confirm", title: `删除 ${name}？`, description: "知识库和其中的文档会一起删除。", confirmLabel: "删除" }); if (confirmed === true) { await window.interviewCopilot.knowledge.deleteBase(id); const next = await window.interviewCopilot.knowledge.listBases(); setKnowledgeBases(next); const nextId = next[0]?.id ?? ""; setKnowledgeBaseId(nextId); setKnowledgeDocuments(nextId ? await window.interviewCopilot.knowledge.listDocuments(nextId) : []); } }} onUpload={uploadKnowledgeFile} onUpdateType={async (id, type) => { await window.interviewCopilot.knowledge.updateType(id, type); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onReindex={async (id) => { await window.interviewCopilot.knowledge.reindex(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onDeleteDocument={async (id) => { await window.interviewCopilot.knowledge.delete(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} />;
@@ -1810,7 +1858,7 @@ export function App(): JSX.Element {
           {page === "home" && <ChatResponseSupplement messages={chatMessages} onApproveAction={approveChatAction} />}
         </div>
         {(page === "home" || page === "interview") && <><div className="chat-context-capsules chat-context-capsules-composer"><span>档案：{selectedProfile?.name ?? "未选择"}</span><span>项目：{selectedProjectId ? projects.find((project) => project.id === selectedProjectId)?.name ?? "当前项目" : "自动"}</span><span>知识：自动检索</span><span>事实策略：仅已确认</span></div><ChatComposer value={composerText} onChange={setComposerText} onSubmit={() => void submitComposer()} onCreateProject={() => void createProject()} /></>}
-        {store.notice && <button className="notice-toast" onClick={() => store.setNotice(undefined)}>{store.notice} <span>×</span></button>}
+        {store.notice && <button className={`notice-toast notice-${store.notice.kind}`} onClick={() => store.setNotice(undefined)}>{store.notice.text} <span>×</span></button>}
       </section>
       {dialog && <AppDialog dialog={dialog} onConfirm={(value) => closeDialog(dialog.kind === "confirm" ? true : value)} onCancel={() => closeDialog(undefined)} />}
       {onboardingOpen && <OnboardingModal onFinish={() => { persistDevice("interview-copilot.onboarding-complete", "1"); setOnboardingOpen(false); }} />}

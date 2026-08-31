@@ -11,10 +11,10 @@ import { createScreenshotFixtureResult, ScreenshotManager, type ScreenshotRegion
 import { createScreenshotRequestId, SCREENSHOT_PROMPT, ScreenshotOperationRegistry, ScreenshotTraceBuffer, withScreenshotTimeout, type ScreenshotTraceEvent, type ScreenshotTraceEventName } from "./screenshot-pipeline";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, analyzeQuestionNucleus, AnswerAgent, AgentToolRegistry, buildDynamicTechnicalLexicon, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectAliasResolver, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, retrieveProfileExperience, routeKnowledge, SessionStateMachine, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, analyzeQuestionNucleus, AnswerAgent, AgentToolRegistry, buildDynamicTechnicalLexicon, buildSessionTerminologyContext, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectAliasResolver, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, retrieveProfileExperience, routeKnowledge, SessionStateMachine, TechnicalTerminologyNormalizer, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TerminologyRolloutMode, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
-import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteResumeAnalysisRepository, SqliteRetrievalRepository, SqliteSkillSuggestionRepository, type SqliteDatabase } from "./database";
+import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteResumeAnalysisRepository, SqliteRetrievalRepository, SqliteSkillSuggestionRepository, SqliteTerminologyRepository, type SqliteDatabase } from "./database";
 import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type OverlayPreferences, type OverlayPreferencesPatch, type ProviderSection } from "./settings-store";
 import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnection } from "./provider-preflight";
 import { INTERVIEW_STARTUP_EVENTS, InterviewStartupTiming, type InterviewStartupEvent } from "./interview-startup-timing";
@@ -26,6 +26,8 @@ import { chatFailureText, classifyChatError, PROJECT_AGENT_TIMEOUT_MS } from "..
 import { ShutdownController } from "./shutdown-controller";
 import { MiddleMouseShortcutManager, middleMouseHelperCandidates, shouldHandleMiddleMouseShortcut } from "./middle-mouse-shortcut";
 import { NativeModifierShortcutManager } from "./native-modifier-shortcut";
+import { normalizeNativeScreenPoint } from "./native-screen-coordinates";
+import { DEFAULT_MAIN_WINDOW_BOUNDS, resolveMainWindowBounds, type MainWindowBounds } from "./main-window-bounds";
 import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-service-manager";
 import { createProfileBuilderModel, createResumeAnalysisModel, ProfileBuilderService } from "./profile-builder";
 import { adaptProfileToInterviewContext } from "./profile-context-adapter";
@@ -47,6 +49,7 @@ if (process.env.INTERVIEW_COPILOT_DISABLE_GPU === "1") {
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 let mainWindow: BrowserWindow | undefined;
+let mainWindowBoundsSaveTimer: NodeJS.Timeout | undefined;
 let overlayManager: OverlayManager | undefined;
 let runtimeOperationMode: RuntimeOperationMode = "IDLE";
 const audioManager = new AudioManager();
@@ -225,6 +228,7 @@ let skillSuggestionRepository: SqliteSkillSuggestionRepository | undefined;
 let profileBuilderService: ProfileBuilderService | undefined;
 let projectMemoryService: ProjectMemoryService | undefined;
 let conversationRepository: SqliteConversationRepository | undefined;
+let terminologyRepository: SqliteTerminologyRepository | undefined;
 let preparationRuntime: PreparationAgentRuntime | undefined;
 let preparationAbortController: AbortController | undefined;
 const chatAbortControllers = new Map<string, { controller: AbortController; reason?: ChatCancelReason }>();
@@ -259,6 +263,20 @@ let mainRendererLoad: Promise<void> | undefined;
 const rendererAppReadyWindows = new Set<number>();
 const rendererAppReadyWaiters = new Map<number, Set<() => void>>();
 
+function saveMainWindowBounds(): void {
+  if (mainWindowBoundsSaveTimer) clearTimeout(mainWindowBoundsSaveTimer);
+  mainWindowBoundsSaveTimer = undefined;
+  if (!database || !mainWindow || mainWindow.isDestroyed()) return;
+  database.run("INSERT INTO app_state(key, value) VALUES ('main_window_bounds', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [JSON.stringify(mainWindow.getBounds())]);
+  database.flush(120);
+}
+
+function scheduleMainWindowBoundsSave(): void {
+  if (mainWindowBoundsSaveTimer) clearTimeout(mainWindowBoundsSaveTimer);
+  mainWindowBoundsSaveTimer = setTimeout(saveMainWindowBounds, 350);
+  mainWindowBoundsSaveTimer.unref?.();
+}
+
 const shutdownController = new ShutdownController([
   { name: "unregister-shortcuts", run: () => globalShortcut.unregisterAll() },
   { name: "stop-middle-mouse-shortcut", run: () => middleMouseShortcutManager?.stop() },
@@ -273,6 +291,7 @@ const shutdownController = new ShutdownController([
   { name: "disconnect-realtime", run: () => realtimeSession.disconnect() },
   { name: "stop-local-asr-service", run: () => localAsrServiceManager.stop() },
   { name: "cancel-project-analysis", run: () => projectMemoryService?.cancelAllAnalysisJobs() },
+  { name: "save-main-window-bounds", run: () => saveMainWindowBounds() },
   { name: "flush-database", run: () => database?.flushNow() },
   { name: "close-database", run: () => database?.close() },
   { name: "destroy-overlay", run: () => overlayManager?.destroy() },
@@ -783,10 +802,17 @@ async function answerCapturedScreenshot(mode: "interview" | "written-test" = "in
 
 function createMainWindow(): BrowserWindow {
   verifyPreload();
+  const saved = database?.first<{ value: string }>("SELECT value FROM app_state WHERE key = 'main_window_bounds'");
+  let savedBounds: Partial<MainWindowBounds> | undefined;
+  try { savedBounds = saved?.value ? JSON.parse(saved.value) as Partial<MainWindowBounds> : undefined; } catch { savedBounds = undefined; }
+  const displayBounds = savedBounds && Number.isFinite(savedBounds.x) && Number.isFinite(savedBounds.y)
+    ? { x: savedBounds.x!, y: savedBounds.y!, width: savedBounds.width ?? DEFAULT_MAIN_WINDOW_BOUNDS.width, height: savedBounds.height ?? DEFAULT_MAIN_WINDOW_BOUNDS.height }
+    : DEFAULT_MAIN_WINDOW_BOUNDS;
+  const workArea = screen.getDisplayMatching(displayBounds).workArea;
+  const bounds = resolveMainWindowBounds(savedBounds, workArea);
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 1000,
-    minWidth: 900,
+    ...bounds,
+    minWidth: 920,
     minHeight: 620,
     title: "Interview Copilot",
     backgroundColor: "#0b1020",
@@ -798,7 +824,9 @@ function createMainWindow(): BrowserWindow {
     }
   });
   mainRendererLoad = loadRenderer(mainWindow);
-  mainWindow.on("closed", () => { mainWindow = undefined; });
+  mainWindow.on("moved", scheduleMainWindowBoundsSave);
+  mainWindow.on("resized", scheduleMainWindowBoundsSave);
+  mainWindow.on("closed", () => { saveMainWindowBounds(); mainWindow = undefined; });
   return mainWindow;
 }
 
@@ -843,6 +871,8 @@ public static class InterviewCopilotNativeMouse {
   public const uint LeftUp = 0x0004;
   public const uint Wheel = 0x0800;
   public static void LeftClick() { var inputs = new Input[2]; inputs[0].type = 0; inputs[0].mouseInput.flags = LeftDown; inputs[1].type = 0; inputs[1].mouseInput.flags = LeftUp; if (SendInput(2, inputs, Marshal.SizeOf(typeof(Input))) != 2) throw new Exception("SendInput failed"); }
+  public static void LeftButtonDown() { var input = new Input[1]; input[0].type = 0; input[0].mouseInput.flags = LeftDown; if (SendInput(1, input, Marshal.SizeOf(typeof(Input))) != 1) throw new Exception("SendInput mouse-down failed"); }
+  public static void LeftButtonUp() { var input = new Input[1]; input[0].type = 0; input[0].mouseInput.flags = LeftUp; if (SendInput(1, input, Marshal.SizeOf(typeof(Input))) != 1) throw new Exception("SendInput mouse-up failed"); }
   public static void WheelBy(int delta) { mouse_event(Wheel, 0, 0, unchecked((uint)delta), UIntPtr.Zero); }
 }`;
 
@@ -859,7 +889,7 @@ async function nativeMouseWheel(x: number, y: number, deltaY: number): Promise<v
 async function nativeMouseDrag(from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> {
   const points = Array.from({ length: 8 }, (_, index) => ({ x: Math.round(from.x + ((to.x - from.x) * (index + 1)) / 8), y: Math.round(from.y + ((to.y - from.y) * (index + 1)) / 8) }));
   const moves = points.map((point) => `[InterviewCopilotNativeMouse]::SetCursorPos(${point.x}, ${point.y}) | Out-Null; Start-Sleep -Milliseconds 25;`).join(" ");
-  const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${nativeMouseTypeDefinition}\n'@; if(-not [InterviewCopilotNativeMouse]::SetCursorPos(${Math.round(from.x)}, ${Math.round(from.y)})){ throw 'SetCursorPos failed' }; Start-Sleep -Milliseconds 60; [InterviewCopilotNativeMouse]::mouse_event([InterviewCopilotNativeMouse]::LeftDown, 0, 0, 0, [UIntPtr]::Zero); ${moves} [InterviewCopilotNativeMouse]::mouse_event([InterviewCopilotNativeMouse]::LeftUp, 0, 0, 0, [UIntPtr]::Zero);`;
+  const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${nativeMouseTypeDefinition}\n'@; if(-not [InterviewCopilotNativeMouse]::SetCursorPos(${Math.round(from.x)}, ${Math.round(from.y)})){ throw 'SetCursorPos failed' }; Start-Sleep -Milliseconds 60; [InterviewCopilotNativeMouse]::LeftButtonDown(); ${moves} [InterviewCopilotNativeMouse]::LeftButtonUp();`;
   await runNativeMouseCommand(command);
 }
 
@@ -897,10 +927,11 @@ async function nativeWindowDiagnostics(window: BrowserWindow): Promise<{ hwnd: s
 
 function nativePoint(window: BrowserWindow, point: { x: number; y: number }): { x: number; y: number } {
   const bounds = window.getBounds();
-  // BrowserWindow.getBounds() already uses the desktop coordinate space that
-  // Win32 input APIs consume on Windows. Applying dipToScreenPoint here
-  // double-scales coordinates on high-DPI displays.
-  return { x: Math.round(bounds.x + point.x), y: Math.round(bounds.y + point.y) };
+  const dipPoint = { x: bounds.x + point.x, y: bounds.y + point.y };
+  // BrowserWindow bounds and DOM rectangles are DIP; Win32 input APIs use
+  // physical pixels. Keep this conversion at the native-input boundary only.
+  const physical = screen.dipToScreenPoint(dipPoint);
+  return { x: Math.round(physical.x), y: Math.round(physical.y) };
 }
 
 async function elementCenter(window: BrowserWindow, selector: string): Promise<{ x: number; y: number }> {
@@ -993,7 +1024,9 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
       app.exit(0);
       return;
     }
-    throw new Error(`Native layout drag did not move the question window: before=${JSON.stringify(beforeEditBounds)} after=${JSON.stringify(afterEditBounds)}`);
+    const nativeHit = await nativeWindowAt(dragStart).catch(() => "unavailable");
+    const domDiagnostics = await editableQuestionWindow.webContents.executeJavaScript(`(() => { const node = document.querySelector('[data-layout-drag-handle]'); const rect = node?.getBoundingClientRect(); return { innerWidth: window.innerWidth, innerHeight: window.innerHeight, devicePixelRatio: window.devicePixelRatio, screenX: window.screenX, screenY: window.screenY, outerWidth: window.outerWidth, outerHeight: window.outerHeight, rect: rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : undefined }; })()`, true).catch(() => undefined);
+    throw new Error(`Native layout drag did not move the question window: before=${JSON.stringify(beforeEditBounds)} after=${JSON.stringify(afterEditBounds)} start=${JSON.stringify(dragStart)} end=${JSON.stringify(expectedDragEnd)} cursor=${JSON.stringify(nativeCursor)} hit=${nativeHit} dom=${JSON.stringify(domDiagnostics)}`);
   }
 
   const questionWindow = manager.enterInterviewMode();
@@ -2634,6 +2667,26 @@ function registerIpc(): void {
   ipcMain.handle("preparation:reject", (_event, requestId: string) => { preparationRuntime?.reject(requestId); return true; });
   ipcMain.handle("preparation:stop", () => { preparationAbortController?.abort(); return true; });
   ipcMain.handle("settings:get", () => providerConfigStore?.getPublic());
+  ipcMain.handle("terminology:get", (_event, profileId: string) => {
+    const mode = database?.first<{ value: string }>("SELECT value FROM app_state WHERE key = 'terminology_rollout_mode'")?.value;
+    const resolvedMode: TerminologyRolloutMode = ["legacy", "shadow", "high_confidence", "dynamic"].includes(mode ?? "") ? mode as TerminologyRolloutMode : "high_confidence";
+    return { mode: resolvedMode, enabled: resolvedMode !== "legacy", terms: terminologyRepository?.listTerms(profileId) ?? [], corrections: terminologyRepository?.listCorrections(profileId) ?? [] };
+  });
+  ipcMain.handle("terminology:set-mode", (_event, mode: TerminologyRolloutMode) => {
+    if (!("legacy|shadow|high_confidence|dynamic".split("|") as string[]).includes(mode)) throw new Error("TERMINOLOGY_MODE_INVALID");
+    database?.run("INSERT INTO app_state(key, value) VALUES ('terminology_rollout_mode', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [mode]);
+    database?.flush(120);
+    return mode;
+  });
+  ipcMain.handle("terminology:add-term", (_event, input: import("./database").TerminologyCustomTermInput) => terminologyRepository?.addTerm(input));
+  ipcMain.handle("terminology:delete-term", (_event, profileId: string, canonical: string) => terminologyRepository?.deleteTerm(profileId, canonical) ?? false);
+  ipcMain.handle("terminology:learn-correction", (_event, profileId: string, raw: string, canonical: string, confidence?: number) => terminologyRepository?.learnCorrection(profileId, raw, canonical, confidence));
+  ipcMain.handle("terminology:test", (_event, profileId: string, text: string) => {
+    const mode = database?.first<{ value: string }>("SELECT value FROM app_state WHERE key = 'terminology_rollout_mode'")?.value;
+    const resolvedMode: TerminologyRolloutMode = ["legacy", "shadow", "high_confidence", "dynamic"].includes(mode ?? "") ? mode as TerminologyRolloutMode : "high_confidence";
+    const normalizer = new TechnicalTerminologyNormalizer({ mode: resolvedMode, context: buildSessionTerminologyContext({ customTerms: terminologyRepository?.listTerms(profileId) ?? [] }) });
+    return normalizer.testNormalization(text);
+  });
   ipcMain.handle("settings:update", (_event, section: ProviderSection, input: Partial<ProviderSettings>) => {
     if (!providerConfigStore) throw new Error("Settings are still initializing");
     const result = providerConfigStore.update(section, input);
@@ -2870,6 +2923,7 @@ if (hasSingleInstanceLock) {
     resumeAnalysisRepository = new SqliteResumeAnalysisRepository(database);
     skillSuggestionRepository = new SqliteSkillSuggestionRepository(database);
     conversationRepository = new SqliteConversationRepository(database);
+    terminologyRepository = new SqliteTerminologyRepository(database);
     const recoveredChatMessages = conversationRepository.recoverInterruptedMessages();
     if (recoveredChatMessages > 0) appLogger.info("CHAT_INTERRUPTED_MESSAGES_RECOVERED", { count: recoveredChatMessages });
     try {
@@ -3317,6 +3371,34 @@ if (hasSingleInstanceLock) {
         generalQa,
         recentTopics: project ? [project.name, ...project.technologyStack] : []
       });
+    },
+    terminologyContextProvider: (profileId, projectId, jobTargetId) => {
+      const profile = profileRepository?.get(profileId);
+      const projectSnapshot = projectMemoryService?.get(profileId);
+      const project = projectSnapshot?.projects.find((item) => item.id === projectId);
+      const jobTarget = jobTargetId ? jobTargetRepository?.get(jobTargetId) : undefined;
+      const job = [profile?.jobDescription?.rawContent, jobTarget?.description, ...(jobTarget?.requirements ?? []).map((item) => item.requirement)].filter(Boolean).join("\n");
+      const projectTerms = [
+        ...(project ? [project.name, project.description, project.role, ...project.hardware, ...project.software, ...project.technologyStack] : []),
+        ...(projectSnapshot?.facts?.filter((fact) => !projectId || fact.projectId === projectId).map((fact) => `${fact.title} ${fact.content}`) ?? []),
+        ...(projectSnapshot?.modules.filter((item) => !projectId || item.projectId === projectId).map((item) => `${item.moduleName} ${item.description}`) ?? []),
+        ...(projectSnapshot?.technicalPoints.filter((item) => !projectId || item.projectId === projectId).map((item) => `${item.topic} ${item.content}`) ?? [])
+      ];
+      return buildSessionTerminologyContext({
+        jd: job,
+        resume: profile?.resume?.rawContent,
+        project: projectTerms.join("\n"),
+        profileTerms: profile?.skills.flatMap((skill) => [skill.name, ...(skill.tags ?? [])]),
+        resumeTerms: profile?.resume?.rawContent ? [profile.resume.rawContent] : [],
+        jobTerms: job ? [job] : [],
+        projectTerms,
+        customTerms: terminologyRepository?.listTerms(profileId) ?? [],
+        recentTopics: project ? [project.name, ...project.technologyStack] : []
+      });
+    },
+    terminologyModeProvider: () => {
+      const stored = database?.first<{ value: string }>("SELECT value FROM app_state WHERE key = 'terminology_rollout_mode'")?.value;
+      return ["legacy", "shadow", "high_confidence", "dynamic"].includes(stored ?? "") ? stored as TerminologyRolloutMode : "high_confidence";
     }
   });
   writtenTestController = new WrittenTestController({
@@ -3339,7 +3421,10 @@ if (hasSingleInstanceLock) {
         broadcast("runtime:error", { code: "SCREENSHOT_FAILED", message: "鼠标中键截图识别失败，请重试", recoverable: true });
       });
     }, (message) => realtimeLogger?.warn(message), (event) => {
-      if (event.event === "mouse-wheel" && event.x !== undefined && event.y !== undefined && event.deltaY !== undefined) overlayManager?.handleGlobalWheel(event.x, event.y, event.deltaY);
+      if (event.event === "mouse-wheel" && event.x !== undefined && event.y !== undefined && event.deltaY !== undefined) {
+        const point = normalizeNativeScreenPoint({ x: event.x, y: event.y }, { screenToDipPoint: (value) => screen.screenToDipPoint(value) });
+        overlayManager?.handleGlobalWheel(point.x, point.y, event.deltaY);
+      }
     });
     middleMouseShortcutManager.start();
   } else {

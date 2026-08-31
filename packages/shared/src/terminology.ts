@@ -13,7 +13,7 @@ export interface TerminologyRule {
   source?: TerminologySource;
 }
 
-export type TerminologySource = "embedded" | "general" | "project" | "builtin" | "profile" | "question_bank" | "contextual" | "phonetic" | "llm";
+export type TerminologySource = "embedded" | "general" | "project" | "builtin" | "profile" | "resume" | "job" | "user" | "session" | "question_bank" | "contextual" | "phonetic" | "llm";
 
 export interface TerminologyCorrection {
   raw: string;

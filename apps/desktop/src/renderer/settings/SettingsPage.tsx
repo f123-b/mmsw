@@ -8,12 +8,14 @@ import type { OverlayPreferences } from "../../shared/overlay-preferences";
 import type { DiscoveredModel, ModelCatalogResult, ModelCategory } from "../../main/model-catalog";
 import type { AsrProviderType } from "@interview-copilot/shared";
 import { OverlayDesigner } from "../overlay/OverlayDesigner";
+import { TerminologySettings, type TerminologySettingsProps } from "./TerminologySettings";
 
-export type SettingsSection = "general" | "overlay" | "models" | "asr" | "retrieval" | "shortcuts" | "privacy" | "about";
+export type SettingsSection = "general" | "overlay" | "terminology" | "models" | "asr" | "retrieval" | "shortcuts" | "privacy" | "about";
 
 const SETTINGS_NAV: Array<{ id: SettingsSection; label: string; description: string }> = [
   { id: "general", label: "常规", description: "应用基础行为" },
   { id: "overlay", label: "悬浮窗", description: "面试与笔试窗口" },
+  { id: "terminology", label: "技术术语", description: "本地词典与 Shadow" },
   { id: "models", label: "模型与 API", description: "供应商与任务路由" },
   { id: "asr", label: "语音识别", description: "实时语音与设备" },
   { id: "retrieval", label: "检索模型", description: "Embedding 与召回" },
@@ -102,6 +104,7 @@ interface SettingsPageProps {
   onOverlayChange: (patch: import("../../shared/overlay-preferences").OverlayPreferencesPatch) => void;
   onOverlayReset: () => void;
   captureProtectionPanel: JSX.Element;
+  terminology: TerminologySettingsProps;
 }
 
 function CatalogModelSelect({ label, value, models, category, onChange, optional = false }: { label: string; value: string; models: DiscoveredModel[]; category: ModelCategory; onChange: (value: string) => void; optional?: boolean }): JSX.Element {
@@ -167,5 +170,5 @@ function AboutSettings(): JSX.Element {
 
 export function SettingsPage(props: SettingsPageProps): JSX.Element {
   const current = SETTINGS_NAV.find((item) => item.id === props.section) ?? SETTINGS_NAV[0];
-  return <section className="settings-page settings-shell" data-testid="settings-page"><div className="settings-page-heading"><div><span className="page-kicker">SETTINGS</span><h1>设置</h1><p className="page-note">将应用行为、悬浮窗和服务配置分开管理。</p></div><span className="settings-current-label">{current.label}</span></div><div className="settings-layout"><nav className="settings-subnav" aria-label="设置分类">{SETTINGS_NAV.map((item) => <button key={item.id} className={props.section === item.id ? "selected" : ""} data-testid={`settings-nav-${item.id}`} onClick={() => props.onSectionChange(item.id)}><strong>{item.label}</strong><small>{item.description}</small></button>)}</nav><main className="settings-content">{props.section === "general" && <GeneralSettings props={props} />}{props.section === "overlay" && <div className="settings-content-stack" data-testid="settings-overlay-page"><OverlayDesigner value={props.overlayPreferences} onChange={props.onOverlayChange} onReset={props.onOverlayReset} /></div>}{props.section === "models" && <ModelSettings props={props} />}{props.section === "asr" && <AsrSettings props={props} />}{props.section === "retrieval" && <RetrievalSettings props={props} />}{props.section === "shortcuts" && <ShortcutSettings />}{props.section === "privacy" && <div className="settings-content-stack" data-testid="settings-privacy-page">{props.captureProtectionPanel}</div>}{props.section === "about" && <AboutSettings />}</main></div></section>;
+  return <section className="settings-page settings-shell" data-testid="settings-page"><div className="settings-page-heading"><div><span className="page-kicker">SETTINGS</span><h1>设置</h1><p className="page-note">将应用行为、悬浮窗和服务配置分开管理。</p></div><span className="settings-current-label">{current.label}</span></div><div className="settings-layout"><nav className="settings-subnav" aria-label="设置分类">{SETTINGS_NAV.map((item) => <button key={item.id} className={props.section === item.id ? "selected" : ""} data-testid={`settings-nav-${item.id}`} onClick={() => props.onSectionChange(item.id)}><strong>{item.label}</strong><small>{item.description}</small></button>)}</nav><main className="settings-content">{props.section === "general" && <GeneralSettings props={props} />}{props.section === "overlay" && <div className="settings-content-stack" data-testid="settings-overlay-page"><OverlayDesigner value={props.overlayPreferences} onChange={props.onOverlayChange} onReset={props.onOverlayReset} /></div>}{props.section === "terminology" && <TerminologySettings {...props.terminology} />}{props.section === "models" && <ModelSettings props={props} />}{props.section === "asr" && <AsrSettings props={props} />}{props.section === "retrieval" && <RetrievalSettings props={props} />}{props.section === "shortcuts" && <ShortcutSettings />}{props.section === "privacy" && <div className="settings-content-stack" data-testid="settings-privacy-page">{props.captureProtectionPanel}</div>}{props.section === "about" && <AboutSettings />}</main></div></section>;
 }

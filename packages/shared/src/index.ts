@@ -1,5 +1,15 @@
 import { normalizeTechnicalTerms } from "./terminology";
 import type { TerminologyCorrection } from "./terminology";
+export * from "./terminology/terminology-types";
+export * from "./terminology/token-normalizer";
+export * from "./terminology/phonetic-matcher";
+export * from "./terminology/domain-router";
+export * from "./terminology/candidate-generator";
+export * from "./terminology/context-scorer";
+export * from "./terminology/confidence-gate";
+export * from "./terminology/lexicons/builtin";
+export * from "./terminology/dynamic-lexicon-builder";
+export * from "./terminology/technical-terminology-normalizer";
 export { buildVisionInput, type ScreenshotImage, type VisionInput } from "./vision";
 
 export const SESSION_STATES = [
@@ -112,6 +122,7 @@ export type { ProjectQaMatchLevel, ProjectQaRouteResult, ProjectQaRoutingPolicy,
 export type { QuestionCategory, QuestionClassification } from "./question-classifier";
 export { TurnCompletionGate, decideTurnCompletion, type TurnCompletionContext, type TurnCompletionDecision, type TurnCompletionState } from "./interview/turn-completion-gate";
 export { PendingQuestionDraftAssembler, classifySegmentRole, type PendingQuestionDraft, type PendingQuestionDraftOptions, type PendingQuestionRawSegment, type PendingQuestionDraftUpdate, type SegmentSemanticRole } from "./interview/pending-question-draft";
+export { splitIntraSegmentQuestions, type IntraSegmentQuestionPart, type IntraSegmentQuestionSplitOptions } from "./interview/intra-segment-question-splitter";
 export { UnresolvedAsrGate, type AsrUnderstandingQuality, type UnresolvedAsrDecision } from "./interview/unresolved-asr-gate";
 export { analyzeQuestionNucleus, type QuestionNucleusAnalysis, type QuestionNucleusIntent } from "./question/question-nucleus";
 export { ProjectAliasResolver, type ProjectAliasCandidate, type ProjectAliasResolution } from "./project-alias-resolver";

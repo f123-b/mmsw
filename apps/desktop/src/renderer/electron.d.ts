@@ -7,7 +7,7 @@ import type { RealtimeConnectOptions } from "../main/realtime-session";
 import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
-import type { HistoryChangedEvent, TranscriptSnapshot } from "@interview-copilot/shared";
+import type { HistoryChangedEvent, TechnicalDomain, TechnicalTerm, TerminologyRolloutMode, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayDisplayInfo, OverlayMode, OverlayNativeBounds } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
@@ -180,6 +180,14 @@ declare global {
         testConnection(section: ProviderSection, profileId?: string): Promise<ProviderCheckResult>;
         listModels(section: ProviderSection, profileId?: string): Promise<ModelCatalogResult>;
         preflight(checkReachability?: boolean): Promise<ProviderPreflightResult>;
+      };
+      terminology: {
+        get(profileId: string): Promise<{ mode: TerminologyRolloutMode; enabled: boolean; terms: TechnicalTerm[]; corrections: unknown[] }>;
+        setMode(mode: TerminologyRolloutMode): Promise<TerminologyRolloutMode>;
+        addTerm(input: { profileId: string; canonical: string; aliases?: string[]; phoneticAliases?: string[]; domains?: TechnicalDomain[]; tags?: string[]; priority?: number }): Promise<TechnicalTerm | undefined>;
+        deleteTerm(profileId: string, canonical: string): Promise<boolean>;
+        learnCorrection(profileId: string, raw: string, canonical: string, confidence?: number): Promise<unknown>;
+        test(profileId: string, text: string): Promise<unknown>;
       };
       projects: {
         list(): Promise<ProjectRecord[]>;

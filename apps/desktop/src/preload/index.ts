@@ -9,7 +9,7 @@ import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { InterviewRuntimeDiagnostics, RuntimeTraceEvent } from "../main/runtime-diagnostics";
 import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
-import type { HistoryChangedEvent, TranscriptSnapshot } from "@interview-copilot/shared";
+import type { HistoryChangedEvent, TechnicalDomain, TechnicalTerm, TerminologyRolloutMode, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayDisplayInfo, OverlayMode, OverlayNativeBounds } from "../main/overlay-manager";
 import type { OverlayPreferences, OverlayPreferencesPatch, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
@@ -209,6 +209,14 @@ const api = {
     testConnection: (section: ProviderSection, profileId?: string): Promise<ProviderCheckResult> => ipcRenderer.invoke("settings:test-connection", section, profileId),
     listModels: (section: ProviderSection, profileId?: string): Promise<ModelCatalogResult> => ipcRenderer.invoke("settings:list-models", section, profileId),
     preflight: (checkReachability?: boolean): Promise<ProviderPreflightResult> => ipcRenderer.invoke("settings:preflight", checkReachability)
+  },
+  terminology: {
+    get: (profileId: string): Promise<{ mode: TerminologyRolloutMode; enabled: boolean; terms: TechnicalTerm[]; corrections: unknown[] }> => ipcRenderer.invoke("terminology:get", profileId),
+    setMode: (mode: TerminologyRolloutMode): Promise<TerminologyRolloutMode> => ipcRenderer.invoke("terminology:set-mode", mode),
+    addTerm: (input: { profileId: string; canonical: string; aliases?: string[]; phoneticAliases?: string[]; domains?: TechnicalDomain[]; tags?: string[]; priority?: number }): Promise<TechnicalTerm | undefined> => ipcRenderer.invoke("terminology:add-term", input),
+    deleteTerm: (profileId: string, canonical: string): Promise<boolean> => ipcRenderer.invoke("terminology:delete-term", profileId, canonical),
+    learnCorrection: (profileId: string, raw: string, canonical: string, confidence?: number): Promise<unknown> => ipcRenderer.invoke("terminology:learn-correction", profileId, raw, canonical, confidence),
+    test: (profileId: string, text: string): Promise<unknown> => ipcRenderer.invoke("terminology:test", profileId, text)
   },
   projects: {
     list: (): Promise<ProjectRecord[]> => ipcRenderer.invoke("projects:list"),
