@@ -9,7 +9,7 @@ import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { InterviewRuntimeDiagnostics, RuntimeTraceEvent } from "../main/runtime-diagnostics";
 import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
-import type { HistoryChangedEvent, TechnicalDomain, TechnicalTerm, TerminologyRolloutMode, TranscriptSnapshot } from "@interview-copilot/shared";
+import type { HistoryChangedEvent, InterviewDirectionSelection, InterviewTerminologyPreview, TechnicalDomain, TechnicalTerm, TerminologyRolloutMode, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayDisplayInfo, OverlayMode, OverlayNativeBounds } from "../main/overlay-manager";
 import type { OverlayPreferences, OverlayPreferencesPatch, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
@@ -124,6 +124,11 @@ const api = {
     setAutomationMode: (mode: "MANUAL" | "AUTO") => ipcRenderer.invoke("interview:set-automation-mode", mode) as Promise<boolean>,
     setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => ipcRenderer.invoke("interview:set-answer-mode", mode) as Promise<boolean>
   },
+  interviewDirections: {
+    getDefault: (profileId: string): Promise<InterviewDirectionSelection | undefined> => ipcRenderer.invoke("interview-directions:get-default", profileId),
+    setDefault: (profileId: string, selection: InterviewDirectionSelection): Promise<InterviewDirectionSelection> => ipcRenderer.invoke("interview-directions:set-default", profileId, selection),
+    preview: (input: { profileId: string; projectId?: string; jobTargetId?: string; selection?: InterviewDirectionSelection }): Promise<InterviewTerminologyPreview> => ipcRenderer.invoke("interview-directions:preview", input)
+  },
   writtenTest: {
     start: (options: WrittenTestStartOptions) => ipcRenderer.invoke("written-test:start", options) as Promise<boolean>,
     stop: () => ipcRenderer.invoke("written-test:stop") as Promise<boolean>,
@@ -211,7 +216,7 @@ const api = {
     preflight: (checkReachability?: boolean): Promise<ProviderPreflightResult> => ipcRenderer.invoke("settings:preflight", checkReachability)
   },
   terminology: {
-    get: (profileId: string): Promise<{ mode: TerminologyRolloutMode; enabled: boolean; terms: TechnicalTerm[]; corrections: unknown[] }> => ipcRenderer.invoke("terminology:get", profileId),
+    get: (profileId: string): Promise<{ mode: TerminologyRolloutMode; enabled: boolean; terms: TechnicalTerm[]; corrections: unknown[]; effectiveLexiconSize?: number; sourceCounts?: Record<string, number>; primaryDomains?: string[]; secondaryDomains?: string[]; directionSelection?: InterviewDirectionSelection }> => ipcRenderer.invoke("terminology:get", profileId),
     setMode: (mode: TerminologyRolloutMode): Promise<TerminologyRolloutMode> => ipcRenderer.invoke("terminology:set-mode", mode),
     addTerm: (input: { profileId: string; canonical: string; aliases?: string[]; phoneticAliases?: string[]; domains?: TechnicalDomain[]; tags?: string[]; priority?: number }): Promise<TechnicalTerm | undefined> => ipcRenderer.invoke("terminology:add-term", input),
     deleteTerm: (profileId: string, canonical: string): Promise<boolean> => ipcRenderer.invoke("terminology:delete-term", profileId, canonical),

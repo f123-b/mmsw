@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
-import { AnswerAgent, InterviewHistoryStore, ModelRouter, QuestionDetector2, SessionStateMachine, type AnswerProvider, type QuestionCandidate } from "@interview-copilot/shared";
+import { AnswerAgent, buildSessionTerminologyContext, InterviewHistoryStore, ModelRouter, QuestionDetector2, resolveInterviewDomainContext, SessionStateMachine, type AnswerProvider, type InterviewDirectionSelection, type QuestionCandidate } from "@interview-copilot/shared";
 import { InterviewCoordinator } from "./interview-coordinator";
 
 class FakeAudio extends EventEmitter {
@@ -34,6 +34,19 @@ async function* answerChunks(): AsyncGenerator<string> {
 }
 
 describe("InterviewCoordinator software E2E", () => {
+  it("passes an optional direction selection to the one-time terminology context build", async () => {
+    const audio = new FakeAudio();
+    const realtime = new FakeRealtime();
+    const agent = new AnswerAgent({ "low-latency": { stream: answerChunks } }, new ModelRouter({ "low-latency": "test-model" }));
+    const selection: InterviewDirectionSelection = { mode: "hybrid", primaryDirectionId: "ai_application", secondaryDirectionIds: ["robotics_ros2"] };
+    const provider = vi.fn(() => buildSessionTerminologyContext({ domainContext: resolveInterviewDomainContext({ selection, jd: "AI 应用和 ROS2" }) }));
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, terminologyContextProvider: provider });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL", directionSelection: selection });
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(provider).toHaveBeenCalledWith("p1", undefined, undefined, selection);
+    await coordinator.stop();
+  });
+
   it("connects ASR before capture so the first PCM packet is not dropped", async () => {
     const order: string[] = [];
     const audio = new OrderedAudio(order);

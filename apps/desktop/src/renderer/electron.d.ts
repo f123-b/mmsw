@@ -7,7 +7,7 @@ import type { RealtimeConnectOptions } from "../main/realtime-session";
 import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
-import type { HistoryChangedEvent, TechnicalDomain, TechnicalTerm, TerminologyRolloutMode, TranscriptSnapshot } from "@interview-copilot/shared";
+import type { HistoryChangedEvent, InterviewDirectionSelection, InterviewTerminologyPreview, TechnicalDomain, TechnicalTerm, TerminologyRolloutMode, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayDisplayInfo, OverlayMode, OverlayNativeBounds } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
@@ -94,6 +94,11 @@ declare global {
         getState(): Promise<{ running: boolean; interviewId?: string; automationMode: "MANUAL" | "AUTO" }>;
         setAutomationMode(mode: "MANUAL" | "AUTO"): Promise<boolean>;
         setAnswerMode(mode: "FAST" | "NORMAL" | "DEEP"): Promise<boolean>;
+      };
+      interviewDirections: {
+        getDefault(profileId: string): Promise<InterviewDirectionSelection | undefined>;
+        setDefault(profileId: string, selection: InterviewDirectionSelection): Promise<InterviewDirectionSelection>;
+        preview(input: { profileId: string; projectId?: string; jobTargetId?: string; selection?: InterviewDirectionSelection }): Promise<InterviewTerminologyPreview>;
       };
       writtenTest: {
         start(options: WrittenTestStartOptions): Promise<boolean>;
@@ -182,7 +187,7 @@ declare global {
         preflight(checkReachability?: boolean): Promise<ProviderPreflightResult>;
       };
       terminology: {
-        get(profileId: string): Promise<{ mode: TerminologyRolloutMode; enabled: boolean; terms: TechnicalTerm[]; corrections: unknown[] }>;
+        get(profileId: string): Promise<{ mode: TerminologyRolloutMode; enabled: boolean; terms: TechnicalTerm[]; corrections: unknown[]; effectiveLexiconSize?: number; sourceCounts?: Record<string, number>; primaryDomains?: string[]; secondaryDomains?: string[]; directionSelection?: InterviewDirectionSelection }>;
         setMode(mode: TerminologyRolloutMode): Promise<TerminologyRolloutMode>;
         addTerm(input: { profileId: string; canonical: string; aliases?: string[]; phoneticAliases?: string[]; domains?: TechnicalDomain[]; tags?: string[]; priority?: number }): Promise<TechnicalTerm | undefined>;
         deleteTerm(profileId: string, canonical: string): Promise<boolean>;

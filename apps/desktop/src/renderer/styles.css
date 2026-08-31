@@ -1095,3 +1095,81 @@ body { background: #f1f1ee; color: var(--text-primary); }
 .about-settings dl { display: grid; gap: 0; margin: 18px 0 0; }.about-settings dl > div { display: flex; justify-content: space-between; border-top: 1px solid #edf0f2; padding: 11px 0; }.about-settings dt { color: #88929d; font-size: 12px; }.about-settings dd { margin: 0; color: #303a47; font-size: 13px; }
 .settings-sticky-actions { display: flex; justify-content: flex-end; }
 @media (max-width: 820px) { .settings-layout { grid-template-columns: 1fr; }.settings-subnav { position: static; grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 0; }.settings-subnav button { border-left: 0; border-bottom: 2px solid transparent; }.settings-subnav button.selected { border-bottom-color: #27364b; border-left-color: transparent; }.settings-form-grid { grid-template-columns: 1fr; }.settings-field-wide { grid-column: auto; }.settings-readonly-list > div { grid-template-columns: 1fr; gap: 4px; } }
+
+/* Interview setup is a three-row shell: the body owns scrolling while the
+ * header and actions remain visible at 620/780/1080px window heights. */
+.modal-backdrop:has(> .setup-modal:not(.interview-setup-modal)) { display: none; }
+.interview-setup-modal { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 32px); min-height: 0; overflow: hidden; padding: 22px 24px 0; }
+.interview-setup-modal .setup-modal-header { min-height: 0; margin-bottom: 13px; }
+.interview-setup-modal .setup-modal-header h2 { margin: 5px 0 4px; font-size: 24px; }
+.interview-setup-modal .setup-modal-header p { max-width: 440px; margin: 0; color: #8a96a5; font-size: 11px; line-height: 1.45; }
+.setup-modal-body { min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 0 1px 15px; scrollbar-width: thin; }
+.setup-section { border-top: 1px solid #edf0f3; padding-top: 12px; }
+.setup-section:first-child { border-top: 0; padding-top: 0; }
+.setup-section .clean-field { margin-bottom: 9px; }
+.setup-profile-section > small { color: #9aa4af; font-size: 10px; }
+.setup-control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.setup-control-grid .clean-field { margin-bottom: 0; }
+.audio-compact-section { margin-top: 12px; }
+.audio-compact-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.audio-compact-row strong, .audio-compact-row small { display: block; }
+.audio-compact-row strong { color: #40516a; font-size: 12px; }
+.audio-compact-row small { margin-top: 3px; color: #9aa4af; font-size: 10px; }
+.audio-compact-status { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; color: #8b97a6; font-size: 10px; }
+.audio-compact-status b { margin-left: 3px; }
+.audio-details { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; margin-top: 10px; padding: 10px; border-radius: 9px; background: #f8fafc; }
+.audio-details .clean-field { margin-bottom: 0; }
+.audio-details .probe-summary { grid-column: 1 / -1; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.audio-details .probe-summary small { flex: 1 1 100%; color: #9aa4af; font-size: 10px; line-height: 1.4; }
+.direction-selector { display: grid; gap: 9px; }
+.direction-selector-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.direction-selector-heading strong, .direction-selector-heading small { display: block; }
+.direction-selector-heading strong { color: #40516a; font-size: 12px; }
+.direction-selector-heading small { margin-top: 3px; color: #98a2ae; font-size: 10px; line-height: 1.4; }
+.direction-mode-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.direction-mode-grid button, .direction-preset-grid button { border: 1px solid #e2e7ed; border-radius: 8px; padding: 8px 9px; background: #fff; color: #63738a; text-align: left; }
+.direction-mode-grid button.selected, .direction-preset-grid button.selected { border-color: #9bb3d9; background: #f3f7fd; color: #385d91; }
+.direction-mode-grid strong, .direction-mode-grid small, .direction-preset-grid strong, .direction-preset-grid small { display: block; }
+.direction-mode-grid strong { font-size: 11px; }
+.direction-mode-grid small { margin-top: 3px; color: #9aa4af; font-size: 9px; }
+.direction-selected-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.direction-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #dde5f0; border-radius: 999px; padding: 5px 8px; background: #f7faff; color: #526f9c; font-size: 10px; }
+.direction-chip.primary { border-color: #abc0df; background: #edf4ff; color: #365d94; }
+.direction-chip i { color: #9aa8ba; font-size: 13px; font-style: normal; line-height: 1; }
+.direction-auto-note, .direction-selection-note, .direction-preview-summary { color: #8b97a6; font-size: 10px; line-height: 1.45; }
+.direction-picker-panel { display: grid; gap: 8px; padding: 9px; border: 1px solid #e5eaf0; border-radius: 10px; background: #fbfcfe; }
+.direction-picker-panel .inline-search { width: 100%; padding: 8px 9px; border-radius: 7px; font-size: 11px; }
+.direction-preset-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; max-height: 235px; overflow-y: auto; }
+.direction-preset-grid button { display: grid; gap: 3px; }
+.direction-preset-grid button > span { color: #9aa9bc; font-size: 9px; }
+.direction-preset-grid strong { color: #4c607c; font-size: 10px; }
+.direction-preset-grid small { color: #96a0ad; font-size: 9px; line-height: 1.35; }
+.custom-domain-picker { border-top: 1px solid #edf0f3; padding-top: 8px; }
+.custom-domain-picker > strong { color: #66778f; font-size: 10px; }
+.custom-domain-picker > div { display: flex; flex-wrap: wrap; gap: 5px 9px; margin-top: 6px; }
+.custom-domain-picker label, .direction-auto-secondary, .setup-save-default { display: inline-flex; align-items: center; gap: 5px; color: #77869a; font-size: 10px; }
+.custom-domain-picker input, .direction-auto-secondary input, .setup-save-default input { accent-color: #5b78ad; }
+.direction-preview-summary { display: flex; flex-wrap: wrap; gap: 6px 12px; padding-top: 1px; }
+.setup-save-default { margin-top: 8px; }
+.setup-modal-footer { display: flex; justify-content: flex-end; gap: 9px; margin: 0 -24px; border-top: 1px solid #e9edf1; padding: 12px 24px 16px; background: #fff; }
+.setup-modal-footer .dark-pill, .setup-modal-footer .outline-pill { min-height: 34px; padding-inline: 15px; font-size: 11px; }
+.setup-lexicon-breakdown { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 11px; margin-top: 10px; color: #8a97a6; font-size: 10px; }
+.setup-lexicon-breakdown strong { color: #667991; }
+.setup-lexicon-breakdown span { padding: 4px 6px; border-radius: 5px; background: #f5f7fa; }
+.terminology-source-stats { display: flex; flex-wrap: wrap; gap: 8px 15px; margin: 12px 0; color: #8a96a5; font-size: 12px; }
+.terminology-source-stats strong { margin-left: 3px; color: #40516a; }
+.terminology-mode-grid small, .terminology-custom-list small { color: #8b97a7; font-size: 11px; }
+@media (max-height: 700px) {
+  .interview-setup-modal { max-height: calc(100vh - 18px); padding-top: 15px; }
+  .interview-setup-modal .setup-modal-header { margin-bottom: 8px; }
+  .interview-setup-modal .setup-modal-header p { display: none; }
+  .setup-modal-body { padding-bottom: 10px; }
+  .direction-preset-grid { max-height: 170px; }
+  .setup-modal-footer { padding-bottom: 11px; }
+}
+@media (max-width: 560px) {
+  .interview-setup-modal { width: calc(100vw - 18px); padding-inline: 15px; }
+  .setup-modal-footer { margin-inline: -15px; padding-inline: 15px; }
+  .audio-details, .setup-control-grid { grid-template-columns: 1fr; }
+  .direction-preset-grid { grid-template-columns: 1fr; }
+}

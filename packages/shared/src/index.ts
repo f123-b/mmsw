@@ -10,6 +10,7 @@ export * from "./terminology/confidence-gate";
 export * from "./terminology/lexicons/builtin";
 export * from "./terminology/dynamic-lexicon-builder";
 export * from "./terminology/technical-terminology-normalizer";
+export * from "./interview-directions";
 export { buildVisionInput, type ScreenshotImage, type VisionInput } from "./vision";
 
 export const SESSION_STATES = [

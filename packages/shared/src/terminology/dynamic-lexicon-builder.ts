@@ -1,6 +1,6 @@
 import { DomainRouter, type DomainRouterInput } from "./domain-router";
 import { builtinTermsForDomains } from "./lexicons/builtin";
-import type { SessionTerminologyContext, TechnicalDomain, TechnicalTerm, TechnicalTermSource } from "./terminology-types";
+import type { InterviewDomainContext, SessionTerminologyContext, TechnicalDomain, TechnicalTerm, TechnicalTermSource } from "./terminology-types";
 
 export interface DynamicLexiconInput extends DomainRouterInput {
   profileTerms?: readonly string[];
@@ -9,6 +9,8 @@ export interface DynamicLexiconInput extends DomainRouterInput {
   projectTerms?: readonly string[];
   customTerms?: readonly TechnicalTerm[];
   recentTopics?: readonly string[];
+  /** Optional direction context resolved before the interview starts. */
+  domainContext?: InterviewDomainContext;
   now?: number;
 }
 
@@ -47,7 +49,10 @@ export class DynamicLexiconBuilder {
   constructor(private readonly router = new DomainRouter()) {}
 
   build(input: DynamicLexiconInput = {}): SessionTerminologyContext {
-    const route = this.router.route(input);
+    const routed = input.domainContext
+      ? { primaryDomains: [...input.domainContext.primaryDomains], secondaryDomains: [...input.domainContext.secondaryDomains], cacheKey: `direction:${input.domainContext.selectedDirectionIds.join(",")}:${input.domainContext.mode}` }
+      : this.router.route(input);
+    const route = routed;
     const domains = [...new Set([...route.primaryDomains, ...route.secondaryDomains])] as TechnicalDomain[];
     const terms = mergeTerms([
       ...builtinTermsForDomains(domains),
@@ -59,7 +64,7 @@ export class DynamicLexiconBuilder {
     ]);
     const sourceCounts = { builtin: 0, resume: 0, job: 0, project: 0, user: 0, session: 0 } satisfies Record<TechnicalTermSource, number>;
     for (const item of terms) sourceCounts[item.source] += 1;
-    return { terms, primaryDomains: route.primaryDomains, secondaryDomains: route.secondaryDomains, sourceCounts, builtAt: input.now ?? Date.now() };
+    return { terms, primaryDomains: route.primaryDomains, secondaryDomains: route.secondaryDomains, sourceCounts, builtAt: input.now ?? Date.now(), ...(input.domainContext ? { domainContext: input.domainContext } : {}) };
   }
 }
 

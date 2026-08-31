@@ -11,7 +11,7 @@ import { createScreenshotFixtureResult, ScreenshotManager, type ScreenshotRegion
 import { createScreenshotRequestId, SCREENSHOT_PROMPT, ScreenshotOperationRegistry, ScreenshotTraceBuffer, withScreenshotTimeout, type ScreenshotTraceEvent, type ScreenshotTraceEventName } from "./screenshot-pipeline";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, analyzeQuestionNucleus, AnswerAgent, AgentToolRegistry, buildDynamicTechnicalLexicon, buildSessionTerminologyContext, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectAliasResolver, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, retrieveProfileExperience, routeKnowledge, SessionStateMachine, TechnicalTerminologyNormalizer, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TerminologyRolloutMode, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, analyzeQuestionNucleus, AnswerAgent, AgentToolRegistry, buildDynamicTechnicalLexicon, buildSessionTerminologyContext, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeInterviewDirectionSelection, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectAliasResolver, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, resolveInterviewDomainContext, retrieveProfileExperience, routeKnowledge, SessionStateMachine, TechnicalTerminologyNormalizer, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type InterviewDirectionSelection, type InterviewTerminologyPreview, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TerminologyRolloutMode, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteResumeAnalysisRepository, SqliteRetrievalRepository, SqliteSkillSuggestionRepository, SqliteTerminologyRepository, type SqliteDatabase } from "./database";
@@ -1841,6 +1841,77 @@ function prepareInterviewContextCache(key: InterviewContextCacheKey): void {
   });
 }
 
+function interviewDirectionStateKey(profileId: string): string {
+  return `interview_direction_selection:${profileId}`;
+}
+
+function getInterviewDirectionDefault(profileId: string): InterviewDirectionSelection | undefined {
+  const raw = database?.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", [interviewDirectionStateKey(profileId)])?.value;
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as InterviewDirectionSelection;
+    return parsed && typeof parsed === "object" ? parsed : undefined;
+  } catch (error) {
+    appLogger?.warn("INTERVIEW_DIRECTION_DEFAULT_INVALID", { profileId, error: String(error) });
+    return undefined;
+  }
+}
+
+function setInterviewDirectionDefault(profileId: string, selection: InterviewDirectionSelection): InterviewDirectionSelection {
+  const normalized = normalizeInterviewDirectionSelection(selection) ?? { mode: "hybrid" as const };
+  database?.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [interviewDirectionStateKey(profileId), JSON.stringify(normalized)]);
+  database?.flush(120);
+  return normalized;
+}
+
+function buildInterviewTerminologyContext(profileId: string, projectId?: string, jobTargetId?: string, directionSelection?: InterviewDirectionSelection) {
+  const profile = profileRepository?.get(profileId);
+  const projectSnapshot = projectMemoryService?.get(profileId);
+  const project = projectSnapshot?.projects.find((item) => item.id === projectId);
+  const jobTarget = jobTargetId ? jobTargetRepository?.get(jobTargetId) : undefined;
+  const job = [profile?.jobDescription?.rawContent, jobTarget?.description, ...(jobTarget?.requirements ?? []).map((item) => item.requirement)].filter(Boolean).join("\n");
+  const projectTerms = [
+    ...(project ? [project.name, project.description, project.role, ...project.hardware, ...project.software, ...project.technologyStack] : []),
+    ...(projectSnapshot?.facts?.filter((fact) => !projectId || fact.projectId === projectId).map((fact) => `${fact.title} ${fact.content}`) ?? []),
+    ...(projectSnapshot?.modules.filter((item) => !projectId || item.projectId === projectId).map((item) => `${item.moduleName} ${item.description}`) ?? []),
+    ...(projectSnapshot?.technicalPoints.filter((item) => !projectId || item.projectId === projectId).map((item) => `${item.topic} ${item.content}`) ?? [])
+  ];
+  let domainContext;
+  try {
+    domainContext = resolveInterviewDomainContext({
+      selection: directionSelection,
+      jd: job,
+      resume: profile?.resume?.rawContent,
+      project: projectTerms.join("\n"),
+      currentTopic: project ? [project.name, ...project.technologyStack].join(" ") : undefined
+    });
+  } catch (error) {
+    // Direction selection is an optional optimization. A malformed or future
+    // preset must never prevent an interview from starting.
+    appLogger?.warn("INTERVIEW_DIRECTION_RESOLVE_FALLBACK", { profileId, projectId, jobTargetId, error: String(error) });
+    domainContext = undefined;
+  }
+  const build = (withDirection?: typeof domainContext) => buildSessionTerminologyContext({
+    jd: job,
+    resume: profile?.resume?.rawContent,
+    project: projectTerms.join("\n"),
+    profileTerms: profile?.skills.flatMap((skill) => [skill.name, ...(skill.tags ?? [])]),
+    resumeTerms: profile?.resume?.rawContent ? [profile.resume.rawContent] : [],
+    jobTerms: job ? [job] : [],
+    projectTerms,
+    customTerms: terminologyRepository?.listTerms(profileId) ?? [],
+    recentTopics: project ? [project.name, ...project.technologyStack] : [],
+    ...(withDirection ? { domainContext: withDirection } : {})
+  });
+  try {
+    return build(domainContext);
+  } catch (error) {
+    if (!directionSelection) throw error;
+    appLogger?.warn("INTERVIEW_DIRECTION_CONTEXT_FALLBACK", { profileId, projectId, jobTargetId, error: String(error) });
+    return build(undefined);
+  }
+}
+
 type ScopedKnowledgeChunk = KnowledgeChunk & {
   metadata: KnowledgeChunk["metadata"] & {
     scope?: "project" | "global-reference" | "profile";
@@ -2667,10 +2738,28 @@ function registerIpc(): void {
   ipcMain.handle("preparation:reject", (_event, requestId: string) => { preparationRuntime?.reject(requestId); return true; });
   ipcMain.handle("preparation:stop", () => { preparationAbortController?.abort(); return true; });
   ipcMain.handle("settings:get", () => providerConfigStore?.getPublic());
+  ipcMain.handle("interview-directions:get-default", (_event, profileId: string) => getInterviewDirectionDefault(profileId));
+  ipcMain.handle("interview-directions:set-default", (_event, profileId: string, selection: InterviewDirectionSelection) => {
+    if (!profileRepository?.get(profileId)) throw new Error("PROFILE_NOT_FOUND: 面试档案不存在");
+    return setInterviewDirectionDefault(profileId, selection);
+  });
+  ipcMain.handle("interview-directions:preview", (_event, input: { profileId: string; projectId?: string; jobTargetId?: string; selection?: InterviewDirectionSelection }): InterviewTerminologyPreview => {
+    const context = buildInterviewTerminologyContext(input.profileId, input.projectId, input.jobTargetId, input.selection);
+    return {
+      ...(input.selection ? { directionSelection: input.selection } : {}),
+      ...(context.domainContext ? { domainContext: context.domainContext } : {}),
+      primaryDomains: context.primaryDomains,
+      secondaryDomains: context.secondaryDomains,
+      lexiconSize: context.terms.length,
+      sourceCounts: context.sourceCounts
+    };
+  });
   ipcMain.handle("terminology:get", (_event, profileId: string) => {
     const mode = database?.first<{ value: string }>("SELECT value FROM app_state WHERE key = 'terminology_rollout_mode'")?.value;
     const resolvedMode: TerminologyRolloutMode = ["legacy", "shadow", "high_confidence", "dynamic"].includes(mode ?? "") ? mode as TerminologyRolloutMode : "high_confidence";
-    return { mode: resolvedMode, enabled: resolvedMode !== "legacy", terms: terminologyRepository?.listTerms(profileId) ?? [], corrections: terminologyRepository?.listCorrections(profileId) ?? [] };
+    const directionSelection = getInterviewDirectionDefault(profileId);
+    const context = buildInterviewTerminologyContext(profileId, undefined, undefined, directionSelection);
+    return { mode: resolvedMode, enabled: resolvedMode !== "legacy", terms: terminologyRepository?.listTerms(profileId) ?? [], corrections: terminologyRepository?.listCorrections(profileId) ?? [], effectiveLexiconSize: context.terms.length, sourceCounts: context.sourceCounts, primaryDomains: context.primaryDomains, secondaryDomains: context.secondaryDomains, directionSelection };
   });
   ipcMain.handle("terminology:set-mode", (_event, mode: TerminologyRolloutMode) => {
     if (!("legacy|shadow|high_confidence|dynamic".split("|") as string[]).includes(mode)) throw new Error("TERMINOLOGY_MODE_INVALID");
@@ -3372,30 +3461,7 @@ if (hasSingleInstanceLock) {
         recentTopics: project ? [project.name, ...project.technologyStack] : []
       });
     },
-    terminologyContextProvider: (profileId, projectId, jobTargetId) => {
-      const profile = profileRepository?.get(profileId);
-      const projectSnapshot = projectMemoryService?.get(profileId);
-      const project = projectSnapshot?.projects.find((item) => item.id === projectId);
-      const jobTarget = jobTargetId ? jobTargetRepository?.get(jobTargetId) : undefined;
-      const job = [profile?.jobDescription?.rawContent, jobTarget?.description, ...(jobTarget?.requirements ?? []).map((item) => item.requirement)].filter(Boolean).join("\n");
-      const projectTerms = [
-        ...(project ? [project.name, project.description, project.role, ...project.hardware, ...project.software, ...project.technologyStack] : []),
-        ...(projectSnapshot?.facts?.filter((fact) => !projectId || fact.projectId === projectId).map((fact) => `${fact.title} ${fact.content}`) ?? []),
-        ...(projectSnapshot?.modules.filter((item) => !projectId || item.projectId === projectId).map((item) => `${item.moduleName} ${item.description}`) ?? []),
-        ...(projectSnapshot?.technicalPoints.filter((item) => !projectId || item.projectId === projectId).map((item) => `${item.topic} ${item.content}`) ?? [])
-      ];
-      return buildSessionTerminologyContext({
-        jd: job,
-        resume: profile?.resume?.rawContent,
-        project: projectTerms.join("\n"),
-        profileTerms: profile?.skills.flatMap((skill) => [skill.name, ...(skill.tags ?? [])]),
-        resumeTerms: profile?.resume?.rawContent ? [profile.resume.rawContent] : [],
-        jobTerms: job ? [job] : [],
-        projectTerms,
-        customTerms: terminologyRepository?.listTerms(profileId) ?? [],
-        recentTopics: project ? [project.name, ...project.technologyStack] : []
-      });
-    },
+    terminologyContextProvider: (profileId, projectId, jobTargetId, directionSelection) => buildInterviewTerminologyContext(profileId, projectId, jobTargetId, directionSelection),
     terminologyModeProvider: () => {
       const stored = database?.first<{ value: string }>("SELECT value FROM app_state WHERE key = 'terminology_rollout_mode'")?.value;
       return ["legacy", "shadow", "high_confidence", "dynamic"].includes(stored ?? "") ? stored as TerminologyRolloutMode : "high_confidence";

@@ -45,6 +45,7 @@ import {
   type AsrLanguage,
   type ModelSnapshot,
   type InterviewRecord,
+  type InterviewDirectionSelection,
   type QuestionRecord,
   type QuestionCandidate,
   type QuestionEvent,
@@ -111,6 +112,8 @@ export interface InterviewStartOptions extends Omit<RealtimeConnectOptions, "aut
   terminologyLexicon?: DynamicTechnicalLexicon;
   terminologyContext?: SessionTerminologyContext;
   terminologyMode?: TerminologyRolloutMode;
+  /** Optional per-interview direction selection; absent keeps the legacy route. */
+  directionSelection?: InterviewDirectionSelection;
 }
 
 export interface InterviewContextSelection {
@@ -145,7 +148,7 @@ export interface InterviewCoordinatorOptions {
   history?: InterviewHistoryPort;
   contextProvider?: (question: QuestionCandidate, profileId: string, recentTranscript: string[], context?: InterviewContextSelection) => AnswerContextInput | Promise<AnswerContextInput>;
   terminologyLexiconProvider?: (profileId: string, projectId?: string, jobTargetId?: string) => DynamicTechnicalLexicon | Promise<DynamicTechnicalLexicon>;
-  terminologyContextProvider?: (profileId: string, projectId?: string, jobTargetId?: string) => SessionTerminologyContext | Promise<SessionTerminologyContext>;
+  terminologyContextProvider?: (profileId: string, projectId?: string, jobTargetId?: string, directionSelection?: InterviewDirectionSelection) => SessionTerminologyContext | Promise<SessionTerminologyContext>;
   terminologyModeProvider?: (profileId: string) => TerminologyRolloutMode;
   asrSettingsProvider?: (profileId: string) => Pick<RealtimeConnectOptions, "providerType" | "providerName" | "model" | "language" | "url">;
   interviewBrain?: InterviewBrain;
@@ -503,7 +506,7 @@ export class InterviewCoordinator extends EventEmitter {
       const providedLexicon = startOptions.terminologyLexicon ?? this.options.terminologyLexiconProvider?.(startOptions.profileId, startOptions.projectId, startOptions.jobTargetId);
       if (providedLexicon && typeof (providedLexicon as PromiseLike<DynamicTechnicalLexicon>).then === "function") this.sessionTerminologyLexicon = await (providedLexicon as Promise<DynamicTechnicalLexicon>);
       else this.sessionTerminologyLexicon = (providedLexicon as DynamicTechnicalLexicon | undefined) ?? buildDynamicTechnicalLexicon({ recentTopics: [startOptions.projectId].filter((value): value is string => Boolean(value)) });
-      const providedTerminologyContext = startOptions.terminologyContext ?? this.options.terminologyContextProvider?.(startOptions.profileId, startOptions.projectId, startOptions.jobTargetId);
+      const providedTerminologyContext = startOptions.terminologyContext ?? this.options.terminologyContextProvider?.(startOptions.profileId, startOptions.projectId, startOptions.jobTargetId, startOptions.directionSelection);
       let terminologyContext: SessionTerminologyContext;
       if (providedTerminologyContext && typeof (providedTerminologyContext as PromiseLike<SessionTerminologyContext>).then === "function") terminologyContext = await (providedTerminologyContext as Promise<SessionTerminologyContext>);
       else terminologyContext = providedTerminologyContext as SessionTerminologyContext | undefined ?? buildSessionTerminologyContext({ recentTopics: [startOptions.projectId].filter((value): value is string => Boolean(value)) });
