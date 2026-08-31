@@ -22,9 +22,14 @@ export type GlobalMouseEvent =
   | { event: "mouse-wheel"; x?: number; y?: number; deltaY?: number }
   | { event: "error"; error?: string };
 
+/** Windows mouseData is positive for wheel-up; DOM scrollTop uses positive-down. */
+export function normalizeNativeWheelDelta(deltaY: number): number {
+  return Number.isFinite(deltaY) ? -deltaY : 0;
+}
+
 export function routeGlobalMouseEvent(event: GlobalMouseEvent, onMiddleClick: () => void, onMouseEvent?: (event: GlobalMouseEvent) => void, onDiagnostic?: (message: string) => void): void {
   if (event.event === "middle-click") onMiddleClick();
-  else if (event.event === "mouse-wheel") onMouseEvent?.(event);
+  else if (event.event === "mouse-wheel") onMouseEvent?.({ ...event, ...(event.deltaY === undefined ? {} : { deltaY: normalizeNativeWheelDelta(event.deltaY) }) });
   else if (event.event === "error") onDiagnostic?.(`MIDDLE_MOUSE_WATCH_ERROR: ${event.error ?? "unknown"}`);
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { routeGlobalMouseEvent, shouldHandleMiddleMouseShortcut } from "./middle-mouse-shortcut";
+import { normalizeNativeWheelDelta, routeGlobalMouseEvent, shouldHandleMiddleMouseShortcut } from "./middle-mouse-shortcut";
 
 describe("middle mouse screenshot shortcut", () => {
   it("runs in manual interview and written-test modes, but never in auto interview", () => {
@@ -16,8 +16,13 @@ describe("middle mouse screenshot shortcut", () => {
     const middleClick = vi.fn();
     const wheel = vi.fn();
     routeGlobalMouseEvent({ event: "middle-click" }, middleClick, wheel);
-    routeGlobalMouseEvent({ event: "mouse-wheel", x: 12, y: 34, deltaY: 120 }, middleClick, wheel);
+    routeGlobalMouseEvent({ event: "mouse-wheel", x: 12, y: 34, deltaY: -120 }, middleClick, wheel);
     expect(middleClick).toHaveBeenCalledTimes(1);
     expect(wheel).toHaveBeenCalledWith({ event: "mouse-wheel", x: 12, y: 34, deltaY: 120 });
+  });
+
+  it("maps native Windows wheel polarity to DOM scroll polarity", () => {
+    expect(normalizeNativeWheelDelta(120)).toBe(-120);
+    expect(normalizeNativeWheelDelta(-120)).toBe(120);
   });
 });
