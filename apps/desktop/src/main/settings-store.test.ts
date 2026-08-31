@@ -297,6 +297,34 @@ describe("OverlaySettingsStore", () => {
     } finally { database.close(); }
   });
 
+  it("keeps dialogue text and background preferences independent from the question window", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      const next = settings.setPreferences({ interview: { questionWindow: { fontSize: 18, backgroundColor: "#111111" }, dialogueWindow: { fontSize: 13, backgroundColor: "#eeeeee" } } });
+      expect(next.interview.questionWindow).toMatchObject({ fontSize: 18, backgroundColor: "#111111" });
+      expect(next.interview.dialogueWindow).toMatchObject({ fontSize: 13, backgroundColor: "#eeeeee" });
+      const questionOnly = settings.setPreferences({ interview: { questionWindow: { fontSize: 19 } } });
+      expect(questionOnly.interview.questionWindow.fontSize).toBe(19);
+      expect(questionOnly.interview.dialogueWindow.fontSize).toBe(13);
+    } finally { database.close(); }
+  });
+
+  it("resolves high-frequency previews without persisting until the final save", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const settings = new OverlaySettingsStore(database);
+      const saved = settings.setPreferences({ interview: { questionWindow: { fontSize: 14 } } });
+      const persistedBefore = database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", ["overlay.preferences"])?.value;
+      for (let index = 0; index < 100; index += 1) settings.previewPreferences({ interview: { questionWindow: { fontSize: 14 + index / 100 } } });
+      expect(settings.getPreferences()).toEqual(saved);
+      expect(database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", ["overlay.preferences"])?.value).toBe(persistedBefore);
+      const final = settings.setPreferences({ interview: { questionWindow: { fontSize: 16 } } });
+      expect(final.interview.questionWindow.fontSize).toBe(16);
+      expect(database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", ["overlay.preferences"])?.value).not.toBe(persistedBefore);
+    } finally { database.close(); }
+  });
+
   it("resets only the persisted overlay layout through the settings store", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {

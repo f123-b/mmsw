@@ -56,6 +56,7 @@ declare global {
         getTransientBounds(): Promise<OverlayNativeBounds | undefined>;
         getZOrderDiagnostics(): Promise<import("../main/overlay-z-order-controller").OverlayZOrderDiagnostics | undefined>;
         getPreferences(): Promise<OverlayPreferences>;
+        previewPreferences(input: OverlayPreferencesPatch): Promise<OverlayPreferences>;
         setPreferences(input: OverlayPreferencesPatch): Promise<OverlayPreferences>;
         enterLayoutEditMode(): Promise<boolean>;
         finishLayoutEditMode(): Promise<boolean>;

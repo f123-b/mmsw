@@ -83,6 +83,7 @@ const api = {
     getTransientBounds: (): Promise<OverlayNativeBounds | undefined> => ipcRenderer.invoke("overlay:get-transient-bounds"),
     getZOrderDiagnostics: (): Promise<unknown> => ipcRenderer.invoke("overlay:get-z-order-diagnostics"),
     getPreferences: (): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:get-preferences"),
+    previewPreferences: (input: OverlayPreferencesPatch): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:preview-preferences", input),
     setPreferences: (input: OverlayPreferencesPatch): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:set-preferences", input),
     enterLayoutEditMode: (): Promise<boolean> => ipcRenderer.invoke("overlay:enter-layout-edit"),
     finishLayoutEditMode: (): Promise<boolean> => ipcRenderer.invoke("overlay:finish-layout-edit"),

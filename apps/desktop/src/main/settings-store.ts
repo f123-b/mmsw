@@ -507,6 +507,18 @@ export class OverlaySettingsStore {
   }
 
   setPreferences(input: OverlayPreferencesPatch): OverlayPreferences {
+    const next = this.mergePreferences(input);
+    this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.preferencesKey, JSON.stringify(next)]);
+    this.database.flushNow();
+    return next;
+  }
+
+  /** Resolve a live preview without touching the persisted app_state row. */
+  previewPreferences(input: OverlayPreferencesPatch): OverlayPreferences {
+    return this.mergePreferences(input);
+  }
+
+  private mergePreferences(input: OverlayPreferencesPatch): OverlayPreferences {
     const current = this.getPreferences();
     const legacyBehaviorPatch = input.behavior && !Object.prototype.hasOwnProperty.call(input.behavior, "interactionMode") && Object.prototype.hasOwnProperty.call(input.behavior, "mousePassthrough")
       ? { interactionMode: input.behavior.mousePassthrough ? "click_through" as const : "interactive" as const }
@@ -516,15 +528,21 @@ export class OverlaySettingsStore {
       : {};
     const interviewInput = input.interview ?? {};
     const writtenInput = input.writtenTest ?? {};
-    const leftGeometryPatch = interviewInput.questionWindow ?? interviewInput.dialogueWindow ?? {};
+    const questionWindowInput = interviewInput.questionWindow ?? {};
+    const dialogueWindowInput = interviewInput.dialogueWindow ?? {};
+    const leftGeometryPatch: Partial<OverlayWindowPreferences> = {};
+    for (const key of ["x", "y", "width", "height", "displayId", "scaleFactor"] as const) {
+      if (key in questionWindowInput) leftGeometryPatch[key] = questionWindowInput[key];
+      else if (key in dialogueWindowInput) leftGeometryPatch[key] = dialogueWindowInput[key];
+    }
     const next = normalizeOverlayPreferences({
       ...current,
       ...input,
       interview: {
         ...current.interview,
         ...interviewInput,
-        questionWindow: { ...current.interview.questionWindow, ...leftGeometryPatch },
-        dialogueWindow: { ...current.interview.dialogueWindow, ...leftGeometryPatch },
+        questionWindow: { ...current.interview.questionWindow, ...questionWindowInput },
+        dialogueWindow: { ...current.interview.dialogueWindow, ...dialogueWindowInput, ...(!interviewInput.dialogueWindow && interviewInput.questionWindow ? leftGeometryPatch : {}) },
         answerWindow: { ...current.interview.answerWindow, ...(interviewInput.answerWindow ?? {}) },
         controlBar: { ...current.interview.controlBar, ...(interviewInput.controlBar ?? {}) }
       },
@@ -539,8 +557,6 @@ export class OverlaySettingsStore {
       appearance: { ...current.appearance, ...(input.appearance ?? {}) },
       screenshot: { ...current.screenshot, ...(input.screenshot ?? {}) }
     });
-    this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.preferencesKey, JSON.stringify(next)]);
-    this.database.flushNow();
     return next;
   }
 

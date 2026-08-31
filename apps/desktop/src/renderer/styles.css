@@ -1328,6 +1328,21 @@ body { background: #f1f1ee; color: var(--text-primary); }
 .designer-color-field code { overflow: hidden; color: #8a96a5; font: 10px ui-monospace, Consolas, monospace; text-overflow: ellipsis; }
 @media (max-width: 720px) { .designer-text-settings-grid { grid-template-columns: 1fr; } }
 
+.designer-window-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 13px 0 11px; border-bottom: 1px solid #e8edf2; padding-bottom: 8px; }
+.designer-window-tabs button, .designer-background-presets button { border: 1px solid #e0e6ed; border-radius: 8px; padding: 7px 11px; background: #fff; color: #718096; font-size: 12px; }
+.designer-window-tabs button:hover, .designer-background-presets button:hover { border-color: #b9c9df; color: #4e6f9f; }
+.designer-window-tabs button.selected, .designer-background-presets button.selected { border-color: #9bb3d9; background: #f3f7fd; color: #385d91; }
+.designer-window-panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.designer-text-quick-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.designer-background-fieldset { min-width: 0; margin: 0; border: 0; padding: 0; }
+.designer-background-fieldset:disabled { opacity: .58; }
+.designer-background-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.designer-advanced-disclosure { margin-top: 11px; border-top: 1px solid #edf0f3; padding-top: 10px; }
+.designer-advanced-disclosure summary { cursor: pointer; color: #64748b; font-size: 11px; }
+.designer-advanced-disclosure[open] summary { margin-bottom: 10px; }
+.designer-advanced-disclosure .designer-fields-grid { gap: 9px; }
+@media (max-width: 840px) { .designer-window-panels { grid-template-columns: 1fr; } }
+
 /* Project/sidebar stability: scrolling owns the variable-height middle area;
  * action columns keep project names and footer controls from shifting. */
 .sidebar-main-scroll { scrollbar-gutter: stable; padding-right: 4px; }

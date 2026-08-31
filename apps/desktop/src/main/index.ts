@@ -2296,6 +2296,11 @@ function registerIpc(): void {
    ipcMain.handle("overlay:get-transient-bounds", () => overlayManager?.getTransientBounds());
    ipcMain.handle("overlay:get-z-order-diagnostics", () => overlayManager?.zOrderDiagnostics);
    ipcMain.handle("overlay:get-preferences", () => overlaySettingsStore?.getPreferences());
+   ipcMain.handle("overlay:preview-preferences", (_event, input: OverlayPreferencesPatch) => {
+     const next = overlaySettingsStore?.previewPreferences(input);
+     if (next) { overlayManager?.applyPreferences(next.behavior); overlayManager?.applyLayoutPreferences(next); broadcast("overlay:preferences", next); }
+     return next;
+   });
    ipcMain.handle("overlay:set-preferences", (_event, input: OverlayPreferencesPatch) => {
      const next = overlaySettingsStore?.setPreferences(input);
      if (next) { overlayManager?.applyPreferences(next.behavior); overlayManager?.applyLayoutPreferences(next); broadcast("overlay:preferences", next); }
