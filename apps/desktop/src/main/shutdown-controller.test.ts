@@ -51,4 +51,69 @@ describe("ShutdownController", () => {
     expect(order).toEqual(["finalize", "flush", "close-db"]);
     expect(shutdown.errors).toHaveLength(1);
   });
+
+  it("SHUTDOWN_STEP_TIMEOUT_CONTINUES", async () => {
+    const order: string[] = [];
+    const shutdown = new ShutdownController([
+      { name: "hung", timeoutMs: 10, run: () => new Promise<void>(() => undefined) },
+      { name: "next", run: () => { order.push("next"); } }
+    ], { globalTimeoutMs: 100 });
+    await shutdown.run();
+    expect(order).toEqual(["next"]);
+    expect(shutdown.errors.map((entry) => entry.step)).toEqual(["hung"]);
+  });
+
+  it("SHUTDOWN_HUNG_CHAT_DOES_NOT_BLOCK_EXIT", async () => {
+    const events: string[] = [];
+    const shutdown = new ShutdownController([
+      { name: "wait-chat", timeoutMs: 10, run: () => new Promise<void>(() => undefined) },
+      { name: "close-db", run: () => { events.push("close-db"); } }
+    ], { globalTimeoutMs: 100, onEvent: ({ event }) => events.push(event) });
+    await shutdown.run();
+    expect(events).toContain("SHUTDOWN_STEP_TIMEOUT");
+    expect(events).toContain("close-db");
+    expect(shutdown.isComplete).toBe(true);
+  });
+
+  it("SHUTDOWN_TIMEOUT_RECORDED", async () => {
+    const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    const shutdown = new ShutdownController([{ name: "flush-db", timeoutMs: 10, run: () => new Promise<void>(() => undefined) }], {
+      globalTimeoutMs: 100,
+      onEvent: (event) => events.push(event)
+    });
+    await shutdown.run();
+    expect(events.find((event) => event.event === "SHUTDOWN_STEP_TIMEOUT")?.fields).toMatchObject({ step: "flush-db", timeoutMs: 10 });
+  });
+
+  it("SHUTDOWN_IDEMPOTENT_DURING_TIMEOUT", async () => {
+    const order: string[] = [];
+    const shutdown = new ShutdownController([
+      { name: "hung", timeoutMs: 10, run: () => new Promise<void>(() => undefined) },
+      { name: "close-db", run: () => { order.push("close-db"); } }
+    ], { globalTimeoutMs: 100 });
+    await Promise.all([shutdown.run(), shutdown.run(), shutdown.run()]);
+    expect(order).toEqual(["close-db"]);
+    expect(shutdown.isComplete).toBe(true);
+  });
+
+  it("SHUTDOWN_DATABASE_STILL_CLOSES_AFTER_TIMEOUT", async () => {
+    let closed = false;
+    const shutdown = new ShutdownController([
+      { name: "stop-audio", timeoutMs: 10, run: () => new Promise<void>(() => undefined) },
+      { name: "close-db", run: () => { closed = true; } }
+    ], { globalTimeoutMs: 100 });
+    await shutdown.run();
+    expect(closed).toBe(true);
+  });
+
+  it("records a global hard timeout when the step budget is exhausted", async () => {
+    const events: string[] = [];
+    const shutdown = new ShutdownController([{ name: "hung", timeoutMs: 100, run: () => new Promise<void>(() => undefined) }], {
+      globalTimeoutMs: 10,
+      onEvent: ({ event }) => events.push(event)
+    });
+    await shutdown.run();
+    expect(events).toContain("SHUTDOWN_HARD_TIMEOUT");
+    expect(shutdown.isComplete).toBe(true);
+  });
 });

@@ -190,10 +190,14 @@ try {
   for (const target of await targets()) {
     if (target.type === "page") await closeTarget(target);
   }
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("RUNTIME_E2E_TIMEOUT Electron did not exit after successful idle")), 10_000);
-    child.once("exit", (code) => { clearTimeout(timer); if (code && code !== 0) reject(new Error(`Electron exited with ${code}`)); else resolve(); });
-  });
+  if (child.exitCode === null && child.signalCode === null) {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("RUNTIME_E2E_TIMEOUT Electron did not exit after successful idle")), 10_000);
+      child.once("exit", (code) => { clearTimeout(timer); if (code && code !== 0) reject(new Error(`Electron exited with ${code}`)); else resolve(); });
+    });
+  } else if (child.exitCode !== 0) {
+    throw new Error(`Electron exited with ${child.exitCode ?? child.signalCode}`);
+  }
   console.log(`REALTIME_SMOKE_E2E_RESULT ${JSON.stringify({ ...lifecycleResult, processExited: true })}`);
 } finally {
   overlay?.socket.close();

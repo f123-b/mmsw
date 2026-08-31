@@ -246,6 +246,7 @@ let audioLogger: SafeLogger | undefined;
 let realtimeLogger: SafeLogger | undefined;
 let database: SqliteDatabase | undefined;
 let appShuttingDown = false;
+let shutdownHardDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
 // The overlay is created after the interview starts. Keep the latest local
 // snapshots in the main process so a newly mounted overlay can replay them
 // instead of waiting for the next ASR packet.
@@ -282,26 +283,48 @@ function scheduleMainWindowBoundsSave(): void {
   mainWindowBoundsSaveTimer.unref?.();
 }
 
+async function drainChatStreams(timeoutMs = 1_800): Promise<void> {
+  const pending = [...chatStreamPromises];
+  if (pending.length === 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+    timer.unref?.();
+  });
+  const drained = await Promise.race([Promise.allSettled(pending).then(() => true), timeout]);
+  if (timer) clearTimeout(timer);
+  if (drained) return;
+  appLogger?.warn("SHUTDOWN_CHAT_DRAIN_TIMEOUT", { pendingCount: pending.length, timeoutMs });
+  chatStreamPromises.clear();
+  chatAbortControllers.clear();
+}
+
 const shutdownController = new ShutdownController([
-  { name: "unregister-shortcuts", run: () => globalShortcut.unregisterAll() },
-  { name: "stop-middle-mouse-shortcut", run: () => middleMouseShortcutManager?.stop() },
-  { name: "stop-native-modifier-shortcut", run: () => nativeModifierShortcutManager?.stop() },
-  { name: "abort-preparation", run: () => preparationAbortController?.abort() },
-  { name: "abort-chat", run: () => chatAbortControllers.forEach((entry) => { entry.reason = "shutdown"; entry.controller.abort(); }) },
-  { name: "wait-chat", run: async () => { await Promise.allSettled([...chatStreamPromises]); } },
-  { name: "stop-interview", run: async () => { screenshotOperations.abortAll(); await interviewCoordinator?.stop("user"); } },
-  { name: "stop-written-test", run: () => { writtenTestController?.stop(); } },
-  { name: "stop-audio", run: async () => { await audioManager.stop(); } },
-  { name: "finalize-realtime", run: async () => { if (!interviewCoordinator?.running) await realtimeSession.finalize?.(1_000); } },
-  { name: "disconnect-realtime", run: () => realtimeSession.disconnect() },
-  { name: "stop-local-asr-service", run: () => localAsrServiceManager.stop() },
-  { name: "cancel-project-analysis", run: () => projectMemoryService?.cancelAllAnalysisJobs() },
-  { name: "save-main-window-bounds", run: () => saveMainWindowBounds() },
-  { name: "destroy-overlay", run: () => overlayManager?.destroy() },
-  { name: "flush-database", run: () => database?.flushNow() },
-  { name: "close-database", run: () => database?.close() },
-  { name: "destroy-windows", run: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy(); } }
-]);
+  { name: "unregister-shortcuts", timeoutMs: 500, run: () => globalShortcut.unregisterAll() },
+  { name: "stop-middle-mouse-shortcut", timeoutMs: 1_500, run: () => middleMouseShortcutManager?.stop() },
+  { name: "stop-native-modifier-shortcut", timeoutMs: 1_500, run: () => nativeModifierShortcutManager?.stop() },
+  { name: "abort-preparation", timeoutMs: 500, run: () => preparationAbortController?.abort() },
+  { name: "abort-chat", timeoutMs: 500, run: () => chatAbortControllers.forEach((entry) => { entry.reason = "shutdown"; entry.controller.abort(); }) },
+  { name: "wait-chat", timeoutMs: 2_000, run: () => drainChatStreams() },
+  { name: "stop-interview", timeoutMs: 5_000, run: async () => { screenshotOperations.abortAll(); await interviewCoordinator?.stop("user"); } },
+  { name: "stop-written-test", timeoutMs: 1_000, run: () => { writtenTestController?.stop(); } },
+  { name: "stop-audio", timeoutMs: 3_000, run: async () => { await audioManager.stop(); } },
+  { name: "finalize-realtime", timeoutMs: 1_500, run: async () => { if (!interviewCoordinator?.running) await realtimeSession.finalize?.(1_000); } },
+  { name: "disconnect-realtime", timeoutMs: 1_000, run: () => realtimeSession.disconnect() },
+  { name: "stop-local-asr-service", timeoutMs: 3_000, run: () => localAsrServiceManager.stop() },
+  { name: "cancel-project-analysis", timeoutMs: 1_000, run: () => projectMemoryService?.cancelAllAnalysisJobs() },
+  { name: "save-main-window-bounds", timeoutMs: 1_000, run: () => saveMainWindowBounds() },
+  { name: "destroy-overlay", timeoutMs: 1_500, run: () => overlayManager?.destroy() },
+  { name: "flush-database", timeoutMs: 3_000, run: () => { database?.flushNow(); appLogger?.info("SHUTDOWN_DATABASE_FLUSHED", {}); } },
+  { name: "close-database", timeoutMs: 1_500, run: () => database?.close() },
+  { name: "destroy-windows", timeoutMs: 1_000, run: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy(); } }
+], {
+  globalTimeoutMs: 9_000,
+  onEvent: ({ event, fields }) => {
+    if (event === "SHUTDOWN_STEP_FAILED" || event === "SHUTDOWN_STEP_TIMEOUT" || event === "SHUTDOWN_HARD_TIMEOUT") appLogger?.warn(event, fields);
+    else appLogger?.info(event, fields);
+  }
+});
 
 type RendererReadiness = {
   bridgeAvailable: boolean;
@@ -506,6 +529,18 @@ function broadcastToWindows(channel: string, payload: unknown): void {
     } catch (error) {
       // A renderer can disappear between isDestroyed() and send(). IPC is a
       // presentation side effect and must not reject an answer/session task.
+      appLogger?.warn("RENDERER_EVENT_DELIVERY_FAILED", { channel, error: String(error) });
+    }
+  }
+}
+
+function broadcastToOverlayWindows(channel: string, payload: unknown): void {
+  const windows = [...(overlayManager?.currentWindows ?? []), ...(transientOverlayChannels.has(channel) ? [overlayManager?.currentTransientWindow] : [])];
+  for (const window of windows) {
+    if (!window || window.isDestroyed()) continue;
+    try {
+      window.webContents.send(channel, payload);
+    } catch (error) {
       appLogger?.warn("RENDERER_EVENT_DELIVERY_FAILED", { channel, error: String(error) });
     }
   }
@@ -831,7 +866,15 @@ function createMainWindow(): BrowserWindow {
   mainRendererLoad = loadRenderer(mainWindow);
   mainWindow.on("moved", scheduleMainWindowBoundsSave);
   mainWindow.on("resized", scheduleMainWindowBoundsSave);
-  mainWindow.on("closed", () => { saveMainWindowBounds(); mainWindow = undefined; });
+  mainWindow.on("closed", () => {
+    saveMainWindowBounds();
+    mainWindow = undefined;
+    // Overlay windows are prepared ahead of an interview and may be hidden,
+    // so window-all-closed is not sufficient to represent the user's main
+    // window close action. Route that action through the normal bounded quit
+    // path while allowing the shutdown controller to destroy the overlays.
+    if (!appShuttingDown && process.platform !== "darwin") app.quit();
+  });
   return mainWindow;
 }
 
@@ -1422,7 +1465,8 @@ async function runPerformanceSmoke(main: BrowserWindow): Promise<void> {
   await main.webContents.executeJavaScript("(() => { const button = document.querySelector('[data-testid=settings-nav-overlay]'); if (!button) throw new Error('overlay settings navigation button missing'); button.click(); return true; })()", true);
   await waitForPerformanceRenderer(main, "() => Boolean(document.querySelector('.overlay-preferences-card'))");
   metrics.push(await measurePerformanceMetric("preset_apply_ui", 150, 1_000, async () => {
-    const elapsed = await main.webContents.executeJavaScript(`(async () => { const compact = document.querySelector("[data-testid='designer-preset-compact_split']"); const classic = document.querySelector("[data-testid='designer-preset-classic_split']"); if (!compact || !classic) throw new Error('designer preset controls missing'); compact.click(); await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))); const start = performance.now(); classic.click(); const deadline = performance.now() + 2_000; while (!classic.classList.contains('selected') && performance.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10)); if (!classic.classList.contains('selected')) throw new Error('classic preset was not selected'); return performance.now() - start; })()`, true) as number;
+    const elapsed = await main.webContents.executeJavaScript(`(() => { const compact = document.querySelector("[data-testid='designer-preset-compact_split']"); const classic = document.querySelector("[data-testid='designer-preset-classic_split']"); if (!compact || !classic) throw new Error('designer preset controls missing'); compact.click(); const start = performance.now(); document.querySelector("[data-testid='designer-preset-classic_split']")?.click(); return performance.now() - start; })()`, true) as number;
+    await waitForPerformanceRenderer(main, "() => document.querySelector(\"[data-testid='designer-preset-classic_split']\")?.classList.contains('selected')");
     return elapsed;
   }));
 
@@ -2290,9 +2334,9 @@ function registerIpc(): void {
     recordScreenshotTrace(payload.name as ScreenshotTraceEventName, payload.screenshotRequestId, { fields: payload.fields });
   });
   // This low-level entry point is diagnostics-only. Product interview start goes through the coordinator.
-  ipcMain.handle("audio:start", (_event, options: AudioStartOptions) => audioManager.start({ ...options, meterOnly: true, autoRecover: false }));
+  ipcMain.handle("audio:start", (_event, options: AudioStartOptions) => appShuttingDown ? undefined : audioManager.start({ ...options, meterOnly: true, autoRecover: false }));
   ipcMain.handle("audio:stop", () => audioManager.stop());
-  ipcMain.handle("audio:probe", (_event, options: AudioStartOptions) => audioManager.probe(options));
+  ipcMain.handle("audio:probe", (_event, options: AudioStartOptions) => appShuttingDown ? undefined : audioManager.probe(options));
   ipcMain.handle("audio:list-devices", () => productionSmokeRequested ? { inputs: [], outputs: [] } : audioManager.listDevices());
   ipcMain.handle("audio:get-diagnostics", () => audioManager.getDiagnostics());
    ipcMain.handle("overlay:show", () => { overlayManager?.enterInterviewMode(); return true; });
@@ -2330,11 +2374,13 @@ function registerIpc(): void {
    ipcMain.handle("overlay:get-z-order-diagnostics", () => overlayManager?.zOrderDiagnostics);
    ipcMain.handle("overlay:get-preferences", () => appShuttingDown ? undefined : overlaySettingsStore?.getPreferences());
    ipcMain.handle("overlay:preview-preferences", (_event, input: OverlayPreferencesPatch) => {
+     if (appShuttingDown) return undefined;
      const next = overlaySettingsStore?.previewPreferences(input);
-     if (next) { overlayManager?.applyPreferences(next.behavior); overlayManager?.applyLayoutPreferences(next); broadcast("overlay:preferences", next); }
+     if (next) { overlayManager?.applyPreferences(next.behavior); overlayManager?.applyLayoutPreferences(next); broadcastToOverlayWindows("overlay:preferences", next); }
      return next;
    });
    ipcMain.handle("overlay:set-preferences", (_event, input: OverlayPreferencesPatch) => {
+     if (appShuttingDown) return undefined;
      const next = overlaySettingsStore?.setPreferences(input);
      if (next) { overlayManager?.applyPreferences(next.behavior); overlayManager?.applyLayoutPreferences(next); broadcast("overlay:preferences", next); }
      return next;
@@ -2383,6 +2429,7 @@ function registerIpc(): void {
   ipcMain.handle("screenshot:capture", () => screenshotManager.capturePrimaryDisplay(undefined, configuredScreenshotRegion()));
   ipcMain.handle("session:get-state", () => session.state);
   ipcMain.handle("realtime:connect", (_event, options: RealtimeConnectOptions) => {
+    if (appShuttingDown) return undefined;
     realtimeSession.connect(options);
     return true;
   });
@@ -2392,6 +2439,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("realtime:get-transcript", () => ({ ...realtimeTranscriptSnapshots }));
   ipcMain.handle("interview:start", async (_event, options: InterviewStartOptions) => {
+    if (appShuttingDown) return undefined;
     interviewStartupTiming = new InterviewStartupTiming(Date.now, pendingStartupButtonClickAt ?? Date.now());
     markInterviewStartup("START_BUTTON_CLICK");
     let coordinatorStarted = false;
@@ -2456,9 +2504,9 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("interview:stop", () => stopInterview());
-  ipcMain.handle("interview:answer-latest", () => coordinator().answerLatest());
-  ipcMain.handle("interview:answer-question", (_event, input: { text: string }) => coordinator().answerQuestionText(input.text));
-  ipcMain.handle("interview:answer-screenshot", (_event, input?: { screenshotRequestId?: string }) => answerCapturedScreenshot("interview", input?.screenshotRequestId, "renderer-ipc"));
+  ipcMain.handle("interview:answer-latest", () => appShuttingDown ? undefined : coordinator().answerLatest());
+  ipcMain.handle("interview:answer-question", (_event, input: { text: string }) => appShuttingDown ? undefined : coordinator().answerQuestionText(input.text));
+  ipcMain.handle("interview:answer-screenshot", (_event, input?: { screenshotRequestId?: string }) => appShuttingDown ? undefined : answerCapturedScreenshot("interview", input?.screenshotRequestId, "renderer-ipc"));
   ipcMain.handle("interview:get-state", () => ({ running: coordinator().running, interviewId: coordinator().interviewId, automationMode: coordinator().automationMode }));
   ipcMain.handle("interview:get-runtime-diagnostics", () => coordinator().getRuntimeDiagnostics());
   ipcMain.handle("interview:get-runtime-trace", (_event, limit?: number) => coordinator().getRuntimeTrace(limit));
@@ -2468,6 +2516,7 @@ function registerIpc(): void {
   ipcMain.handle("interview:set-automation-mode", (_event, mode: "MANUAL" | "AUTO") => { const next = mode === "MANUAL" ? "MANUAL" : "AUTO"; overlaySettingsStore?.setAutomationMode(next); coordinator().setAutomationMode(next); return true; });
   ipcMain.handle("interview:set-answer-mode", (_event, mode: "FAST" | "NORMAL" | "DEEP") => { coordinator().setAnswerMode(mode); return true; });
   ipcMain.handle("written-test:start", (_event, options: WrittenTestStartOptions) => {
+    if (appShuttingDown) return undefined;
     if (!profileRepository?.get(options.profileId)) throw new Error("PROFILE_NOT_FOUND: 笔试档案不存在");
     if (coordinator().running) throw new Error("INTERVIEW_RUNNING: 请先结束当前面试");
     const llm = providerConfigStore?.get("llm") ?? environmentLlmSettings;
@@ -2479,7 +2528,7 @@ function registerIpc(): void {
     return true;
   });
   ipcMain.handle("written-test:stop", () => { stopWrittenTest(); return true; });
-  ipcMain.handle("written-test:answer-screenshot", (_event, input?: { screenshotRequestId?: string }) => answerCapturedScreenshot("written-test", input?.screenshotRequestId, "renderer-ipc"));
+  ipcMain.handle("written-test:answer-screenshot", (_event, input?: { screenshotRequestId?: string }) => appShuttingDown ? undefined : answerCapturedScreenshot("written-test", input?.screenshotRequestId, "renderer-ipc"));
   ipcMain.handle("written-test:get-state", () => writtenTestController?.state ?? { running: false, answerMode: "NORMAL" as const });
   ipcMain.handle("written-test:set-answer-mode", (_event, mode: "FAST" | "NORMAL" | "DEEP") => { writtenTestController?.setAnswerMode(mode); return true; });
   ipcMain.handle("chat:create-conversation", (_event, input: { profileId?: string; projectId?: string; title?: string }) => {
@@ -2489,6 +2538,7 @@ function registerIpc(): void {
   ipcMain.handle("chat:list-conversations", (_event, profileId?: string) => conversationRepository?.list(profileId) ?? []);
   ipcMain.handle("chat:get-conversation", (_event, conversationId: string) => conversationRepository?.get(conversationId));
   ipcMain.handle("chat:send-message", async (_event, input: { conversationId: string; content: string }) => {
+    if (appShuttingDown) return undefined;
     const content = input.content.trim();
     if (!content) throw new Error("聊天内容不能为空");
     const stream = streamChat(input.conversationId, content);
@@ -2501,6 +2551,7 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("chat:continue-message", async (_event, input: { conversationId: string; messageId: string }) => {
+    if (appShuttingDown) return undefined;
     const stream = streamChat(input.conversationId, "", input.messageId);
     chatStreamPromises.add(stream);
     try { await stream; return true; } finally { chatStreamPromises.delete(stream); }
@@ -2557,8 +2608,9 @@ function registerIpc(): void {
   ipcMain.handle("self-introduction:save", (_event, input: Parameters<SqliteProfileSelfIntroductionRepository["save"]>[0]) => { const result = profileSelfIntroductionRepository?.save({ ...input, resumeHash: input.resumeHash || currentResumeHash(input.profileId) }); releaseInterviewCaches(); return result; });
   ipcMain.handle("self-introduction:approve", (_event, input: { id: string; resumeHash?: string }) => { const record = profileSelfIntroductionRepository?.getById(input.id); const result = profileSelfIntroductionRepository?.approve(input.id, input.resumeHash ?? (record ? currentResumeHash(record.profileId) : undefined)); releaseInterviewCaches(); return result; });
   ipcMain.handle("self-introduction:continue-using", (_event, input: { id: string; resumeHash: string }) => { const record = profileSelfIntroductionRepository?.getById(input.id); const result = record ? profileSelfIntroductionRepository?.rebindToCurrent(input.id, input.resumeHash || currentResumeHash(record.profileId)) : undefined; releaseInterviewCaches(); return result; });
-  ipcMain.handle("self-introduction:generate", async (_event, input: { profileId: string; targetDurationSeconds?: number; language?: string }) => { const result = await generateSelfIntroduction(input.profileId, input.targetDurationSeconds, input.language); releaseInterviewCaches(); return result; });
+  ipcMain.handle("self-introduction:generate", async (_event, input: { profileId: string; targetDurationSeconds?: number; language?: string }) => { if (appShuttingDown) return undefined; const result = await generateSelfIntroduction(input.profileId, input.targetDurationSeconds, input.language); releaseInterviewCaches(); return result; });
   ipcMain.handle("self-introduction:upload", async (_event, input: { profileId: string; resumeHash: string; filename: string; mimeType: string; bytes: Uint8Array; targetDurationSeconds?: number; language?: string }) => {
+    if (appShuttingDown) return undefined;
     const parsed = await parseDocument({ documentId: `self-introduction-${Date.now()}`, filename: input.filename, mimeType: input.mimeType, bytes: input.bytes });
     const result = profileSelfIntroductionRepository?.save({ profileId: input.profileId, resumeHash: input.resumeHash || currentResumeHash(input.profileId), text: parsed.text, source: "uploaded", approved: false, targetDurationSeconds: input.targetDurationSeconds, language: input.language });
     releaseInterviewCaches();
@@ -2570,6 +2622,7 @@ function registerIpc(): void {
   ipcMain.handle("knowledge:delete-base", (_event, knowledgeBaseId: string) => { knowledgeRepository?.deleteKnowledgeBase(knowledgeBaseId); return true; });
   ipcMain.handle("knowledge:list-documents", (_event, knowledgeBaseId?: string) => knowledgeRepository?.listDocuments(knowledgeBaseId) ?? []);
   ipcMain.handle("knowledge:ingest", async (_event, input: { knowledgeBaseId?: string; profileId?: string; projectId?: string; sourceRole?: import("@interview-copilot/shared").ProjectSourceRole | "auto"; filename: string; mimeType: string; bytes: Uint8Array; documentType?: KnowledgeDocumentTypeOption }) => {
+    if (appShuttingDown) return undefined;
     if (input.sourceRole === "question_bank") throw new Error("PROJECT_QA_USE_DEDICATED_IMPORT: 请使用“上传项目题库”入口");
     if (!knowledgeRepository) throw new Error("Knowledge database is still initializing");
     const knowledgeBase = input.knowledgeBaseId ? knowledgeRepository.listKnowledgeBases().find((base) => base.id === input.knowledgeBaseId) : knowledgeRepository.ensureKnowledgeBase();
@@ -2606,12 +2659,14 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("knowledge:ingest-project-materials", async (_event, input: { profileId: string; projectId: string; knowledgeBaseId: string; files: import("@interview-copilot/shared").ProjectMaterialImportFile[] }) => {
+    if (appShuttingDown) return undefined;
     if (!projectMemoryService) throw new Error("Project Memory is still initializing");
     const report = await projectMemoryService.importProjectMaterials(input);
     releaseInterviewCaches();
     return report;
   });
   ipcMain.handle("knowledge:ingest-project-question-bank", async (_event, input: { profileId: string; projectId: string; filename: string; mimeType: string; bytes: Uint8Array }) => {
+    if (appShuttingDown) return undefined;
     if (!questionBankRepository) throw new Error("Question Bank is still initializing");
     const bytes = normalizeDocumentBytes(input.bytes);
     const parsed = await parseDocument({ documentId: `project-qa-${Date.now()}`, filename: input.filename, mimeType: input.mimeType, bytes });
@@ -2622,6 +2677,7 @@ function registerIpc(): void {
   ipcMain.handle("knowledge:delete", (_event, documentId: string) => { for (const assignment of projectMemoryRepository?.sourcesFor("document", documentId) ?? []) projectMemoryRepository?.unassignSource(assignment.projectId, "document", documentId); knowledgeRepository?.deleteDocument(documentId); releaseInterviewCaches(); return true; });
   ipcMain.handle("knowledge:update-type", (_event, documentId: string, documentType: KnowledgeDocumentType) => { const result = knowledgeRepository?.updateDocumentType(documentId, documentType); releaseInterviewCaches(); return result; });
   ipcMain.handle("knowledge:reindex", async (_event, documentId: string) => {
+    if (appShuttingDown) return undefined;
     if (!knowledgeRepository) throw new Error("Knowledge database is still initializing");
     const document = knowledgeRepository.getDocument(documentId);
     if (!document) throw new Error("Knowledge document not found");
@@ -2661,23 +2717,25 @@ function registerIpc(): void {
   ipcMain.handle("question-bank:coverage", (_event, jobProfileId?: string) => questionBankRepository?.coverage(jobProfileId) ?? { overallCoverage: 0, topics: [], missingSkills: [], generatedAt: Date.now() });
   ipcMain.handle("question-bank:save-job", (_event, input: Parameters<SqliteQuestionBankRepository["saveJobProfile"]>[0]) => questionBankRepository?.saveJobProfile(input));
   ipcMain.handle("question-bank:import-text", (_event, input: { text: string; filename?: string; includeProject?: boolean; includeBehavioral?: boolean }) => questionBankRepository?.importText(input.text, input.filename, { includeProject: input.includeProject, includeBehavioral: input.includeBehavioral }));
-  ipcMain.handle("question-bank:generate-answers", async (_event, input?: { questionIds?: string[]; onlyUnanswered?: boolean }) => { const result = await generateQuestionBankAnswers(input); releaseInterviewCaches(); return result; });
-  ipcMain.handle("question-bank:generate-project-qa", async (_event, projectId: string) => { const result = await generateProjectQuestionBank(projectId); releaseInterviewCaches(); return result; });
+  ipcMain.handle("question-bank:generate-answers", async (_event, input?: { questionIds?: string[]; onlyUnanswered?: boolean }) => { if (appShuttingDown) return undefined; const result = await generateQuestionBankAnswers(input); releaseInterviewCaches(); return result; });
+  ipcMain.handle("question-bank:generate-project-qa", async (_event, projectId: string) => { if (appShuttingDown) return undefined; const result = await generateProjectQuestionBank(projectId); releaseInterviewCaches(); return result; });
   ipcMain.handle("question-bank:match", (_event, text: string) => questionBankRepository?.matchQuestion(text));
   ipcMain.handle("profile-builder:get", (_event, profileId: string) => profileBuilderService?.get(profileId));
   ipcMain.handle("profile-builder:list-skill-suggestions", (_event, profileId: string, status?: import("@interview-copilot/shared").SkillSuggestionStatus) => skillSuggestionRepository?.list(profileId, status) ?? []);
   ipcMain.handle("profile-builder:review-skill-suggestion", (_event, suggestionId: string, status: import("@interview-copilot/shared").SkillSuggestionStatus) => skillSuggestionRepository?.review(suggestionId, status));
   ipcMain.handle("resume-analysis:get", (_event, profileId: string) => profileBuilderService?.getResumeAnalysis(profileId));
-  ipcMain.handle("resume-analysis:start", (_event, profileId: string) => profileBuilderService?.startResumeAnalysis(profileId));
+  ipcMain.handle("resume-analysis:start", (_event, profileId: string) => appShuttingDown ? undefined : profileBuilderService?.startResumeAnalysis(profileId));
   ipcMain.handle("resume-analysis:get-job", (_event, jobId: string) => profileBuilderService?.getJob(jobId));
   ipcMain.handle("resume-analysis:cancel", (_event, jobId: string) => profileBuilderService?.cancelJob(jobId));
   ipcMain.handle("profile-builder:start", (_event, profileId: string) => {
+    if (appShuttingDown) return undefined;
     if (!profileBuilderService) throw new Error("Profile Builder is still initializing");
     return profileBuilderService.start(profileId);
   });
   ipcMain.handle("profile-builder:get-job", (_event, jobId: string) => profileBuilderService?.getJob(jobId));
   ipcMain.handle("profile-builder:cancel", (_event, jobId: string) => profileBuilderService?.cancelJob(jobId));
   ipcMain.handle("profile-builder:rebuild", async (_event, profileId: string) => {
+    if (appShuttingDown) return undefined;
     if (!profileBuilderService) throw new Error("Profile Builder is still initializing");
     return profileBuilderService.rebuild(profileId);
   });
@@ -2700,17 +2758,19 @@ function registerIpc(): void {
   ipcMain.handle("project-memory:analysis-job", (_event, projectId: string) => projectMemoryService?.getProjectAnalysisJob(projectId));
   ipcMain.handle("project-memory:analysis-jobs", (_event, profileId: string) => projectMemoryService?.listProjectAnalysisJobs(profileId) ?? []);
   ipcMain.handle("project-memory:cancel-analysis", (_event, projectId: string, jobId?: string) => projectMemoryService?.cancelProjectAnalysis(projectId, jobId));
-  ipcMain.handle("project-memory:retry-analysis", (_event, profileId: string, projectId: string) => projectMemoryService?.retryProjectAnalysis(profileId, projectId));
+  ipcMain.handle("project-memory:retry-analysis", (_event, profileId: string, projectId: string) => appShuttingDown ? undefined : projectMemoryService?.retryProjectAnalysis(profileId, projectId));
   ipcMain.handle("project-memory:assign-source", (_event, input: Parameters<NonNullable<typeof projectMemoryService>["assignSource"]>[0]) => { projectMemoryService?.assignSource(input); releaseInterviewCaches(); return true; });
   ipcMain.handle("project-memory:unassign-source", (_event, projectId: string, sourceType: import("@interview-copilot/shared").ProjectSourceType, sourceId: string) => { projectMemoryRepository?.unassignSource(projectId, sourceType, sourceId); releaseInterviewCaches(); return true; });
   ipcMain.handle("project-memory:assign-document", (_event, profileId: string, documentId: string, projectId?: string) => { const assigned = projectMemoryService?.assignDocument(profileId, documentId, projectId); releaseInterviewCaches(); return assigned; });
   ipcMain.handle("job-targets:list", (_event, profileId: string) => jobTargetRepository?.list(profileId) ?? []);
   ipcMain.handle("retrieval:list", (_event, profileId: string, limit?: number) => retrievalRepository?.list(profileId, limit) ?? []);
   ipcMain.handle("project-memory:rebuild", async (_event, profileId: string) => {
+    if (appShuttingDown) return undefined;
     if (!projectMemoryService) throw new Error("Project Memory is still initializing");
     return projectMemoryService.rebuild(profileId);
   });
   ipcMain.handle("project-memory:rebuild-project", async (_event, projectId: string) => {
+    if (appShuttingDown) return undefined;
     if (!projectMemoryService) throw new Error("Project Memory is still initializing");
     const project = projectMemoryRepository?.getProject(projectId);
     if (!project) throw new Error("PROJECT_NOT_FOUND");
@@ -2743,6 +2803,7 @@ function registerIpc(): void {
     return { canceled: false, path: filePath, bytes: Buffer.byteLength(content, "utf8") };
   });
   ipcMain.handle("preparation:start", async (_event, goal: string) => {
+    if (appShuttingDown) return undefined;
     if (!profileRepository) throw new Error("Profile database is still initializing");
     if (preparationRuntime) throw new Error("A preparation run is already active");
     if (!(providerConfigStore?.get("llm") ?? environmentLlmSettings).apiKey) throw new Error("LLM_NOT_CONFIGURED: Preparation Agent 需要 LLM Provider");
@@ -3773,7 +3834,14 @@ app.on("before-quit", (event) => {
   if (shutdownController.isComplete) return;
   event.preventDefault();
   if (shutdownController.inProgress) return;
+  const shutdownStartedAt = Date.now();
+  shutdownHardDeadlineTimer = setTimeout(() => {
+    appLogger?.error("SHUTDOWN_HARD_TIMEOUT", { currentStep: shutdownController.activeStep, elapsedMs: Date.now() - shutdownStartedAt, pid: process.pid });
+    app.exit(typeof process.exitCode === "number" ? process.exitCode : 0);
+  }, 10_000);
   void shutdownController.run().finally(() => {
+    if (shutdownHardDeadlineTimer) clearTimeout(shutdownHardDeadlineTimer);
+    shutdownHardDeadlineTimer = undefined;
     const exitCode = typeof process.exitCode === "number" ? process.exitCode : 0;
     app.exit(exitCode);
   });

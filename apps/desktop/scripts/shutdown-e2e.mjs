@@ -187,7 +187,10 @@ async function closeAllRendererWindows(port) {
       try {
         client = connectTarget(page);
         await new Promise((resolve, reject) => { client.socket.once("open", resolve); client.socket.once("error", reject); });
-        await client.evaluate("setTimeout(() => window.close(), 0); true");
+        await Promise.race([
+          client.evaluate("setTimeout(() => window.close(), 0); true"),
+          sleep(750).then(() => { throw new Error("renderer close acknowledgement timed out"); })
+        ]);
       } catch {
         // The target may disappear as the previous window-close reaches main.
       } finally {
