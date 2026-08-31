@@ -245,6 +245,7 @@ let appLogger: SafeLogger | undefined;
 let audioLogger: SafeLogger | undefined;
 let realtimeLogger: SafeLogger | undefined;
 let database: SqliteDatabase | undefined;
+let appShuttingDown = false;
 // The overlay is created after the interview starts. Keep the latest local
 // snapshots in the main process so a newly mounted overlay can replay them
 // instead of waiting for the next ASR packet.
@@ -296,9 +297,9 @@ const shutdownController = new ShutdownController([
   { name: "stop-local-asr-service", run: () => localAsrServiceManager.stop() },
   { name: "cancel-project-analysis", run: () => projectMemoryService?.cancelAllAnalysisJobs() },
   { name: "save-main-window-bounds", run: () => saveMainWindowBounds() },
+  { name: "destroy-overlay", run: () => overlayManager?.destroy() },
   { name: "flush-database", run: () => database?.flushNow() },
   { name: "close-database", run: () => database?.close() },
-  { name: "destroy-overlay", run: () => overlayManager?.destroy() },
   { name: "destroy-windows", run: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy(); } }
 ]);
 
@@ -2327,7 +2328,7 @@ function registerIpc(): void {
    ipcMain.handle("overlay:get-window-bounds", (_event, panel: OverlayNativePanel) => overlayManager?.getWindowBounds(panel));
    ipcMain.handle("overlay:get-transient-bounds", () => overlayManager?.getTransientBounds());
    ipcMain.handle("overlay:get-z-order-diagnostics", () => overlayManager?.zOrderDiagnostics);
-   ipcMain.handle("overlay:get-preferences", () => overlaySettingsStore?.getPreferences());
+   ipcMain.handle("overlay:get-preferences", () => appShuttingDown ? undefined : overlaySettingsStore?.getPreferences());
    ipcMain.handle("overlay:preview-preferences", (_event, input: OverlayPreferencesPatch) => {
      const next = overlaySettingsStore?.previewPreferences(input);
      if (next) { overlayManager?.applyPreferences(next.behavior); overlayManager?.applyLayoutPreferences(next); broadcast("overlay:preferences", next); }
@@ -2515,6 +2516,7 @@ function registerIpc(): void {
   ipcMain.handle("profiles:list", () => profileRepository?.list() ?? []);
   ipcMain.handle("profiles:get", (_event, profileId: string) => profileRepository?.get(profileId));
   ipcMain.handle("profiles:save", (_event, input: Parameters<SqliteProfileRepository["save"]>[0]) => {
+    if (appShuttingDown) return undefined;
     // Saving profile metadata is a local database operation. Analysis is an
     // explicit user action so opening the app or editing a profile cannot
     // silently create paid LLM requests.
@@ -3767,6 +3769,7 @@ if (hasSingleInstanceLock) {
 }
 
 app.on("before-quit", (event) => {
+  appShuttingDown = true;
   if (shutdownController.isComplete) return;
   event.preventDefault();
   if (shutdownController.inProgress) return;
