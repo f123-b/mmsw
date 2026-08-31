@@ -270,6 +270,55 @@ describe("SQLite persistence", () => {
     } finally { database.close(); }
   });
 
+  it("keeps project collection, memory and facts isolated across profiles and restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "interview-copilot-project-library-"));
+    const filePath = join(directory, "projects.sqlite");
+    try {
+      const first = await SqliteDatabase.open(filePath);
+      const profiles = new SqliteProfileRepository(first);
+      const profileA = profiles.save({ id: "profile-project-a", name: "Profile A", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 }, 1);
+      const profileB = profiles.save({ id: "profile-project-b", name: "Profile B", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 2, updatedAt: 2 }, 2);
+      const projects = new SqliteProjectRepository(first);
+      const memory = new SqliteProjectMemoryRepository(first);
+      const projectA1 = projects.create("项目 A1", profileA.id, 10);
+      const projectA2 = projects.create("项目 A2", profileA.id, 11);
+      const projectB1 = projects.create("项目 B1", profileB.id, 12);
+      memory.replaceSnapshot(profileA.id, { projects: [
+        { id: projectA1.id, profileId: profileA.id, name: projectA1.name, description: "A1", role: "owner", hardware: [], software: [], technologyStack: ["A1"], sourceIds: ["source-a1"], confidence: 1 },
+        { id: projectA2.id, profileId: profileA.id, name: projectA2.name, description: "A2", role: "owner", hardware: [], software: [], technologyStack: ["A2"], sourceIds: ["source-a2"], confidence: 1 }
+      ], modules: [], technicalPoints: [], problems: [], interviewQuestions: [], facts: [
+        { id: "fact-a1", projectId: projectA1.id, type: "technology", title: "A1 技术", content: "A1", confidence: 1, verified: false, sourceIds: ["source-a1"], evidence: [{ sourceId: "source-a1", quote: "A1" }] },
+        { id: "fact-a2", projectId: projectA2.id, type: "technology", title: "A2 技术", content: "A2", confidence: 1, verified: false, sourceIds: ["source-a2"], evidence: [{ sourceId: "source-a2", quote: "A2" }] }
+      ] });
+      memory.replaceSnapshot(profileB.id, { projects: [{ id: projectB1.id, profileId: profileB.id, name: projectB1.name, description: "B1", role: "owner", hardware: [], software: [], technologyStack: ["B1"], sourceIds: ["source-b1"], confidence: 1 }], modules: [], technicalPoints: [], problems: [], interviewQuestions: [], facts: [{ id: "fact-b1", projectId: projectB1.id, type: "technology", title: "B1 技术", content: "B1", confidence: 1, verified: false, sourceIds: ["source-b1"], evidence: [{ sourceId: "source-b1", quote: "B1" }] }] });
+      expect(projects.list(profileA.id).map((project) => project.id)).toEqual(expect.arrayContaining([projectA1.id, projectA2.id]));
+      first.close();
+
+      const second = await SqliteDatabase.open(filePath);
+      try {
+        const reopenedProjects = new SqliteProjectRepository(second);
+        const reopenedMemory = new SqliteProjectMemoryRepository(second);
+        expect(reopenedProjects.list(profileA.id).map((project) => project.id)).toEqual(expect.arrayContaining([projectA1.id, projectA2.id]));
+        expect(reopenedProjects.list(profileA.id).every((project) => project.profileId === profileA.id)).toBe(true);
+        expect(reopenedMemory.getSnapshot(profileA.id).projects.map((project) => project.id)).toEqual(expect.arrayContaining([projectA1.id, projectA2.id]));
+        expect(reopenedMemory.listFacts(profileA.id).map((fact) => fact.id)).toEqual(expect.arrayContaining(["fact-a1", "fact-a2"]));
+        expect(reopenedMemory.listFacts(profileA.id).some((fact) => fact.id === "fact-b1")).toBe(false);
+
+        reopenedProjects.rename(projectA1.id, "项目 A1 重命名", 20);
+        reopenedProjects.delete(projectA2.id);
+        const afterDelete = await SqliteDatabase.open(filePath);
+        try {
+          const finalProjects = new SqliteProjectRepository(afterDelete);
+          const finalMemory = new SqliteProjectMemoryRepository(afterDelete);
+          expect(finalProjects.list(profileA.id)).toMatchObject([{ id: projectA1.id, name: "项目 A1 重命名", profileId: profileA.id }]);
+          expect(finalMemory.getSnapshot(profileA.id).projects.map((project) => project.id)).toEqual([projectA1.id]);
+          expect(finalMemory.listFacts(profileA.id).map((fact) => fact.id)).toEqual(["fact-a1"]);
+          expect(finalProjects.list(profileB.id).map((project) => project.id)).toEqual([projectB1.id]);
+        } finally { afterDelete.close(); }
+      } finally { second.close(); }
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("round-trips repository files in dedicated tables without putting source text in documents", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {

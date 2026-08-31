@@ -224,7 +224,7 @@ const api = {
     test: (profileId: string, text: string): Promise<unknown> => ipcRenderer.invoke("terminology:test", profileId, text)
   },
   projects: {
-    list: (): Promise<ProjectRecord[]> => ipcRenderer.invoke("projects:list"),
+    list: (profileId?: string): Promise<ProjectRecord[]> => ipcRenderer.invoke("projects:list", profileId),
     create: (input: { name: string; profileId?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }): Promise<ProjectRecord | undefined> => ipcRenderer.invoke("projects:create", input),
     rename: (projectId: string, name: string): Promise<ProjectRecord | undefined> => ipcRenderer.invoke("projects:rename", projectId, name),
     update: (projectId: string, input: { name?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }): Promise<ProjectRecord | undefined> => ipcRenderer.invoke("projects:update", projectId, input),

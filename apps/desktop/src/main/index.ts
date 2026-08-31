@@ -2822,7 +2822,7 @@ function registerIpc(): void {
     if (!providerConfigStore) throw new Error("Settings are still initializing");
     return runProviderPreflight({ llm: providerConfigStore.get("llm"), asr: providerConfigStore.get("asr"), embedding: providerConfigStore.get("embedding") }, Boolean(checkReachability), providerPreflightCache);
   });
-  ipcMain.handle("projects:list", () => projectRepository?.list() ?? []);
+  ipcMain.handle("projects:list", (_event, profileId?: string) => projectRepository?.list(profileId) ?? []);
   ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => { const created = projectRepository?.create(input.name, input.profileId, Date.now(), input.ownershipMode, input.ownershipNote); interviewContextCache.release(); return created; });
   ipcMain.handle("projects:rename", (_event, projectId: string, name: string) => { const renamed = projectRepository?.rename(projectId, name); interviewContextCache.release(); return renamed; });
   ipcMain.handle("projects:update", (_event, projectId: string, input: { name?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => { const updated = projectRepository?.update(projectId, input); interviewContextCache.release(); return updated; });

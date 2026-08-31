@@ -1198,8 +1198,11 @@ export interface ConversationMessageRecord {
 export class SqliteProjectRepository {
   constructor(private readonly database: SqliteDatabase) {}
 
-  list(): ProjectRecord[] {
-    return this.database.all<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects ORDER BY updated_at DESC").map((row) => this.hydrate(row));
+  list(profileId?: string): ProjectRecord[] {
+    const query = profileId
+      ? "SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects WHERE profile_id = ? ORDER BY updated_at DESC"
+      : "SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects ORDER BY updated_at DESC";
+    return this.database.all<Record<string, unknown>>(query, profileId ? [profileId] : []).map((row) => this.hydrate(row));
   }
 
   get(projectId: string): ProjectRecord | undefined {

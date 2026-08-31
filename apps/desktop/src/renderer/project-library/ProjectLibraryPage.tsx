@@ -24,6 +24,7 @@ import type { ChatAction } from "@interview-copilot/shared";
 import type { KnowledgeAnalysisRunRecord, ProjectMemoryStats } from "../../main/database";
 import { chatFailureText } from "../../shared/chat-errors";
 import { ProjectQuestionBankPanel } from "./ProjectQuestionBankPanel";
+import { mergeProjectCollection, type ProjectCollectionRecord } from "./project-collection";
 
 interface ProjectAgentMessage {
   id: string;
@@ -40,6 +41,7 @@ type AdvancedSection = "facts" | "conflicts" | "review" | "stale" | "analysis";
 
 interface ProjectLibraryPageProps {
   profileId: string;
+  projects: ProjectCollectionRecord[];
   memory: ProjectMemorySnapshot;
   stats: ProjectMemoryStats;
   facts: ProjectFact[];
@@ -56,6 +58,8 @@ interface ProjectLibraryPageProps {
   onCancelAnalysis: (projectId: string, jobId?: string) => Promise<void>;
   onRetryAnalysis: (projectId: string) => Promise<void>;
   onCreateProject?: (input: { name: string; ownershipMode: OwnershipMode; ownershipNote?: string }) => Promise<void>;
+  onRenameProject?: (projectId: string, currentName: string) => Promise<void>;
+  onDeleteProject?: (projectId: string, currentName: string) => Promise<void>;
   onUpdateProject: (projectId: string, input: { ownershipMode?: OwnershipMode; ownershipNote?: string }) => Promise<void>;
   onReviewFact: (factId: string, status: "active" | "pending_review" | "rejected" | "conflicting") => Promise<void>;
   onResolveConflict: (conflictGroupId: string, selectedFactId: string, keepBoth?: boolean, variantContexts?: Record<string, string>) => Promise<void>;
@@ -185,13 +189,19 @@ function ProjectHeader(props: {
   updatedAt?: number;
   familiarity: ProjectLibraryPageViewModel["familiarity"];
   onEdit: () => void;
+  onRename: () => void;
+  onDelete: () => void;
 }): JSX.Element {
   const mode = normalizeProjectOwnershipMode(props.project.ownershipMode) as OwnershipMode;
   return <header className="project-header-v5">
     <div className="project-header-main"><div className="project-title-line"><h1>{props.project.name}</h1><button className="project-icon-button" onClick={props.onEdit} aria-label="编辑项目设置">✎</button></div><p className="project-header-summary">{props.summary}</p><span className="project-ownership-chip">{OwnershipLabel({ mode })}</span></div>
-    <div className="project-header-actions"><button className="outline-pill project-header-edit" onClick={props.onEdit}>项目设置</button></div>
+    <div className="project-header-actions"><button className="outline-pill project-header-edit" onClick={props.onEdit}>项目设置</button><details className="project-header-more"><summary className="project-icon-button" aria-label="更多项目操作">···</summary><div className="project-header-more-menu" role="menu"><button role="menuitem" onClick={props.onRename}>重命名项目</button><button role="menuitem" className="danger-text" onClick={props.onDelete}>删除项目</button></div></details></div>
     <div className="project-header-meta" aria-label="项目状态"><span>熟悉度 <strong>{props.familiarity.overall}%</strong></span><span>资料 <strong>{props.sourceCoverage}%</strong></span><span>技术 <strong>{props.familiarity.technical}%</strong></span><span>问题 <strong>{props.familiarity.problems}%</strong></span><span className="project-header-updated">{relativeUpdatedAt(props.updatedAt)} · {props.sourceCount} 份资料</span></div>
   </header>;
+}
+
+function ProjectPicker({ projects, selectedProjectId, onSelect, onCreate }: { projects: ProjectCollectionRecord[]; selectedProjectId: string; onSelect: (projectId: string) => void; onCreate: () => void }): JSX.Element {
+  return <label className="project-picker"><span>当前项目</span><select value={selectedProjectId} onChange={(event) => onSelect(event.target.value)} aria-label="选择当前项目"><option value="" disabled>选择项目</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select><button type="button" className="project-picker-add" onClick={onCreate} aria-label="创建项目">＋</button></label>;
 }
 
 type ProjectLibraryPageViewModel = ReturnType<typeof deriveProjectLibraryViewModel>;
@@ -360,7 +370,6 @@ type DrawerState =
   | { kind: "settings" };
 
 export function ProjectLibraryPage(props: ProjectLibraryPageProps): JSX.Element {
-  const [selectedProjectId, setSelectedProjectId] = useState(props.selectedProjectId ?? props.memory.projects[0]?.id ?? "");
   const [section, setSection] = useState<ProjectSection>("overview");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [advancedSection, setAdvancedSection] = useState<AdvancedSection>("conflicts");
@@ -379,12 +388,14 @@ export function ProjectLibraryPage(props: ProjectLibraryPageProps): JSX.Element 
   const [sourceImporting, setSourceImporting] = useState(false);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
 
-  const selectedProject = props.memory.projects.find((project) => project.id === selectedProjectId) ?? props.memory.projects[0];
+  const collection = useMemo(() => mergeProjectCollection(props.projects, props.memory.projects), [props.projects, props.memory.projects]);
+  const selectedProjectId = props.selectedProjectId && collection.some((project) => project.id === props.selectedProjectId) ? props.selectedProjectId : collection[0]?.id ?? "";
+  const selectedProject = collection.find((project) => project.id === selectedProjectId);
   const analysisJob = selectedProject ? props.analysisJobs.find((job) => job.projectId === selectedProject.id) : undefined;
   const analysisActive = Boolean(analysisJob && ["queued", "mapping", "exploring", "synthesizing", "grounding"].includes(analysisJob.status));
   const analysisRebuilding = props.rebuilding || analysisActive;
-  useEffect(() => { if (props.selectedProjectId && props.memory.projects.some((project) => project.id === props.selectedProjectId)) setSelectedProjectId(props.selectedProjectId); }, [props.selectedProjectId, props.memory.projects]);
-  useEffect(() => { if (!selectedProject && props.memory.projects[0]) setSelectedProjectId(props.memory.projects[0].id); }, [props.memory.projects, selectedProject]);
+  const collectionKey = collection.map((project) => project.id).join("\u0000");
+  useEffect(() => { if (selectedProjectId && props.selectedProjectId !== selectedProjectId) props.onSelectProject?.(selectedProjectId); }, [collectionKey, props.onSelectProject, props.selectedProjectId, selectedProjectId]);
   useEffect(() => {
     if (!selectedProject) return;
     let cancelled = false;
@@ -413,7 +424,7 @@ export function ProjectLibraryPage(props: ProjectLibraryPageProps): JSX.Element 
   if (!selectedProject || !model) return <section className="simple-page project-library-v5 project-library-empty"><div className="project-library-page-heading"><div><span className="project-eyebrow">PROJECT LIBRARY</span><h1>项目库</h1><p>把项目资料整理成可以快速复习、可以放心回答的工程经验。</p></div><button className="dark-pill" onClick={() => setCreateProjectOpen(true)}>添加项目</button></div><EmptyState title="还没有项目" description="创建一个项目，再上传 README、源码或排查记录。" action={<button className="dark-pill" onClick={() => setCreateProjectOpen(true)}>创建第一个项目</button>} />{createProjectOpen && <CreateProjectModal onClose={() => setCreateProjectOpen(false)} onCreate={props.onCreateProject} />}</section>;
   const displayModel: ProjectLibraryDisplayModel = { ...model, projectFacts, staleFacts, analysisRuns: props.analysisRuns };
 
-  const selectProject = (projectId: string): void => { setSelectedProjectId(projectId); props.onSelectProject?.(projectId); setSection("overview"); setAdvancedOpen(false); setDrawer(undefined); };
+  const selectProject = (projectId: string): void => { props.onSelectProject?.(projectId); setSection("overview"); setAdvancedOpen(false); setDrawer(undefined); };
   const selectSection = (next: ProjectSection): void => { setSection(next); setAdvancedOpen(false); setDrawer(undefined); };
   const selectProblem = (problem: ProjectProblem): void => { setSelectedProblemId(problem.id); setSection("problems"); };
   const resolveConflict = async (group: ProjectConflictGroup, fact: ProjectFact, keepBoth = false, variantContexts?: Record<string, string>): Promise<void> => { await props.onResolveConflict(group.id, fact.id, keepBoth, variantContexts); setDrawer(undefined); };
@@ -436,8 +447,8 @@ export function ProjectLibraryPage(props: ProjectLibraryPageProps): JSX.Element 
   };
 
   return <section className="project-library-v5">
-    <div className="project-library-page-heading"><div><span className="project-eyebrow">PROJECT LIBRARY</span><h2>我的项目</h2></div><div className="project-library-heading-actions"><button className="outline-pill" onClick={() => setCreateProjectOpen(true)}>添加项目</button><button className="dark-pill" onClick={openAddSource}>添加资料</button></div></div>
-     <div className="project-workspace-grid"><div className="project-workspace-content">{projectLoading && <ProjectLoadingSkeleton />}<ProjectHeader project={model.project} summary={model.summary} sourceCount={model.status.sourceCount} sourceCoverage={model.completeness.sourceCoverageScore} updatedAt={latestSourceUpdatedAt} familiarity={model.familiarity} onEdit={() => setDrawer({ kind: "settings" })} /><ProjectTabs section={section} advancedOpen={advancedOpen} onSection={selectSection} onToggleAdvanced={() => setAdvancedOpen((value) => !value)} />{section === "overview" && <ProjectOverview model={model} onSection={selectSection} onSelectParameter={(fact) => setDrawer({ kind: "parameter", fact })} onSelectDecision={(fact) => setDrawer({ kind: "decision", fact })} onSelectProblem={selectProblem} onOpenSources={() => selectSection("sources")} onOpenQuestions={() => selectSection("questions")} onRebuild={() => props.onRebuild(model.project.id)} rebuilding={analysisRebuilding} analysisJob={analysisJob} onCancelAnalysis={() => void props.onCancelAnalysis(model.project.id, analysisJob?.id)} onRetryAnalysis={() => void props.onRetryAnalysis(model.project.id)} onAddSource={openAddSource} onNextAction={(type) => { if (type === "analyze_sources") props.onRebuild(model.project.id); else if (type === "missing_parameters") selectSection("parameters"); else if (type === "missing_decisions") selectSection("decisions"); else if (type === "conflict") { setAdvancedSection("conflicts"); selectSection("advanced"); } else openAddSource(); }} />}{section === "parameters" && <ProjectParameters model={model} search={parameterSearch} onSearch={setParameterSearch} category={parameterCategory} onCategory={setParameterCategory} onSelect={(fact) => setDrawer({ kind: "parameter", fact })} />}{section === "architecture" && <ProjectArchitecture model={model} />}{section === "decisions" && <ProjectDecisions model={model} onSelect={(fact) => setDrawer({ kind: "decision", fact })} />}{section === "problems" && <ProjectProblems model={model} selectedId={selectedProblemId} onSelect={(problem) => setSelectedProblemId(problem.id)} />}{section === "questions" && <ProjectQuestionBankPanel profileId={props.profileId} projectId={model.project.id} projectName={model.project.name} onImport={(file) => props.onImportProjectQuestionBank(model.project.id, file)} onGenerate={() => props.onGenerateProjectQa(model.project.id)} />}{section === "sources" && <ProjectSources facts={projectFacts} sources={sources} analysisStatus={model.analysisStatus} onSelect={(source) => setDrawer({ kind: "source", source })} onOpenSources={openAddSource} />}{section === "advanced" && <ProjectAdvanced model={displayModel} advancedSection={advancedSection} onAdvancedSection={setAdvancedSection} onSelectFact={(fact) => setDrawer({ kind: "fact", fact })} onSelectConflict={(group) => setDrawer({ kind: "conflict", group })} onReviewFact={(factId, status) => void props.onReviewFact(factId, status)} />}
+    <div className="project-library-page-heading"><div><span className="project-eyebrow">PROJECT LIBRARY</span><h2>我的项目</h2></div><div className="project-library-heading-actions"><ProjectPicker projects={props.projects} selectedProjectId={selectedProjectId} onSelect={selectProject} onCreate={() => setCreateProjectOpen(true)} /><button className="outline-pill" onClick={() => setCreateProjectOpen(true)}>添加项目</button><button className="dark-pill" onClick={openAddSource}>添加资料</button></div></div>
+     <div className="project-workspace-grid"><div className="project-workspace-content">{projectLoading && <ProjectLoadingSkeleton />}<ProjectHeader project={model.project} summary={model.summary} sourceCount={model.status.sourceCount} sourceCoverage={model.completeness.sourceCoverageScore} updatedAt={latestSourceUpdatedAt} familiarity={model.familiarity} onEdit={() => setDrawer({ kind: "settings" })} onRename={() => void props.onRenameProject?.(model.project.id, model.project.name)} onDelete={() => void props.onDeleteProject?.(model.project.id, model.project.name)} /><ProjectTabs section={section} advancedOpen={advancedOpen} onSection={selectSection} onToggleAdvanced={() => setAdvancedOpen((value) => !value)} />{section === "overview" && <ProjectOverview model={model} onSection={selectSection} onSelectParameter={(fact) => setDrawer({ kind: "parameter", fact })} onSelectDecision={(fact) => setDrawer({ kind: "decision", fact })} onSelectProblem={selectProblem} onOpenSources={() => selectSection("sources")} onOpenQuestions={() => selectSection("questions")} onRebuild={() => props.onRebuild(model.project.id)} rebuilding={analysisRebuilding} analysisJob={analysisJob} onCancelAnalysis={() => void props.onCancelAnalysis(model.project.id, analysisJob?.id)} onRetryAnalysis={() => void props.onRetryAnalysis(model.project.id)} onAddSource={openAddSource} onNextAction={(type) => { if (type === "analyze_sources") props.onRebuild(model.project.id); else if (type === "missing_parameters") selectSection("parameters"); else if (type === "missing_decisions") selectSection("decisions"); else if (type === "conflict") { setAdvancedSection("conflicts"); selectSection("advanced"); } else openAddSource(); }} />}{section === "parameters" && <ProjectParameters model={model} search={parameterSearch} onSearch={setParameterSearch} category={parameterCategory} onCategory={setParameterCategory} onSelect={(fact) => setDrawer({ kind: "parameter", fact })} />}{section === "architecture" && <ProjectArchitecture model={model} />}{section === "decisions" && <ProjectDecisions model={model} onSelect={(fact) => setDrawer({ kind: "decision", fact })} />}{section === "problems" && <ProjectProblems model={model} selectedId={selectedProblemId} onSelect={(problem) => setSelectedProblemId(problem.id)} />}{section === "questions" && <ProjectQuestionBankPanel profileId={props.profileId} projectId={model.project.id} projectName={model.project.name} onImport={(file) => props.onImportProjectQuestionBank(model.project.id, file)} onGenerate={() => props.onGenerateProjectQa(model.project.id)} />}{section === "sources" && <ProjectSources facts={projectFacts} sources={sources} analysisStatus={model.analysisStatus} onSelect={(source) => setDrawer({ kind: "source", source })} onOpenSources={openAddSource} />}{section === "advanced" && <ProjectAdvanced model={displayModel} advancedSection={advancedSection} onAdvancedSection={setAdvancedSection} onSelectFact={(fact) => setDrawer({ kind: "fact", fact })} onSelectConflict={(group) => setDrawer({ kind: "conflict", group })} onReviewFact={(factId, status) => void props.onReviewFact(factId, status)} />}
       {section === "overview" && ["team", "partial"].includes(normalizeProjectOwnershipMode(model.project.ownershipMode)) && <div className="project-responsibility-inline"><label htmlFor="project-responsibility-v5">补充我的负责范围</label><div><textarea id="project-responsibility-v5" rows={2} value={responsibilityInput} onChange={(event) => setResponsibilityInput(event.target.value)} placeholder="补充你真实负责的模块、实现细节和边界" /><button className="outline-pill" disabled={!responsibilityInput.trim()} onClick={async () => { await props.onAddResponsibility(model.project.id, responsibilityInput.trim()); setResponsibilityInput(""); }}>保存范围</button></div></div>}
       {section === "overview" && <div className="project-agent-runtime-card"><header><div><span className="project-eyebrow">PROJECT AGENT</span><h2>项目资料整理助手</h2><p>问我参数、架构、设计决策、问题链或资料冲突，也可以整理项目介绍。</p></div><span className="project-agent-scope">当前项目 · {model.project.name}</span></header><div className="project-agent-quick-actions"><button onClick={() => setAgentInput("当前项目还缺哪些技术信息？")}>检查技术信息缺口</button><button onClick={() => setAgentInput("有哪些关键参数没有确认，哪些设计没有记录 Why？")}>检查参数与决策</button><button onClick={() => setAgentInput("问题链哪里不完整，当前资料有哪些冲突？")}>检查问题链与冲突</button></div><ProjectAgentRuntime model={model} messages={currentMessages} agentInput={agentInput} onInput={setAgentInput} onSend={() => void sendAgent()} sending={props.agentSending} onRetry={(messageId) => void props.onRetryAgent(messageId)} onSettings={props.onOpenSettings} /></div>}
     </div></div>

@@ -1112,7 +1112,7 @@ export function App(): JSX.Element {
           }
         }
         setHistoryRecords(await window.interviewCopilot.history.list());
-        const storedProjects = await window.interviewCopilot.projects.list();
+        const storedProjects = await window.interviewCopilot.projects.list(active?.id ?? storedProfiles[0]?.id);
         setProjects(storedProjects);
         const storedConversations = await window.interviewCopilot.chat.listConversations(active?.id ?? storedProfiles[0]?.id);
         setConversations(storedConversations);
@@ -1239,8 +1239,14 @@ export function App(): JSX.Element {
       setJobTargets([]);
       setKnowledgeAnalysisRuns([]);
       setRetrievalRuns([]);
+      setProjects([]);
+      setSelectedProjectId(undefined);
       return;
     }
+    void window.interviewCopilot.projects.list(profileId).then((nextProjects) => {
+      setProjects(nextProjects);
+      setSelectedProjectId((current) => current && nextProjects.some((project) => project.id === current) ? current : nextProjects[0]?.id);
+    }).catch(() => setProjects([]));
     void window.interviewCopilot.profileBuilder.get(profileId).then(setProfileBuilderArtifact).catch(() => setProfileBuilderArtifact(undefined));
     void window.interviewCopilot.resumeAnalysis.get(profileId).then(setResumeAnalysis).catch(() => setResumeAnalysis(undefined));
     void window.interviewCopilot.profileBuilder.listSkillSuggestions(profileId).then(setSkillSuggestions).catch(() => setSkillSuggestions([]));
@@ -1295,8 +1301,8 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     if (interviewJobTargetId && !jobTargets.some((target) => target.id === interviewJobTargetId)) setInterviewJobTargetId("");
-    if (interviewProjectId && !projectMemory?.projects.some((project) => project.id === interviewProjectId)) setInterviewProjectId("");
-  }, [interviewJobTargetId, interviewProjectId, jobTargets, projectMemory]);
+    if (interviewProjectId && !projects.some((project) => project.id === interviewProjectId)) setInterviewProjectId("");
+  }, [interviewJobTargetId, interviewProjectId, jobTargets, projects]);
 
   useEffect(() => {
     if (!profileId) return;
@@ -1596,6 +1602,7 @@ export function App(): JSX.Element {
     const created = await window.interviewCopilot.projects.create({ ...input, profileId });
     if (created) {
       await refreshProjectState(profileId);
+      setSelectedProjectId(created.id);
       store.setNotice(`已创建项目“${created.name}”，现在可以添加项目资料`);
     }
   };
@@ -1632,9 +1639,10 @@ export function App(): JSX.Element {
     }
   };
   const selectedProfile = profiles.find((profile) => profile.id === profileId);
-  const refreshProjectState = async (profile = profileId): Promise<{ memory: ProjectMemorySnapshot; facts: ProjectFact[] }> => {
-    if (!profile) return { memory: projectMemory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] }, facts: [] };
-    const [memory, stats, facts, allFacts, targets, analyses, retrievals] = await Promise.all([
+  const refreshProjectState = async (profile = profileId): Promise<{ memory: ProjectMemorySnapshot; facts: ProjectFact[]; projects: ProjectItem[] }> => {
+    if (!profile) return { memory: projectMemory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] }, facts: [], projects: [] };
+    const [projects, memory, stats, facts, allFacts, targets, analyses, retrievals] = await Promise.all([
+      window.interviewCopilot.projects.list(profile),
       window.interviewCopilot.projectMemory.get(profile),
       window.interviewCopilot.projectMemory.stats(profile),
       window.interviewCopilot.projectMemory.listFacts(profile),
@@ -1644,8 +1652,10 @@ export function App(): JSX.Element {
       window.interviewCopilot.retrieval.list(profile, 20)
     ]);
     const resolvedMemory = memory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] };
+    setProjects(projects);
+    setSelectedProjectId((current) => current && projects.some((project) => project.id === current) ? current : projects[0]?.id);
     setProjectMemory(memory); setProjectMemoryStats(stats); setProjectFacts(facts); setStaleProjectFacts(allFacts.filter((fact) => fact.stale)); setJobTargets(targets); setKnowledgeAnalysisRuns(analyses); setRetrievalRuns(retrievals);
-    return { memory: resolvedMemory, facts };
+    return { memory: resolvedMemory, facts, projects };
   };
   const refreshProfiles = async () => { const next = await window.interviewCopilot.profiles.list(); setProfiles(next); };
   const renameProfile = async () => { if (!selectedProfile) return; const name = await requestDialog({ kind: "form", title: "重命名 Profile", label: "Profile 名称", defaultValue: selectedProfile.name, required: true, confirmLabel: "保存" }); if (typeof name === "string" && name.trim()) { await window.interviewCopilot.profiles.save({ ...selectedProfile, name: name.trim() }); await refreshProfiles(); } };
@@ -1856,11 +1866,11 @@ export function App(): JSX.Element {
     if (typeof value !== "string" || !value.trim()) return;
     try {
       const project = await window.interviewCopilot.projects.create({ name: value.trim(), profileId });
-      if (project) { setProjects((current) => [project, ...current]); setSelectedProjectId(project.id); store.setNotice(`项目“${project.name}”已创建`); }
+      if (project) { await refreshProjectState(profileId); setSelectedProjectId(project.id); store.setNotice(`项目“${project.name}”已创建`); }
     } catch (error) { store.setNotice(`项目创建失败：${userFacingError(error)}`); }
   };
-  const renameProject = async (projectId: string, currentName: string) => { const name = await requestDialog({ kind: "form", title: "重命名项目", label: "项目名称", defaultValue: currentName, required: true, confirmLabel: "保存" }); if (typeof name !== "string") return; const updated = await window.interviewCopilot.projects.rename(projectId, name); if (updated) setProjects((current) => current.map((project) => project.id === updated.id ? updated : project)); };
-  const deleteProject = async (projectId: string, currentName: string) => { const confirmed = await requestDialog({ kind: "confirm", title: `删除 ${currentName}？`, description: "项目会被删除，对话内容仍保留。", confirmLabel: "删除" }); if (confirmed !== true) return; await window.interviewCopilot.projects.delete(projectId); setProjects((current) => current.filter((project) => project.id !== projectId)); if (selectedProjectId === projectId) beginNewConversation(); };
+  const renameProject = async (projectId: string, currentName: string) => { const name = await requestDialog({ kind: "form", title: "重命名项目", label: "项目名称", defaultValue: currentName, required: true, confirmLabel: "保存" }); if (typeof name !== "string" || !name.trim()) return; const updated = await window.interviewCopilot.projects.rename(projectId, name); if (updated) { await refreshProjectState(profileId); store.setNotice(`项目已重命名为“${updated.name}”`); } };
+  const deleteProject = async (projectId: string, currentName: string) => { const confirmed = await requestDialog({ kind: "confirm", title: `删除 ${currentName}？`, description: "项目会被删除，对话内容仍保留。删除后会自动切换到剩余项目。", confirmLabel: "删除" }); if (confirmed !== true) return; await window.interviewCopilot.projects.delete(projectId); const refreshed = await refreshProjectState(profileId); if (selectedProjectId === projectId) { const fallback = refreshed.projects[0]?.id; if (fallback) { setSelectedProjectId(fallback); setActiveConversationId(undefined); setChatMessages([]); setComposerText(""); setConversations((await window.interviewCopilot.chat.listConversations(profileId)).filter((conversation) => conversation.projectId === fallback)); } else beginNewConversation(); } store.setNotice(`项目“${currentName}”已删除`); };
   const startPreparation = () => { setPage("preparation"); store.setNotice("已打开面试准备 Agent"); };
   const polishResume = () => { setPreparationGoal("润色当前 Resume 中的项目描述，保留真实技术细节和量化结果"); setPage("preparation"); };
   const selectLanguage = () => { setPage("settings"); setSettingsSection("general"); };
@@ -1955,7 +1965,7 @@ export function App(): JSX.Element {
   const specialPageContent = page === "knowledge"
     ? <KnowledgePage knowledgeBases={knowledgeBases} knowledgeBaseId={knowledgeBaseId} knowledgeDocuments={knowledgeDocuments} requestDialog={requestDialog} onSelectBase={setKnowledgeBaseId} onCreateBase={async (name) => { const created = await window.interviewCopilot.knowledge.createBase(name); if (created) { setKnowledgeBases((current) => [created, ...current]); setKnowledgeBaseId(created.id); setKnowledgeDocuments([]); } }} onRenameBase={async (id, name) => { const updated = await window.interviewCopilot.knowledge.renameBase(id, name); if (updated) setKnowledgeBases((current) => current.map((item) => item.id === updated.id ? updated : item)); }} onDeleteBase={async (id, name) => { const confirmed = await requestDialog({ kind: "confirm", title: `删除 ${name}？`, description: "删除后资料库和其中的文档会一起删除。", confirmLabel: "删除" }); if (confirmed === true) { await window.interviewCopilot.knowledge.deleteBase(id); const next = await window.interviewCopilot.knowledge.listBases(); const nextId = next[0]?.id ?? ""; setKnowledgeBases(next); setKnowledgeBaseId(nextId); setKnowledgeDocuments(nextId ? await window.interviewCopilot.knowledge.listDocuments(nextId) : []); } }} onUpload={uploadKnowledgeFile} onUpdateType={async (id, type) => { await window.interviewCopilot.knowledge.updateType(id, type); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onReindex={async (id) => { await window.interviewCopilot.knowledge.reindex(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} onDeleteDocument={async (id) => { await window.interviewCopilot.knowledge.delete(id); if (knowledgeBaseId) setKnowledgeDocuments(await window.interviewCopilot.knowledge.listDocuments(knowledgeBaseId)); }} />
     : page === "project-library"
-      ? <ProjectLibraryPage profileId={profileId} memory={projectMemory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] }} stats={projectMemoryStats} facts={projectFacts} staleFacts={staleProjectFacts} analysisRuns={knowledgeAnalysisRuns} analysisJobs={projectAnalysisJobs} rebuilding={projectMemoryRunning} selectedProjectId={selectedProjectId} onSelectProject={setSelectedProjectId} onImportProjectMaterials={importProjectMaterials} onImportProjectQuestionBank={importProjectQuestionBank} onGenerateProjectQa={generateProjectQuestionBank} onCreateProject={createProjectMemory} onUpdateProject={updateProjectOwnership} onRebuild={(projectId) => void rebuildProjectMemory(projectId)} onCancelAnalysis={(projectId, jobId) => window.interviewCopilot.projectMemory.cancelAnalysis(projectId, jobId).then((job) => { if (job) setProjectAnalysisJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]); })} onRetryAnalysis={(projectId) => window.interviewCopilot.projectMemory.retryAnalysis(profileId, projectId).then((job) => { if (job) setProjectAnalysisJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]); })} onReviewFact={reviewProjectFact} onResolveConflict={resolveProjectConflict} onUnassignSource={unassignProjectSource} onAddResponsibility={addProjectResponsibility} agentMessages={chatMessages} agentSending={chatSending} agentProjectId={conversations.find((item) => item.id === activeConversationId)?.projectId} onSendAgent={sendProjectAgent} onRetryAgent={retryChatMessage} onOpenSettings={() => setPage("settings")} onApproveAgentAction={approveChatAction} />
+      ? <ProjectLibraryPage profileId={profileId} projects={projects} memory={projectMemory ?? { projects: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] }} stats={projectMemoryStats} facts={projectFacts} staleFacts={staleProjectFacts} analysisRuns={knowledgeAnalysisRuns} analysisJobs={projectAnalysisJobs} rebuilding={projectMemoryRunning} selectedProjectId={selectedProjectId} onSelectProject={setSelectedProjectId} onImportProjectMaterials={importProjectMaterials} onImportProjectQuestionBank={importProjectQuestionBank} onGenerateProjectQa={generateProjectQuestionBank} onCreateProject={createProjectMemory} onRenameProject={renameProject} onDeleteProject={deleteProject} onUpdateProject={updateProjectOwnership} onRebuild={(projectId) => void rebuildProjectMemory(projectId)} onCancelAnalysis={(projectId, jobId) => window.interviewCopilot.projectMemory.cancelAnalysis(projectId, jobId).then((job) => { if (job) setProjectAnalysisJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]); })} onRetryAnalysis={(projectId) => window.interviewCopilot.projectMemory.retryAnalysis(profileId, projectId).then((job) => { if (job) setProjectAnalysisJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]); })} onReviewFact={reviewProjectFact} onResolveConflict={resolveProjectConflict} onUnassignSource={unassignProjectSource} onAddResponsibility={addProjectResponsibility} agentMessages={chatMessages} agentSending={chatSending} agentProjectId={conversations.find((item) => item.id === activeConversationId)?.projectId} onSendAgent={sendProjectAgent} onRetryAgent={retryChatMessage} onOpenSettings={() => setPage("settings")} onApproveAgentAction={approveChatAction} />
       : page === "job-targets"
       ? <JobTargetsPage targets={jobTargets} onUploadJob={uploadJobDescription} onOpenProfile={() => setPage("profiles")} />
       : page === "profiles"

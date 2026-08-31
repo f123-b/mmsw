@@ -195,7 +195,7 @@ declare global {
         test(profileId: string, text: string): Promise<unknown>;
       };
       projects: {
-        list(): Promise<ProjectRecord[]>;
+        list(profileId?: string): Promise<ProjectRecord[]>;
         create(input: { name: string; profileId?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }): Promise<ProjectRecord | undefined>;
         rename(projectId: string, name: string): Promise<ProjectRecord | undefined>;
         update(projectId: string, input: { name?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }): Promise<ProjectRecord | undefined>;
