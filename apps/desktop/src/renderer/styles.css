@@ -1346,6 +1346,7 @@ body { background: #f1f1ee; color: var(--text-primary); }
 /* Project/sidebar stability: scrolling owns the variable-height middle area;
  * action columns keep project names and footer controls from shifting. */
 .sidebar-main-scroll { scrollbar-gutter: stable; padding-right: 4px; }
+.sidebar-icon { flex: 0 0 18px; align-self: center; }
 .sidebar-project-row { min-width: 0; gap: 0; }
 .sidebar-project-row .sidebar-conversation { min-width: 0; flex: 1 1 auto; }
 .sidebar-project-action { width: 24px; min-width: 24px; height: 28px; padding: 0; border-radius: 7px; opacity: .45; line-height: 1; }

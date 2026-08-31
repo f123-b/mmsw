@@ -258,9 +258,7 @@ function AnswerCore({ text }: { text: string }): JSX.Element {
 function useScrollFollow(ref: RefObject<HTMLDivElement | null>, contentKey: string, enabled = true): { following: boolean; onScroll: () => void; follow: () => void } {
   const [following, setFollowing] = useState(true);
   const lastContentKey = useRef(contentKey);
-  const resumeTimer = useRef<number | undefined>(undefined);
   const scrollRaf = useRef<number | undefined>(undefined);
-  const clearResumeTimer = () => { if (resumeTimer.current !== undefined) { window.clearTimeout(resumeTimer.current); resumeTimer.current = undefined; } };
   const scheduleTail = useCallback(() => {
     if (scrollRaf.current !== undefined) return;
     scrollRaf.current = window.requestAnimationFrame(() => {
@@ -274,11 +272,10 @@ function useScrollFollow(ref: RefObject<HTMLDivElement | null>, contentKey: stri
       lastContentKey.current = contentKey;
       // A new question/answer is a new reading task. Resume the latest tail;
       // the user can still scroll upward again and use the explicit button.
-      clearResumeTimer();
       if (enabled) setFollowing(true);
     }
   }, [contentKey, enabled]);
-  useEffect(() => () => { clearResumeTimer(); if (scrollRaf.current !== undefined) window.cancelAnimationFrame(scrollRaf.current); }, []);
+  useEffect(() => () => { if (scrollRaf.current !== undefined) window.cancelAnimationFrame(scrollRaf.current); }, []);
   useEffect(() => {
     if (enabled && !following) return;
     if (!enabled) setFollowing(true);
@@ -292,14 +289,11 @@ function useScrollFollow(ref: RefObject<HTMLDivElement | null>, contentKey: stri
     const element = ref.current;
     if (!element) return;
     const atTail = element.scrollHeight - element.scrollTop - element.clientHeight < 18;
-    clearResumeTimer();
     setFollowing(atTail);
-    if (!atTail && enabled) resumeTimer.current = window.setTimeout(() => { resumeTimer.current = undefined; setFollowing(true); }, 4_000);
   };
   const follow = () => {
     const element = ref.current;
     if (!element) return;
-    clearResumeTimer();
     element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
     setFollowing(true);
   };
@@ -328,7 +322,7 @@ function QuestionOverlayContent({ groups, viewModel, autoFollow }: { groups: Ove
 
 function AnswerOverlayContent({ viewModel, autoFollow }: { viewModel: AnswerOverlayViewModel; autoFollow: boolean }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const follow = useScrollFollow(scrollRef, `${viewModel.question ?? ""}:${viewModel.answer}:${viewModel.streaming}`, autoFollow);
+  const follow = useScrollFollow(scrollRef, `${viewModel.question ?? ""}:${viewModel.streaming ? "streaming" : "idle"}`, autoFollow);
   return <section className="overlay-panel-card answer-card answer-overlay-content" data-overlay-content="answer" aria-label="当前回答">
     <div className="overlay-panel-drag-handle" data-layout-drag-handle="true" aria-label="拖动回答悬浮窗">布局编辑 · 拖动窗口</div>
     <div ref={scrollRef} className="overlay-scroll-region" onScroll={follow.onScroll} tabIndex={0}>
@@ -362,7 +356,7 @@ function WrittenQuestionContent({ viewModel }: { viewModel: AnswerOverlayViewMod
 
 function WrittenTestReaderContent({ viewModel, autoFollow }: { viewModel: AnswerOverlayViewModel; autoFollow: boolean }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const follow = useScrollFollow(scrollRef, `${viewModel.question}:${viewModel.answer}:${viewModel.streaming}`, autoFollow);
+  const follow = useScrollFollow(scrollRef, `${viewModel.question}:${viewModel.streaming ? "streaming" : "idle"}`, autoFollow);
   return <section className="overlay-panel-card written-reader-card written-reader-content" data-overlay-content="written-test" aria-label="笔试阅读器">
     <div ref={scrollRef} className="overlay-scroll-region" onScroll={follow.onScroll} tabIndex={0}>
       <div className="overlay-content-status"><span className="content-status-dot" />笔试 · {viewModel.answer ? "回答" : "等待截图"}</div>

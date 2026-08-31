@@ -316,6 +316,8 @@ describe("OverlaySettingsStore", () => {
       const settings = new OverlaySettingsStore(database);
       const saved = settings.setPreferences({ interview: { questionWindow: { fontSize: 14 } } });
       const persistedBefore = database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", ["overlay.preferences"])?.value;
+      const preview = settings.previewPreferences({ appearance: { mode: "text_only" }, interview: { questionWindow: { fontSize: 18, textColor: "#00ff99", textOpacity: 0.7, backgroundColor: "#112233", backgroundOpacity: 0.35, blur: 7, radius: 9 } } });
+      expect(preview).toMatchObject({ appearance: { mode: "text_only" }, interview: { questionWindow: { fontSize: 18, textColor: "#00ff99", textOpacity: 0.7, backgroundColor: "#112233", backgroundOpacity: 0.35, blur: 7, radius: 9 } } });
       for (let index = 0; index < 100; index += 1) settings.previewPreferences({ interview: { questionWindow: { fontSize: 14 + index / 100 } } });
       expect(settings.getPreferences()).toEqual(saved);
       expect(database.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", ["overlay.preferences"])?.value).toBe(persistedBefore);

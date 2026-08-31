@@ -1,5 +1,6 @@
 import type { JSX } from "react";
 import type { AppPage } from "../app/routes";
+import { sidebarHasProjectOverflow, visibleSidebarProjects } from "./sidebar-model";
 
 interface SidebarProps {
   page: AppPage;
@@ -26,7 +27,7 @@ const items: Array<{ page: AppPage; label: string; icon: string }> = [
 ];
 
 export function Sidebar({ page, projects, conversations, onNavigate, onNewConversation, onOpenConversation, onOpenProject, onRenameProject, onDeleteProject }: SidebarProps): JSX.Element {
-  const visibleProjects = page === "project-library" ? projects : projects.slice(0, 6);
+  const visibleProjects = visibleSidebarProjects(projects, page === "project-library");
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
@@ -50,7 +51,7 @@ export function Sidebar({ page, projects, conversations, onNavigate, onNewConver
         </nav>
         <div className="sidebar-section-label">{page === "project-library" ? "我的项目" : "对话工作区"}</div>
         {projects.length === 0 ? <div className="sidebar-empty">还没有项目</div> : visibleProjects.map((project) => <div className="sidebar-project-row" key={project.id}><button className={`sidebar-conversation ${page === "project-library" ? "sidebar-project-library-link" : ""}`} onClick={() => onOpenProject(project.id)}><span>▸</span><span className="sidebar-conversation-title">{project.name}</span></button><button className="sidebar-project-action" title="重命名项目" aria-label={`重命名项目 ${project.name}`} onClick={() => onRenameProject(project.id, project.name)}>✎</button><button className="sidebar-project-action danger-text" title="删除项目" aria-label={`删除项目 ${project.name}`} onClick={() => onDeleteProject(project.id, project.name)}>×</button></div>)}
-        {page !== "project-library" && projects.length > visibleProjects.length && <button className="sidebar-conversation sidebar-project-more" onClick={() => onNavigate("project-library")}><span>＋</span><span className="sidebar-conversation-title">查看全部项目</span></button>}
+        {page !== "project-library" && sidebarHasProjectOverflow(projects, visibleProjects) && <button className="sidebar-conversation sidebar-project-more" onClick={() => onNavigate("project-library")}><span>＋</span><span className="sidebar-conversation-title">查看全部项目</span></button>}
         <div className="sidebar-section-label conversation-label">最近对话</div>
         {conversations.length === 0 ? <div className="sidebar-empty">还没有对话</div> : conversations.slice(0, 8).map((conversation) => <button className="sidebar-conversation" key={conversation.id} onClick={() => onOpenConversation(conversation.id)}><span>•</span><span className="sidebar-conversation-title">{conversation.title}</span></button>)}
       </div>
