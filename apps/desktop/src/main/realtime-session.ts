@@ -442,7 +442,7 @@ export class RealtimeSession extends EventEmitter {
     if (message.type === "runtime_error") this.emit("runtime-error", message);
   }
 
-  private handleDirectSegment(segment: { source: "mic" | "remote"; text: string; startMs: number; endMs: number; final: boolean; confidence?: number; utteranceId?: string }): void {
+  private handleDirectSegment(segment: { source: "mic" | "remote"; text: string; startMs: number; endMs: number; final: boolean; confidence?: number; utteranceId?: string; endpoint?: boolean; speechFinal?: boolean; utteranceEnd?: boolean; endOfTurn?: boolean }): void {
     // Keep partial/final events for one provider speech item addressable by a
     // stable id. Building the id from text made every ASR revision look like a
     // new utterance and caused duplicate questions and answer cancellations.

@@ -110,7 +110,7 @@ export class WrittenTestController extends EventEmitter {
           this.emitEvent({ type: "realtime_message", message: { type: "answer_start", answerId: event.answerId, questionId: event.questionId, groupId, relation: "PRIMARY", mode: event.mode, model: event.model } });
         }
         else if (event.type === "answer_delta") this.emitEvent({ type: "realtime_message", message: { type: "answer_delta", answerId: event.answerId, delta: event.delta } });
-        else this.emitEvent({ type: "realtime_message", message: { type: "answer_end", answerId: event.answerId, text: event.text, quality: event.quality } });
+        else if (event.type === "answer_end") this.emitEvent({ type: "realtime_message", message: { type: "answer_end", answerId: event.answerId, text: event.text, quality: event.quality } });
       }
     } catch (error) {
       if (!controller.signal.aborted) this.emitEvent({ type: "diagnostic", message: `LLM_FAILED: ${String(error)}` });

@@ -10,6 +10,8 @@ export interface TurnCompletionDecision {
 export interface TurnCompletionContext {
   previousText?: string;
   currentTopic?: string;
+  /** Provider/VAD explicitly marked the speech item as ended. */
+  asrEndpoint?: boolean;
 }
 
 const FILLER = /^(?:嗯+|呃+|啊+|哦+|好+|好的|对|明白了?|知道了?|可以|行|那个|然后)[。！？?！\s，,、]*$/iu;
@@ -28,16 +30,16 @@ function clamp(value: number): number { return Math.max(0, Math.min(1, value)); 
  */
 export function decideTurnCompletion(text: string, context: TurnCompletionContext = {}): TurnCompletionDecision {
   const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized || FILLER.test(normalized)) return { state: "filler", confidence: 0.99, reason: "filler-only", recommendedWaitMs: 180 };
-  if (INSTRUCTION_MODIFIER.test(normalized)) return { state: "instruction_modifier", confidence: 0.97, reason: "instruction-modifier", recommendedWaitMs: 420 };
-  if (TOPIC_ANNOUNCEMENT.test(normalized) && !QUESTION_FORM.test(normalized)) return { state: "topic_announcement", confidence: 0.96, reason: "topic-announcement", recommendedWaitMs: 360 };
-  if (INCOMPLETE_TAIL.test(normalized) || INCOMPLETE_SENTENCE.test(normalized)) return { state: "incomplete", confidence: 0.94, reason: "semantic-clause-open", recommendedWaitMs: 1_050 };
+  if (!normalized || FILLER.test(normalized)) return { state: "filler", confidence: 0.99, reason: "filler-only", recommendedWaitMs: 140 };
+  if (INSTRUCTION_MODIFIER.test(normalized)) return { state: "instruction_modifier", confidence: 0.97, reason: "instruction-modifier", recommendedWaitMs: 260 };
+  if (TOPIC_ANNOUNCEMENT.test(normalized) && !QUESTION_FORM.test(normalized)) return { state: "topic_announcement", confidence: 0.96, reason: "topic-announcement", recommendedWaitMs: 180 };
+  if (INCOMPLETE_TAIL.test(normalized) || INCOMPLETE_SENTENCE.test(normalized)) return { state: "incomplete", confidence: 0.94, reason: "semantic-clause-open", recommendedWaitMs: 620 };
   if (context.previousText && /(?:如果|若|假设|在|关于|针对|比如|包括|以及|并且|而且|尤其)[。！？?！；;，,、\s]*$/u.test(context.previousText)) {
-    return { state: "incomplete", confidence: 0.88, reason: "previous-clause-open", recommendedWaitMs: 1_050 };
+    return { state: "incomplete", confidence: 0.88, reason: "previous-clause-open", recommendedWaitMs: 620 };
   }
-  if (QUESTION_FORM.test(normalized) || /[？?]$/.test(normalized)) return { state: "complete", confidence: 0.96, reason: "explicit-question", recommendedWaitMs: 320 };
-  if (/[。！？!；;]$/.test(normalized)) return { state: "complete", confidence: 0.82, reason: "terminal-punctuation", recommendedWaitMs: 360 };
-  return { state: "ambiguous", confidence: clamp(normalized.length >= 8 ? 0.66 : 0.48), reason: "no-semantic-boundary", recommendedWaitMs: 420 };
+  if (QUESTION_FORM.test(normalized) || /[？?]$/.test(normalized)) return { state: "complete", confidence: 0.96, reason: context.asrEndpoint ? "explicit-question-endpoint" : "explicit-question", recommendedWaitMs: context.asrEndpoint ? 0 : 140 };
+  if (/[。！？!；;]$/.test(normalized)) return { state: "complete", confidence: 0.82, reason: context.asrEndpoint ? "terminal-punctuation-endpoint" : "terminal-punctuation", recommendedWaitMs: context.asrEndpoint ? 0 : 180 };
+  return { state: "ambiguous", confidence: clamp(normalized.length >= 8 ? 0.66 : 0.48), reason: context.asrEndpoint ? "ambiguous-endpoint" : "no-semantic-boundary", recommendedWaitMs: context.asrEndpoint ? 80 : 260 };
 }
 
 export class TurnCompletionGate {

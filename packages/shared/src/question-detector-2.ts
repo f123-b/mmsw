@@ -16,4 +16,4 @@ export class QuestionClassifier {
 
 export { QuestionDetector as QuestionDetector2, decideQuestion, questionScore } from "./question/question-detector";
 export type { QuestionDecision, QuestionDecisionInput } from "./question/question-detector";
-export type { QuestionAnalysis, QuestionAnalysisSnapshot, QuestionDetectionContext, QuestionDetectionResult, QuestionDetectionType, QuestionLLMConfirmation, QuestionLLMConfirmer, QuestionScore, QuestionSpeechAct } from "./question/types";
+export type { QuestionAnalysis, QuestionAnalysisSnapshot, QuestionDetectionContext, QuestionDetectionResult, QuestionDetectionType, QuestionLLMConfirmation, QuestionLLMConfirmer, QuestionRecognitionMode, QuestionScore, QuestionSpeechAct } from "./question/types";

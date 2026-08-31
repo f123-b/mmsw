@@ -93,6 +93,15 @@ export interface AnswerTelemetry {
   blockedClaimTypes?: string[];
   unsupportedPastPersonalActionCount?: number;
   historyRevision?: number;
+  asrFinalToQuestionConfirmedMs?: number;
+  questionConfirmedToProviderRequestMs?: number;
+  providerRequestToFirstTokenMs?: number;
+  asrFinalToFirstVisibleTokenMs?: number;
+  fastContextMs?: number;
+  claimGateMs?: number;
+  /** Compatibility aliases used by runtime dashboards. */
+  providerFirstTokenMs?: number;
+  asrFinalToFirstTokenMs?: number;
   timings?: Record<string, number | undefined>;
 }
 
@@ -107,6 +116,8 @@ export interface PreparedAnswer {
 }
 
 export interface AnswerContextInput {
+  /** Identifies whether this context was built on the first-token path. */
+  contextMode?: "fast" | "rich";
   profileSummary?: string;
   jobDescriptionSummary?: string;
   profileInstructions?: string;
@@ -380,6 +391,7 @@ export interface AnswerProvider {
 export type AnswerGenerationEvent =
   | { type: "answer_start"; answerId: string; questionId: string; mode: AnswerMode; model: string }
   | { type: "answer_delta"; answerId: string; delta: string }
+  | { type: "claim_gate_pass"; answerId: string; elapsedMs: number }
   | { type: "answer_end"; answerId: string; text: string; quality?: AnswerQualityResult };
 
 export interface AnswerGenerationOptions {
@@ -403,6 +415,45 @@ export interface AnswerGenerationOptions {
   modelOverride?: ModelSnapshot;
   /** Never expose an unsupported personal/project claim as a final answer. */
   strictPersonalGrounding?: boolean;
+}
+
+class StreamingSentenceClaimGate {
+  private pending = "";
+  private elapsed = 0;
+
+  constructor(private readonly input: { question: string; evidenceSnapshot: EvidenceSnapshot; intent: ReturnType<typeof analyzeAnswerIntent> }) {}
+
+  get elapsedMs(): number { return this.elapsed; }
+
+  push(text: string): string {
+    if (!text) return "";
+    this.pending += text;
+    let output = "";
+    let boundary = this.pending.search(/[。！？!?；;\n]/u);
+    while (boundary >= 0) {
+      const sentence = this.pending.slice(0, boundary + 1);
+      this.pending = this.pending.slice(boundary + 1);
+      output += this.check(sentence);
+      boundary = this.pending.search(/[。！？!?；;\n]/u);
+    }
+    return output;
+  }
+
+  finish(): string {
+    const remaining = this.pending;
+    this.pending = "";
+    return remaining ? this.check(remaining) : "";
+  }
+
+  private check(sentence: string): string {
+    const startedAt = performance.now();
+    // Evaluate the sentence itself when possible. The full snapshot remains
+    // authoritative, while sentence-level checks make unsupported ownership
+    // claims safe without blocking the rest of the stream.
+    const sentenceResult = new ClaimGate().check({ ...this.input, answer: sentence });
+    this.elapsed += Math.max(0, performance.now() - startedAt);
+    return sentenceResult.rewrittenAnswer ?? sentenceResult.fallbackAnswer ?? sentence;
+  }
 }
 
 export class AnswerAgent {
@@ -484,7 +535,20 @@ export class AnswerAgent {
       maxRetries: options.maxRetries
     };
     let text = "";
+    let streamedSafeText = "";
+    let sanitizedStreamText = "";
+    let claimGateFirstPassEmitted = false;
     const sanitizer = new StreamingAnswerSanitizer();
+    const personalClaimRequested = requiresPersonalClaimEvidence(intent) || intent.asksBehavioralEpisode;
+    const projectContextRequested = intent.asksProjectImplementation || intent.allowsProjectEvidence;
+    const streamingClaimGate = !options.directDisplay && (personalClaimRequested || projectContextRequested)
+      ? new StreamingSentenceClaimGate({ question: routedQuestion.text, evidenceSnapshot, intent })
+      : undefined;
+    const emitSafeDelta = (delta: string): void => {
+      if (!delta) return;
+      const safe = streamingClaimGate ? streamingClaimGate.push(delta) : delta;
+      if (safe) streamedSafeText += safe;
+    };
     if (options.directDisplay && provider.complete) {
       text = await provider.complete(providerRequest, signal);
     } else {
@@ -492,13 +556,48 @@ export class AnswerAgent {
         if (!delta) continue;
         text += delta;
         const safeDelta = sanitizer.push(delta);
-        if (options.emitDeltas !== false && !options.directDisplay && safeDelta) yield { type: "answer_delta", answerId, delta: safeDelta };
+        if (options.emitDeltas !== false && !options.directDisplay && safeDelta) {
+          const before = streamedSafeText;
+          emitSafeDelta(safeDelta);
+          const emitted = streamedSafeText.slice(before.length);
+          if (emitted) {
+            if (streamingClaimGate && !claimGateFirstPassEmitted) {
+              claimGateFirstPassEmitted = true;
+              yield { type: "claim_gate_pass", answerId, elapsedMs: streamingClaimGate.elapsedMs };
+            }
+            yield { type: "answer_delta", answerId, delta: emitted };
+          }
+          sanitizedStreamText += safeDelta;
+        }
+      }
+      if (options.emitDeltas !== false && !options.directDisplay) {
+        const finalized = sanitizer.finalize();
+        const remainder = finalized.startsWith(sanitizedStreamText) ? finalized.slice(sanitizedStreamText.length) : "";
+        if (remainder) {
+          const before = streamedSafeText;
+          emitSafeDelta(remainder);
+          const emitted = streamedSafeText.slice(before.length);
+          if (emitted) {
+            if (streamingClaimGate && !claimGateFirstPassEmitted) {
+              claimGateFirstPassEmitted = true;
+              yield { type: "claim_gate_pass", answerId, elapsedMs: streamingClaimGate.elapsedMs };
+            }
+            yield { type: "answer_delta", answerId, delta: emitted };
+          }
+        }
+        const trailing = streamingClaimGate?.finish() ?? "";
+        if (trailing) {
+          streamedSafeText += trailing;
+          if (streamingClaimGate && !claimGateFirstPassEmitted) {
+            claimGateFirstPassEmitted = true;
+            yield { type: "claim_gate_pass", answerId, elapsedMs: streamingClaimGate.elapsedMs };
+          }
+          yield { type: "answer_delta", answerId, delta: trailing };
+        }
       }
     }
-    const completedText = options.directDisplay && provider.complete ? sanitizeStreamingAnswer(text) : sanitizer.finalize();
+    const completedText = options.directDisplay && provider.complete ? sanitizeStreamingAnswer(text) : options.emitDeltas !== false && !options.directDisplay ? streamedSafeText : sanitizer.finalize();
     let formattedText = options.formatAnswer === false ? completedText.trim() : this.formatter.format(completedText, mode, kind, plan);
-    const personalClaimRequested = requiresPersonalClaimEvidence(intent) || intent.asksBehavioralEpisode;
-    const projectContextRequested = intent.asksProjectImplementation || intent.allowsProjectEvidence;
     const explicitlyProvidedExperience = context.personalMemoryEvidence.length > 0 || context.experienceContext.length > 0 || context.projectEvidence.length > 0;
     const groundingText = [
       ...(personalClaimRequested || projectContextRequested || explicitlyProvidedExperience || context.projectQaEvidence.length > 0 ? [context.profileSummary, context.jobDescriptionSummary, ...context.sessionEvidence.map((item) => item.text), ...context.personalMemoryEvidence, ...context.experienceContext, ...context.verifiedResumeEvidence, ...context.verifiedPersonalProjectFacts, ...context.projectQaEvidence, ...context.projectEvidence] : []),
@@ -634,6 +733,7 @@ export class AnswerAgent {
       blockedPersonalClaimCount: claimGate.blockedClaims.length,
       blockedClaimTypes: [...new Set(claimGate.blockedClaims.map((claim) => claim.type))],
       unsupportedPastPersonalActionCount: claimGate.unsupportedPastPersonalActionCount,
+      claimGateMs: streamingClaimGate?.elapsedMs,
       ...(context.answerSourcePlan?.qaMatch?.questionId ? { projectQaQuestionId: context.answerSourcePlan.qaMatch.questionId } : {})
     };
     yield { type: "answer_end", answerId, text: formattedText, quality };

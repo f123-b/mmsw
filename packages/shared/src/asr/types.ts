@@ -22,6 +22,10 @@ export interface TranscriptSegment {
   startMs: number;
   endMs: number;
   final: boolean;
+  endpoint?: boolean;
+  speechFinal?: boolean;
+  utteranceEnd?: boolean;
+  endOfTurn?: boolean;
   confidence?: number;
 }
 

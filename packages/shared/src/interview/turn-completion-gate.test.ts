@@ -10,12 +10,18 @@ describe("TurnCompletionGate", () => {
     "网络断开或设备重启。"
   ])("keeps semantic setup clauses open: %s", (text) => {
     expect(gate.decide(text).state).toBe("incomplete");
-    expect(gate.decide(text).recommendedWaitMs).toBeGreaterThanOrEqual(800);
+    expect(gate.decide(text).recommendedWaitMs).toBeGreaterThanOrEqual(500);
+    expect(gate.decide(text).recommendedWaitMs).toBeLessThanOrEqual(650);
   });
 
   it("recognizes complete questions and non-question modifiers", () => {
     expect(gate.decide("DMA 的作用是什么？").state).toBe("complete");
     expect(gate.decide("下面聊一下 RTOS").state).toBe("topic_announcement");
     expect(gate.decide("请重点讲一下异常恢复").state).toBe("instruction_modifier");
+  });
+
+  it("trusts an explicit ASR endpoint for complete and bounded ambiguous turns", () => {
+    expect(gate.decide("DMA 的作用是什么？", { asrEndpoint: true }).recommendedWaitMs).toBe(0);
+    expect(gate.decide("这个技术点", { asrEndpoint: true }).recommendedWaitMs).toBe(80);
   });
 });

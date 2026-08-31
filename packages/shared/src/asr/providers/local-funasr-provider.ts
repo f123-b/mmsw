@@ -10,6 +10,13 @@ interface LocalMessage {
   startMs?: number;
   endMs?: number;
   confidence?: number;
+  endpoint?: boolean;
+  speechFinal?: boolean;
+  utteranceEnd?: boolean;
+  endOfTurn?: boolean;
+  speech_final?: boolean;
+  utterance_end?: boolean;
+  end_of_turn?: boolean;
   error?: string;
   message?: string;
 }
@@ -83,9 +90,9 @@ export class LocalFunASRProvider implements ASRProvider, StreamingAsrProvider {
     if (!text) return;
     const startMs = Math.max(0, Math.round(message.startMs ?? 0));
     const endMs = Math.max(startMs, Math.round(message.endMs ?? startMs));
-    const segment: TranscriptSegment = { source: this.activeSource, text, startMs, endMs, final: message.type === "asr_final", ...(message.confidence === undefined ? {} : { confidence: message.confidence }) };
+    const segment: TranscriptSegment = { source: this.activeSource, text, startMs, endMs, final: message.type === "asr_final", endpoint: Boolean(message.endpoint ?? message.type === "asr_final"), speechFinal: Boolean(message.speechFinal ?? message.speech_final), utteranceEnd: Boolean(message.utteranceEnd ?? message.utterance_end), endOfTurn: Boolean(message.endOfTurn ?? message.end_of_turn ?? message.type === "asr_final"), ...(message.confidence === undefined ? {} : { confidence: message.confidence }) };
     this.listener?.(segment);
-    this.legacyListener?.({ source: this.activeSource, text, startMs, endMs, final: segment.final, ...(segment.confidence === undefined ? {} : { confidence: segment.confidence }) });
+    this.legacyListener?.({ source: this.activeSource, text, startMs, endMs, final: segment.final, endpoint: segment.endpoint, speechFinal: segment.speechFinal, utteranceEnd: segment.utteranceEnd, endOfTurn: segment.endOfTurn, ...(segment.confidence === undefined ? {} : { confidence: segment.confidence }) });
   }
 
   private notifyError(error: unknown): void {

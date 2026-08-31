@@ -4,28 +4,48 @@ export type RuntimeSessionState = typeof RUNTIME_SESSION_STATES[number];
 export const RUNTIME_QUESTION_STATES = ["detected", "confirmed", "queued", "answering", "streaming", "answered", "finished", "cancelled", "failed"] as const;
 export type RuntimeQuestionState = typeof RUNTIME_QUESTION_STATES[number];
 
-export const RUNTIME_ANSWER_STATES = ["created", "context_loading", "provider_pending", "streaming", "completed", "committed", "cancelled", "failed"] as const;
+export const RUNTIME_ANSWER_STATES = ["created", "context_loading", "request_ready", "request_sent", "provider_pending", "streaming", "completed", "committed", "cancelled", "failed"] as const;
 export type RuntimeAnswerState = typeof RUNTIME_ANSWER_STATES[number];
 
 export const RUNTIME_TRACE_EVENTS = [
   "INTERVIEW_SESSION_START_REQUESTED",
   "INTERVIEW_SESSION_STARTED",
   "TRANSCRIPT_RECEIVED",
+  "ASR_PARTIAL_RECEIVED",
+  "ASR_FINAL_RECEIVED",
+  "TURN_COMPLETION_STARTED",
+  "TURN_COMPLETION_COMPLETED",
+  "QUESTION_LOCAL_ANALYSIS_STARTED",
+  "QUESTION_LOCAL_ANALYSIS_COMPLETED",
+  "QUESTION_CLASSIFIER_WARMUP_STARTED",
+  "QUESTION_CLASSIFIER_WARMUP_COMPLETED",
+  "QUESTION_CLASSIFIER_WARMUP_FAILED",
   "QUESTION_DETECTED",
   "QUESTION_CONFIRMED",
   "QUESTION_QUEUED",
   "QUESTION_MERGED",
   "ANSWER_REQUEST_CREATED",
+  "CONTEXT_BUILDING",
+  "REQUEST_READY",
+  "PROVIDER_REQUEST_STARTED",
+  "PROVIDER_REQUEST_SENT",
   "PROJECT_CONTEXT_STARTED",
   "PROJECT_CONTEXT_READY",
   "PROJECT_CONTEXT_FAILED",
   "PROVIDER_STREAM_REQUESTED",
   "PROVIDER_STREAM_STARTED",
   "PROVIDER_FIRST_TOKEN",
+  "FIRST_VISIBLE_TOKEN",
   "PROVIDER_STREAM_COMPLETED",
   "PROVIDER_STREAM_CANCELLED",
   "PROVIDER_STREAM_FAILED",
   "ANSWER_COMMITTED",
+  "ANSWER_COMPLETED",
+  "FAST_CONTEXT_STARTED",
+  "FAST_CONTEXT_COMPLETED",
+  "RICH_CONTEXT_STARTED",
+  "RICH_CONTEXT_COMPLETED",
+  "CLAIM_GATE_FIRST_PASS",
   "OVERLAY_UPDATE_REQUESTED",
   "OVERLAY_UPDATED",
   "QUESTION_FINISHED",
@@ -149,6 +169,107 @@ export class RuntimeTraceBuffer {
   }
 
   clear(): void { this.events.length = 0; }
+}
+
+export interface RuntimeLatencySample {
+  id: string;
+  asrFinalReceivedAt?: number;
+  questionConfirmedAt?: number;
+  providerRequestStartedAt?: number;
+  providerRequestSentAt?: number;
+  providerFirstTokenAt?: number;
+  firstVisibleTokenAt?: number;
+  answerDeltaAt?: number;
+  overlayVisibleAt?: number;
+  fastContextStartedAt?: number;
+  fastContextCompletedAt?: number;
+  /** Local sentence-level ClaimGate cost reported by AnswerAgent. */
+  claimGateMs?: number;
+  claimGateAt?: number;
+}
+
+export interface RuntimeLatencyStageMetrics {
+  count: number;
+  p50: number;
+  p95: number;
+  max: number;
+}
+
+export interface RuntimeLatencyMetrics {
+  sampleCount: number;
+  stages: {
+    asrFinalToQuestionConfirmedMs: RuntimeLatencyStageMetrics;
+    questionConfirmedToProviderRequestMs: RuntimeLatencyStageMetrics;
+    providerRequestToFirstTokenMs: RuntimeLatencyStageMetrics;
+    asrFinalToFirstVisibleTokenMs: RuntimeLatencyStageMetrics;
+    fastContextMs: RuntimeLatencyStageMetrics;
+    claimGateMs: RuntimeLatencyStageMetrics;
+    answerDeltaToOverlayVisibleMs: RuntimeLatencyStageMetrics;
+    /** Aliases retained for dashboards that use the shorter stage names. */
+    providerFirstTokenMs: RuntimeLatencyStageMetrics;
+    asrFinalToFirstTokenMs: RuntimeLatencyStageMetrics;
+  };
+}
+
+function stageMetrics(values: number[]): RuntimeLatencyStageMetrics {
+  const sorted = [...values].sort((left, right) => left - right);
+  const percentile = (ratio: number): number => sorted.length ? Number(sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * ratio) - 1)]!.toFixed(3)) : 0;
+  return { count: sorted.length, p50: percentile(0.5), p95: percentile(0.95), max: sorted.length ? Number(sorted[sorted.length - 1]!.toFixed(3)) : 0 };
+}
+
+/** Formal low-latency runtime telemetry. Samples are bounded to one session. */
+export class RuntimeLatencyTelemetry {
+  private readonly values = new Map<string, RuntimeLatencySample>();
+
+  start(id: string, at: number): RuntimeLatencySample {
+    const sample = this.values.get(id) ?? { id };
+    sample.asrFinalReceivedAt ??= at;
+    this.values.set(id, sample);
+    return sample;
+  }
+
+  mark(id: string, stage: Exclude<keyof RuntimeLatencySample, "id">, at: number): void {
+    const sample = this.values.get(id) ?? { id };
+    sample[stage] = at;
+    this.values.set(id, sample);
+  }
+
+  markOnce(id: string, stage: Exclude<keyof RuntimeLatencySample, "id">, at: number): void {
+    const sample = this.values.get(id) ?? { id };
+    if (sample[stage] !== undefined) return;
+    sample[stage] = at;
+    this.values.set(id, sample);
+  }
+
+  setDuration(id: string, stage: "claimGateMs", durationMs: number | undefined): void {
+    if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs < 0) return;
+    const sample = this.values.get(id) ?? { id };
+    sample[stage] = durationMs;
+    this.values.set(id, sample);
+  }
+
+  snapshot(): RuntimeLatencySample[] { return [...this.values.values()].map((sample) => ({ ...sample })); }
+
+  metrics(): RuntimeLatencyMetrics {
+    const samples = this.snapshot();
+    const durations = (get: (sample: RuntimeLatencySample) => number | undefined): number[] => samples.map(get).filter((value): value is number => value !== undefined && Number.isFinite(value) && value >= 0);
+    return {
+      sampleCount: samples.length,
+      stages: {
+        asrFinalToQuestionConfirmedMs: stageMetrics(durations((sample) => sample.asrFinalReceivedAt !== undefined && sample.questionConfirmedAt !== undefined ? sample.questionConfirmedAt - sample.asrFinalReceivedAt : undefined)),
+        questionConfirmedToProviderRequestMs: stageMetrics(durations((sample) => sample.questionConfirmedAt !== undefined && sample.providerRequestStartedAt !== undefined ? sample.providerRequestStartedAt - sample.questionConfirmedAt : undefined)),
+        providerRequestToFirstTokenMs: stageMetrics(durations((sample) => sample.providerRequestStartedAt !== undefined && sample.providerFirstTokenAt !== undefined ? sample.providerFirstTokenAt - sample.providerRequestStartedAt : undefined)),
+        asrFinalToFirstVisibleTokenMs: stageMetrics(durations((sample) => sample.asrFinalReceivedAt !== undefined && sample.firstVisibleTokenAt !== undefined ? sample.firstVisibleTokenAt - sample.asrFinalReceivedAt : undefined)),
+        fastContextMs: stageMetrics(durations((sample) => sample.fastContextStartedAt !== undefined && sample.fastContextCompletedAt !== undefined ? sample.fastContextCompletedAt - sample.fastContextStartedAt : undefined)),
+        claimGateMs: stageMetrics(durations((sample) => sample.claimGateMs ?? (sample.providerFirstTokenAt !== undefined && sample.claimGateAt !== undefined ? sample.claimGateAt - sample.providerFirstTokenAt : undefined))),
+        answerDeltaToOverlayVisibleMs: stageMetrics(durations((sample) => sample.answerDeltaAt !== undefined && sample.overlayVisibleAt !== undefined ? sample.overlayVisibleAt - sample.answerDeltaAt : undefined)),
+        providerFirstTokenMs: stageMetrics(durations((sample) => sample.providerRequestStartedAt !== undefined && sample.providerFirstTokenAt !== undefined ? sample.providerFirstTokenAt - sample.providerRequestStartedAt : undefined)),
+        asrFinalToFirstTokenMs: stageMetrics(durations((sample) => sample.asrFinalReceivedAt !== undefined && sample.providerFirstTokenAt !== undefined ? sample.providerFirstTokenAt - sample.asrFinalReceivedAt : undefined))
+      }
+    };
+  }
+
+  clear(): void { this.values.clear(); }
 }
 
 export async function withRuntimeTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout?: () => void): Promise<T | undefined> {

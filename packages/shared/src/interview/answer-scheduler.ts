@@ -21,6 +21,8 @@ export interface AnswerSchedulerActive extends AnswerSchedulerQuestion {
   startedAt: number;
   visibleText: string;
   hasVisibleOutput: boolean;
+  /** True once the provider request has left the process. */
+  requestSent: boolean;
   plan: AnswerMergePlan;
 }
 
@@ -136,14 +138,15 @@ export class AnswerScheduler {
         startedAt: options.now ?? Date.now(),
         visibleText: "",
         hasVisibleOutput: false,
+        requestSent: false,
         plan: initialPlan(enriched)
       };
       return { action: "start", question: cloneQuestion(enriched), reason: "scheduler-idle", queueDepth: 0, active: this.active };
     }
-    if (mergeableRelation(enriched.relationType) && !this.activeAnswer.hasVisibleOutput && enriched.groupId === this.activeAnswer.groupId) {
+    if (mergeableRelation(enriched.relationType) && !this.activeAnswer.hasVisibleOutput && !this.activeAnswer.requestSent && enriched.groupId === this.activeAnswer.groupId) {
       this.activeAnswer.plan = mergePlan(this.activeAnswer.plan, enriched);
       this.mergeCount += 1;
-      return { action: "merge", question: cloneQuestion(enriched), reason: "augmentation-merged-before-visible-output", queueDepth: this.queueDepth, active: this.active };
+      return { action: "merge", question: cloneQuestion(enriched), reason: "augmentation-merged-before-request", queueDepth: this.queueDepth, active: this.active };
     }
     const action: AnswerSchedulerAction = "queue";
     this.queuedAnswers.push(enriched);
@@ -161,6 +164,12 @@ export class AnswerScheduler {
     if (!this.activeAnswer) return;
     this.activeAnswer.visibleText += text;
     this.activeAnswer.hasVisibleOutput = true;
+  }
+
+  markRequestSent(questionId: string): boolean {
+    if (this.activeAnswer?.id !== questionId) return false;
+    this.activeAnswer.requestSent = true;
+    return true;
   }
 
   canCancel(reason: AnswerCancellationReason): boolean {
@@ -182,7 +191,7 @@ export class AnswerScheduler {
     this.activeAnswer = undefined;
     const next = this.queuedAnswers.shift();
     if (next && options.activateNext !== false) {
-      this.activeAnswer = { ...next, startedAt: Date.now(), visibleText: "", hasVisibleOutput: false, plan: initialPlan(next) };
+      this.activeAnswer = { ...next, startedAt: Date.now(), visibleText: "", hasVisibleOutput: false, requestSent: false, plan: initialPlan(next) };
     }
     return next ? cloneQuestion(next) : undefined;
   }

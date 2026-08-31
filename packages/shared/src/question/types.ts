@@ -6,6 +6,7 @@ import type { QuestionSemanticFrame } from "./semantic-frame";
 
 export type QuestionDetectionType = "technical" | "project" | "behavior" | "follow_up" | "clarification" | "not_question";
 export type QuestionSpeechAct = InterviewSpeechAct | "SMALL_TALK" | "INSTRUCTION";
+export type QuestionRecognitionMode = "local_only" | "hybrid_debug";
 
 export interface QuestionScore {
   ruleScore: number;

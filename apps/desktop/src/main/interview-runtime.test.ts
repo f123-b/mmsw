@@ -113,6 +113,48 @@ describe("realtime interview runtime lifecycle", () => {
     expect(coordinator.getRuntimeDiagnostics()).toMatchObject({ pendingQuestions: 0, activeAnswers: 0, activeStreams: 0, activeProviderRequests: 0, activeAbortControllers: 0, activeTimers: 0, answerQueueDepth: 0 });
   });
 
+  it("measures the low-latency path with ASR endpoint signals and streaming output", async () => {
+    const provider: AnswerProvider = { stream: async function* () { yield "这是一个可直接口述的技术回答。"; } };
+    const { coordinator, realtime } = createRuntime(provider, { questionSilenceMs: 80, contextProvider: () => ({ contextMode: "fast" }) });
+    await coordinator.start({ profileId: "runtime-benchmark-profile", url: "wss://runtime.test", automationMode: "AUTO", answerMode: "NORMAL" });
+
+    const sampleCount = 8;
+    for (let index = 0; index < sampleCount; index += 1) {
+      const questionId = `latency-question-${index}`;
+      const completedBefore = trace(coordinator).filter((item) => item.name === "QUESTION_FINISHED").length;
+      realtime.emit("transcript", {}, {
+        id: questionId,
+        source: "remote",
+        text: `请解释第 ${index} 个技术点？`,
+        startMs: index * 1_000,
+        endMs: index * 1_000 + 300,
+        final: true,
+        endpoint: true,
+        speechFinal: true,
+        utteranceEnd: true
+      });
+      await waitFor(() => trace(coordinator).filter((item) => item.name === "QUESTION_FINISHED").length > completedBefore);
+    }
+
+    const metrics = coordinator.getRuntimeLatencyMetrics();
+    console.log("INTERVIEW_RUNTIME_LATENCY_BENCHMARK", JSON.stringify(metrics));
+    expect(metrics.sampleCount).toBe(sampleCount);
+    expect(metrics.stages.asrFinalToQuestionConfirmedMs.count).toBe(sampleCount);
+    expect(metrics.stages.questionConfirmedToProviderRequestMs.count).toBe(sampleCount);
+    expect(metrics.stages.providerRequestToFirstTokenMs.count).toBe(sampleCount);
+    expect(metrics.stages.asrFinalToFirstVisibleTokenMs.count).toBe(sampleCount);
+    expect(metrics.stages.fastContextMs.count).toBe(sampleCount);
+    expect(metrics.stages.answerDeltaToOverlayVisibleMs.count).toBe(sampleCount);
+    expect(metrics.stages.asrFinalToQuestionConfirmedMs.p95).toBeLessThan(250);
+    expect(metrics.stages.questionConfirmedToProviderRequestMs.p95).toBeLessThan(150);
+    expect(metrics.stages.providerRequestToFirstTokenMs.p95).toBeLessThan(1_000);
+    expect(metrics.stages.asrFinalToFirstVisibleTokenMs.p95).toBeLessThan(500);
+    expect(metrics.stages.fastContextMs.p95).toBeLessThan(300);
+    expect(metrics.stages.answerDeltaToOverlayVisibleMs.p95).toBeLessThan(50);
+    expect(names(coordinator)).toEqual(expect.arrayContaining(["ASR_FINAL_RECEIVED", "TURN_COMPLETION_STARTED", "TURN_COMPLETION_COMPLETED", "REQUEST_READY", "PROVIDER_REQUEST_SENT", "FIRST_VISIBLE_TOKEN"]));
+    await coordinator.stop();
+  });
+
   it("stops without a question and tolerates repeated stop calls", async () => {
     const { coordinator } = createRuntime({ stream: async function* () { yield "unused"; } });
     await coordinator.start({ profileId: "runtime-profile", url: "wss://runtime.test", answerMode: "NORMAL" });
@@ -120,6 +162,25 @@ describe("realtime interview runtime lifecycle", () => {
     await coordinator.stop();
     expect(coordinator.isRuntimeIdle()).toBe(true);
     expect(coordinator.runtimeState).toBe("stopped");
+  });
+
+  it("warms the local question classifier during startup and falls back on failure", async () => {
+    let warmupCalls = 0;
+    const successful = createRuntime({ stream: async function* () { yield "unused"; } }, {
+      questionClassifierWarmup: async () => { warmupCalls += 1; }
+    });
+    await successful.coordinator.start({ profileId: "runtime-profile", url: "wss://runtime.test", answerMode: "NORMAL" });
+    expect(warmupCalls).toBe(1);
+    expect(names(successful.coordinator)).toEqual(expect.arrayContaining(["QUESTION_CLASSIFIER_WARMUP_STARTED", "QUESTION_CLASSIFIER_WARMUP_COMPLETED"]));
+    await successful.coordinator.stop();
+
+    const failed = createRuntime({ stream: async function* () { yield "unused"; } }, {
+      questionClassifierWarmup: async () => { throw new Error("model unavailable"); }
+    });
+    await failed.coordinator.start({ profileId: "runtime-profile", url: "wss://runtime.test", answerMode: "NORMAL" });
+    expect(names(failed.coordinator)).toContain("QUESTION_CLASSIFIER_WARMUP_FAILED");
+    expect(failed.coordinator.runtimeState).toBe("running");
+    await failed.coordinator.stop();
   });
 
   it("drains an unrequested confirmed question when MANUAL mode stops", async () => {

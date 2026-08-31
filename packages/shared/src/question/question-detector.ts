@@ -1,6 +1,6 @@
 import { classifyNonQuestionSpeechAct, classifyQuestion, type QuestionCategory, type QuestionClassification } from "../question-classifier";
 import type { LocalQuestionModel, LocalQuestionResult } from "./local-classifier";
-import type { QuestionAnalysis, QuestionDetectionContext, QuestionDetectionType, QuestionLLMConfirmer, QuestionScore, QuestionSpeechAct } from "./types";
+import type { QuestionAnalysis, QuestionDetectionContext, QuestionDetectionType, QuestionLLMConfirmer, QuestionRecognitionMode, QuestionScore, QuestionSpeechAct } from "./types";
 import { normalizeTechnicalTerms } from "../terminology";
 import { classifyInterviewSpeechAct, shouldHardRejectSpeechAct } from "../interview/speech-act-classifier";
 import { classifyQuestionSemanticFrame } from "./semantic-frame";
@@ -142,14 +142,19 @@ export class QuestionDetector {
   private readonly threshold: number;
   private readonly llmMinScore: number;
   private readonly llmMaxScore: number;
+  private readonly questionRecognitionMode: QuestionRecognitionMode;
 
-  constructor(options: { classifier?: { classify(text: string, contextText?: string, final?: boolean): QuestionClassification }; localClassifier?: LocalQuestionModel; llmConfirmer?: QuestionLLMConfirmer; threshold?: number; llmMinScore?: number; llmMaxScore?: number } = {}) {
+  constructor(options: { classifier?: { classify(text: string, contextText?: string, final?: boolean): QuestionClassification }; localClassifier?: LocalQuestionModel; llmConfirmer?: QuestionLLMConfirmer; questionRecognitionMode?: QuestionRecognitionMode; threshold?: number; llmMinScore?: number; llmMaxScore?: number } = {}) {
     this.classifier = options.classifier ?? { classify: classifyQuestion };
     this.localClassifier = options.localClassifier;
     this.llmConfirmer = options.llmConfirmer;
     this.threshold = options.threshold ?? 0.85;
     this.llmMinScore = options.llmMinScore ?? 0.5;
     this.llmMaxScore = options.llmMaxScore ?? 0.8;
+    // Supplying a confirmer without an explicit mode is retained as the
+    // backwards-compatible debug behavior for library callers. Live runtime
+    // construction passes local_only explicitly.
+    this.questionRecognitionMode = options.questionRecognitionMode ?? (options.llmConfirmer ? "hybrid_debug" : "local_only");
   }
 
   get hasLocalClassifier(): boolean { return Boolean(this.localClassifier); }
@@ -176,7 +181,7 @@ export class QuestionDetector {
       }
     }
     const weightedWithoutLlm = 0.3 * preliminary.score.ruleScore + 0.5 * preliminary.score.semanticScore;
-    if (!this.llmConfirmer || weightedWithoutLlm < this.llmMinScore || weightedWithoutLlm > this.llmMaxScore) {
+    if (this.questionRecognitionMode !== "hybrid_debug" || !this.llmConfirmer || weightedWithoutLlm < this.llmMinScore || weightedWithoutLlm > this.llmMaxScore) {
       return preliminary;
     }
     try {

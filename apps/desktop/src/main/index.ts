@@ -32,6 +32,7 @@ import { adaptProfileToInterviewContext } from "./profile-context-adapter";
 import { createProjectComprehensionModel, createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { parseRepositoryArchiveInWorker } from "./repository-import-worker-client";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
+import { InterviewContextCache, type InterviewContextCacheKey } from "./interview-context-cache";
 import { formatInterviewMarkdown, type InterviewExportResult } from "./history-export";
 import { deriveProjectProblemChains, deriveProjectTechnicalDecisions, formatProjectFactValue, inferProjectSourceRole, isFactEligible, isFactReviewRequired, normalizeProjectOwnershipMode, resolveProjectAnswerPerspective } from "@interview-copilot/shared";
 import type { ChatAction, ChatCancelReason, ChatResponse } from "@interview-copilot/shared";
@@ -199,31 +200,10 @@ const localQuestionClassifier = new LocalQuestionClassifier({
 });
 const questionDetector2 = new QuestionDetector2({
   localClassifier: localQuestionClassifier,
-  // The LLM is only a tie-breaker for medium-confidence utterances. Clear
-  // questions stay on the local/rules path so recognition does not add a
-  // second network request before every live answer.
-  llmConfirmer: async (text, contextText) => {
-    const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings;
-    if (!settings.apiKey) throw new Error("LLM classifier is not configured");
-    const model = taskModel(settings, "questionRecognitionModel", "fastModel");
-    let output = "";
-    for await (const delta of answerProvider.stream({
-      model,
-      maxOutputTokens: 120,
-      maxRetries: 0,
-      sections: [
-        { name: "system/base", content: "你是面试语音问题分类器。只返回 JSON，不要 Markdown。字段：label（QUESTION、FOLLOW_UP、STATEMENT、SMALL_TALK、INSTRUCTION、CONTROL）、isQuestion（boolean）、confidence（0到1）、type（technical、project、behavior、follow_up、clarification、not_question）、reason。" },
-        { name: "recent-transcript", content: contextText || "无上下文" },
-        { name: "question", content: text }
-      ]
-    })) output += delta;
-    const json = output.match(/\{[\s\S]*\}/)?.[0];
-    if (!json) throw new Error("LLM classifier returned invalid JSON");
-    const parsed = JSON.parse(json) as { label?: string; isQuestion?: boolean; confidence?: number; type?: string; reason?: string };
-    const label = ["QUESTION", "FOLLOW_UP", "STATEMENT", "SMALL_TALK", "INSTRUCTION", "CONTROL"].includes(parsed.label || "") ? parsed.label as "QUESTION" | "FOLLOW_UP" | "STATEMENT" | "SMALL_TALK" | "INSTRUCTION" | "CONTROL" : undefined;
-    const type = ["technical", "project", "behavior", "follow_up", "clarification", "not_question"].includes(parsed.type || "") ? parsed.type as "technical" | "project" | "behavior" | "follow_up" | "clarification" | "not_question" : undefined;
-    return { isQuestion: Boolean(parsed.isQuestion ?? (label === "QUESTION" || label === "FOLLOW_UP")), confidence: Math.max(0, Math.min(1, Number(parsed.confidence ?? 0))), label, type, reason: parsed.reason };
-  }
+  // Live Interview must never spend a network round trip deciding whether an
+  // utterance is a question. hybrid_debug remains available to library and
+  // benchmark callers through QuestionDetector's explicit mode.
+  questionRecognitionMode: "local_only"
 });
 let interviewCoordinator: InterviewCoordinator | undefined;
 let writtenTestController: WrittenTestController | undefined;
@@ -250,6 +230,7 @@ let preparationAbortController: AbortController | undefined;
 const chatAbortControllers = new Map<string, { controller: AbortController; reason?: ChatCancelReason }>();
 const chatStreamPromises = new Set<Promise<void>>();
 const providerPreflightCache = new ProviderPreflightCache();
+const interviewContextCache = new InterviewContextCache();
 let interviewStartupTiming: InterviewStartupTiming | undefined;
 let pendingStartupButtonClickAt: number | undefined;
 let appLogger: SafeLogger | undefined;
@@ -695,7 +676,7 @@ async function runIndependentVisionAnswer(visionInput: ReturnType<typeof buildVi
           recordScreenshotTrace("VISION_FIRST_TOKEN", screenshotRequestId, { providerRequestId, answerId, status: "streaming" });
         }
         broadcast("realtime:message", { type: "answer_delta", answerId: event.answerId, delta: event.delta });
-      } else {
+      } else if (event.type === "answer_end") {
         if (!firstTokenAt) {
           firstTokenAt = Date.now();
           recordScreenshotTrace("VISION_FIRST_TOKEN", screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "completed" });
@@ -1775,6 +1756,7 @@ async function stopInterview(): Promise<void> {
     screenshotOperations.abortAll();
     await coordinator().stop("user");
   } finally {
+    interviewContextCache.release();
     // The HUD is a session-scoped window. Always restore the normal app even
     // when ASR/audio shutdown reports an error or an answer is still flushing.
     overlayManager?.exitInterviewMode();
@@ -1784,6 +1766,44 @@ async function stopInterview(): Promise<void> {
       mainWindow.focus();
     }
   }
+}
+
+function prepareInterviewContextCache(key: InterviewContextCacheKey): void {
+  const profile = profileRepository?.get(key.profileId);
+  const selectedJobTarget = key.jobTargetId ? jobTargetRepository?.get(key.jobTargetId) : jobTargetRepository?.list(key.profileId).find((target) => target.status === "active");
+  const interviewProfile = profile ? adaptProfileToInterviewContext(profile, selectedJobTarget) : undefined;
+  const projectSnapshot = projectMemoryService?.get(key.profileId) ?? { projects: [], facts: [], modules: [], technicalPoints: [], problems: [], interviewQuestions: [] };
+  const project = key.projectId ? projectSnapshot.projects.find((item) => item.id === key.projectId) : undefined;
+  const projectFacts = (projectSnapshot.facts ?? []).filter((fact) => (!key.projectId || fact.projectId === key.projectId) && isFactEligible(fact));
+  const formatFact = (fact: typeof projectFacts[number]): string => `项目技术事实（${fact.type}，来源 ${fact.sourceIds.join("、")}）：${fact.title}：${fact.type === "parameter" ? formatProjectFactValue(fact.value) || fact.content : fact.content}`;
+  const personalFacts = projectFacts.filter((fact) => fact.ownership === "self" && (fact.evidenceLevel === "confirmed-user" || fact.verified)).map(formatFact);
+  const parameters = projectFacts.filter((fact) => fact.type === "parameter").slice(0, 8).map((fact) => `[${fact.canonicalKey ?? "parameter"}] ${fact.title}=${formatProjectFactValue(fact.value) || fact.content}`);
+  const decisions = deriveProjectTechnicalDecisions(projectFacts).slice(0, 5).map((decision) => `${decision.choice}${decision.reason ? `；原因：${decision.reason}` : ""}${decision.tradeoff ? `；取舍：${decision.tradeoff}` : ""}`);
+  const problemChains = deriveProjectProblemChains(projectFacts).slice(0, 4).map((chain) => `${chain.challenge?.content ?? "问题待补充"}；原因：${chain.cause?.content ?? "待补充"}；解决：${chain.solution?.content ?? "待补充"}；结果：${chain.result?.content ?? "待补充"}`);
+  const structuredFastKnowledge = [
+    ...(parameters.length ? [`KEY_PARAMETERS（结构化配置值）：${parameters.join("；")}`] : []),
+    ...(decisions.length ? [`TECHNICAL_DECISIONS（已有选择与取舍）：${decisions.join("\n")}`] : []),
+    ...(problemChains.length ? [`PROBLEM_CHAINS（已有问题链）：${problemChains.join("\n")}`] : [])
+  ];
+  interviewContextCache.prepare(key, {
+    contextMode: "fast",
+    profileSummary: interviewProfile?.candidate.resumeSummary,
+    jobDescriptionSummary: interviewProfile?.target?.description,
+    profileInstructions: interviewProfile?.candidate.instructions,
+    expressionLevel: interviewProfile?.candidate.expressionLevel ?? "plain",
+    explainAdvancedTerms: interviewProfile?.candidate.explainAdvancedTerms ?? true,
+    skills: interviewProfile?.candidate.skills ?? [],
+    experienceContext: [interviewProfile?.candidate.resumeSummary].filter((value): value is string => Boolean(value)),
+    personalMemoryEvidence: [],
+    projectEvidence: projectFacts.slice(0, 12).map(formatFact),
+    verifiedPersonalProjectFacts: personalFacts.slice(0, 8),
+    verifiedResumeEvidence: [interviewProfile?.candidate.resumeSummary].filter((value): value is string => Boolean(value)),
+    retrievedKnowledge: structuredFastKnowledge,
+    recentTranscript: [],
+    ...(interviewProfile?.candidate.companyContext ? { companyContext: interviewProfile.candidate.companyContext } : {}),
+    ...(interviewProfile?.candidate.salaryExpectation ? { salaryExpectation: interviewProfile.candidate.salaryExpectation } : {}),
+    ...(project ? { currentProject: project.name } : {})
+  });
 }
 
 type ScopedKnowledgeChunk = KnowledgeChunk & {
@@ -2234,6 +2254,7 @@ function registerIpc(): void {
     let overlayShown = false;
     try {
       if (!profileRepository?.get(options.profileId)) throw new Error("PROFILE_NOT_FOUND: 面试档案不存在");
+      prepareInterviewContextCache({ profileId: options.profileId, projectId: options.projectId, jobTargetId: options.jobTargetId });
       if (options.projectId && !projectMemoryRepository?.getSnapshot(options.profileId).projects.some((project) => project.id === options.projectId)) throw new Error("PROJECT_NOT_FOUND: 重点项目不属于当前档案");
       if (options.jobTargetId && jobTargetRepository?.get(options.jobTargetId)?.profileId !== options.profileId) throw new Error("JOB_TARGET_NOT_FOUND: 目标岗位不属于当前档案");
       const llm = providerConfigStore?.get("llm") ?? environmentLlmSettings;
@@ -2297,6 +2318,7 @@ function registerIpc(): void {
   ipcMain.handle("interview:get-state", () => ({ running: coordinator().running, interviewId: coordinator().interviewId, automationMode: coordinator().automationMode }));
   ipcMain.handle("interview:get-runtime-diagnostics", () => coordinator().getRuntimeDiagnostics());
   ipcMain.handle("interview:get-runtime-trace", (_event, limit?: number) => coordinator().getRuntimeTrace(limit));
+  ipcMain.handle("interview:get-runtime-latency", () => coordinator().getRuntimeLatencyMetrics());
   ipcMain.handle("screenshot:get-diagnostics", () => screenshotOperations.diagnostics());
   ipcMain.handle("screenshot:get-trace", (_event, limit?: number) => screenshotTrace.snapshot(limit));
   ipcMain.handle("interview:set-automation-mode", (_event, mode: "MANUAL" | "AUTO") => { const next = mode === "MANUAL" ? "MANUAL" : "AUTO"; overlaySettingsStore?.setAutomationMode(next); coordinator().setAutomationMode(next); return true; });
@@ -2353,11 +2375,13 @@ function registerIpc(): void {
     // Saving profile metadata is a local database operation. Analysis is an
     // explicit user action so opening the app or editing a profile cannot
     // silently create paid LLM requests.
-    return profileRepository?.save(input);
+    const saved = profileRepository?.save(input);
+    interviewContextCache.release();
+    return saved;
   });
-  ipcMain.handle("profiles:delete", (_event, profileId: string) => { profileRepository?.delete(profileId); return true; });
-  ipcMain.handle("profiles:clone", (_event, profileId: string, name: string) => profileRepository?.clone(profileId, name));
-  ipcMain.handle("profiles:select-active", (_event, profileId: string) => profileRepository?.setActive(profileId));
+  ipcMain.handle("profiles:delete", (_event, profileId: string) => { profileRepository?.delete(profileId); interviewContextCache.release(); return true; });
+  ipcMain.handle("profiles:clone", (_event, profileId: string, name: string) => { const cloned = profileRepository?.clone(profileId, name); interviewContextCache.release(); return cloned; });
+  ipcMain.handle("profiles:select-active", (_event, profileId: string) => { const selected = profileRepository?.setActive(profileId); interviewContextCache.release(); return selected; });
   ipcMain.handle("profiles:active", () => profileRepository?.active());
   ipcMain.handle("profiles:attach-material", async (_event, input: { profileId: string; kind: "resume" | "jobDescription"; filename: string; mimeType: string; bytes: Uint8Array }) => {
     if (!profileRepository) throw new Error("Profile database is still initializing");
@@ -2369,6 +2393,7 @@ function registerIpc(): void {
     const summary = parsed.text.replace(/\s+/g, " ").trim().slice(0, 800);
     const material = { rawContent: parsed.text, summary, filename: input.filename, mimeType: input.mimeType, uploadedAt: Date.now(), parseStatus: "parsed" as const, analysisStatus: "not_started" as const };
     const saved = profileRepository.save({ ...profile, ...(input.kind === "resume" ? { resume: material } : { jobDescription: material }), updatedAt: Date.now() });
+    interviewContextCache.release();
     return saved;
   });
   ipcMain.handle("profiles:remove-material", (_event, profileId: string, kind: "resume" | "jobDescription") => {
@@ -2376,6 +2401,7 @@ function registerIpc(): void {
     const profile = profileRepository.get(profileId);
     if (!profile) throw new Error("Profile not found");
     const saved = profileRepository.save({ ...profile, ...(kind === "resume" ? { resume: undefined } : { jobDescription: undefined }), updatedAt: Date.now() });
+    interviewContextCache.release();
     return saved;
   });
   ipcMain.handle("knowledge:list-bases", () => knowledgeRepository?.listKnowledgeBases() ?? []);
@@ -2491,15 +2517,15 @@ function registerIpc(): void {
   ipcMain.handle("project-memory:get", (_event, profileId: string) => projectMemoryService?.get(profileId));
   ipcMain.handle("project-memory:stats", (_event, profileId: string, projectId?: string) => projectMemoryRepository?.stats(profileId, projectId) ?? { projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0, questions: 0, facts: 0, eligibleFacts: 0, reviewRequiredFacts: 0, userActionRequiredFacts: 0, conflictingFacts: 0, conflictGroups: 0, userActions: 0, staleFacts: 0 });
   ipcMain.handle("project-memory:list-facts", (_event, profileId: string, projectId?: string, options?: { includeStale?: boolean; includeRejected?: boolean }) => projectMemoryRepository?.listFacts(profileId, projectId, options) ?? []);
-  ipcMain.handle("project-memory:add-candidate-fact", (_event, fact: import("@interview-copilot/shared").ProjectFact) => projectMemoryRepository?.addCandidateFact(fact));
-  ipcMain.handle("project-memory:add-responsibility", (_event, profileId: string, projectId: string, content: string) => projectMemoryRepository?.addUserResponsibility(profileId, projectId, content));
-  ipcMain.handle("project-memory:confirm-fact", (_event, factId: string) => projectMemoryRepository?.confirmFactAsUser(factId));
-  ipcMain.handle("project-memory:verify-fact", (_event, factId: string, verified: boolean) => projectMemoryRepository?.setFactVerification(factId, verified));
-  ipcMain.handle("project-memory:review-fact", (_event, factId: string, status: import("@interview-copilot/shared").ProjectFact["status"]) => projectMemoryRepository?.setFactReviewStatus(factId, status));
-  ipcMain.handle("project-memory:resolve-conflict", (_event, conflictGroupId: string, selectedFactId: string, keepBoth?: boolean, variantContexts?: Record<string, string>) => projectMemoryRepository?.resolveConflict(conflictGroupId, selectedFactId, Boolean(keepBoth), variantContexts) ?? []);
+  ipcMain.handle("project-memory:add-candidate-fact", (_event, fact: import("@interview-copilot/shared").ProjectFact) => { const saved = projectMemoryRepository?.addCandidateFact(fact); interviewContextCache.release(); return saved; });
+  ipcMain.handle("project-memory:add-responsibility", (_event, profileId: string, projectId: string, content: string) => { const saved = projectMemoryRepository?.addUserResponsibility(profileId, projectId, content); interviewContextCache.release(); return saved; });
+  ipcMain.handle("project-memory:confirm-fact", (_event, factId: string) => { const saved = projectMemoryRepository?.confirmFactAsUser(factId); interviewContextCache.release(); return saved; });
+  ipcMain.handle("project-memory:verify-fact", (_event, factId: string, verified: boolean) => { const saved = projectMemoryRepository?.setFactVerification(factId, verified); interviewContextCache.release(); return saved; });
+  ipcMain.handle("project-memory:review-fact", (_event, factId: string, status: import("@interview-copilot/shared").ProjectFact["status"]) => { const saved = projectMemoryRepository?.setFactReviewStatus(factId, status); interviewContextCache.release(); return saved; });
+  ipcMain.handle("project-memory:resolve-conflict", (_event, conflictGroupId: string, selectedFactId: string, keepBoth?: boolean, variantContexts?: Record<string, string>) => { const saved = projectMemoryRepository?.resolveConflict(conflictGroupId, selectedFactId, Boolean(keepBoth), variantContexts) ?? []; interviewContextCache.release(); return saved; });
   ipcMain.handle("project-memory:conflict-groups", (_event, projectId: string, includeResolved?: boolean) => projectMemoryRepository?.listConflictGroups(projectId, Boolean(includeResolved)) ?? []);
   ipcMain.handle("project-memory:user-actions", (_event, projectId: string) => projectMemoryRepository?.listUserActions(projectId) ?? []);
-  ipcMain.handle("project-memory:repair-semantics", (_event, projectId: string) => projectMemoryRepository?.repairProjectFactSemantics(projectId) ?? []);
+  ipcMain.handle("project-memory:repair-semantics", (_event, projectId: string) => { const repaired = projectMemoryRepository?.repairProjectFactSemantics(projectId) ?? []; interviewContextCache.release(); return repaired; });
   ipcMain.handle("project-memory:sources", (_event, projectId: string) => projectMemoryRepository?.listSourceDetails(projectId) ?? []);
   ipcMain.handle("project-memory:completeness", (_event, profileId: string, projectId: string) => projectMemoryRepository?.getProjectCompleteness(profileId, projectId));
   ipcMain.handle("project-memory:analysis-runs", (_event, profileId: string) => knowledgeAnalysisRepository?.list(profileId) ?? []);
@@ -2508,9 +2534,9 @@ function registerIpc(): void {
   ipcMain.handle("project-memory:analysis-jobs", (_event, profileId: string) => projectMemoryService?.listProjectAnalysisJobs(profileId) ?? []);
   ipcMain.handle("project-memory:cancel-analysis", (_event, projectId: string, jobId?: string) => projectMemoryService?.cancelProjectAnalysis(projectId, jobId));
   ipcMain.handle("project-memory:retry-analysis", (_event, profileId: string, projectId: string) => projectMemoryService?.retryProjectAnalysis(profileId, projectId));
-  ipcMain.handle("project-memory:assign-source", (_event, input: Parameters<NonNullable<typeof projectMemoryService>["assignSource"]>[0]) => { projectMemoryService?.assignSource(input); return true; });
-  ipcMain.handle("project-memory:unassign-source", (_event, projectId: string, sourceType: import("@interview-copilot/shared").ProjectSourceType, sourceId: string) => { projectMemoryRepository?.unassignSource(projectId, sourceType, sourceId); return true; });
-  ipcMain.handle("project-memory:assign-document", (_event, profileId: string, documentId: string, projectId?: string) => projectMemoryService?.assignDocument(profileId, documentId, projectId));
+  ipcMain.handle("project-memory:assign-source", (_event, input: Parameters<NonNullable<typeof projectMemoryService>["assignSource"]>[0]) => { projectMemoryService?.assignSource(input); interviewContextCache.release(); return true; });
+  ipcMain.handle("project-memory:unassign-source", (_event, projectId: string, sourceType: import("@interview-copilot/shared").ProjectSourceType, sourceId: string) => { projectMemoryRepository?.unassignSource(projectId, sourceType, sourceId); interviewContextCache.release(); return true; });
+  ipcMain.handle("project-memory:assign-document", (_event, profileId: string, documentId: string, projectId?: string) => { const assigned = projectMemoryService?.assignDocument(profileId, documentId, projectId); interviewContextCache.release(); return assigned; });
   ipcMain.handle("job-targets:list", (_event, profileId: string) => jobTargetRepository?.list(profileId) ?? []);
   ipcMain.handle("retrieval:list", (_event, profileId: string, limit?: number) => retrievalRepository?.list(profileId, limit) ?? []);
   ipcMain.handle("project-memory:rebuild", async (_event, profileId: string) => {
@@ -2653,10 +2679,10 @@ function registerIpc(): void {
     return runProviderPreflight({ llm: providerConfigStore.get("llm"), asr: providerConfigStore.get("asr"), embedding: providerConfigStore.get("embedding") }, Boolean(checkReachability), providerPreflightCache);
   });
   ipcMain.handle("projects:list", () => projectRepository?.list() ?? []);
-  ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => projectRepository?.create(input.name, input.profileId, Date.now(), input.ownershipMode, input.ownershipNote));
-  ipcMain.handle("projects:rename", (_event, projectId: string, name: string) => projectRepository?.rename(projectId, name));
-  ipcMain.handle("projects:update", (_event, projectId: string, input: { name?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => projectRepository?.update(projectId, input));
-  ipcMain.handle("projects:delete", (_event, projectId: string) => { projectRepository?.delete(projectId); return true; });
+  ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => { const created = projectRepository?.create(input.name, input.profileId, Date.now(), input.ownershipMode, input.ownershipNote); interviewContextCache.release(); return created; });
+  ipcMain.handle("projects:rename", (_event, projectId: string, name: string) => { const renamed = projectRepository?.rename(projectId, name); interviewContextCache.release(); return renamed; });
+  ipcMain.handle("projects:update", (_event, projectId: string, input: { name?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => { const updated = projectRepository?.update(projectId, input); interviewContextCache.release(); return updated; });
+  ipcMain.handle("projects:delete", (_event, projectId: string) => { projectRepository?.delete(projectId); interviewContextCache.release(); return true; });
 }
 
 async function generateQuestionBankAnswers(input: { questionIds?: string[]; onlyUnanswered?: boolean } = {}): Promise<import("./database").QuestionBankAnswerGenerationResult> {
@@ -2903,27 +2929,79 @@ if (hasSingleInstanceLock) {
     if (embeddingCache.size >= 64) embeddingCache.delete(embeddingCache.keys().next().value as string);
     embeddingCache.set(key, vector);
   };
-  const resolveEmbeddingWithinBudget = (embeddingPromise: Promise<number[] | undefined>, budgetMs = 100): Promise<{ vector?: number[]; timedOut: boolean; elapsedMs: number }> => new Promise((resolve) => {
-    const startedAt = performance.now();
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      resolve({ timedOut: true, elapsedMs: Math.max(0, performance.now() - startedAt) });
-    }, budgetMs);
-    embeddingPromise.then((vector) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(vector ? { vector, timedOut: false, elapsedMs: Math.max(0, performance.now() - startedAt) } : { timedOut: false, elapsedMs: Math.max(0, performance.now() - startedAt) });
-    }, () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ timedOut: false, elapsedMs: Math.max(0, performance.now() - startedAt) });
-    });
-  });
   const answerContextProvider = async (question: { text: string }, profileId: string, recentTranscript: string[] = [], interviewContext?: InterviewContextSelection) => {
+    const fastNormalizedQuestion = normalizeTechnicalTerms(question.text);
+    const fastAnswerIntent = analyzeAnswerIntent(fastNormalizedQuestion);
+    const cached = interviewContextCache.get({ profileId, projectId: interviewContext?.projectId, jobTargetId: interviewContext?.jobTargetId })
+      ?? interviewContextCache.get({ profileId, projectId: undefined, jobTargetId: interviewContext?.jobTargetId })
+      ?? interviewContextCache.getActive()
+      ?? {};
+    // The live lane must not open the full project snapshot. The selected
+    // project name is already in the session cache and is sufficient for the
+    // local intent/semantic pass; rich retrieval does that I/O in background.
+    const fastQuestionAnalysis = new QuestionAnalyzer().analyze(fastNormalizedQuestion, cached.currentProject ? [cached.currentProject] : []);
+    const fastTargetProjectId = interviewContext?.projectId;
+    const fastProjectIntent = analyzeProjectQuestionIntent({ question: fastNormalizedQuestion, targetProjectId: fastTargetProjectId, answerIntent: fastAnswerIntent, questionAnalysisType: fastQuestionAnalysis.type, followUpContext: interviewContext?.followUpContext });
+    const fastTechnicalOnly = !fastProjectIntent.projectQuestionRequested
+      && !fastAnswerIntent.requiresPersonalIdentity
+      && !fastAnswerIntent.requiresPersonalOwnership
+      && !fastAnswerIntent.requiresPersonalMetric
+      && !fastAnswerIntent.requiresPersonalResult
+      && !fastAnswerIntent.asksBehavioralEpisode;
+    if (interviewContext?.contextMode === "fast") {
+      const fastCoreTechnicalQa = matchCoreTechnicalQa(fastNormalizedQuestion);
+      const fastRoute = questionBankRepository?.routeQuestion(fastNormalizedQuestion, {
+        ...(fastProjectIntent.projectQuestionRequested ? {} : { scope: "global" as const }),
+        profileId,
+        ...(fastProjectIntent.projectQuestionRequested && fastTargetProjectId ? { projectId: fastTargetProjectId } : {}),
+        limit: 5
+      });
+      const fastProjectQa = fastProjectIntent.projectQuestionRequested ? fastRoute?.projectQa : undefined;
+      const fastMatch = fastProjectQa?.top ?? fastRoute?.top;
+      const fastCard = fastMatch?.question.answerCards.find((card) => card.verified && !card.stale) ?? fastMatch?.question.answerCards.find((card) => card.mode === "standard") ?? fastMatch?.question.answerCards[0];
+      const fastPreparedAnswer = fastMatch && fastCard ? { content: `${fastCard.content}${fastCard.codeContent ? `\n代码：\n${fastCard.codeContent}` : ""}${fastCard.complexity ? `\n复杂度：${fastCard.complexity}` : ""}${fastCard.limitations ? `\n边界与限制：${fastCard.limitations}` : ""}`, score: fastMatch.score, verified: fastCard.verified, stale: fastCard.stale, answerCardId: fastCard.id, questionId: fastMatch.question.id } : undefined;
+      const fastPersonalQuestion = fastAnswerIntent.requiresPersonalIdentity || fastAnswerIntent.requiresPersonalOwnership || fastAnswerIntent.requiresPersonalMetric || fastAnswerIntent.requiresPersonalResult || fastAnswerIntent.asksBehavioralEpisode;
+      const fastSourcePlan = planAnswerSource({
+        projectId: fastTargetProjectId,
+        projectAnchorAvailable: fastProjectIntent.projectAnchorAvailable,
+        projectQuestion: fastProjectIntent.projectQuestionRequested,
+        personalQuestion: fastPersonalQuestion,
+        projectQa: fastProjectQa,
+        coreTechnicalQa: fastCoreTechnicalQa,
+        ...(fastPreparedAnswer ? { preparedAnswer: fastPreparedAnswer } : {})
+      });
+      // Project/personal turns get the same immediate cached answer lane. The
+      // old full retrieval path is intentionally detached and can enrich a
+      // later follow-up without holding the first provider request.
+      if (!fastTechnicalOnly) {
+        interviewContext?.onRichContext?.("started");
+        void answerContextProvider(question, profileId, recentTranscript, { ...interviewContext, contextMode: "rich", onRichContext: undefined })
+          .then(() => interviewContext?.onRichContext?.("completed"))
+          .catch(() => undefined);
+      }
+      return {
+        ...cached,
+        contextMode: "fast" as const,
+        recentTranscript: recentTranscript.slice(-8),
+        currentTopic: cached.currentTopic ?? interviewContext?.followUpContext?.relatedTechnicalTopic,
+        questionBankMatches: fastRoute?.hits ?? [],
+        ...(fastCoreTechnicalQa ? { coreTechnicalQa: fastCoreTechnicalQa } : {}),
+        ...(fastPreparedAnswer ? { preparedAnswer: fastPreparedAnswer } : {}),
+        answerSourcePlan: fastSourcePlan,
+        projectQaEvidence: fastSourcePlan.mode === "project_qa_direct" && fastPreparedAnswer ? [fastPreparedAnswer.content] : [],
+        retrievedKnowledge: fastTechnicalOnly ? [] : cached.retrievedKnowledge ?? [],
+        questionTelemetry: {
+          normalizedText: fastNormalizedQuestion,
+          canonicalText: fastNormalizedQuestion,
+          projectAnchorAvailable: fastProjectIntent.projectAnchorAvailable,
+          projectQuestionRequested: fastProjectIntent.projectQuestionRequested,
+          projectQuestionMode: fastProjectIntent.projectQuestionMode,
+          ...(fastProjectIntent.projectQuestionRequested && fastTargetProjectId ? { projectAutoAnchorId: fastTargetProjectId } : {}),
+          ...(fastCoreTechnicalQa ? { coreQaMatchLevel: "strong" as const, coreQaScore: fastCoreTechnicalQa ? 1 : 0, coreQaQuestionId: fastCoreTechnicalQa.id } : {}),
+          ...(fastProjectQa?.top ? { projectQaMatchLevel: fastProjectQa.level, projectQaQuestionId: fastProjectQa.top.question.id } : {})
+        }
+      };
+    }
     const profile = profileRepository?.get(profileId);
     const selectedJobTarget = interviewContext?.jobTargetId ? jobTargetRepository?.get(interviewContext.jobTargetId) : jobTargetRepository?.list(profileId).find((target) => target.status === "active");
     const interviewProfile = profile ? adaptProfileToInterviewContext(profile, selectedJobTarget) : undefined;
@@ -3004,8 +3082,12 @@ if (hasSingleInstanceLock) {
       minScore: 0.18,
       includeReferenceProject: projectAnchorAvailable
     }) ?? [];
-    const embeddingBudget = await resolveEmbeddingWithinBudget(queryEmbeddingPromise, 100);
-    const queryEmbedding = embeddingBudget.vector;
+    // Remote embedding is a rich-context accelerator only. A live answer
+    // always has a lexical path and never waits for this promise.
+    const queryEmbedding = cachedVector;
+    void queryEmbeddingPromise.then((vector) => {
+      if (vector && embeddingKey) rememberEmbedding(embeddingKey, vector);
+    }).catch(() => undefined);
     if (!earlyProjectQaDirect && projectQuestionRequested && queryEmbedding && projectMemoryRepository) {
       factMatches = projectMemoryRepository.searchFacts(profileId, normalizedQuestion, {
         projectId: targetProjectId,
@@ -3082,10 +3164,10 @@ if (hasSingleInstanceLock) {
     let retrieved = await keywordRetrieval;
     let retrievalDiagnostics = {
       keywordRetrievalMs: keywordTiming.totalRetrievalMs ?? 0,
-      embeddingMs: cachedVector ? 0 : embeddingBudget.elapsedMs,
+      embeddingMs: cachedVector ? 0 : 0,
       rerankMs: keywordTiming.rerankMs ?? 0,
       totalRetrievalMs: keywordTiming.totalRetrievalMs ?? 0,
-      embeddingTimedOut: embeddingBudget.timedOut
+      embeddingTimedOut: false
     };
     if (queryEmbedding && chunks.length > 0) {
       const embeddingTiming: RetrievalTiming = {};
@@ -3184,6 +3266,7 @@ if (hasSingleInstanceLock) {
     session,
     answerAgent,
     questionDetector2,
+    questionClassifierWarmup: async () => { await loadLocalQuestionModel(); },
     history: historyRepository,
     onStartupTiming: (event) => markInterviewStartup(event),
     initialAutomationMode: overlaySettingsStore?.getAutomationMode() ?? "AUTO",

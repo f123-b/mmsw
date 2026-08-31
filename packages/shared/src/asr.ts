@@ -248,7 +248,7 @@ export class DeepgramStreamingAsrProvider implements StreamingAsrProvider {
     if (text && this.segmentListener) {
       const startMs = Math.max(0, Math.round((message.start ?? 0) * 1_000));
       const endMs = Math.max(startMs, Math.round(((message.start ?? 0) + (message.duration ?? 0)) * 1_000));
-      this.segmentListener({ source: this.source, text, startMs, endMs, final: Boolean(message.is_final), ...(alternative?.confidence === undefined ? {} : { confidence: alternative.confidence }) });
+      this.segmentListener({ source: this.source, text, startMs, endMs, final: Boolean(message.is_final), endpoint: Boolean(message.speech_final || message.from_finalize), speechFinal: Boolean(message.speech_final), utteranceEnd: Boolean(message.from_finalize), endOfTurn: Boolean(message.speech_final || message.from_finalize), ...(alternative?.confidence === undefined ? {} : { confidence: alternative.confidence }) });
     }
     if (this.finalizing && (message.speech_final === true || message.from_finalize === true)) this.finishFinalize();
   }
@@ -432,7 +432,7 @@ export class DashScopeTaskStreamingAsrProvider implements StreamingAsrProvider {
       if (text && this.segmentListener) {
         const startMs = Math.max(0, Math.round(sentence?.begin_time ?? 0));
         const endMs = Math.max(startMs, Math.round(sentence?.end_time ?? startMs));
-        this.segmentListener({ source: this.source, text, startMs, endMs, final: Boolean(sentence?.sentence_end) });
+        this.segmentListener({ source: this.source, text, startMs, endMs, final: Boolean(sentence?.sentence_end), endpoint: Boolean(sentence?.sentence_end), endOfTurn: Boolean(sentence?.sentence_end) });
       }
       return;
     }
@@ -663,7 +663,7 @@ export class QwenRealtimeAsrProvider implements StreamingAsrProvider {
     const range = this.itemRanges.get(itemId) ?? { startMs: this.lastFinalEndMs };
     const startMs = Math.max(0, Math.round(range.startMs));
     const endMs = Math.max(startMs, Math.round(range.endMs ?? this.sentAudioMs));
-    this.segmentListener({ source: this.source, text, startMs, endMs, final, utteranceId: itemId });
+    this.segmentListener({ source: this.source, text, startMs, endMs, final, utteranceId: itemId, ...(final ? { endpoint: true, speechFinal: true, utteranceEnd: true, endOfTurn: true } : {}) });
     if (final) {
       this.lastFinalEndMs = endMs;
       this.itemRanges.delete(itemId);

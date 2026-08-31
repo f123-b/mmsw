@@ -160,6 +160,11 @@ export const transcriptSegmentSchema = z.object({
   final: z.boolean(),
   /** Provider-side speech item. Partial and final events for one utterance share it. */
   utteranceId: z.string().min(1).optional(),
+  /** Optional provider/VAD end-of-turn marker. */
+  endpoint: z.boolean().optional(),
+  speechFinal: z.boolean().optional(),
+  utteranceEnd: z.boolean().optional(),
+  endOfTurn: z.boolean().optional(),
   confidence: z.number().min(0).max(1).optional()
 });
 

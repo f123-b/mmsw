@@ -90,6 +90,31 @@ describe("Answer routing and generation", () => {
     expect(ended).toMatchObject({ type: "answer_end", text: stored, quality: { claimGateDecision: "allow", blockedClaimCount: 0, answerSourceMode: "project_qa_direct", qaMatchLevel: "exact" } });
   });
 
+  it("streams project answers through the local sentence ClaimGate without a repair request", async () => {
+    let providerCalls = 0;
+    const projectProvider: AnswerProvider = {
+      stream: async function* () {
+        providerCalls += 1;
+        yield "系统使用 DMA 搬运采样数据。";
+        yield "这样可以减少 CPU 的搬运开销。";
+      }
+    };
+    const events = [] as Array<{ type: string; delta?: string; quality?: { telemetry?: { claimGateMs?: number } } }>;
+    for await (const event of new AnswerAgent({ normal: projectProvider }, new ModelRouter({ normal: "test-model" })).stream(
+      { id: "project-stream", text: "介绍一下这个项目的实现" },
+      "NORMAL",
+      { currentProject: "采样控制项目", projectEvidence: ["系统使用 DMA 搬运采样数据"] },
+      undefined,
+      { directDisplay: false, emitDeltas: true, allowQualityRepair: false, formatAnswer: false }
+    )) events.push(event);
+
+    expect(providerCalls).toBe(1);
+    expect(events.map((event) => event.type)).toEqual(["answer_start", "claim_gate_pass", "answer_delta", "answer_delta", "answer_end"]);
+    expect(events.findIndex((event) => event.type === "answer_delta")).toBeLessThan(events.findIndex((event) => event.type === "answer_end"));
+    expect(events.at(-1)?.quality?.telemetry?.claimGateMs).toBeGreaterThanOrEqual(0);
+    expect(events.at(-1)?.quality?.telemetry?.claimGateMs).toBeLessThan(50);
+  });
+
   it("passes a structured answer plan into the provider prompt", async () => {
     let prompt = "";
     const planningProvider: AnswerProvider = {

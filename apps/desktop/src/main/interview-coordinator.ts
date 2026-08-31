@@ -58,11 +58,13 @@ import type { AudioStartOptions } from "./audio-manager";
 import type { RealtimeConnectOptions, RealtimeConnectionState } from "./realtime-session";
 import {
   RuntimeAbortRegistry,
+  RuntimeLatencyTelemetry,
   RuntimeTimerRegistry,
   RuntimeTraceBuffer,
   withRuntimeTimeout,
   type InterviewRuntimeDiagnostics,
   type RuntimeAnswerState,
+  type RuntimeLatencyMetrics,
   type RuntimeQuestionState,
   type RuntimeSessionState,
   type RuntimeTraceEvent,
@@ -104,6 +106,10 @@ export interface InterviewStartOptions extends Omit<RealtimeConnectOptions, "aut
 }
 
 export interface InterviewContextSelection {
+  /** Live requests use the preloaded lane; rich retrieval is background work. */
+  contextMode?: "fast" | "rich";
+  /** Lifecycle hook for detached rich retrieval; never part of the answer contract. */
+  onRichContext?: (phase: "started" | "completed") => void;
   projectId?: string;
   jobTargetId?: string;
   followUpContext?: FollowUpContext;
@@ -148,6 +154,8 @@ export interface InterviewCoordinatorOptions {
   stopTimeoutMs?: number;
   /** Optional main-process startup trace hooks. They never affect runtime behavior. */
   onStartupTiming?: (event: "AUDIO_READY" | "ASR_READY") => void;
+  /** Warm the local question model during session startup, off the ASR path. */
+  questionClassifierWarmup?: () => Promise<unknown>;
 }
 
 export type InterviewCoordinatorEvent =
@@ -248,6 +256,7 @@ export class InterviewCoordinator extends EventEmitter {
   private pendingTopicTransition = false;
   private runtimeSessionState: RuntimeSessionState = "idle";
   private readonly runtimeTimers = new RuntimeTimerRegistry();
+  private readonly runtimeLatency = new RuntimeLatencyTelemetry();
   private readonly runtimeAbortControllers = new RuntimeAbortRegistry();
   private readonly runtimeTrace = new RuntimeTraceBuffer();
   private readonly runtimeQuestions = new Map<string, RuntimeQuestionRecord>();
@@ -264,10 +273,9 @@ export class InterviewCoordinator extends EventEmitter {
   constructor(private readonly options: InterviewCoordinatorOptions) {
     super();
     this.asr = options.asrManager ?? options.realtime ?? (() => { throw new Error("ASRManager is required"); })();
-    // A short ASR pause is common inside an embedded question (for example
-    // “堆和栈的区别”). Give the final transcript enough time to settle before
-    // the detector starts an answer, while keeping the UI partial live.
-    this.questionSilenceMs = Math.max(180, options.questionSilenceMs ?? 420);
+    // The semantic completion gate owns the adaptive wait. This value is only
+    // the temporal detector fallback for partial/revision handling.
+    this.questionSilenceMs = Math.max(80, options.questionSilenceMs ?? 160);
     this.detector = options.detector ?? new QuestionDetector({ silenceMs: this.questionSilenceMs });
     this.detector2 = options.questionDetector2 ?? new QuestionDetector2();
     this.brain = options.interviewBrain ?? new InterviewBrain();
@@ -312,6 +320,8 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   getRuntimeTrace(limit = 30): RuntimeTraceEvent[] { return this.runtimeTrace.snapshot(limit); }
+
+  getRuntimeLatencyMetrics(): RuntimeLatencyMetrics { return this.runtimeLatency.metrics(); }
 
   isRuntimeIdle(): boolean {
     const diagnostics = this.getRuntimeDiagnostics();
@@ -403,6 +413,10 @@ export class InterviewCoordinator extends EventEmitter {
   private markQuestionStateById(questionId: string, state: RuntimeQuestionState): void {
     const existing = this.runtimeQuestions.get(questionId);
     if (existing) this.runtimeQuestions.set(questionId, { ...existing, state });
+  }
+
+  private markLatency(questionId: string, stage: Parameters<RuntimeLatencyTelemetry["mark"]>[1], at = this.now()): void {
+    this.runtimeLatency.mark(questionId, stage, at);
   }
 
   private clearRuntimeTimers(): void { this.runtimeTimers.clearAll(); }
@@ -500,6 +514,7 @@ export class InterviewCoordinator extends EventEmitter {
       this.currentQuestion = undefined;
       this.pendingTopicTransition = false;
       this.runtimeQuestions.clear();
+      this.runtimeLatency.clear();
       this.clearRuntimeTimers();
       this.clearRuntimeRegistries();
       this.answerTasks.clear();
@@ -511,13 +526,25 @@ export class InterviewCoordinator extends EventEmitter {
       this.clearRemoteAssemblyTimer();
       this.aggregator.clear();
       this.recordRuntimeTrace("INTERVIEW_SESSION_STARTED", {}, { reasonCode: "session-created" });
+      const warmup = this.options.questionClassifierWarmup
+        ? (async () => {
+          this.recordRuntimeTrace("QUESTION_CLASSIFIER_WARMUP_STARTED", {}, { reasonCode: "session-start" });
+          try {
+            await this.options.questionClassifierWarmup?.();
+            this.recordRuntimeTrace("QUESTION_CLASSIFIER_WARMUP_COMPLETED", {}, { reasonCode: "session-start" });
+          } catch (error) {
+            this.recordRuntimeTrace("QUESTION_CLASSIFIER_WARMUP_FAILED", { error: String(error) }, { reasonCode: "fallback-rules-semantic" });
+          }
+        })()
+        : Promise.resolve();
       // Connect ASR before opening capture. Audio can deliver its first PCM
       // packet synchronously from start(); RealtimeSession queues packets
       // while the socket is opening, so no leading speech is lost.
       this.transition("CONNECTING");
       this.asr.connect({ ...startOptions, ...asrSettings, providerType, url: connectUrl, language: asrSettings?.language ?? (startOptions.language as AsrLanguage | undefined), autoReconnect: true });
       this.options.onStartupTiming?.("ASR_READY");
-      await this.options.audio.start({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true });
+      const audioStart = Promise.resolve(this.options.audio.start({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true }));
+      await Promise.all([audioStart, warmup]);
       this.options.onStartupTiming?.("AUDIO_READY");
       return record.id;
     } catch (error) {
@@ -757,6 +784,9 @@ export class InterviewCoordinator extends EventEmitter {
     try {
       const answerOperation = this.runtimeAnswers.get(operationId);
       if (answerOperation) answerOperation.state = "context_loading";
+      this.recordRuntimeTrace("CONTEXT_BUILDING", {}, { questionId: question.id, providerRequestId });
+      this.recordRuntimeTrace("FAST_CONTEXT_STARTED", {}, { questionId: question.id, providerRequestId });
+      this.markLatency(question.id, "fastContextStartedAt");
       this.recordRuntimeTrace("PROJECT_CONTEXT_STARTED", {}, { questionId: question.id, providerRequestId });
       const isFollowUp = question.speechAct === "FOLLOW_UP" || question.detectionType === "follow_up" || question.category === "followup";
       const followUpContext = isFollowUp
@@ -769,7 +799,16 @@ export class InterviewCoordinator extends EventEmitter {
           }
         )
         : undefined;
-      const providerContextResult = this.contextProvider(question, this.activeProfileId ?? "", [...frozenContext.recentTranscript], { projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId, ...(followUpContext ? { followUpContext } : {}) });
+      const providerContextResult = this.contextProvider(question, this.activeProfileId ?? "", [...frozenContext.recentTranscript], {
+        contextMode: "fast",
+        onRichContext: (phase) => {
+          if (!this.activeInterviewId || this.runtimeSessionId !== sessionId) return;
+          this.recordRuntimeTrace(phase === "started" ? "RICH_CONTEXT_STARTED" : "RICH_CONTEXT_COMPLETED", {}, { questionId: question.id, providerRequestId, reasonCode: "background-rich-context" });
+        },
+        projectId: this.activeOptions?.projectId,
+        jobTargetId: this.activeOptions?.jobTargetId,
+        ...(followUpContext ? { followUpContext } : {})
+      });
       // Keep the default synchronous context path truly synchronous. This
       // removes an avoidable microtask from consecutive-question handling;
       // async profile/knowledge retrieval still remains cancellable below.
@@ -789,6 +828,14 @@ export class InterviewCoordinator extends EventEmitter {
         return;
       }
       const memorySnapshot = frozenContext.memory;
+      const contextFinishedAt = this.now();
+      if (providerContext.contextMode === "fast") {
+        this.recordRuntimeTrace("FAST_CONTEXT_COMPLETED", { contextMs: contextFinishedAt - (this.runtimeLatency.snapshot().find((sample) => sample.id === question.id)?.fastContextStartedAt ?? contextFinishedAt) }, { questionId: question.id, providerRequestId });
+        this.markLatency(question.id, "fastContextCompletedAt", contextFinishedAt);
+      } else {
+        this.recordRuntimeTrace("RICH_CONTEXT_STARTED", {}, { questionId: question.id, providerRequestId });
+        this.recordRuntimeTrace("RICH_CONTEXT_COMPLETED", {}, { questionId: question.id, providerRequestId });
+      }
       const projectQaDirect = providerContext.answerSourcePlan?.mode === "project_qa_direct";
       const evidenceSnapshot: EvidenceSnapshot = this.contextLock.lock({
         questionId: question.id,
@@ -834,6 +881,8 @@ export class InterviewCoordinator extends EventEmitter {
         evidenceSnapshot
       };
       if (answerOperation) answerOperation.state = "provider_pending";
+      if (answerOperation) answerOperation.state = "request_ready";
+      this.recordRuntimeTrace("REQUEST_READY", {}, { questionId: question.id, providerRequestId });
       this.recordRuntimeTrace("PROJECT_CONTEXT_READY", {}, { questionId: question.id, providerRequestId });
       // A queued question must retain the topic and transcript that existed
       // when it was confirmed. Looking at global "latest" memory here caused
@@ -875,6 +924,9 @@ export class InterviewCoordinator extends EventEmitter {
         if (answerOperation) answerOperation.state = "committed";
         this.recordRuntimeTrace("ANSWER_COMMITTED", {}, { questionId: question.id, answerId, providerRequestId, reasonCode: "question-bank" });
         this.emitRealtimeMessage({ type: "answer_end", answerId, text: preparedText });
+        this.recordRuntimeTrace("FIRST_VISIBLE_TOKEN", {}, { questionId: question.id, answerId, providerRequestId });
+        this.markLatency(question.id, "firstVisibleTokenAt", finishedAt);
+        this.recordRuntimeTrace("ANSWER_COMPLETED", {}, { questionId: question.id, answerId, providerRequestId });
         answerTrace?.update({ answerSource: "question-bank" }).mark("answerLookupStarted", startedAt).mark("answerVisible", finishedAt).mark("answerEnded", finishedAt);
         this.emitQuestionTrace(answerTrace);
         this.memory.recordAnswer(preparedText, { question: question.text, questionId: question.id, groupId: question.groupId, createdAt: finishedAt });
@@ -899,6 +951,8 @@ export class InterviewCoordinator extends EventEmitter {
         : question.text;
       answerTrace?.update({ answerSource: projectQaMode ? "project-qa" : "llm", ...(projectQaMode ? { answerSourceMode: projectQaMode, qaMatchLevel: lockedProviderContext.answerSourcePlan?.qaMatchLevel } : {}) }).mark("llmRequestStarted", this.now());
       this.recordRuntimeTrace("PROVIDER_STREAM_REQUESTED", {}, { questionId: question.id, providerRequestId });
+      this.recordRuntimeTrace("PROVIDER_REQUEST_STARTED", {}, { questionId: question.id, providerRequestId });
+      this.markLatency(question.id, "providerRequestStartedAt");
       if (streamOptions.screenshotRequestId) {
         this.recordScreenshotTrace("VISION_PROVIDER_REQUEST_STARTED", streamOptions.screenshotRequestId, { providerRequestId, status: "provider_pending", messageShape: "multimodal" });
       }
@@ -908,13 +962,19 @@ export class InterviewCoordinator extends EventEmitter {
         this.emitDiagnostic(`PROVIDER_FIRST_TOKEN_TIMEOUT: ${question.id}`);
         this.cancelAnswer("timeout", "first-token-timeout");
       }, Math.max(50, this.options.providerFirstTokenTimeoutMs ?? 10_000));
+      this.answerScheduler.markRequestSent(question.id);
+      if (answerOperation) answerOperation.state = "request_sent";
+      this.recordRuntimeTrace("PROVIDER_REQUEST_SENT", {}, { questionId: question.id, providerRequestId });
+      this.markLatency(question.id, "providerRequestSentAt");
+      let claimGateFirstPassRecorded = false;
       for await (const event of this.options.answerAgent.stream({ id: question.id, text: plannedQuestionText, ...(isFollowUp ? { kind: "follow-up" as const } : {}) }, mode, context, controller.signal, {
         ...streamOptions,
-        // Project answers are buffered until claim/evidence validation has
-        // passed. Generic technical answers can still stream immediately.
-        directDisplay: requiresClaimValidation,
-        emitDeltas: !requiresClaimValidation,
-        allowQualityRepair: requiresClaimValidation,
+        // Live Interview always exposes provider deltas. Sentence-level local
+        // ClaimGate in AnswerAgent protects ownership claims without turning a
+        // project answer into a full-response buffer or a second LLM call.
+        directDisplay: false,
+        emitDeltas: true,
+        allowQualityRepair: false,
         formatAnswer: true,
         maxRetries: 1,
         preferFastRoute: this.activeOptions?.automationMode === "AUTO" && !streamOptions.hasScreenshot,
@@ -942,6 +1002,10 @@ export class InterviewCoordinator extends EventEmitter {
             this.recordScreenshotTrace("VISION_PROVIDER_REQUEST_RECEIVED", streamOptions.screenshotRequestId, { providerRequestId, answerId: event.answerId, providerModel: event.model, status: "streaming", messageShape: "multimodal" });
           }
           this.emitRealtimeMessage({ type: "answer_start", answerId: event.answerId, questionId: event.questionId, mode: event.mode, model: event.model, ...(question.groupId ? { groupId: question.groupId, relation: answerRelationForQuestion(question) } : {}) });
+        } else if (event.type === "claim_gate_pass") {
+          claimGateFirstPassRecorded = true;
+          this.runtimeLatency.setDuration(question.id, "claimGateMs", event.elapsedMs);
+          this.recordRuntimeTrace("CLAIM_GATE_FIRST_PASS", { claimGateMs: event.elapsedMs }, { questionId: question.id, answerId: event.answerId, providerRequestId });
         } else if (event.type === "answer_delta") {
           this.accumulatedAnswerText += event.delta;
           if (event.delta.trim() && question.groupId) this.visibleAnswerGroups.add(question.groupId);
@@ -956,11 +1020,16 @@ export class InterviewCoordinator extends EventEmitter {
           }
           if (firstToken) {
             this.runtimeTimers.clear(`answer-first-token:${operationId}`);
+            this.markLatency(question.id, "providerFirstTokenAt", firstTokenAt);
             this.recordRuntimeTrace("PROVIDER_FIRST_TOKEN", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
             if (streamOptions.screenshotRequestId) this.recordScreenshotTrace("VISION_FIRST_TOKEN", streamOptions.screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "streaming" });
           }
           answerTrace?.mark("firstToken", this.answerFirstTokenAt);
           this.emitRealtimeMessage({ type: "answer_delta", answerId: event.answerId, delta: event.delta });
+          if (firstToken) {
+            this.recordRuntimeTrace("FIRST_VISIBLE_TOKEN", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
+            this.markLatency(question.id, "firstVisibleTokenAt");
+          }
         } else {
           const finishedAt = this.now();
           const answerText = event.text || this.accumulatedAnswerText;
@@ -980,14 +1049,22 @@ export class InterviewCoordinator extends EventEmitter {
             this.answerFirstTokenAt = finishedAt;
             if (answerOperation) answerOperation.firstTokenAt ??= finishedAt;
             this.recordRuntimeTrace("PROVIDER_FIRST_TOKEN", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
+            this.markLatency(question.id, "providerFirstTokenAt", finishedAt);
+            this.recordRuntimeTrace("FIRST_VISIBLE_TOKEN", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
+            this.markLatency(question.id, "firstVisibleTokenAt", finishedAt);
             if (streamOptions.screenshotRequestId) this.recordScreenshotTrace("VISION_FIRST_TOKEN", streamOptions.screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "completed" });
           }
           this.recordRuntimeTrace("PROVIDER_STREAM_COMPLETED", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
+          this.recordRuntimeTrace("ANSWER_COMPLETED", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
           if (streamOptions.screenshotRequestId) this.recordScreenshotTrace("VISION_RESPONSE_COMPLETED", streamOptions.screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "completed" });
           answerTrace?.mark("answerEnded", finishedAt);
           if (event.quality) answerTrace?.update({ answerSourceMode: event.quality.answerSourceMode, qaMatchLevel: event.quality.qaMatchLevel, claimGateDecision: event.quality.claimGateDecision, blockedClaimCount: event.quality.blockedClaimCount });
           if (event.quality?.issues.includes("QUALITY_UNGROUNDED_CLAIM")) this.emitDiagnostic("QUALITY_UNGROUNDED_CLAIM");
           if (event.quality?.issues.includes("strict-grounding-fallback")) this.emitDiagnostic("STRICT_GROUNDING_FALLBACK");
+          if (event.quality?.telemetry?.claimGateMs !== undefined && !claimGateFirstPassRecorded) {
+            this.runtimeLatency.setDuration(question.id, "claimGateMs", event.quality.telemetry.claimGateMs);
+            this.recordRuntimeTrace("CLAIM_GATE_FIRST_PASS", { claimGateMs: event.quality.telemetry.claimGateMs }, { questionId: question.id, answerId: event.answerId, providerRequestId });
+          }
           const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
           const telemetry = this.buildAnswerTelemetry(question, {
             ...(event.quality?.telemetry ?? {}),
@@ -1098,6 +1175,8 @@ export class InterviewCoordinator extends EventEmitter {
         return;
       }
       this.recordRuntimeTrace("TRANSCRIPT_RECEIVED", { source: segment.source, final: segment.final, textLength: segment.text.length });
+      if (segment.final) this.recordRuntimeTrace("ASR_FINAL_RECEIVED", { source: segment.source, textLength: segment.text.length }, { reasonCode: "asr-final" });
+      else this.recordRuntimeTrace("ASR_PARTIAL_RECEIVED", { source: segment.source, textLength: segment.text.length }, { reasonCode: "asr-partial" });
       this.emit("event", { type: "transcript", snapshot, segment });
       if (segment.final) {
         const transcriptVariants = resolveContextualTerminology(rawSegment.text, { contextText: this.memory.contextText(), topics: [this.anchorStore.snapshot(receivedAt).currentTopic].filter((topic): topic is string => Boolean(topic)), lexicon: this.sessionTerminologyLexicon });
@@ -1185,8 +1264,12 @@ export class InterviewCoordinator extends EventEmitter {
       this.recordRuntimeTrace("QUESTION_CONFIRMED", { textLength: event.question.text.length }, { questionId: event.question.id, reasonCode: event.type });
       if (groupResult.displayable && groupResult.item.answerable) this.currentQuestion = event.question;
       const trace = this.pendingQuestionTrace ?? new QuestionTrace({ questionTraceId: `question-trace-${event.question.id}`, questionScore: event.question.score, questionType: event.question.detectionType, followUp: event.question.speechAct === "FOLLOW_UP", projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId });
+      const traceSnapshot = trace.snapshot();
+      this.runtimeLatency.start(event.question.id, traceSnapshot.asrFinalReceivedAt ?? this.now());
       if (trace.snapshot().questionDetectedAt === undefined) trace.mark("questionDetected", this.now());
-      trace.mark("questionConfirmed", this.now());
+      const confirmedAt = this.now();
+      trace.mark("questionConfirmed", confirmedAt);
+      this.markLatency(event.question.id, "questionConfirmedAt", confirmedAt);
       this.currentQuestionTrace = trace;
       this.pendingQuestionTrace = undefined;
       this.memory.recordQuestion(event.question.text, { questionId: event.question.id, parentQuestionId: event.question.parentQuestionId, rootQuestionId: event.question.rootQuestionId, groupId: event.question.groupId, relationType: event.question.relationType, createdAt: event.question.detectedAt });
@@ -1299,9 +1382,11 @@ export class InterviewCoordinator extends EventEmitter {
     const elapsed = Math.max(0, this.now() - this.remoteAssemblyStartedAt);
     const remaining = Math.max(120, 1_800 - elapsed);
     const text = utterance.text.trim();
+    this.recordRuntimeTrace("TURN_COMPLETION_STARTED", { textLength: text.length }, { reasonCode: "remote-final-assembly" });
     const completion = this.turnCompletionGate.decide(text, {
       previousText: latest.text,
-      currentTopic: this.anchorStore.snapshot(this.now()).currentTopic
+      currentTopic: this.anchorStore.snapshot(this.now()).currentTopic,
+      asrEndpoint: Boolean(latest.endpoint || latest.speechFinal || latest.utteranceEnd || latest.endOfTurn)
     });
     // The semantic gate owns the completion horizon. A punctuation mark must
     // not shorten an open conditional/setup clause.
@@ -1309,6 +1394,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.runtimeTimers.set("remote-assembly", () => {
       this.remoteAssemblyTimer = undefined;
       this.remoteAssemblyStartedAt = undefined;
+      this.recordRuntimeTrace("TURN_COMPLETION_COMPLETED", { state: completion.state, waitMs: completion.recommendedWaitMs }, { reasonCode: completion.reason });
       this.flushRemoteUtterances();
     }, Math.min(delay, remaining));
   }
@@ -1379,6 +1465,7 @@ export class InterviewCoordinator extends EventEmitter {
       terminologyConfidence: terminology.confidence,
       unresolvedAsr: false
     });
+    this.recordRuntimeTrace("QUESTION_LOCAL_ANALYSIS_STARTED", { textLength: correctedText.length }, { reasonCode: "final-utterance" });
     if (["incomplete", "topic_announcement", "instruction_modifier", "filler"].includes(completion.state)) {
       if (completion.state === "topic_announcement" || completion.state === "instruction_modifier") {
         this.stageQuestionContext(utterance, turn, correctedText, completion.state === "topic_announcement" ? "TOPIC_ANNOUNCEMENT" : "INSTRUCTION_MODIFIER");
@@ -1471,7 +1558,9 @@ export class InterviewCoordinator extends EventEmitter {
       latestAnchor: anchorSnapshot.latestAnchor,
       pendingCodeContext: Boolean(anchorSnapshot.pendingCodeContext)
     };
-    let analysis = this.detector2.analyzeSync(canonicalQuestion, contextText, true, detectionContext);
+    let analysis = this.detector2.hasLocalClassifier
+      ? await this.detector2.analyze(canonicalQuestion, contextText, true, detectionContext)
+      : this.detector2.analyzeSync(canonicalQuestion, contextText, true, detectionContext);
     analysis = {
       ...analysis,
       text: canonicalQuestion,
@@ -1494,31 +1583,7 @@ export class InterviewCoordinator extends EventEmitter {
       ...(speech.codeContext ? { codeContext: true } : {})
     };
     let decision = this.brain.analyze({ text: canonicalQuestion, analysis, memory: detectionContext.memory, recentTranscript: previousTranscript });
-    if (this.detector2.hasLocalClassifier || (!decision.isQuestion && analysis.score.finalScore >= 0.5)) {
-      analysis = await this.detector2.analyze(canonicalQuestion, contextText, true, detectionContext);
-      analysis = {
-        ...analysis,
-        text: canonicalQuestion,
-        rawText: utterance.rawText ?? utterance.text,
-        normalizedText: correctedText,
-        canonicalText: canonicalQuestion,
-        semanticFrame: classifyQuestionSemanticFrame(canonicalQuestion, analysis.type),
-        contextRelation: resolved.contextRelation,
-        inheritedTopic: resolved.inheritedTopic,
-        topic: resolved.topic,
-        terminologyCorrections: terminology.corrections,
-        type: analysis.isQuestion
-          ? speech.speechAct === "FOLLOW_UP" ? "follow_up" : analysis.type
-          : "not_question",
-        speechAct: analysis.isQuestion ? speech.speechAct : analysis.speechAct,
-        normalizedQuestion: canonicalQuestion,
-        anchorUsedId: resolved.anchorUsed?.id,
-        shouldAnswer: analysis.shouldAnswer,
-        reason: `${speech.reason}+${resolved.reason}`,
-        ...(speech.codeContext ? { codeContext: true } : {})
-      };
-      decision = this.brain.analyze({ text: canonicalQuestion, analysis, memory: detectionContext.memory, recentTranscript: previousTranscript });
-    }
+    this.recordRuntimeTrace("QUESTION_LOCAL_ANALYSIS_COMPLETED", { question: decision.isQuestion, score: analysis.score.finalScore }, { reasonCode: analysis.reason });
     trace.update({
       speechAct: analysis.speechAct,
       ruleScore: analysis.score.ruleScore,
@@ -1801,6 +1866,10 @@ export class InterviewCoordinator extends EventEmitter {
       ...(typeof messageWithIds.questionId === "string" ? { questionId: messageWithIds.questionId } : {}),
       ...(typeof messageWithIds.answerId === "string" ? { answerId: messageWithIds.answerId } : {})
     };
+    const latencyQuestionId = ids.questionId
+      ?? (typeof messageWithIds.answerId === "string" ? [...this.runtimeAnswers.values()].find((answer) => answer.answerId === messageWithIds.answerId)?.questionId : undefined)
+      ?? this.activeAnswerQuestion?.id;
+    if (message.type === "answer_delta" && latencyQuestionId) this.runtimeLatency.markOnce(latencyQuestionId, "answerDeltaAt", this.now());
     if (screenshotRequestId && message.type === "answer_end") {
       this.recordScreenshotTrace("VISION_OVERLAY_UPDATE_REQUESTED", screenshotRequestId, { providerRequestId: screenshotAnswer.providerRequestId, answerId: messageWithIds.answerId, status: "completed" });
     }
@@ -1809,6 +1878,7 @@ export class InterviewCoordinator extends EventEmitter {
     // Renderer delivery is best effort. There is deliberately no renderer
     // acknowledgement in the answer/session completion barrier.
     this.recordRuntimeTrace("OVERLAY_UPDATED", { messageType: message.type }, ids);
+    if (message.type === "answer_delta" && latencyQuestionId) this.runtimeLatency.markOnce(latencyQuestionId, "overlayVisibleAt", this.now());
     if (screenshotRequestId && message.type === "answer_end") {
       this.recordScreenshotTrace("VISION_OVERLAY_UPDATED", screenshotRequestId, { providerRequestId: screenshotAnswer.providerRequestId, answerId: messageWithIds.answerId, status: "completed" });
     }
@@ -1821,6 +1891,8 @@ export class InterviewCoordinator extends EventEmitter {
   private buildAnswerTelemetry(question: QuestionCandidate, extra: Partial<AnswerTelemetry> = {}): AnswerTelemetry {
     const projectQuestionRequested = /项目|简历|经历|负责|做过|成果|业绩|个人|你的实现|你的方案/.test(question.text);
     const trace = this.activeQuestionTrace?.snapshot();
+    const latency = this.runtimeLatency.snapshot().find((sample) => sample.id === question.id);
+    const elapsed = (end?: number, start?: number): number | undefined => end === undefined || start === undefined ? undefined : Math.max(0, end - start);
     const nucleus = analyzeQuestionNucleus(question.canonicalText ?? question.text);
     return {
       rawText: question.rawText,
@@ -1845,6 +1917,14 @@ export class InterviewCoordinator extends EventEmitter {
       projectAnchorAvailable: Boolean(this.activeOptions?.projectId),
       projectQuestionRequested,
       historyRevision: this.activeInterviewId ? this.history.getRevision?.(this.activeInterviewId) : undefined,
+      asrFinalToQuestionConfirmedMs: elapsed(latency?.questionConfirmedAt, latency?.asrFinalReceivedAt),
+      questionConfirmedToProviderRequestMs: elapsed(latency?.providerRequestStartedAt, latency?.questionConfirmedAt),
+      providerRequestToFirstTokenMs: elapsed(latency?.providerFirstTokenAt, latency?.providerRequestStartedAt),
+      providerFirstTokenMs: elapsed(latency?.providerFirstTokenAt, latency?.providerRequestStartedAt),
+      asrFinalToFirstTokenMs: elapsed(latency?.providerFirstTokenAt, latency?.asrFinalReceivedAt),
+      asrFinalToFirstVisibleTokenMs: elapsed(latency?.firstVisibleTokenAt, latency?.asrFinalReceivedAt),
+      fastContextMs: elapsed(latency?.fastContextCompletedAt, latency?.fastContextStartedAt),
+      claimGateMs: latency?.claimGateMs,
       timings: {
         aggregationWaitMs: trace?.metrics.asrFinalToUtteranceMs,
         terminologyMs: undefined,

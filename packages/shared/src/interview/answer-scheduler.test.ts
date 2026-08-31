@@ -47,4 +47,16 @@ describe("AnswerScheduler", () => {
     expect(scheduler.active?.id).toBe("q1");
     expect(scheduler.queue).toHaveLength(1);
   });
+
+  it("does not merge an augmentation after the provider request was sent", () => {
+    const scheduler = new AnswerScheduler();
+    scheduler.request(q1, { now: 1_000 });
+    expect(scheduler.markRequestSent("q1")).toBe(true);
+
+    const augmentation = scheduler.request({ id: "q4", text: "再补充一个边界条件。", groupId: "g1", relationType: "SAME_QUESTION_AUGMENTATION" }, { relationType: "SAME_QUESTION_AUGMENTATION" });
+    expect(augmentation.action).toBe("queue");
+    expect(augmentation.reason).toBe("active-answer-protected");
+    expect(scheduler.active?.plan.constraints).toEqual([]);
+    expect(scheduler.queue.map((item) => item.id)).toEqual(["q4"]);
+  });
 });

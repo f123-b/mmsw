@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { RuntimeAbortRegistry, RuntimeTimerRegistry, RuntimeTraceBuffer, withRuntimeTimeout, type RuntimeTraceEvent } from "./runtime-diagnostics";
+import { RuntimeAbortRegistry, RuntimeLatencyTelemetry, RuntimeTimerRegistry, RuntimeTraceBuffer, withRuntimeTimeout, type RuntimeTraceEvent } from "./runtime-diagnostics";
 
 const event = (name: RuntimeTraceEvent["name"], timestamp: number): RuntimeTraceEvent => ({
   name,
@@ -59,5 +59,26 @@ describe("runtime diagnostics primitives", () => {
     await expect(result).resolves.toBeUndefined();
     expect(vi.getTimerCount()).toBe(0);
     vi.useRealTimers();
+  });
+
+  it("reports bounded p50, p95, and max latency for each runtime stage", () => {
+    const telemetry = new RuntimeLatencyTelemetry();
+    [10, 20, 30, 40].forEach((duration, index) => {
+      const id = `q-${index}`;
+      telemetry.start(id, 0);
+      telemetry.mark(id, "questionConfirmedAt", duration);
+      telemetry.mark(id, "providerRequestStartedAt", duration + 2);
+      telemetry.mark(id, "providerFirstTokenAt", duration + 5);
+      telemetry.mark(id, "firstVisibleTokenAt", duration + 6);
+      telemetry.mark(id, "fastContextStartedAt", 1);
+      telemetry.mark(id, "fastContextCompletedAt", 1 + duration);
+      telemetry.setDuration(id, "claimGateMs", duration / 10);
+    });
+
+    const metrics = telemetry.metrics();
+    expect(metrics.sampleCount).toBe(4);
+    expect(metrics.stages.asrFinalToQuestionConfirmedMs).toMatchObject({ count: 4, p50: 20, p95: 40, max: 40 });
+    expect(metrics.stages.providerRequestToFirstTokenMs).toMatchObject({ count: 4, p50: 3, p95: 3, max: 3 });
+    expect(metrics.stages.claimGateMs).toMatchObject({ count: 4, p50: 2, p95: 4, max: 4 });
   });
 });

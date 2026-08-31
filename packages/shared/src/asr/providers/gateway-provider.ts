@@ -9,6 +9,13 @@ interface GatewayMessage {
   startMs?: number;
   endMs?: number;
   confidence?: number;
+  endpoint?: boolean;
+  speechFinal?: boolean;
+  utteranceEnd?: boolean;
+  endOfTurn?: boolean;
+  speech_final?: boolean;
+  utterance_end?: boolean;
+  end_of_turn?: boolean;
   error?: string;
   message?: string;
 }
@@ -67,7 +74,11 @@ export class GatewayProvider implements ASRProvider {
       text: message.text,
       startMs: message.startMs,
       endMs: message.endMs,
-      confidence: message.confidence
+      confidence: message.confidence,
+      endpoint: message.endpoint,
+      speechFinal: message.speechFinal ?? message.speech_final,
+      utteranceEnd: message.utteranceEnd ?? message.utterance_end,
+      endOfTurn: message.endOfTurn ?? message.end_of_turn
     };
     const text = typeof raw.text === "string" ? raw.text.trim() : "";
     if (!text) return;
@@ -78,6 +89,10 @@ export class GatewayProvider implements ASRProvider {
       startMs: Math.max(0, Number(raw.startMs ?? 0)),
       endMs: Math.max(0, Number(raw.endMs ?? raw.startMs ?? 0)),
       final: message.type === "asr_final",
+      ...(raw.endpoint === undefined ? {} : { endpoint: Boolean(raw.endpoint) }),
+      ...(raw.speechFinal === undefined ? {} : { speechFinal: Boolean(raw.speechFinal) }),
+      ...(raw.utteranceEnd === undefined ? {} : { utteranceEnd: Boolean(raw.utteranceEnd) }),
+      ...(raw.endOfTurn === undefined ? {} : { endOfTurn: Boolean(raw.endOfTurn) }),
       ...(raw.confidence === undefined ? {} : { confidence: Number(raw.confidence) })
     });
   }
