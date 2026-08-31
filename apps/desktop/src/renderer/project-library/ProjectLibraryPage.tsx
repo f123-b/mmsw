@@ -201,7 +201,30 @@ function ProjectHeader(props: {
 }
 
 function ProjectPicker({ projects, selectedProjectId, onSelect, onCreate }: { projects: ProjectCollectionRecord[]; selectedProjectId: string; onSelect: (projectId: string) => void; onCreate: () => void }): JSX.Element {
-  return <label className="project-picker"><span>当前项目</span><select value={selectedProjectId} onChange={(event) => onSelect(event.target.value)} aria-label="选择当前项目"><option value="" disabled>选择项目</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select><button type="button" className="project-picker-add" onClick={onCreate} aria-label="创建项目">＋</button></label>;
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const selected = projects.find((project) => project.id === selectedProjectId);
+  const filtered = projects.filter((project) => project.name.toLowerCase().includes(query.trim().toLowerCase()));
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [open]);
+
+  const createProject = (): void => {
+    setOpen(false);
+    setQuery("");
+    onCreate();
+  };
+
+  return <div className="project-picker"><span>当前项目</span><div className="project-picker-control">
+    <button type="button" className="project-picker-trigger" onClick={() => setOpen((value) => !value)} aria-label="选择当前项目" aria-expanded={open} aria-haspopup="listbox"><span>{selected?.name ?? "选择项目"}</span><span aria-hidden="true">⌄</span></button>
+    {open && <div className="project-picker-popover" role="dialog" aria-label="搜索项目"><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索项目..." aria-label="搜索项目" /><div className="project-picker-options" role="listbox" aria-label="项目列表">{filtered.map((project) => <button type="button" role="option" aria-selected={project.id === selectedProjectId} className={project.id === selectedProjectId ? "selected" : ""} key={project.id} onClick={() => { onSelect(project.id); setOpen(false); setQuery(""); }}>{project.name}</button>)}{filtered.length === 0 && <small>没有匹配的项目</small>}</div><button type="button" className="project-picker-create" onClick={createProject}>＋ 新建项目</button></div>}
+  </div><button type="button" className="project-picker-add" onClick={createProject} aria-label="创建项目">＋</button></div>;
 }
 
 type ProjectLibraryPageViewModel = ReturnType<typeof deriveProjectLibraryViewModel>;

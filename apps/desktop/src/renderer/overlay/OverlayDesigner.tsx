@@ -80,6 +80,8 @@ function TextPreferencesPanel({ label, value, onChange }: { label: string; value
       <DesignerNumberField label="标题大小" value={value.titleFontSize} min={10} max={40} suffix="px" onChange={(next) => onChange({ titleFontSize: next })} onCommit={() => onChange({}, true)} />
       <label className="designer-select-field"><span>字重</span><select value={value.fontWeight} onChange={(event) => onChange({ fontWeight: Number(event.target.value) as OverlayWindowPreferences["fontWeight"] }, true)}><option value="400">常规</option><option value="500">中等</option><option value="600">半粗</option></select></label>
       <DesignerNumberField label="行距" value={value.lineHeight} min={1} max={2.5} step={0.05} onChange={(next) => onChange({ lineHeight: next })} onCommit={() => onChange({}, true)} />
+      <DesignerNumberField label="段落间距" value={value.paragraphGap} min={0} max={40} suffix="px" onChange={(next) => onChange({ paragraphGap: next })} onCommit={() => onChange({}, true)} />
+      <DesignerNumberField label="项目间距" value={value.itemGap} min={0} max={40} suffix="px" onChange={(next) => onChange({ itemGap: next })} onCommit={() => onChange({}, true)} />
       <DesignerOpacityField label="文字透明度" value={value.textOpacity} onChange={(next) => onChange({ textOpacity: next })} onCommit={() => onChange({}, true)} />
     </div></details>
   </div>;
@@ -91,9 +93,9 @@ function BackgroundPreferencesPanel({ value, preset, textOnly, onPreset, onChang
     <div className="designer-section-card-heading"><strong>背景设置</strong><small>{textOnly ? "纯文字模式不会显示卡片背景" : "每个窗口独立保留背景参数"}</small></div>
     <fieldset disabled={textOnly} className="designer-background-fieldset">
       <div className="designer-background-presets">{presets.map(([key, label]) => <button type="button" key={key} className={preset === key ? "selected" : ""} onClick={() => onPreset(key)}>{label}</button>)}</div>
+      <div className="designer-background-quick-field"><DesignerOpacityField label="背景透明度" value={value.backgroundOpacity} onChange={(next) => onChange({ backgroundOpacity: next })} onCommit={() => onChange({}, true)} /></div>
       <details className="designer-advanced-disclosure"><summary>高级背景参数</summary><div className="designer-fields-grid">
         <label className="designer-color-field"><span>背景颜色</span><div><input type="color" value={value.backgroundColor} onChange={(event) => onChange({ backgroundColor: event.target.value })} onBlur={() => onChange({}, true)} /><code>{value.backgroundColor}</code></div></label>
-        <DesignerOpacityField label="背景透明度" value={value.backgroundOpacity} onChange={(next) => onChange({ backgroundOpacity: next })} onCommit={() => onChange({}, true)} />
         <DesignerNumberField label="模糊" value={value.blur} min={0} max={40} suffix="px" onChange={(next) => onChange({ blur: next })} onCommit={() => onChange({}, true)} />
         <DesignerNumberField label="圆角" value={value.radius} min={0} max={32} suffix="px" onChange={(next) => onChange({ radius: next })} onCommit={() => onChange({}, true)} />
         <DesignerOpacityField label="边框透明度" value={value.borderOpacity} onChange={(next) => onChange({ borderOpacity: next })} onCommit={() => onChange({}, true)} />
