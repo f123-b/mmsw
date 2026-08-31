@@ -424,7 +424,7 @@ try {
   if (!(await main.evaluate("document.body.innerText.includes('Embedding API Key') && document.body.innerText.includes('关键词召回') && document.body.innerText.includes('向量召回')"))) throw new Error("SETTINGS_RETRIEVAL_PAGE_INCOMPLETE");
   await clickText("常规");
   await waitFor(() => Boolean(document.querySelector("[data-testid='settings-general-page']")));
-  evidence.push("Settings navigation: PASS (8 secondary sections); Model / ASR / Retrieval separation: PASS; unsupported controls are labeled instead of persisted as fake settings");
+  evidence.push("Settings navigation: PASS (9 secondary sections); Model / ASR / Retrieval separation: PASS; unsupported controls are labeled instead of persisted as fake settings");
   await clickText("悬浮窗");
   await waitFor(() => document.body.innerText.includes("面试悬浮窗"));
   await clickSelector("[data-testid='designer-preset-classic_split']");
