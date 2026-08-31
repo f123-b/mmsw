@@ -3258,7 +3258,9 @@ if (hasSingleInstanceLock) {
         answerSourcePlan: fastSourcePlan,
         projectQaEvidence: fastSourcePlan.mode === "project_qa_direct" && fastPreparedAnswer ? [fastPreparedAnswer.content] : [],
         projectEvidence: fastSourcePlan.mode === "project_qa_direct" ? [] : fastOverviewHits.map((chunk) => `[PROJECT_SOURCE] ${chunk.metadata.filename}: ${chunk.text}`),
-        retrievedKnowledge: fastTechnicalOnly
+        retrievedKnowledge: fastProjectIntent.projectQuestionRequested
+          ? []
+          : fastTechnicalOnly
           ? []
           : [
             ...(fastUnderstandingRoute ? [`PROJECT_UNDERSTANDING_ROUTE=${fastUnderstandingRoute}`] : []),
@@ -3274,6 +3276,7 @@ if (hasSingleInstanceLock) {
           projectOverviewHitCount: fastOverviewHits.length,
           ...(fastCoreTechnicalQa ? { coreQaMatchLevel: "strong" as const, coreQaScore: fastCoreTechnicalQa ? 1 : 0, coreQaQuestionId: fastCoreTechnicalQa.id } : {}),
           ...(fastProjectQa?.top ? { projectQaMatchLevel: fastProjectQa.level, projectQaQuestionId: fastProjectQa.top.question.id } : {})
+          ,...(selfIntroIntent.matched ? { selfIntroductionDetected: true } : {})
         }
       };
     }

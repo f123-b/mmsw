@@ -23,4 +23,19 @@ describe("ProjectInterviewCache", () => {
     expect(cache.resolveProject("支付平台怎么做？").ambiguous).toBe(true);
     expect(cache.resolveProject("任意问题", { explicitProjectId: "p1" }).reason).toBe("session");
   });
+
+  it("keeps local project resolution and overview retrieval comfortably below the hot-path budget", () => {
+    const cache = new ProjectInterviewCache();
+    cache.prepare({ profileId: "profile", projects: [{ id: "p1", name: "支付项目", aliases: ["支付"], questionBankIndex: [question("q1", "支付项目如何使用 DMA？")], questionAnswers: [], overviewChunks: [chunk] }] });
+    const samples: number[] = [];
+    for (let index = 0; index < 100; index += 1) {
+      const started = performance.now();
+      cache.resolveProject("支付项目如何使用 DMA？");
+      cache.routeProjectQuestion("支付项目如何使用 DMA？", "p1");
+      cache.searchOverview("DMA 采样", "p1");
+      samples.push(performance.now() - started);
+    }
+    samples.sort((left, right) => left - right);
+    expect(samples[94]).toBeLessThan(50);
+  });
 });
