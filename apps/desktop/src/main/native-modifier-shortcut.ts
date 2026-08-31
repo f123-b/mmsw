@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
+import { terminateGracefully } from "./managed-process";
 
 export type NativeModifier = "ctrl" | "alt" | "shift";
 
@@ -36,9 +37,15 @@ export class NativeModifierShortcutManager {
     return true;
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     const child = this.child;
-    this.child = undefined;
-    if (child && !child.killed) child.kill();
+    if (!child) return;
+    const result = await terminateGracefully(child, {
+      gracefulTimeoutMs: 1_000,
+      forceTimeoutMs: 750,
+      onEvent: (event, fields) => this.onDiagnostic?.(`${event}: pid=${fields.pid ?? "unknown"}`)
+    });
+    if (this.child === child) this.child = undefined;
+    if (!result.exited) this.onDiagnostic?.(`NATIVE_MODIFIER_EXIT_TIMEOUT: pid=${child.pid ?? "unknown"}`);
   }
 }

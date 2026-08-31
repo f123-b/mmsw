@@ -14,6 +14,7 @@ import {
 } from "@interview-copilot/protocol";
 import { PcmPacketAssembler } from "./pcm-packet-assembler";
 import { resolveAudioCapturePolicy } from "./audio-policy";
+import { terminateGracefully } from "./managed-process";
 
 export type AudioProcessState = "stopped" | "running";
 export type AudioProcessKind = "probe" | "meter" | "capture";
@@ -190,9 +191,14 @@ export class AudioManager extends EventEmitter {
       pendingProbe.reject(new Error("AUDIO_PROBE_STOPPED: audio probe was stopped before completion"));
     }
     const child = this.process;
-    const exit = this.processExitPromise;
-    if (child && !child.killed) child.kill();
-    if (child && exit) await Promise.race([exit, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
+    if (child) {
+      const result = await terminateGracefully(child, {
+        gracefulTimeoutMs: 2_000,
+        forceTimeoutMs: 1_000,
+        onEvent: (event, fields) => this.emit("diagnostic", `${event}: pid=${fields.pid ?? "unknown"}`)
+      });
+      if (!result.exited) this.emit("diagnostic", `AUDIO_PROCESS_EXIT_TIMEOUT: pid=${child.pid ?? "unknown"}`);
+    }
     if (this.process === child && child) {
       this.process = undefined;
       this.processKind = undefined;

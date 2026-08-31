@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { terminateGracefully } from "./managed-process";
 
 export function shouldHandleMiddleMouseShortcut(input: { interviewRunning: boolean; automationMode: "AUTO" | "MANUAL"; writtenTestRunning: boolean; middleMouseEnabled?: boolean; enabledInManualInterview?: boolean; enabledInExamMode?: boolean }): boolean {
   if (input.middleMouseEnabled === false) return false;
@@ -62,9 +63,15 @@ export class MiddleMouseShortcutManager {
     return true;
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     const child = this.child;
-    this.child = undefined;
-    if (child && !child.killed) child.kill();
+    if (!child) return;
+    const result = await terminateGracefully(child, {
+      gracefulTimeoutMs: 1_000,
+      forceTimeoutMs: 750,
+      onEvent: (event, fields) => this.onDiagnostic?.(`${event}: pid=${fields.pid ?? "unknown"}`)
+    });
+    if (this.child === child) this.child = undefined;
+    if (!result.exited) this.onDiagnostic?.(`MIDDLE_MOUSE_WATCH_EXIT_TIMEOUT: pid=${child.pid ?? "unknown"}`);
   }
 }

@@ -2,6 +2,7 @@ import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process"
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createConnection } from "node:net";
+import { terminateGracefully } from "./managed-process";
 
 export interface LocalAsrServiceOptions {
   resolveServiceRoot: () => string | undefined;
@@ -88,16 +89,16 @@ function probeExecutable(command: string, args: string[], cwd: string, timeoutMs
   return new Promise((resolve) => {
     let settled = false;
     const child = spawn(command, args, { cwd, windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
-    const finish = (ok: boolean, reason: string) => {
+    const finish = async (ok: boolean, reason: string) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      child.kill();
+      await terminateGracefully(child, { gracefulTimeoutMs: 250, forceTimeoutMs: 250 });
       resolve({ ok, reason });
     };
-    const timer = setTimeout(() => finish(false, `probe timeout: ${command}`), timeoutMs);
-    child.once("error", (error) => finish(false, error.message));
-    child.once("exit", (code) => finish(code === 0, code === 0 ? "ok" : `exit code ${code ?? "unknown"}`));
+    const timer = setTimeout(() => { void finish(false, `probe timeout: ${command}`); }, timeoutMs);
+    child.once("error", (error) => { void finish(false, error.message); });
+    child.once("exit", (code) => { void finish(code === 0, code === 0 ? "ok" : `exit code ${code ?? "unknown"}`); });
   });
 }
 
@@ -105,6 +106,7 @@ export class LocalAsrServiceManager {
   private backendProcess: ChildProcess | undefined;
   private facadeProcess: ChildProcess | undefined;
   private startPromise: Promise<void> | undefined;
+  private lifecycleVersion = 0;
   private state: LocalAsrServiceState = "stopped";
   private lastError: string | undefined;
 
@@ -172,23 +174,25 @@ export class LocalAsrServiceManager {
 
   async ensureRunning(startOptions: LocalAsrStartOptions = {}): Promise<void> {
     if (this.startPromise) return this.startPromise;
-    this.startPromise = this.start(startOptions).finally(() => {
+    const lifecycleVersion = this.lifecycleVersion;
+    this.startPromise = this.start(startOptions, lifecycleVersion).finally(() => {
       this.startPromise = undefined;
     });
     return this.startPromise;
   }
 
   async stop(): Promise<void> {
+    this.lifecycleVersion += 1;
     this.startPromise = undefined;
     const processes = [this.facadeProcess, this.backendProcess].filter((process): process is ChildProcess => Boolean(process));
-    this.facadeProcess = undefined;
-    this.backendProcess = undefined;
     await Promise.all(processes.map((process) => this.terminate(process)));
+    if (this.facadeProcess && processes.includes(this.facadeProcess)) this.facadeProcess = undefined;
+    if (this.backendProcess && processes.includes(this.backendProcess)) this.backendProcess = undefined;
     this.state = "stopped";
     this.lastError = undefined;
   }
 
-  private async start(startOptions: LocalAsrStartOptions): Promise<void> {
+  private async start(startOptions: LocalAsrStartOptions, lifecycleVersion: number): Promise<void> {
     this.state = "starting";
     this.lastError = undefined;
     const timeoutMs = this.options.startupTimeoutMs ?? 30_000;
@@ -197,29 +201,58 @@ export class LocalAsrServiceManager {
     const webSocketEndpoint = endpointFromUrl(webSocketUrl, 8765);
     const upstreamEndpoint = endpointFromUrl(upstreamUrl, 8080);
     const model = startOptions.model || DEFAULT_MODEL;
+    const ownedProcesses: ChildProcess[] = [];
+    const cancelIfStale = async (): Promise<boolean> => {
+      if (lifecycleVersion === this.lifecycleVersion) return false;
+      await this.stopProcesses(ownedProcesses);
+      if (lifecycleVersion === this.lifecycleVersion) {
+        this.state = "stopped";
+        this.lastError = undefined;
+      }
+      return true;
+    };
 
     try {
+      if (await cancelIfStale()) return;
       const backendReady = await isTcpReachable(upstreamEndpoint);
+      if (await cancelIfStale()) return;
       if (!backendReady) {
-        this.backendProcess = this.spawnOpenAsr(model);
+        const process = this.spawnOpenAsr(model);
+        ownedProcesses.push(process);
+        if (await cancelIfStale()) return;
+        this.backendProcess = process;
         await waitForTcp(upstreamEndpoint, timeoutMs);
       }
 
+      if (await cancelIfStale()) return;
       const facadeReady = await isTcpReachable(webSocketEndpoint);
+      if (await cancelIfStale()) return;
       if (!facadeReady) {
-        this.facadeProcess = this.spawnFacade({
+        const process = this.spawnFacade({
           serviceRoot: this.options.resolveServiceRoot(),
           host: webSocketEndpoint.host,
           port: webSocketEndpoint.port,
           model,
           upstreamUrl
         });
+        ownedProcesses.push(process);
+        if (await cancelIfStale()) return;
+        this.facadeProcess = process;
         await waitForTcp(webSocketEndpoint, timeoutMs);
       }
 
+      if (await cancelIfStale()) return;
       this.state = "ready";
       this.log(`Local ASR ready: ${webSocketUrl} -> ${upstreamUrl}`);
     } catch (error) {
+      if (lifecycleVersion !== this.lifecycleVersion) {
+        await this.stopProcesses(ownedProcesses);
+        if (lifecycleVersion === this.lifecycleVersion) {
+          this.state = "stopped";
+          this.lastError = undefined;
+        }
+        return;
+      }
       this.state = "error";
       this.lastError = error instanceof Error ? error.message : String(error);
       this.log(`Local ASR startup failed: ${this.lastError}`);
@@ -287,24 +320,22 @@ export class LocalAsrServiceManager {
 
   private async stopOwnedProcesses(): Promise<void> {
     const processes = [this.facadeProcess, this.backendProcess].filter((process): process is ChildProcess => Boolean(process));
-    this.facadeProcess = undefined;
-    this.backendProcess = undefined;
-    await Promise.all(processes.map((process) => this.terminate(process)));
+    await this.stopProcesses(processes);
   }
 
-  private terminate(process: ChildProcess): Promise<void> {
-    if (process.exitCode !== null || process.killed) return Promise.resolve();
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        process.kill();
-        resolve();
-      }, 1_000);
-      process.once("exit", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-      process.kill();
+  private async stopProcesses(processes: ChildProcess[]): Promise<void> {
+    await Promise.all(processes.map((process) => this.terminate(process)));
+    if (this.facadeProcess && processes.includes(this.facadeProcess)) this.facadeProcess = undefined;
+    if (this.backendProcess && processes.includes(this.backendProcess)) this.backendProcess = undefined;
+  }
+
+  private async terminate(process: ChildProcess): Promise<void> {
+    const result = await terminateGracefully(process, {
+      gracefulTimeoutMs: 1_000,
+      forceTimeoutMs: 1_000,
+      onEvent: (event, fields) => this.log(`${event}: pid=${fields.pid ?? "unknown"}`)
     });
+    if (!result.exited) this.log(`Local ASR process exit timeout: pid=${process.pid ?? "unknown"}`);
   }
 
   private log(message: string): void {
