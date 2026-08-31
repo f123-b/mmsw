@@ -17,9 +17,6 @@ export function ChatComposer({ value, onChange, onSubmit, onCreateProject }: Cha
       <div className="chat-composer">
         <textarea value={value} onChange={(event) => onChange(event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); onSubmit(); } }} placeholder="向 Interview Copilot 咨询任何面试准备问题..." aria-label="面试准备问题" />
         <div className="composer-toolbar">
-          <button className="composer-tool plus-tool" aria-label="添加附件">＋</button>
-          <button className="composer-tool search-tool"><span>◎</span> 网络搜索</button>
-          <button className="composer-tool permission-tool"><span>♢</span> 完全访问权限 <small>⌄</small></button>
           <button className={`send-button ${value.trim() ? "active" : ""}`} onClick={onSubmit} aria-label="发送">↑</button>
         </div>
       </div>
