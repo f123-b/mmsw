@@ -9,6 +9,7 @@ import { initialOverlayLifecycleState, isOverlayLayoutEditing, reduceOverlayLife
 import { clampOverlayPanelBounds, contentDrivenHeight, resolveOverlayNativeBounds, type OverlayContentPanel, type OverlayNativeBounds, type OverlayNativePanel, type OverlayRuntimeLayoutMode } from "./overlay-layout-controller";
 import { OverlayZOrderController, type OverlayZOrderDiagnosticEvent, type OverlayZOrderDiagnostics } from "./overlay-z-order-controller";
 import type { InterviewStartupEvent } from "./interview-startup-timing";
+import { isInsideOverlayContent } from "./native-screen-coordinates";
 
 export { applyOverlayMode, nextOverlayMode } from "./overlay-mode";
 export type { OverlayMode, OverlayWindowLike } from "./overlay-mode";
@@ -289,7 +290,7 @@ export class OverlayManager {
       const window = this.getWindow(panel);
       if (!window) continue;
       const bounds = window.getBounds();
-      if (x < bounds.x || y < bounds.y || x > bounds.x + bounds.width || y > bounds.y + bounds.height) continue;
+      if (!isInsideOverlayContent({ x, y }, bounds)) continue;
       window.webContents.send("overlay:global-wheel", { x: x - bounds.x, y: y - bounds.y, deltaY, dual: this.wheelRouting === "dual" });
       break;
     }

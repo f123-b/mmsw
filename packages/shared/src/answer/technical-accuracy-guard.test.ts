@@ -60,4 +60,17 @@ describe("technical accuracy guard", () => {
     expect(result.decision).toBe("rewrite");
     expect(result.rewrittenAnswer).toContain("缓冲区所有权");
   });
+
+  it.each([
+    ["中断优先级和任务优先级有什么区别？", "中断优先级就是任务优先级，都是调度线程。", "不能混为一谈"],
+    ["mutex 和 semaphore 有什么区别？", "信号量就是互斥锁。", "唯一所有权"],
+    ["I2C、SPI、UART 怎么比较？", "I2C 使用 MOSI 和片选，UART 使用 SDA。", "共享总线"],
+    ["HardFault 和 watchdog 复位有什么区别？", "HardFault 就是看门狗复位。", "处理器异常"],
+    ["FOC 电流环和速度环分别做什么？", "速度环直接控制电流，电流环直接控制转速。", "级联"],
+    ["DMA 和中断有什么区别？", "DMA 本质是中断。", "数据搬运机制"]
+  ] as const)("separates adjacent technical concepts: %s", (question, answer, expected) => {
+    const result = guard.check({ question, answer });
+    expect(result.decision).toBe("rewrite");
+    expect(result.rewrittenAnswer).toContain(expected);
+  });
 });

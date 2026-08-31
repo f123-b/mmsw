@@ -56,7 +56,8 @@ const TRAILING_ANSWER_REQUEST = /(?:^|[，,、\s])(?:好|好的|嗯+|明白了?)
 const QUESTION_FORM = /(?:什么是|什么|为什么|为何|怎么|如何|怎样|哪些|哪种|哪个|哪里|哪|谁|是否|有没有|能不能|可不可以|区别|原理|作用|原因|流程|优缺点|怎么解决|怎么验证|怎么设计|怎么实现|什么地方|用过哪些|最多|最少|最大|最小|上限|容量|数量|多少|几个|几路|几种|多大|多长|多快|频率|设计.*(?:系统|架构|方案|模块))/i;
 const QUESTION_PARTICLE = /(?:吗|呢)[。！？?！\s]*$/i;
 const FOLLOW_UP_PREFIX = /^(?:那|然后|还有|具体|如果|再|这个|它|这里|其中|继续|接着|接下来)/;
-const ELLIPTICAL_FOLLOW_UP = /^(?:为什么|为何|怎么|如何|具体(?:呢)?|还有(?:呢|吗)?|然后呢|用过哪些|用在什么地方|哪几个|哪种|那低速呢|再具体一点|能不能具体一点)[？?。！!\s]*$/i;
+const ELLIPTICAL_FOLLOW_UP = /^(?:为什么|为何|怎么|如何|具体(?:呢)?|还有(?:呢|吗)?|然后呢|用过哪些|用在什么地方|哪几个|哪种|那低速呢|再具体一点|能不能具体一点|你会关注哪些点|考虑哪些可能性|有哪些可能性|快速排查清单|给(?:个|一份)?(?:快速)?(?:排查|检查)(?:清单|步骤)|简单比较(?:一下)?|简单对比(?:一下)?|对比一下|具体细节)[？?。！!\s]*$/iu;
+const CONTEXTUAL_OUTPUT_FOLLOW_UP = /^(?:请)?(?:简单|重点|分别)?(?:比较|对比|讲|说|列出|给)(?:一下|一下子)?[^。！？?！]{0,18}[。！？?！\s]*$/iu;
 const ELLIPTICAL_ANSWER_REQUEST = /^(?:讲一下|讲讲|说一下|说说|展开讲一下|详细讲述|具体说)[？?。！!\s]*$/i;
 const STRONG_TOPIC = /(?:STL|TCP|UDP|HTTP|MQTT|CoAP|LwIP|IIC|I2C|SPI|UART|CAN(?: FD)?|LIN|FlexRay|Modbus|FOC|DMA|PWM|ADC|DAC|GPIO|NVIC|SysTick|MPU|MMU|FreeRTOS|RT-Thread|Zephyr|Linux|RTOS|C\+\+|C语言|RISC-V|Cortex-[MAR]|虚函数|堆和栈|进程间通信|进程线程|链表|字符串|排序|同步机制|三次握手|四次挥手|容器|上拉电阻|EEPROM|Flash|内存管理|低速抖动|系统架构|完整过程|实现过程)/i;
 const ASSERTIVE_STATEMENT = /^(?:我|我们|系统|项目|这个项目|当前项目|当前|这个方案|这次优化|它|该模块).*(?:是|为|通过|使用|采用|完成|下降|提升|增加|减少|切换|实现了|负责了)[^？?]*[。！!]$/;
@@ -103,12 +104,12 @@ function isFollowUp(text: string, context: SpeechActContext): boolean {
   if (!hasAnchor && !hasEmbeddedAnchor) return false;
   if (hasStandaloneTopicSubject(text) && !hasEmbeddedAnchor) return false;
   if (context.latestAnchor?.text && detectTopicBoundary({ previousText: context.latestAnchor.text, previousTopic: context.currentTopic, currentText: text }).relation === "NEW_TOPIC") return false;
-  if (ELLIPTICAL_FOLLOW_UP.test(text) || ELLIPTICAL_ANSWER_REQUEST.test(text) || TRAILING_ANSWER_REQUEST.test(text)) return true;
+  if (ELLIPTICAL_FOLLOW_UP.test(text) || CONTEXTUAL_OUTPUT_FOLLOW_UP.test(text) || ELLIPTICAL_ANSWER_REQUEST.test(text) || TRAILING_ANSWER_REQUEST.test(text)) return true;
   const completeStandaloneForm = /(?:在哪|哪里|是什么|哪些|哪种|哪个|多少|几个|几路|上限|容量)/.test(text);
   const completeWhyHowFollowUp = /^(?:那|然后).*(?:为什么|为何|怎么|如何)/.test(text) && !completeStandaloneForm;
   const contextualCompleteFollowUp = /^(?:那|然后|如果|接下来|再|这个|它|这里|其中).*(?:如果|换成|换为|结果|低速|验证|设计|优化|实现|怎么|如何|呢|吗)/.test(text) && !completeStandaloneForm;
   const shortInterrogativeFollowUp = /^(?:为什么|为何|怎么|如何|怎样)/.test(text) && compact.length <= 16 && !completeStandaloneForm;
-  return (FOLLOW_UP_PREFIX.test(text) || shortInterrogativeFollowUp) && compact.length <= 16 && (!hasCompleteQuestion(text) || completeWhyHowFollowUp || contextualCompleteFollowUp || shortInterrogativeFollowUp);
+  return (ELLIPTICAL_FOLLOW_UP.test(text) || CONTEXTUAL_OUTPUT_FOLLOW_UP.test(text) || FOLLOW_UP_PREFIX.test(text) || shortInterrogativeFollowUp) && compact.length <= 24 && (!hasCompleteQuestion(text) || completeWhyHowFollowUp || contextualCompleteFollowUp || shortInterrogativeFollowUp || ELLIPTICAL_FOLLOW_UP.test(text) || CONTEXTUAL_OUTPUT_FOLLOW_UP.test(text));
 }
 
 /**

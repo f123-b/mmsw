@@ -4,6 +4,13 @@ import { SpeechActClassifier, shouldHardRejectSpeechAct } from "./speech-act-cla
 describe("interview speech acts", () => {
   const classifier = new SpeechActClassifier();
 
+  it("recognizes short follow-up requests without a repeated technical noun", () => {
+    const context = { currentTopic: "DMA", latestAnchor: { text: "DMA 和中断怎么配合？", speechAct: "QUESTION" as const } };
+    expect(classifier.classify("你会关注哪些点？", context).speechAct).toBe("FOLLOW_UP");
+    expect(classifier.classify("考虑哪些可能性？", context).speechAct).toBe("FOLLOW_UP");
+    expect(classifier.classify("给个快速排查清单", context).shouldAnswer).toBe(true);
+  });
+
   it("rescues quantity, command-style and code requests", () => {
     expect(classifier.classify("CAN 总线上最多能挂多少个节点？").speechAct).toBe("QUESTION");
     expect(classifier.classify("列举一下进程间通信的方式").speechAct).toBe("ANSWER_REQUEST");

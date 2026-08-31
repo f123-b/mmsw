@@ -50,8 +50,8 @@ export interface PendingQuestionDraftOptions {
 
 const FILLER = /^(?:嗯+|呃+|啊+|哦+|好+|好的|对|明白了?|知道了?|可以|行|那个|继续|继续说|另外(?:[，,、\s]*说说看)?|然后)[。！？?！\s，,、]*$/iu;
 const SETUP = /^(?:假设|如果|若|当|在这个|在该|围绕|针对|关于|说说你做的|最后一个追问|好[，,、]?假设|我们先聊|接下来问一个)/iu;
-const CONSTRAINT = /(?:不能(?:换|改|更换)|不得|不可|无需|仅限|只(?:需要|讲|说)|限制|硬件(?:保持)?不变|不换硬件|不改硬件|时间不超过|控制在\s*\d+\s*(?:秒|分钟)|具体(?:数值|数字)|map\s*文件|栈回溯)/iu;
-const OUTPUT_REQUIREMENT = /^(?:请给(?:出|我)?|给(?:出|我)?|列出|需要覆盖|需要说明|还要说明|尽量结合|结合具体|分(?:成|为)?\s*\d+|说清楚|同时说明|最后说明|包括|涵盖)|(?:角度|风险|方案|计划|应对).*(?:说|讲|说明|覆盖)/iu;
+const CONSTRAINT = /(?:不能(?:换|改|更换)|不得|不可|无需|仅限|只(?:需要|讲|说)|限制|硬件(?:保持)?不变|不换硬件|不改硬件|时间不超过|控制在\s*\d+\s*(?:秒|分钟)|具体(?:数值|数字)|map\s*文件|栈回溯|固定在|保持不变|不要展开|只比较|仅从)/iu;
+const OUTPUT_REQUIREMENT = /^(?:请给(?:出|我)?|给(?:出|我)?|列出|需要覆盖|需要说明|还要说明|尽量结合|结合具体|分(?:成|为)?\s*\d+|说清楚|同时说明|最后说明|包括|涵盖)|^(?:请)?(?:简单|重点|分别|分别从).*(?:比较|对比|清单|速率|布线|可靠性|排查|同步)|(?:角度|风险|方案|计划|应对|速率|布线|可靠性|清单|排查|同步).*(?:说|讲|说明|覆盖|比较|对比|列|给|展开)/iu;
 const EXAMPLE = /^(?:比如|例如|举例(?:来说)?|像是|举个)/iu;
 const QUESTION_FORM = /(?:什么|为什么|为何|怎么|如何|怎样|哪些|哪种|哪个|是否|有没有|能不能|可不可以|多少|几个|吗|呢|请问|介绍|解释|说明|说说|讲讲|排查|定位|设计|优化|验证|解决)/iu;
 const NEW_TOPIC = /^(?:换个话题|换个方向|另一个问题|下一个问题|下个问题|接下来问|再问一个)/iu;
@@ -155,7 +155,7 @@ export class PendingQuestionDraftAssembler {
 
   constructor(options: PendingQuestionDraftOptions = {}) {
     this.lateConstraintWindowMs = Math.max(500, options.lateConstraintWindowMs ?? 3_000);
-    this.setupWaitMs = Math.max(300, options.setupWaitMs ?? 900);
+    this.setupWaitMs = Math.max(300, options.setupWaitMs ?? 1_400);
     this.nucleusWaitMs = Math.max(80, options.nucleusWaitMs ?? 220);
   }
 

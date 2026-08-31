@@ -221,14 +221,18 @@ function AnswerCore({ text }: { text: string }): JSX.Element {
 function useScrollFollow(ref: RefObject<HTMLDivElement | null>, contentKey: string, enabled = true): { following: boolean; onScroll: () => void; follow: () => void } {
   const [following, setFollowing] = useState(true);
   const lastContentKey = useRef(contentKey);
+  const resumeTimer = useRef<number | undefined>(undefined);
+  const clearResumeTimer = () => { if (resumeTimer.current !== undefined) { window.clearTimeout(resumeTimer.current); resumeTimer.current = undefined; } };
   useEffect(() => {
     if (lastContentKey.current !== contentKey) {
       lastContentKey.current = contentKey;
       // A new question/answer is a new reading task. Resume the latest tail;
       // the user can still scroll upward again and use the explicit button.
+      clearResumeTimer();
       if (enabled) setFollowing(true);
     }
   }, [contentKey, enabled]);
+  useEffect(() => () => clearResumeTimer(), []);
   useEffect(() => {
     if (enabled && !following) return;
     if (!enabled) setFollowing(true);
@@ -241,11 +245,15 @@ function useScrollFollow(ref: RefObject<HTMLDivElement | null>, contentKey: stri
   const onScroll = () => {
     const element = ref.current;
     if (!element) return;
-    setFollowing(element.scrollHeight - element.scrollTop - element.clientHeight < 18);
+    const atTail = element.scrollHeight - element.scrollTop - element.clientHeight < 18;
+    clearResumeTimer();
+    setFollowing(atTail);
+    if (!atTail && enabled) resumeTimer.current = window.setTimeout(() => { resumeTimer.current = undefined; setFollowing(true); }, 4_000);
   };
   const follow = () => {
     const element = ref.current;
     if (!element) return;
+    clearResumeTimer();
     element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
     setFollowing(true);
   };

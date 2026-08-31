@@ -6,6 +6,11 @@ function segment(id: string, text: string, startMs: number, endMs = startMs + 30
 }
 
 describe("PendingQuestionDraftAssembler", () => {
+  it("keeps setup/output constraints long enough to assemble the nucleus", () => {
+    const assembler = new PendingQuestionDraftAssembler();
+    expect(assembler.waitMs).toBe(1_400);
+    expect(classifySegmentRole("简单比较速率、布线和可靠性", { hasNucleus: true })).toBe("OUTPUT_REQUIREMENT");
+  });
   it("classifies semantic roles without waiting for a remote model", () => {
     expect(classifySegmentRole("在这个项目中，最后一个追问是", {})).toBe("SETUP");
     expect(classifySegmentRole("你是如何定位这个问题的？", {})).toBe("NUCLEUS");
