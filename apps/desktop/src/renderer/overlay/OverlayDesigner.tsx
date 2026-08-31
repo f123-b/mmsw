@@ -4,6 +4,7 @@ import type { InterviewLayoutPreset, OverlayPreferences, OverlayPreferencesPatch
 import { applyLayoutPreset, resolveWrittenTestLayoutPreset } from "./overlay-designer";
 import { DesignerNumberField, DesignerOpacityField } from "./OverlayInspector";
 import { OverlayDesignerCanvas, DESIGNER_CANVAS, type OverlayDesignerMode } from "./OverlayDesignerCanvas";
+import { applyOverlayPreferencesDraftPatch, createOverlayPreferencesDraftState, hasOverlayPreferencesPatch, markOverlayPreferencesPersisted, syncOverlayPreferencesFromParent, takeOverlayPreferencesPersistPatch, takeOverlayPreferencesPreviewPatch, type OverlayPreferencesDraftState } from "./overlay-preferences-draft";
 
 const INTERVIEW_PRESETS: Array<[InterviewLayoutPreset, string, string]> = [
   ["classic_split", "经典双栏", "Control · 左侧问题 · 右侧回答"],
@@ -19,55 +20,6 @@ const WRITTEN_PRESETS: Array<[WrittenTestLayoutPreset, string, string]> = [
 type TextWindowKey = "questionWindow" | "dialogueWindow" | "answerWindow" | "controlBar";
 type BackgroundPreset = "transparent" | "dark_glass" | "light_glass" | "solid" | "custom";
 type WindowChange = (patch: Partial<OverlayWindowPreferences>, commit?: boolean) => void;
-
-function mergePatchSections(base: OverlayPreferencesPatch, next: OverlayPreferencesPatch): OverlayPreferencesPatch {
-  const merged = { ...base, ...next } as OverlayPreferencesPatch;
-  const interview = { ...(base.interview ?? {}), ...(next.interview ?? {}) };
-  const writtenTest = { ...(base.writtenTest ?? {}), ...(next.writtenTest ?? {}) };
-  for (const key of ["questionWindow", "dialogueWindow", "answerWindow", "controlBar"] as const) {
-    const left = base.interview?.[key];
-    const right = next.interview?.[key];
-    if (left || right) interview[key] = { ...(left ?? {}), ...(right ?? {}) } as never;
-  }
-  for (const key of ["questionWindow", "answerWindow", "controlBar"] as const) {
-    const left = base.writtenTest?.[key];
-    const right = next.writtenTest?.[key];
-    if (left || right) writtenTest[key] = { ...(left ?? {}), ...(right ?? {}) } as never;
-  }
-  if (base.interview || next.interview) merged.interview = interview;
-  if (base.writtenTest || next.writtenTest) merged.writtenTest = writtenTest;
-  if (base.behavior || next.behavior) merged.behavior = { ...(base.behavior ?? {}), ...(next.behavior ?? {}) };
-  if (base.appearance || next.appearance) merged.appearance = { ...(base.appearance ?? {}), ...(next.appearance ?? {}) };
-  if (base.screenshot || next.screenshot) merged.screenshot = { ...(base.screenshot ?? {}), ...(next.screenshot ?? {}) };
-  return merged;
-}
-
-function mergeDraft(current: OverlayPreferences, patch: OverlayPreferencesPatch): OverlayPreferences {
-  const interviewPatch = patch.interview ?? {};
-  const writtenPatch = patch.writtenTest ?? {};
-  return {
-    ...current,
-    ...patch,
-    interview: {
-      ...current.interview,
-      ...interviewPatch,
-      questionWindow: { ...current.interview.questionWindow, ...(interviewPatch.questionWindow ?? {}) },
-      dialogueWindow: { ...current.interview.dialogueWindow, ...(interviewPatch.dialogueWindow ?? {}) },
-      answerWindow: { ...current.interview.answerWindow, ...(interviewPatch.answerWindow ?? {}) },
-      controlBar: { ...current.interview.controlBar, ...(interviewPatch.controlBar ?? {}) }
-    },
-    writtenTest: {
-      ...current.writtenTest,
-      ...writtenPatch,
-      questionWindow: { ...current.writtenTest.questionWindow, ...(writtenPatch.questionWindow ?? {}) },
-      answerWindow: { ...current.writtenTest.answerWindow, ...(writtenPatch.answerWindow ?? {}) },
-      controlBar: { ...current.writtenTest.controlBar, ...(writtenPatch.controlBar ?? {}) }
-    },
-    behavior: { ...current.behavior, ...(patch.behavior ?? {}) },
-    appearance: { ...current.appearance, ...(patch.appearance ?? {}) },
-    screenshot: { ...current.screenshot, ...(patch.screenshot ?? {}) }
-  } as OverlayPreferences;
-}
 
 function TextPreferencesPanel({ label, value, onChange }: { label: string; value: OverlayWindowPreferences; onChange: WindowChange }): JSX.Element {
   return <div className="designer-section-card designer-text-settings-card">
@@ -107,57 +59,83 @@ function BackgroundPreferencesPanel({ value, preset, textOnly, onPreset, onChang
   </div>;
 }
 
-export function OverlayDesigner({ value, onChange, onPreview, onReset }: { value: OverlayPreferences; onChange: (patch: OverlayPreferencesPatch) => void; onPreview?: (patch: OverlayPreferencesPatch) => void | Promise<void>; onReset: () => void }): JSX.Element {
+export function OverlayDesigner({ value, onChange, onPreview, onReset }: { value: OverlayPreferences; onChange: (patch: OverlayPreferencesPatch) => void | Promise<unknown>; onPreview?: (patch: OverlayPreferencesPatch) => void | Promise<unknown>; onReset: () => void | Promise<unknown> }): JSX.Element {
   const [displays, setDisplays] = useState<OverlayDisplayInfo[]>([]);
   const [designMode, setDesignMode] = useState<OverlayDesignerMode>("interview");
   const [activeWindowKey, setActiveWindowKey] = useState<TextWindowKey>("questionWindow");
   const [draftValue, setDraftValue] = useState(value);
-  const draftRef = useRef(value);
-  const pendingPreviewRef = useRef<OverlayPreferencesPatch>({});
+  const draftStateRef = useRef<OverlayPreferencesDraftState>(createOverlayPreferencesDraftState(value));
   const previewTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const previewInFlightRef = useRef(false);
+  const persistRevisionRef = useRef(0);
+  const draftRevisionRef = useRef(0);
+  const parentValueRef = useRef(value);
+  const onChangeRef = useRef(onChange);
+  const onPreviewRef = useRef(onPreview);
+  const commitPendingRef = useRef<() => void>(() => undefined);
+  parentValueRef.current = value;
+  onChangeRef.current = onChange;
+  onPreviewRef.current = onPreview;
 
   useEffect(() => { void window.interviewCopilot.overlay.getDisplays().then(setDisplays).catch(() => setDisplays([])); }, []);
-  useEffect(() => () => { if (previewTimerRef.current) clearTimeout(previewTimerRef.current); void window.interviewCopilot.overlay.finishLayoutEditMode(); }, []);
   useEffect(() => {
-    if (Object.keys(pendingPreviewRef.current).length === 0) {
-      draftRef.current = value;
-      setDraftValue(value);
-    }
+    if (syncOverlayPreferencesFromParent(draftStateRef.current, value)) setDraftValue(draftStateRef.current.draft);
   }, [value]);
 
   const flushPreview = (): void => {
-    if (!onPreview || previewInFlightRef.current) return;
-    const patch = pendingPreviewRef.current;
-    if (Object.keys(patch).length === 0) return;
-    pendingPreviewRef.current = {};
+    if (!onPreviewRef.current || previewInFlightRef.current) return;
+    const patch = takeOverlayPreferencesPreviewPatch(draftStateRef.current);
+    if (!hasOverlayPreferencesPatch(patch)) return;
     previewInFlightRef.current = true;
-    Promise.resolve(onPreview(patch)).catch(() => undefined).finally(() => {
+    Promise.resolve(onPreviewRef.current(patch)).catch(() => undefined).finally(() => {
       previewInFlightRef.current = false;
-      if (Object.keys(pendingPreviewRef.current).length > 0) {
+      if (hasOverlayPreferencesPatch(draftStateRef.current.pendingPreviewPatch)) {
         previewTimerRef.current = setTimeout(() => { previewTimerRef.current = undefined; flushPreview(); }, 80);
       }
     });
   };
   const schedulePreview = (): void => {
-    if (!onPreview || previewTimerRef.current) return;
+    if (!onPreviewRef.current || previewTimerRef.current) return;
     previewTimerRef.current = setTimeout(() => { previewTimerRef.current = undefined; flushPreview(); }, 80);
   };
+  const commitPending = (): void => {
+    if (previewTimerRef.current) { clearTimeout(previewTimerRef.current); previewTimerRef.current = undefined; }
+    const patch = takeOverlayPreferencesPersistPatch(draftStateRef.current);
+    if (!hasOverlayPreferencesPatch(patch)) return;
+    const persistRevision = ++persistRevisionRef.current;
+    const draftRevision = draftRevisionRef.current;
+    Promise.resolve().then(() => onChangeRef.current(patch)).then((persisted) => {
+      if (persistRevisionRef.current === persistRevision && draftRevisionRef.current === draftRevision) {
+        markOverlayPreferencesPersisted(draftStateRef.current);
+        if (persisted && typeof persisted === "object" && "interview" in persisted && "writtenTest" in persisted) {
+          draftStateRef.current.draft = persisted as OverlayPreferences;
+          setDraftValue(draftStateRef.current.draft);
+        } else if (syncOverlayPreferencesFromParent(draftStateRef.current, parentValueRef.current)) setDraftValue(draftStateRef.current.draft);
+      }
+    }).catch(() => undefined);
+  };
+  commitPendingRef.current = commitPending;
+  useEffect(() => () => {
+    if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
+    commitPendingRef.current();
+    void window.interviewCopilot.overlay.finishLayoutEditMode();
+  }, []);
   const applyPatch = (patch: OverlayPreferencesPatch, commit = true): void => {
-    if (Object.keys(patch).length > 0) {
-      const next = mergeDraft(draftRef.current, patch);
-      draftRef.current = next;
-      setDraftValue(next);
+    applyOverlayPreferencesDraftPatch(draftStateRef.current, patch, !commit);
+    if (hasOverlayPreferencesPatch(patch)) {
+      draftRevisionRef.current += 1;
+      setDraftValue(draftStateRef.current.draft);
     }
-    if (commit) {
-      if (previewTimerRef.current) { clearTimeout(previewTimerRef.current); previewTimerRef.current = undefined; }
-      const finalPatch = mergePatchSections(pendingPreviewRef.current, patch);
-      pendingPreviewRef.current = {};
-      if (Object.keys(finalPatch).length > 0) onChange(finalPatch);
-      return;
-    }
-    pendingPreviewRef.current = mergePatchSections(pendingPreviewRef.current, patch);
-    schedulePreview();
+    if (commit) commitPending();
+    else schedulePreview();
+  };
+
+  const resetPreferences = (): void => {
+    if (previewTimerRef.current) { clearTimeout(previewTimerRef.current); previewTimerRef.current = undefined; }
+    draftStateRef.current.pendingPreviewPatch = {};
+    draftStateRef.current.dirtyPersistPatch = {};
+    persistRevisionRef.current += 1;
+    void onReset();
   };
 
   const selectedDisplayId = designMode === "interview" ? draftValue.interview.questionWindow.displayId : draftValue.writtenTest.questionWindow.displayId;
@@ -210,7 +188,7 @@ export function OverlayDesigner({ value, onChange, onPreview, onReset }: { value
     : <section className="designer-section"><p className="designer-inline-note">单阅读器：回答显示在题目窗口内，无独立回答窗口开关。</p></section>;
 
   return <section className="settings-service-card overlay-preferences-card overlay-designer-card">
-    <header className="overlay-designer-header"><div><span className="page-kicker">悬浮窗设计器</span><h2>面试与笔试悬浮窗</h2><p>两种工作流分别保存窗口位置和尺寸；运行时窗口稳定，内容在内部滚动。</p></div><button className="outline-pill" onClick={onReset}>恢复布局默认</button></header>
+    <header className="overlay-designer-header"><div><span className="page-kicker">悬浮窗设计器</span><h2>面试与笔试悬浮窗</h2><p>两种工作流分别保存窗口位置和尺寸；运行时窗口稳定，内容在内部滚动。</p></div><button className="outline-pill" onClick={resetPreferences}>恢复布局默认</button></header>
     <div className="overlay-designer-mode-tabs"><button className={designMode === "interview" ? "selected" : ""} onClick={() => setDesignMode("interview")}>面试悬浮窗</button><button className={designMode === "writtenTest" ? "selected" : ""} onClick={() => setDesignMode("writtenTest")}>笔试悬浮窗</button></div>
     {designMode === "interview" ? <aside className="overlay-designer-controls"><section className="designer-section"><div className="designer-section-heading"><div><h3>布局模式</h3><p>默认使用稳定的经典双栏。</p></div></div><div className="designer-preset-card-grid">{INTERVIEW_PRESETS.map(([preset, label, description]) => <button key={preset} type="button" data-testid={`designer-preset-${preset}`} className={`designer-preset-card ${interview.layoutPreset === preset ? "selected" : ""}`} onClick={() => applyInterviewPreset(preset)}><span className={`preset-thumb preset-thumb-${preset}`} aria-hidden="true"><i /><i /></span><strong>{label}</strong><small>{description}</small></button>)}</div><button className="dark-pill designer-edit-real-button" onClick={() => void window.interviewCopilot.overlay.enterLayoutEditMode()}>在桌面上调整</button></section><section className="designer-section"><div className="designer-section-heading"><div><h3>左侧窗口内容</h3><p>布局模式和左窗内容是两个独立设置。</p></div></div><div className="designer-choice-row">{([ ["dialogue", "对话"], ["question", "问题"], ["hidden", "隐藏"] ] as const).map(([mode, label]) => <button key={mode} className={interview.leftPanel === mode ? "selected" : ""} onClick={() => applyPatch({ interview: { leftPanel: mode } })}>{label}</button>)}</div></section><section className="designer-section"><label className="designer-check-row"><input type="checkbox" checked={interview.showAnswer} onChange={(event) => applyPatch({ interview: { showAnswer: event.target.checked } })} /><span><strong>显示右侧回答</strong><small>回答窗口始终保持固定高度并在内部滚动</small></span></label></section></aside> : <aside className="overlay-designer-controls"><section className="designer-section"><div className="designer-section-heading"><div><h3>笔试布局</h3><p>笔试只保留截图题目与 AI 回答。</p></div></div><div className="designer-preset-card-grid">{WRITTEN_PRESETS.map(([preset, label, description]) => <button key={preset} type="button" data-testid={`designer-preset-${preset}`} className={`designer-preset-card ${draftValue.writtenTest.layoutPreset === preset ? "selected" : ""}`} onClick={() => applyWrittenPreset(preset)}><span className={`preset-thumb preset-thumb-written-${preset}`} aria-hidden="true"><i /><i /></span><strong>{label}</strong><small>{description}</small></button>)}</div></section>{writtenShowAnswerControl}</aside>}
     <OverlayDesignerCanvas value={draftValue} mode={designMode} onChange={(patch) => applyPatch(patch)} displays={displays} activeDisplay={activeDisplay} />

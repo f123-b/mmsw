@@ -101,9 +101,9 @@ interface SettingsPageProps {
   onSaveAsr: () => Promise<void>;
   onSaveEmbedding: () => Promise<void>;
   overlayPreferences: OverlayPreferences;
-  onOverlayPreview: (patch: import("../../shared/overlay-preferences").OverlayPreferencesPatch) => void;
-  onOverlayChange: (patch: import("../../shared/overlay-preferences").OverlayPreferencesPatch) => void;
-  onOverlayReset: () => void;
+  onOverlayPreview: (patch: import("../../shared/overlay-preferences").OverlayPreferencesPatch) => void | Promise<unknown>;
+  onOverlayChange: (patch: import("../../shared/overlay-preferences").OverlayPreferencesPatch) => void | Promise<unknown>;
+  onOverlayReset: () => void | Promise<unknown>;
   captureProtectionPanel: JSX.Element;
   terminology: TerminologySettingsProps;
 }
