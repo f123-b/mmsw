@@ -1,10 +1,8 @@
 import { useState, type JSX } from "react";
-import type { InterviewDirectionSelection, TechnicalDomain, TechnicalTerm, TerminologyRolloutMode } from "@interview-copilot/shared";
+import { TECHNICAL_DOMAIN_LABELS, TECHNICAL_DOMAINS, type InterviewDirectionSelection, type TechnicalDomain, type TechnicalTerm, type TerminologyRolloutMode } from "@interview-copilot/shared";
 import { DirectionSelector } from "../interview/DirectionSelector";
 
-const DOMAIN_LABELS: Array<[TechnicalDomain, string]> = [
-  ["common_cs", "计算机基础"], ["c_cpp", "C / C++"], ["embedded", "嵌入式"], ["linux", "Linux"], ["network", "网络"], ["database", "数据库"], ["java", "Java"], ["backend", "后端"], ["frontend", "前端"], ["algorithm", "算法"], ["ai_cv", "AI / CV"], ["computer_vision", "计算机视觉"], ["ai_application", "AI 应用"], ["llm", "LLM"], ["motor_control", "电机控制"], ["control_algorithm", "控制算法"], ["robotics", "机器人"], ["ros", "ROS2"], ["fpga_ic", "FPGA / IC"], ["computer_architecture", "计算机体系结构"], ["verification", "验证"], ["devops", "DevOps"], ["project", "项目"]
-];
+const DOMAIN_LABELS: Array<[TechnicalDomain, string]> = TECHNICAL_DOMAINS.map((domain) => [domain, TECHNICAL_DOMAIN_LABELS[domain]]);
 
 const MODE_LABELS: Array<[TerminologyRolloutMode, string, string]> = [
   ["dynamic", "智能纠错", "会话词典 + 高置信度修正"],

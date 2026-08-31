@@ -3,6 +3,7 @@ import type { CSSProperties, JSX } from "react";
 import "./styles.css";
 import "./overlay-simplified.css";
 import { create } from "zustand";
+import { useShallow } from "zustand/react/shallow";
 import type { AudioCapability, AudioChannelCapability, AudioDevices, AudioDrift, AudioSidecarEvent, ProbeChannelResult, ProbeResult, RealtimeServerMessage } from "@interview-copilot/protocol";
 import { AnswerThreadStore, QUESTION_BANK_BANK_LABELS, QUESTION_BANK_BANK_TYPES, QUESTION_BANK_TYPE_LABELS, QUESTION_BANK_TYPES, answerRelationForQuestion, validateLlmModelConfiguration, type AnswerThread, type OverlayAnswerRelation } from "@interview-copilot/shared";
 import { QWEN_REALTIME_ASR_MODEL, QWEN_REALTIME_ASR_URL, type AsrProviderType, type ChatAction, type ChatResponse, type ProjectAnalysisJob, type ProjectFact, type ProjectMaterialImportReport, type ProjectMemorySnapshot, type ProjectQaGenerationResult, type ProjectQuestionBankImportReport, type ProjectSourceRole, type QuestionBankBankType, type QuestionBankCoverageResult, type QuestionBankJobProfileRecord, type QuestionBankQuestionRecord, type QuestionBankSkillRecord, type QuestionBankType, type QuestionCandidate, type QuestionEvent, type SessionState, type SkillSuggestion, type SkillSuggestionStatus, type TechnicalDomain, type TechnicalTerm, type TerminologyRolloutMode, type TranscriptSnapshot } from "@interview-copilot/shared";
@@ -35,6 +36,7 @@ import { SettingsPage, type SettingsSection } from "./settings/SettingsPage";
 import { HelpPage, OnboardingModal } from "./help/HelpPage";
 import { InterviewSetupModal } from "./interview/InterviewSetupModal";
 import type { InterviewDirectionSelection, InterviewTerminologyPreview } from "@interview-copilot/shared";
+import { userFacingRuntimeDiagnostic } from "./runtime-notices";
 
 type AppNoticeKind = "progress" | "success" | "info" | "warning" | "error";
 interface AppNotice { kind: AppNoticeKind; text: string; autoDismissMs?: number; }
@@ -429,6 +431,35 @@ interface AudioStore {
   applyRealtimeMessage: (message: RealtimeServerMessage) => void;
 }
 
+type AudioRenderState = Pick<AudioStore, "mic" | "system" | "state" | "overlayMode" | "hudState" | "sessionState" | "realtimeState" | "operationMode" | "runtimePhases" | "automationMode" | "answerMode" | "question" | "answerText" | "answerStreaming" | "questionGroups" | "activeQuestionGroupId" | "activeAnswerGroupId" | "answerThreads" | "remoteTranscript" | "micTranscript" | "capability" | "probeResult" | "asrDiagnostics" | "notice">;
+
+const EMPTY_RENDER_STATE: AudioRenderState = {
+  mic: 0,
+  system: 0,
+  state: "STOPPED",
+  overlayMode: "interactive",
+  hudState: { running: false, panelVisible: false, transcriptVisible: false, answerVisible: false, transientLayer: "none", shareMode: false, topBarVisible: false, mouseMode: "passthrough", mode: "HIDDEN" },
+  sessionState: "IDLE",
+  realtimeState: "disconnected",
+  operationMode: "IDLE",
+  runtimePhases: initialRuntimePhaseState,
+  automationMode: "AUTO",
+  answerMode: "NORMAL",
+  question: undefined,
+  answerText: "",
+  answerStreaming: false,
+  questionGroups: [],
+  activeQuestionGroupId: undefined,
+  activeAnswerGroupId: undefined,
+  answerThreads: [],
+  remoteTranscript: { source: "remote", final: [] },
+  micTranscript: { source: "mic", final: [] },
+  capability: undefined,
+  probeResult: undefined,
+  asrDiagnostics: { provider: "unknown", model: "", language: "", micState: "stopped", remoteState: "stopped", reconnectCount: 0, droppedPcmPackets: 0, vadProvider: "unknown", speechProbability: { mic: 0, remote: 0 }, micSpeech: false, remoteSpeech: false, fallback: false, vadReady: false, vadReason: "not-initialized", lastSpeechStart: {}, lastSpeechEnd: {} },
+  notice: undefined
+};
+
 const stableAnswer = new StableAnswerStateMachine();
 const answerThreadStore = new AnswerThreadStore();
 const questionsById = new Map<string, QuestionCandidate>();
@@ -685,7 +716,14 @@ function HistoryDetailPanel({ detail, metrics }: { detail: HistoryDetail; metric
 }
 
 function OverlayView(): JSX.Element {
-  const { mic, system, state, overlayMode, question, answerText, answerStreaming, answerMode } = useAudioStore();
+  const mic = useAudioStore((store) => store.mic);
+  const system = useAudioStore((store) => store.system);
+  const state = useAudioStore((store) => store.state);
+  const overlayMode = useAudioStore((store) => store.overlayMode);
+  const question = useAudioStore((store) => store.question);
+  const answerText = useAudioStore((store) => store.answerText);
+  const answerStreaming = useAudioStore((store) => store.answerStreaming);
+  const answerMode = useAudioStore((store) => store.answerMode);
   const toggleMode = async () => {
     await window.interviewCopilot.overlay.setMode(overlayMode === "interactive" ? "passive" : "interactive");
   };
@@ -800,7 +838,45 @@ export function App(): JSX.Element {
   const overlaySurface = useMemo(() => { const mode = new URLSearchParams(window.location.search).get("window"); return mode === "overlay-control" ? "control" : mode === "overlay-question" ? "question" : mode === "overlay-answer" ? "answer" : undefined; }, []);
   const isOverlay = Boolean(overlaySurface);
   const captureTest = useMemo(() => new URLSearchParams(window.location.search).get("capture-test") === "1", []);
-  const store = useAudioStore();
+  // Main-window rendering only selects the low-frequency state it displays.
+  // Overlay windows opt into the full runtime snapshot because they are the
+  // dedicated high-frequency surfaces; audio meter/answer deltas no longer
+  // invalidate the whole desktop React tree.
+  const renderStore = useAudioStore(useShallow((state): AudioRenderState => isOverlay ? {
+    mic: state.mic,
+    system: state.system,
+    state: state.state,
+    overlayMode: state.overlayMode,
+    hudState: state.hudState,
+    sessionState: state.sessionState,
+    realtimeState: state.realtimeState,
+    operationMode: state.operationMode,
+    runtimePhases: state.runtimePhases,
+    automationMode: state.automationMode,
+    answerMode: state.answerMode,
+    question: state.question,
+    answerText: state.answerText,
+    answerStreaming: state.answerStreaming,
+    questionGroups: state.questionGroups,
+    activeQuestionGroupId: state.activeQuestionGroupId,
+    activeAnswerGroupId: state.activeAnswerGroupId,
+    answerThreads: state.answerThreads,
+    remoteTranscript: state.remoteTranscript,
+    micTranscript: state.micTranscript,
+    capability: state.capability,
+    probeResult: state.probeResult,
+    asrDiagnostics: state.asrDiagnostics,
+    notice: state.notice
+  } : {
+    ...EMPTY_RENDER_STATE,
+    automationMode: state.automationMode,
+    answerMode: state.answerMode,
+    capability: state.capability,
+    probeResult: state.probeResult,
+    asrDiagnostics: state.asrDiagnostics,
+    notice: state.notice
+  }));
+  const store = { ...useAudioStore.getState(), ...renderStore };
   useEffect(() => {
     // The initial mode event can be emitted before the overlay renderer has
     // finished mounting. Mirror the native OverlayManager default locally so
@@ -1055,13 +1131,18 @@ export function App(): JSX.Element {
       window.interviewCopilot.events.onOverlayPreferences(setOverlayPreferences),
       window.interviewCopilot.events.onScreenshot(store.setScreenshot),
       window.interviewCopilot.events.onScreenshotError(store.setNotice),
-      window.interviewCopilot.events.onScreenshotDiagnostic(store.setNotice),
+      window.interviewCopilot.events.onScreenshotDiagnostic((message) => { const notice = userFacingRuntimeDiagnostic(message); if (notice) store.setNotice(notice); }),
       window.interviewCopilot.events.onRealtimeState(store.setRealtimeState),
       window.interviewCopilot.events.onRealtimeTranscript(store.applyTranscript),
       window.interviewCopilot.events.onRealtimeMessage(store.applyRealtimeMessage),
-      window.interviewCopilot.events.onRealtimeDiagnostic(store.setNotice),
+      window.interviewCopilot.events.onRealtimeDiagnostic((message) => { const notice = userFacingRuntimeDiagnostic(message); if (notice) store.setNotice(notice); }),
       window.interviewCopilot.events.onRealtimeDiagnostics((diagnostics) => store.setAsrDiagnostics(diagnostics)),
-      window.interviewCopilot.events.onRuntimeError((error) => store.setNotice(`${error.code}: ${error.message}${error.recoverable ? " · 可重试" : ""}`)),
+      window.interviewCopilot.events.onRuntimeError((error) => {
+        const raw = `${error.code}: ${error.message}`;
+        if (/^(?:ANSWER_QUEUED|QUESTION_CONFIRMED|REQUEST_SENT|PROVIDER_REQUEST_SENT)\b/i.test(raw)) return;
+        const notice = userFacingRuntimeDiagnostic(raw) ?? raw.replace(/\bquestion-[a-z0-9-]+\b/gi, "").replace(/\s{2,}/g, " ").trim();
+        store.setNotice(`${notice}${error.recoverable ? " · 可重试" : ""}`);
+      }),
       window.interviewCopilot.events.onQuestion(store.applyQuestion),
       window.interviewCopilot.events.onAutomationMode(store.setAutomationMode),
       window.interviewCopilot.events.onAnswerMode((mode) => { store.setAnswerMode(mode); setAnswerMode(mode); }),
@@ -1905,12 +1986,14 @@ export function App(): JSX.Element {
       <Sidebar page={page} projects={projects} conversations={conversations} onNavigate={setPage} onNewConversation={beginNewConversation} onOpenConversation={(conversationId) => void openConversation(conversationId)} onOpenProject={(projectId) => { if (page === "project-library") { setSelectedProjectId(projectId); } else { void openProject(projectId); } }} onRenameProject={(projectId, name) => void renameProject(projectId, name)} onDeleteProject={(projectId, name) => void deleteProject(projectId, name)} />
       <section className="content-shell">
         <div className="modern-topbar"><div className="topbar-context"><span className="topbar-breadcrumb">{page === "project-library" ? "项目库" : "Interview Copilot"}</span><span className="topbar-slash">/</span><strong>{page === "project-library" ? "项目详情" : pageTitle}</strong></div><div className="topbar-actions"><span className="topbar-profile">{selectedProfile ? `当前档案 · ${selectedProfile.name}` : "未选择面试档案"}</span>{page === "project-library" && <button className="topbar-settings-button" aria-label="项目库设置" onClick={() => setPage("settings")}>⚙</button>}<button className="dark-pill start-interview" onClick={openInterviewSetup}>开始面试 <span>↗</span></button></div></div>
-        <div className="modern-main">
+        <div className="content-viewport">
+          <div className="modern-main">
           {page === "interview" && <section className="interview-context-panel"><div><span className="page-kicker">ANSWER CONTEXT</span><strong>本轮回答上下文</strong><small>未选择时，系统会根据面试问题自动识别项目和岗位。</small></div><label className="clean-field"><span>目标岗位</span><select value={interviewJobTargetId} onChange={(event) => setInterviewJobTargetId(event.target.value)}><option value="">自动使用当前岗位</option>{jobTargets.map((target) => <option value={target.id} key={target.id}>{target.name}</option>)}</select></label><label className="clean-field"><span>重点项目</span><select value={interviewProjectId} onChange={(event) => setInterviewProjectId(event.target.value)}><option value="">根据问题自动识别</option>{projectMemory?.projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label></section>}
           <PageErrorBoundary page={page}>{modernPageContent}</PageErrorBoundary>
           {page === "home" && <ChatResponseSupplement messages={chatMessages} onApproveAction={approveChatAction} />}
+          </div>
+          {(page === "home" || page === "interview") && <div className="composer-dock"><div className="chat-context-capsules chat-context-capsules-composer"><span>档案：{selectedProfile?.name ?? "未选择"}</span><span>项目：{selectedProjectId ? projects.find((project) => project.id === selectedProjectId)?.name ?? "当前项目" : "自动"}</span><span>知识：自动检索</span><span>事实策略：仅已确认</span></div><ChatComposer value={composerText} onChange={setComposerText} onSubmit={() => void submitComposer()} onCreateProject={() => void createProject()} /></div>}
         </div>
-        {(page === "home" || page === "interview") && <><div className="chat-context-capsules chat-context-capsules-composer"><span>档案：{selectedProfile?.name ?? "未选择"}</span><span>项目：{selectedProjectId ? projects.find((project) => project.id === selectedProjectId)?.name ?? "当前项目" : "自动"}</span><span>知识：自动检索</span><span>事实策略：仅已确认</span></div><ChatComposer value={composerText} onChange={setComposerText} onSubmit={() => void submitComposer()} onCreateProject={() => void createProject()} /></>}
         {store.notice && <button className={`notice-toast notice-${store.notice.kind}`} onClick={() => store.setNotice(undefined)}>{store.notice.text} <span>×</span></button>}
       </section>
       {dialog && <AppDialog dialog={dialog} onConfirm={(value) => closeDialog(dialog.kind === "confirm" ? true : value)} onCancel={() => closeDialog(undefined)} />}

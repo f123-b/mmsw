@@ -27,6 +27,42 @@ export const TECHNICAL_DOMAINS = [
 ] as const;
 
 export type TechnicalDomain = typeof TECHNICAL_DOMAINS[number];
+
+/**
+ * Stable UI labels for the internal technical-domain ids.
+ *
+ * Keep the ids as the protocol/storage contract and use this map whenever a
+ * domain is rendered.  This avoids leaking routing implementation details
+ * such as `motor_control` into user-facing surfaces.
+ */
+export const TECHNICAL_DOMAIN_LABELS: Readonly<Record<TechnicalDomain, string>> = {
+  common_cs: "计算机基础",
+  c_cpp: "C / C++",
+  embedded: "嵌入式",
+  linux: "Linux",
+  network: "网络",
+  database: "数据库",
+  java: "Java",
+  backend: "后端",
+  frontend: "前端",
+  algorithm: "算法",
+  ai_cv: "AI / CV",
+  fpga_ic: "FPGA / IC",
+  devops: "DevOps",
+  motor_control: "电机控制",
+  control_algorithm: "控制算法",
+  robotics: "机器人",
+  ros: "ROS2",
+  ai_application: "AI 应用",
+  llm: "大语言模型",
+  computer_vision: "计算机视觉",
+  computer_architecture: "计算机体系结构",
+  verification: "芯片验证",
+  project: "项目",
+  resume: "Resume",
+  job: "岗位要求"
+};
+
 export type TechnicalTermSource = "builtin" | "resume" | "job" | "project" | "user" | "session";
 export type TerminologyRolloutMode = "legacy" | "shadow" | "high_confidence" | "dynamic";
 

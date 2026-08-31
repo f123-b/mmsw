@@ -1,7 +1,7 @@
 import { useEffect, useState, type JSX } from "react";
 import type { OverlayPreferences } from "../../shared/overlay-preferences";
 import { DEFAULT_OVERLAY_PREFERENCES } from "../../shared/overlay-preferences";
-import { DraggableResizablePanel, type OverlayPanelLayout, type OverlayRootProps } from "./OverlayRoot";
+import { DraggableResizablePanel, overlayWindowStyle, type OverlayPanelLayout, type OverlayRootProps } from "./OverlayRoot";
 import { primaryRuntimeStatus } from "./runtime-state";
 
 /** ControlWindow deliberately renders only the always-clickable toolbar. */
@@ -25,8 +25,9 @@ export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
   const writtenPreferences = preferences.writtenTest;
   const statusLabel = primaryRuntimeStatus(props.runtimePhases);
   const answerReady = props.runtimePhases.answerPhase === "READY";
-  return <main className="overlay-root control-overlay-root" data-overlay-surface="control" data-hud-state={statusLabel} data-operation-mode={props.operationMode}>
-    {preferences.showToolbar && <DraggableResizablePanel panel="toolbar" nativePanel="control" geometryMode={props.operationMode === "WRITTEN_TEST" ? "writtenTest" : "interview"} geometryPreset={props.operationMode === "WRITTEN_TEST" ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={layout} onChange={(_panel, patch) => setLayout((current) => ({ ...current, ...patch }))} onCommit={() => undefined} editMode={layoutEditMode} className="toolbar-panel">
+  const controlPreferences = interviewMode ? interviewPreferences.controlBar : writtenPreferences.controlBar;
+  return <main className="overlay-root control-overlay-root" data-overlay-surface="control" data-hud-state={statusLabel} data-operation-mode={props.operationMode} style={overlayWindowStyle(controlPreferences, preferences.appearance)}>
+    {preferences.showToolbar && <DraggableResizablePanel panel="toolbar" nativePanel="control" geometryMode={props.operationMode === "WRITTEN_TEST" ? "writtenTest" : "interview"} geometryPreset={props.operationMode === "WRITTEN_TEST" ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={layout} onChange={(_panel, patch) => setLayout((current) => ({ ...current, ...patch }))} onCommit={() => undefined} editMode={layoutEditMode} className="toolbar-panel" windowPreferences={controlPreferences}>
       <div className="floating-toolbar hud-interactive-region" role="toolbar" aria-label={`${modeLabel}控制栏`}>
         <span className="toolbar-audio-mark" aria-hidden="true">≈</span>
         <div className="toolbar-status-inline" data-testid="toolbar-status"><i aria-hidden="true" /><span>{statusLabel}</span></div>

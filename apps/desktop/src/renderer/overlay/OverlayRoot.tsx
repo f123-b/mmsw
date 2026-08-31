@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type JSX, type RefObject } from "react";
 import type { AnswerThread, TranscriptSnapshot } from "@interview-copilot/shared";
 import type { HUDLayout, HUDState, OverlayMode } from "../../main/overlay-manager";
-import { DEFAULT_OVERLAY_PREFERENCES, type OverlayPreferences } from "../../shared/overlay-preferences";
+import { DEFAULT_OVERLAY_PREFERENCES, type OverlayAppearancePreferences, type OverlayPreferences, type OverlayWindowPreferences } from "../../shared/overlay-preferences";
 import { resolveOverlayPersistedGeometry, toRelativeOverlayBounds } from "../../shared/overlay-layout";
 import { boundsForPanel, clampDesignerRect, resizeDesignerRect, snapDesignerRect, type DesignerPanel, type ResizeHandle, type DesignerGeometryContext } from "./overlay-designer";
 import { isDisplayableQuestionGroup, type RuntimePhaseState } from "./runtime-state";
@@ -12,6 +12,41 @@ export type OverlaySurface = "question" | "answer" | "control" | "transient";
 export type OverlayPanelLayout = { x: number; y: number; width: number; height: number; visible: boolean; collapsed: boolean; locked: boolean; opacity: number };
 type PanelLayout = OverlayPanelLayout;
 type OverlayLayout = Record<PanelKey, PanelLayout>;
+
+type OverlayCssVariables = CSSProperties & Record<`--${string}`, string>;
+
+/** Keep preference application at the surface root instead of scattering
+ * inline styles across content nodes.  Each native window/panel supplies its
+ * own variables, so question, dialogue, answer and control text stay
+ * independently configurable. */
+export function overlayWindowStyle(windowPreferences: OverlayWindowPreferences, appearance: OverlayAppearancePreferences = DEFAULT_OVERLAY_PREFERENCES.appearance): OverlayCssVariables {
+  const shadow = appearance.textShadow === "medium"
+    ? "0 1px 3px rgba(0, 0, 0, .92)"
+    : appearance.textShadow === "soft"
+      ? "0 1px 2px rgba(0, 0, 0, .72)"
+      : "none";
+  return {
+    "--overlay-font-size": `${windowPreferences.fontSize}px`,
+    "--overlay-title-font-size": `${windowPreferences.titleFontSize}px`,
+    "--overlay-font-weight": String(windowPreferences.fontWeight),
+    "--overlay-line-height": String(windowPreferences.lineHeight),
+    "--overlay-paragraph-gap": `${windowPreferences.paragraphGap}px`,
+    "--overlay-item-gap": `${windowPreferences.itemGap}px`,
+    "--overlay-padding": `${windowPreferences.padding}px`,
+    "--overlay-background-color": windowPreferences.backgroundColor,
+    "--overlay-background-opacity": String(windowPreferences.backgroundOpacity),
+    "--overlay-text-color": windowPreferences.textColor,
+    "--overlay-text-opacity": String(windowPreferences.textOpacity),
+    "--overlay-border-opacity": String(windowPreferences.border ? windowPreferences.borderOpacity : 0),
+    "--overlay-border-width": windowPreferences.border ? "1px" : "0px",
+    "--overlay-blur": `${windowPreferences.blur}px`,
+    "--overlay-radius": `${windowPreferences.radius}px`,
+    "--overlay-shadow": windowPreferences.shadow ? "0 10px 26px rgba(17, 39, 67, .18)" : "none",
+    "--overlay-text-shadow": shadow,
+    "--overlay-text-only-shadow": "0 1px 2px rgba(0, 0, 0, .88), 0 0 1px rgba(0, 0, 0, .88)",
+    "--overlay-text-outline": appearance.textOutline ? `${appearance.textOutline}px` : "0px"
+  };
+}
 
 export interface OverlayRootProps {
   surface?: OverlaySurface;
@@ -126,9 +161,11 @@ export interface DraggableResizablePanelProps {
   nativePanel?: "question" | "answer" | "control";
   geometryMode: DesignerGeometryContext["mode"];
   geometryPreset: DesignerGeometryContext["preset"];
+  windowPreferences?: OverlayWindowPreferences;
+  appearance?: OverlayAppearancePreferences;
 }
 
-export function DraggableResizablePanel({ panel, layout, onChange, onCommit, editMode, className, children, nativePanel, geometryMode, geometryPreset }: DraggableResizablePanelProps): JSX.Element {
+export function DraggableResizablePanel({ panel, layout, onChange, onCommit, editMode, className, children, nativePanel, geometryMode, geometryPreset, windowPreferences, appearance }: DraggableResizablePanelProps): JSX.Element {
   const [dragging, setDragging] = useState(false);
   const cleanupRef = useRef<(() => void) | undefined>(undefined);
   useEffect(() => () => cleanupRef.current?.(), []);
@@ -170,7 +207,7 @@ export function DraggableResizablePanel({ panel, layout, onChange, onCommit, edi
     window.addEventListener("pointercancel", end, { once: true });
     window.addEventListener("blur", end, { once: true });
   };
-  const panelStyle = { left: layout.x, top: layout.y, width: layout.width, height: layout.height, display: layout.visible ? undefined : "none" } as CSSProperties;
+  const panelStyle = { left: layout.x, top: layout.y, width: layout.width, height: layout.height, display: layout.visible ? undefined : "none", ...(windowPreferences ? overlayWindowStyle(windowPreferences, appearance) : {}) } as CSSProperties;
   const resizeHandles: ResizeHandle[] = ["n", "ne", "e", "se", "s", "sw", "w", "nw"];
   return <div className={`floating-panel ${className} ${dragging ? "dragging" : ""} ${editMode ? "layout-editing" : ""}`} data-panel={panel} style={panelStyle} onPointerDown={beginDrag}>{children}{editMode && !layout.locked && resizeHandles.map((handle) => <div className={`resize-handle resize-handle-${handle}`} aria-label={`调整大小 ${handle}`} key={handle} onPointerDown={(event) => beginResize(handle, event)} />)}</div>;
 }
@@ -222,7 +259,16 @@ function useScrollFollow(ref: RefObject<HTMLDivElement | null>, contentKey: stri
   const [following, setFollowing] = useState(true);
   const lastContentKey = useRef(contentKey);
   const resumeTimer = useRef<number | undefined>(undefined);
+  const scrollRaf = useRef<number | undefined>(undefined);
   const clearResumeTimer = () => { if (resumeTimer.current !== undefined) { window.clearTimeout(resumeTimer.current); resumeTimer.current = undefined; } };
+  const scheduleTail = useCallback(() => {
+    if (scrollRaf.current !== undefined) return;
+    scrollRaf.current = window.requestAnimationFrame(() => {
+      scrollRaf.current = undefined;
+      const element = ref.current;
+      if (element && enabled && following) element.scrollTop = element.scrollHeight;
+    });
+  }, [enabled, following, ref]);
   useEffect(() => {
     if (lastContentKey.current !== contentKey) {
       lastContentKey.current = contentKey;
@@ -232,7 +278,7 @@ function useScrollFollow(ref: RefObject<HTMLDivElement | null>, contentKey: stri
       if (enabled) setFollowing(true);
     }
   }, [contentKey, enabled]);
-  useEffect(() => () => clearResumeTimer(), []);
+  useEffect(() => () => { clearResumeTimer(); if (scrollRaf.current !== undefined) window.cancelAnimationFrame(scrollRaf.current); }, []);
   useEffect(() => {
     if (enabled && !following) return;
     if (!enabled) setFollowing(true);
@@ -240,8 +286,8 @@ function useScrollFollow(ref: RefObject<HTMLDivElement | null>, contentKey: stri
   useEffect(() => {
     const element = ref.current;
     if (!element || !enabled || !following) return;
-    element.scrollTop = element.scrollHeight;
-  }, [contentKey, enabled, following, ref]);
+    scheduleTail();
+  }, [contentKey, enabled, following, ref, scheduleTail]);
   const onScroll = () => {
     const element = ref.current;
     if (!element) return;
@@ -363,6 +409,8 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   const transcriptVisible = !visualHidden && leftPanel !== "hidden" && (!nativeSurface || nativeSurface === "question") && panel !== "answer" && (layoutEditMode || props.hudState.transcriptVisible);
   const answerVisible = !visualHidden && (!nativeSurface || nativeSurface === "answer") && panel !== "question" && (writtenTestMode ? writtenPreferences.showAnswer : interviewPreferences.showAnswer) && (layoutEditMode || props.hudState.answerVisible);
   const singleWrittenReader = writtenTestMode && writtenPreferences.layoutPreset === "single_reader";
+  const questionPreferences = writtenTestMode ? writtenPreferences.questionWindow : leftPanel === "dialogue" ? interviewPreferences.dialogueWindow : interviewPreferences.questionWindow;
+  const answerPreferences = writtenTestMode ? writtenPreferences.answerWindow : interviewPreferences.answerWindow;
   const displayedGroups = layoutEditMode && props.questionGroups.length === 0 ? DESIGNER_QUESTION_GROUPS : props.questionGroups;
   const displayedThreads = layoutEditMode && props.answerThreads.length === 0 ? DESIGNER_ANSWER_THREADS : props.answerThreads;
   const questionViewModel = buildQuestionOverlayViewModel(displayedGroups, props.activeQuestionGroupId, props.question?.text);
@@ -388,11 +436,11 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   return <main className="overlay-root" data-overlay-surface={nativeSurface ?? "designer"} data-hud-mode={props.hudState.mode} data-share-mode={props.hudState.shareMode ? "on" : "off"} data-overlay-mode={props.overlayMode} data-layout-edit-mode={layoutEditMode ? "on" : "off"} data-appearance-mode={preferences.appearance.mode} data-operation-mode={props.operationMode}>
     {props.captureTest && !visualHidden && <div className="capture-test-marker">CAPTURE_PROTECTION_TEST_MARKER_7F32</div>}
     {transcriptVisible && (nativeSurface === "question" && !layoutEditMode
-      ? <div ref={nativeContentRef} className="native-content-window native-window-shell question-panel">{singleWrittenReader ? <WrittenTestReaderContent viewModel={answerViewModel} autoFollow={autoFollowAnswer} /> : writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} autoFollow={autoFollowQuestion} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} autoFollow={autoFollowQuestion} />}</div>
-      : <DraggableResizablePanel panel="transcript" nativePanel={nativeSurface === "question" ? "question" : undefined} geometryMode={writtenTestMode ? "writtenTest" : "interview"} geometryPreset={writtenTestMode ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={{ ...layout.transcript, visible: true, locked: !layoutEditMode && (layout.transcript.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="question-panel">{writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} autoFollow={autoFollowQuestion} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} autoFollow={autoFollowQuestion} />}</DraggableResizablePanel>)}
+      ? <div ref={nativeContentRef} className="native-content-window native-window-shell question-panel" style={overlayWindowStyle(questionPreferences, preferences.appearance)}>{singleWrittenReader ? <WrittenTestReaderContent viewModel={answerViewModel} autoFollow={autoFollowAnswer} /> : writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} autoFollow={autoFollowQuestion} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} autoFollow={autoFollowQuestion} />}</div>
+      : <DraggableResizablePanel panel="transcript" nativePanel={nativeSurface === "question" ? "question" : undefined} geometryMode={writtenTestMode ? "writtenTest" : "interview"} geometryPreset={writtenTestMode ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={{ ...layout.transcript, visible: true, locked: !layoutEditMode && (layout.transcript.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="question-panel" windowPreferences={questionPreferences} appearance={preferences.appearance}>{writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} autoFollow={autoFollowQuestion} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} autoFollow={autoFollowQuestion} />}</DraggableResizablePanel>)}
     {answerVisible && !singleWrittenReader && (nativeSurface === "answer" && !layoutEditMode
-      ? <div ref={nativeContentRef} className="native-content-window native-window-shell answer-panel"><AnswerOverlayContent viewModel={answerViewModel} autoFollow={autoFollowAnswer} /></div>
-      : <DraggableResizablePanel panel="answer" nativePanel={nativeSurface === "answer" ? "answer" : undefined} geometryMode={writtenTestMode ? "writtenTest" : "interview"} geometryPreset={writtenTestMode ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={{ ...layout.answer, visible: true, locked: !layoutEditMode && (layout.answer.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="answer-panel"><AnswerOverlayContent viewModel={answerViewModel} autoFollow={autoFollowAnswer} /></DraggableResizablePanel>)}
+      ? <div ref={nativeContentRef} className="native-content-window native-window-shell answer-panel" style={overlayWindowStyle(answerPreferences, preferences.appearance)}><AnswerOverlayContent viewModel={answerViewModel} autoFollow={autoFollowAnswer} /></div>
+      : <DraggableResizablePanel panel="answer" nativePanel={nativeSurface === "answer" ? "answer" : undefined} geometryMode={writtenTestMode ? "writtenTest" : "interview"} geometryPreset={writtenTestMode ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={{ ...layout.answer, visible: true, locked: !layoutEditMode && (layout.answer.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="answer-panel" windowPreferences={answerPreferences} appearance={preferences.appearance}><AnswerOverlayContent viewModel={answerViewModel} autoFollow={autoFollowAnswer} /></DraggableResizablePanel>)}
     {layoutEditMode && !visualHidden && <div className="layout-edit-toolbar hud-interactive-region"><span>布局编辑模式</span><button onClick={() => void window.interviewCopilot.overlay.finishLayoutEditMode()}>完成布局</button></div>}
     {!visualHidden && <div className={`hud-protection-indicator ${protectionTone}`} aria-hidden="true">{effectiveProtectionEnabled ? "◈" : "·"}</div>}
   </main>;

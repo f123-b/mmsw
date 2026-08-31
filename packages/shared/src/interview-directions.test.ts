@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildSessionTerminologyContext } from "./terminology/dynamic-lexicon-builder";
 import { INTERVIEW_DIRECTION_PRESETS, INTERVIEW_DIRECTION_WEIGHT, resolveInterviewDomainContext } from "./interview-directions";
+import { TECHNICAL_DOMAIN_LABELS, TECHNICAL_DOMAINS } from "./terminology/terminology-types";
 
 describe("interview direction compatibility layer", () => {
   it("keeps the legacy route untouched when no selection is supplied", () => {
@@ -46,5 +47,12 @@ describe("interview direction compatibility layer", () => {
   it("keeps the preset catalog additive and exposes all requested directions", () => {
     const ids = new Set(INTERVIEW_DIRECTION_PRESETS.map((preset) => preset.id));
     expect([...ids]).toEqual(expect.arrayContaining(["auto", "embedded_software", "motor_control", "c_cpp_systems", "linux_systems", "ai_application", "ai_cv", "robotics_ros2", "java_backend", "frontend", "algorithms", "network", "database", "fpga", "digital_ic_verification", "devops", "custom"]));
+  });
+
+  it("provides a stable user-facing label for every internal domain id", () => {
+    for (const domain of TECHNICAL_DOMAINS) {
+      expect(TECHNICAL_DOMAIN_LABELS[domain]).toBeTruthy();
+      expect(TECHNICAL_DOMAIN_LABELS[domain]).not.toBe(domain);
+    }
   });
 });
