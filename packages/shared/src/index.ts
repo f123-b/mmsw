@@ -128,6 +128,7 @@ export { UnresolvedAsrGate, type AsrUnderstandingQuality, type UnresolvedAsrDeci
 export { analyzeQuestionNucleus, type QuestionNucleusAnalysis, type QuestionNucleusIntent } from "./question/question-nucleus";
 export { ProjectAliasResolver, type ProjectAliasCandidate, type ProjectAliasResolution } from "./project-alias-resolver";
 export { detectSelfIntroductionIntent, analyzeSelfIntroductionIntent, isSelfIntroductionRequest, type SelfIntroductionIntent } from "./interview/self-introduction-intent";
+export { createSelfIntroductionAnswerPlan } from "./interview/self-introduction-answer-plan";
 
 export interface TranscriptSnapshot {
   source: TranscriptSource;
