@@ -5,6 +5,8 @@ export type AnswerSourceMode =
   | "project_qa_direct"
   | "project_qa_augmented"
   | "project_knowledge_generated"
+  | "self_intro_direct"
+  | "self_intro_rewrite"
   | "general_technical"
   | "general_core_qa"
   | "personal_experience";

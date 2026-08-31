@@ -1254,7 +1254,7 @@ export class SqliteProfileSelfIntroductionRepository {
     return this.getById(id);
   }
 
-  private getById(id: string): ProfileSelfIntroductionRecord | undefined {
+  getById(id: string): ProfileSelfIntroductionRecord | undefined {
     const row = this.database.first<Record<string, unknown>>("SELECT id, profile_id AS profileId, resume_hash AS resumeHash, text, source, approved, target_duration_seconds AS targetDurationSeconds, language, created_at AS createdAt, updated_at AS updatedAt FROM profile_self_introductions WHERE id = ?", [id]);
     return row ? this.hydrate(row) : undefined;
   }

@@ -335,6 +335,10 @@ body { background: #f1f1ee; color: var(--text-primary); }
 .profile-project-card strong { color: #263650; }
 .profile-project-card p { margin: 6px 0; color: #68758a; line-height: 1.5; }
 .profile-project-card small { color: #7392bd; }
+.profile-project-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.profile-project-heading span { color: #7c8798; font-size: 11px; }
+.self-introduction-editor { width: 100%; box-sizing: border-box; margin: 16px 0 12px; min-height: 190px; resize: vertical; border: 1px solid #dfe5ee; border-radius: 10px; padding: 12px; color: #263650; background: #fbfcfe; line-height: 1.6; font: inherit; }
+.self-introduction-panel .detail-actions { flex-wrap: wrap; }
 .profile-raw-material { margin-top: 18px; border-top: 1px solid #e5eaf1; padding-top: 14px; color: #637087; font-size: 13px; }
 .profile-raw-material summary { cursor: pointer; color: #526987; }
 .profile-raw-material pre { max-height: 320px; overflow: auto; margin-top: 12px; white-space: pre-wrap; font: inherit; line-height: 1.55; }

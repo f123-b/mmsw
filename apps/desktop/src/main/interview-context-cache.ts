@@ -13,6 +13,7 @@ function keyOf(key: InterviewContextCacheKey): string {
 function cloneContext(context: AnswerContextInput): AnswerContextInput {
   return {
     ...context,
+    ...(context.selfIntroduction ? { selfIntroduction: { ...context.selfIntroduction } } : {}),
     skills: context.skills?.map((item) => ({ ...item })),
     experienceContext: [...(context.experienceContext ?? [])],
     personalMemoryEvidence: [...(context.personalMemoryEvidence ?? [])],

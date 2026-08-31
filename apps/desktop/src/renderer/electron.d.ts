@@ -155,6 +155,7 @@ declare global {
         save(input: ProfileSelfIntroductionInput): Promise<ProfileSelfIntroductionRecord | undefined>;
         approve(id: string, resumeHash?: string): Promise<ProfileSelfIntroductionRecord | undefined>;
         continueUsing(id: string, resumeHash: string): Promise<ProfileSelfIntroductionRecord | undefined>;
+        generate(profileId: string, targetDurationSeconds?: number, language?: string): Promise<ProfileSelfIntroductionRecord | undefined>;
         upload(input: { profileId: string; resumeHash: string; filename: string; mimeType: string; bytes: Uint8Array; targetDurationSeconds?: number; language?: string }): Promise<ProfileSelfIntroductionRecord | undefined>;
       };
       projectMemory: {

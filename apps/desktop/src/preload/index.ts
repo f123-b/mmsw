@@ -184,6 +184,7 @@ const api = {
     save: (input: ProfileSelfIntroductionInput): Promise<ProfileSelfIntroductionRecord | undefined> => ipcRenderer.invoke("self-introduction:save", input),
     approve: (id: string, resumeHash?: string): Promise<ProfileSelfIntroductionRecord | undefined> => ipcRenderer.invoke("self-introduction:approve", { id, resumeHash }),
     continueUsing: (id: string, resumeHash: string): Promise<ProfileSelfIntroductionRecord | undefined> => ipcRenderer.invoke("self-introduction:continue-using", { id, resumeHash }),
+    generate: (profileId: string, targetDurationSeconds?: number, language?: string): Promise<ProfileSelfIntroductionRecord | undefined> => ipcRenderer.invoke("self-introduction:generate", { profileId, targetDurationSeconds, language }),
     upload: (input: { profileId: string; resumeHash: string; filename: string; mimeType: string; bytes: Uint8Array; targetDurationSeconds?: number; language?: string }): Promise<ProfileSelfIntroductionRecord | undefined> => ipcRenderer.invoke("self-introduction:upload", input)
   },
   projectMemory: {

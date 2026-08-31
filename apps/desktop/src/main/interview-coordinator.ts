@@ -855,7 +855,19 @@ export class InterviewCoordinator extends EventEmitter {
         this.recordRuntimeTrace("RICH_CONTEXT_STARTED", {}, { questionId: question.id, providerRequestId });
         this.recordRuntimeTrace("RICH_CONTEXT_COMPLETED", {}, { questionId: question.id, providerRequestId });
       }
-      const projectQaDirect = providerContext.answerSourcePlan?.mode === "project_qa_direct";
+      const contextTelemetry = providerContext.questionTelemetry ?? {};
+      const contextSourceMode = providerContext.answerSourcePlan?.mode;
+      if (contextTelemetry.selfIntroductionDetected) {
+        this.recordRuntimeTrace("SELF_INTRO_DETECTED", { confidence: 0.99, cacheHit: Boolean(providerContext.selfIntroduction?.approved) }, { questionId: question.id, providerRequestId });
+        if (contextSourceMode === "self_intro_rewrite") this.recordRuntimeTrace("SELF_INTRO_REWRITE", { cacheHit: true }, { questionId: question.id, providerRequestId });
+      }
+      if (contextTelemetry.projectResolutionReason && contextTelemetry.projectAutoAnchorId) this.recordRuntimeTrace("PROJECT_RESOLVED", { reason: contextTelemetry.projectResolutionReason, score: contextTelemetry.projectAutoAnchorConfidence }, { questionId: question.id, providerRequestId });
+      if (contextTelemetry.projectQuestionRequested) {
+        this.recordRuntimeTrace("PROJECT_QA_ROUTE", { matchLevel: contextTelemetry.projectQaMatchLevel, overviewHitCount: contextTelemetry.projectOverviewHitCount, cacheHit: contextTelemetry.projectCacheHit }, { questionId: question.id, providerRequestId });
+        if ((contextTelemetry.projectOverviewHitCount ?? 0) > 0) this.recordRuntimeTrace("PROJECT_OVERVIEW_RETRIEVAL", { hitCount: contextTelemetry.projectOverviewHitCount, cacheHit: contextTelemetry.projectCacheHit }, { questionId: question.id, providerRequestId });
+        if (providerContext.contextMode === "fast") this.recordRuntimeTrace("PROJECT_FAST_CONTEXT_READY", { route: contextSourceMode, cacheHit: contextTelemetry.projectCacheHit }, { questionId: question.id, providerRequestId });
+      }
+      const projectQaContextDirect = providerContext.answerSourcePlan?.mode === "project_qa_direct" || providerContext.answerSourcePlan?.mode === "self_intro_direct" || providerContext.answerSourcePlan?.mode === "self_intro_rewrite";
       const evidenceSnapshot: EvidenceSnapshot = this.contextLock.lock({
         questionId: question.id,
         profileId: this.activeProfileId,
@@ -869,10 +881,10 @@ export class InterviewCoordinator extends EventEmitter {
         currentTopic: providerContext.currentTopic ?? frozenContext.memory.currentTopic,
         personalMemoryEvidence: providerContext.personalMemoryEvidence,
         experienceContext: providerContext.experienceContext,
-        projectEvidence: projectQaDirect ? [] : providerContext.projectEvidence,
+        projectEvidence: projectQaContextDirect ? [] : providerContext.projectEvidence,
         verifiedResumeEvidence: providerContext.verifiedResumeEvidence,
         verifiedPersonalProjectFacts: providerContext.verifiedPersonalProjectFacts,
-        retrievedKnowledge: projectQaDirect ? [] : providerContext.retrievedKnowledge,
+        retrievedKnowledge: projectQaContextDirect ? [] : providerContext.retrievedKnowledge,
         answerSourcePlan: providerContext.answerSourcePlan,
         projectQaEvidence: providerContext.projectQaEvidence,
         recentTranscript: frozenContext.recentTranscript,
@@ -917,8 +929,13 @@ export class InterviewCoordinator extends EventEmitter {
         || (isFollowUp && (/项目|简历|经历|负责|做过|成果|业绩/.test(personalThreadText) || (lockedProviderContext.sessionEvidence?.length ?? 0) > 0));
       const projectQaMode = lockedProviderContext.answerSourcePlan?.mode;
       const requiresClaimValidation = requiresPersonalGrounding || projectQaMode === "project_qa_direct" || projectQaMode === "project_qa_augmented";
-      if (preparedAnswer && preparedAnswer.verified && preparedAnswer.score >= 0.88 && !streamOptions.hasScreenshot && !isProjectQuestion && !answerIntent.requiresPersonalIdentity && !requiresClaimValidation) {
+      const selfIntroDirect = projectQaMode === "self_intro_direct";
+      const projectQaDirect = projectQaMode === "project_qa_direct";
+      const ordinaryQuestionBankDirect = !isProjectQuestion && !answerIntent.requiresPersonalIdentity && !requiresClaimValidation;
+      if (preparedAnswer && preparedAnswer.verified && preparedAnswer.score >= 0.88 && !streamOptions.hasScreenshot && (ordinaryQuestionBankDirect || selfIntroDirect || projectQaDirect)) {
         this.emitDiagnostic("QUESTION_BANK_DIRECT_HIT");
+        if (selfIntroDirect) this.recordRuntimeTrace("SELF_INTRO_DIRECT", { cacheHit: true }, { questionId: question.id, providerRequestId });
+        if (projectQaDirect) this.recordRuntimeTrace("PROJECT_QA_DIRECT", { cacheHit: true, qaMatchLevel: lockedProviderContext.answerSourcePlan?.qaMatchLevel }, { questionId: question.id, providerRequestId });
         const answerId = `question-bank-answer-${question.id}-${startedAt}`;
         const finishedAt = this.now();
         const answerOperation = this.runtimeAnswers.get(operationId);
@@ -931,23 +948,24 @@ export class InterviewCoordinator extends EventEmitter {
         this.answerId = answerId;
         this.answerQuestionId = question.id;
         this.answerMode = mode;
-        this.answerModel = "question-bank";
+        const directModel = selfIntroDirect ? "self-introduction" : projectQaDirect ? "project-question-bank" : "question-bank";
+        this.answerModel = directModel;
         this.answerStartedAt = startedAt;
         this.answerFirstTokenAt = finishedAt;
-        this.emitRealtimeMessage({ type: "answer_start", answerId, questionId: question.id, mode, model: "question-bank", ...(question.groupId ? { groupId: question.groupId, relation: answerRelationForQuestion(question) } : {}) });
-        const preparedText = normalizeTechnicalTerms(preparedAnswer.content);
+        this.emitRealtimeMessage({ type: "answer_start", answerId, questionId: question.id, mode, model: directModel, ...(question.groupId ? { groupId: question.groupId, relation: answerRelationForQuestion(question) } : {}) });
+        const preparedText = selfIntroDirect ? preparedAnswer.content : normalizeTechnicalTerms(preparedAnswer.content);
         this.answerScheduler.markVisibleOutput(preparedText);
         if (question.groupId) this.visibleAnswerGroups.add(question.groupId);
         const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
-        const telemetry = this.buildAnswerTelemetry(question, { answerSourceMode: "question-bank", technicalGuardDecision: "allow", technicalViolationCount: 0, claimGateDecision: "allow", blockedPersonalClaimCount: 0 });
-        this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: preparedText, model: "question-bank", mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, telemetry, ...(question.groupId ? { groupId: question.groupId } : {}), relation: answerRelationForQuestion(question), answerRunId: operationId, createdAt: finishedAt });
+        const telemetry = this.buildAnswerTelemetry(question, { answerSourceMode: projectQaMode ?? "question-bank", technicalGuardDecision: "allow", technicalViolationCount: 0, claimGateDecision: "allow", blockedPersonalClaimCount: 0 });
+        this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: preparedText, model: directModel, mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, telemetry, ...(question.groupId ? { groupId: question.groupId } : {}), relation: answerRelationForQuestion(question), answerRunId: operationId, createdAt: finishedAt });
         if (answerOperation) answerOperation.state = "committed";
-        this.recordRuntimeTrace("ANSWER_COMMITTED", {}, { questionId: question.id, answerId, providerRequestId, reasonCode: "question-bank" });
+        this.recordRuntimeTrace("ANSWER_COMMITTED", {}, { questionId: question.id, answerId, providerRequestId, reasonCode: directModel });
         this.emitRealtimeMessage({ type: "answer_end", answerId, text: preparedText });
         this.recordRuntimeTrace("FIRST_VISIBLE_TOKEN", {}, { questionId: question.id, answerId, providerRequestId });
         this.markLatency(question.id, "firstVisibleTokenAt", finishedAt);
         this.recordRuntimeTrace("ANSWER_COMPLETED", {}, { questionId: question.id, answerId, providerRequestId });
-        answerTrace?.update({ answerSource: "question-bank" }).mark("answerLookupStarted", startedAt).mark("answerVisible", finishedAt).mark("answerEnded", finishedAt);
+      answerTrace?.update({ answerSource: selfIntroDirect ? "project-qa" : projectQaDirect ? "project-qa" : "question-bank" }).mark("answerLookupStarted", startedAt).mark("answerVisible", finishedAt).mark("answerEnded", finishedAt);
         this.emitQuestionTrace(answerTrace);
         this.memory.recordAnswer(preparedText, { question: question.text, questionId: question.id, groupId: question.groupId, createdAt: finishedAt });
         this.detector.markAnswered(question.id);

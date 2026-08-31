@@ -11,7 +11,7 @@ import { createScreenshotFixtureResult, ScreenshotManager, type ScreenshotRegion
 import { createScreenshotRequestId, SCREENSHOT_PROMPT, ScreenshotOperationRegistry, ScreenshotTraceBuffer, withScreenshotTimeout, type ScreenshotTraceEvent, type ScreenshotTraceEventName } from "./screenshot-pipeline";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, analyzeQuestionNucleus, AnswerAgent, AgentToolRegistry, buildDynamicTechnicalLexicon, buildSessionTerminologyContext, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeInterviewDirectionSelection, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectAliasResolver, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, resolveInterviewDomainContext, retrieveProfileExperience, routeKnowledge, SessionStateMachine, TechnicalTerminologyNormalizer, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type InterviewDirectionSelection, type InterviewTerminologyPreview, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TerminologyRolloutMode, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, analyzeQuestionNucleus, analyzeSelfIntroductionIntent, AnswerAgent, AgentToolRegistry, buildDynamicTechnicalLexicon, buildSessionTerminologyContext, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeInterviewDirectionSelection, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectAliasResolver, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, resolveInterviewDomainContext, retrieveProfileExperience, routeKnowledge, SessionStateMachine, TechnicalTerminologyNormalizer, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type InterviewDirectionSelection, type InterviewTerminologyPreview, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TerminologyRolloutMode, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteResumeAnalysisRepository, SqliteResumeProjectLinkRepository, SqliteProfileSelfIntroductionRepository, SqliteRetrievalRepository, SqliteSkillSuggestionRepository, SqliteTerminologyRepository, type SqliteDatabase } from "./database";
@@ -29,12 +29,13 @@ import { NativeModifierShortcutManager } from "./native-modifier-shortcut";
 import { normalizeNativeScreenPoint } from "./native-screen-coordinates";
 import { DEFAULT_MAIN_WINDOW_BOUNDS, resolveMainWindowBounds, type MainWindowBounds } from "./main-window-bounds";
 import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-service-manager";
-import { createProfileBuilderModel, createResumeAnalysisModel, ProfileBuilderService } from "./profile-builder";
+import { createProfileBuilderModel, createResumeAnalysisModel, ProfileBuilderService, resumeAnalysisHash } from "./profile-builder";
 import { adaptProfileToInterviewContext } from "./profile-context-adapter";
 import { createProjectComprehensionModel, createProjectMemoryModel, ProjectMemoryService } from "./project-memory";
 import { parseRepositoryArchiveInWorker } from "./repository-import-worker-client";
 import { OnnxQuestionClassifier } from "./onnx-question-classifier";
 import { InterviewContextCache, type InterviewContextCacheKey } from "./interview-context-cache";
+import { ProjectInterviewCache } from "./project-interview-cache";
 import { formatInterviewMarkdown, type InterviewExportResult } from "./history-export";
 import { deriveProjectProblemChains, deriveProjectTechnicalDecisions, formatProjectFactValue, inferProjectSourceRole, isFactEligible, isFactReviewRequired, normalizeProjectOwnershipMode, resolveProjectAnswerPerspective } from "@interview-copilot/shared";
 import type { ChatAction, ChatCancelReason, ChatResponse } from "@interview-copilot/shared";
@@ -237,6 +238,7 @@ const chatAbortControllers = new Map<string, { controller: AbortController; reas
 const chatStreamPromises = new Set<Promise<void>>();
 const providerPreflightCache = new ProviderPreflightCache();
 const interviewContextCache = new InterviewContextCache();
+const projectInterviewCache = new ProjectInterviewCache();
 let interviewStartupTiming: InterviewStartupTiming | undefined;
 let pendingStartupButtonClickAt: number | undefined;
 let appLogger: SafeLogger | undefined;
@@ -1788,12 +1790,21 @@ function agentWorkspace(profileId: string): string {
   return join(app.getPath("userData"), "workspaces", profileId);
 }
 
+function releaseInterviewCaches(): void {
+  interviewContextCache.release();
+  projectInterviewCache.release();
+}
+
+function currentResumeHash(profileId: string): string {
+  return resumeAnalysisHash(profileRepository?.get(profileId)?.resume?.rawContent ?? "");
+}
+
 async function stopInterview(): Promise<void> {
   try {
     screenshotOperations.abortAll();
     await coordinator().stop("user");
   } finally {
-    interviewContextCache.release();
+    releaseInterviewCaches();
     // The HUD is a session-scoped window. Always restore the normal app even
     // when ASR/audio shutdown reports an error or an answer is still flushing.
     overlayManager?.exitInterviewMode();
@@ -1817,6 +1828,8 @@ function prepareInterviewContextCache(key: InterviewContextCacheKey): void {
   const parameters = projectFacts.filter((fact) => fact.type === "parameter").slice(0, 8).map((fact) => `[${fact.canonicalKey ?? "parameter"}] ${fact.title}=${formatProjectFactValue(fact.value) || fact.content}`);
   const decisions = deriveProjectTechnicalDecisions(projectFacts).slice(0, 5).map((decision) => `${decision.choice}${decision.reason ? `；原因：${decision.reason}` : ""}${decision.tradeoff ? `；取舍：${decision.tradeoff}` : ""}`);
   const problemChains = deriveProjectProblemChains(projectFacts).slice(0, 4).map((chain) => `${chain.challenge?.content ?? "问题待补充"}；原因：${chain.cause?.content ?? "待补充"}；解决：${chain.solution?.content ?? "待补充"}；结果：${chain.result?.content ?? "待补充"}`);
+  const resumeHash = resumeAnalysisHash(profile?.resume?.rawContent ?? "");
+  const cachedSelfIntroduction = profileSelfIntroductionRepository?.get(key.profileId, resumeHash);
   const structuredFastKnowledge = [
     ...(parameters.length ? [`KEY_PARAMETERS（结构化配置值）：${parameters.join("；")}`] : []),
     ...(decisions.length ? [`TECHNICAL_DECISIONS（已有选择与取舍）：${decisions.join("\n")}`] : []),
@@ -1839,7 +1852,24 @@ function prepareInterviewContextCache(key: InterviewContextCacheKey): void {
     recentTranscript: [],
     ...(interviewProfile?.candidate.companyContext ? { companyContext: interviewProfile.candidate.companyContext } : {}),
     ...(interviewProfile?.candidate.salaryExpectation ? { salaryExpectation: interviewProfile.candidate.salaryExpectation } : {}),
-    ...(project ? { currentProject: project.name } : {})
+    ...(project ? { currentProject: project.name } : {}),
+    ...(cachedSelfIntroduction?.status === "current" && cachedSelfIntroduction.approved ? { selfIntroduction: { id: cachedSelfIntroduction.id, text: cachedSelfIntroduction.text, approved: true, language: cachedSelfIntroduction.language, ...(cachedSelfIntroduction.targetDurationSeconds ? { targetDurationSeconds: cachedSelfIntroduction.targetDurationSeconds } : {}) } } : {})
+  });
+  const resumeProjects = resumeAnalysisRepository?.get(key.profileId, resumeHash)?.artifact?.projects ?? [];
+  const projectRecords = projectMemoryRepository?.listProjects(key.profileId) ?? projectSnapshot.projects.map((item) => ({ id: item.id, name: item.name, profileId: key.profileId, aliases: [], sourceIds: [], ownershipMode: item.ownershipMode, ownershipNote: item.ownershipNote }));
+  projectInterviewCache.prepare({
+    profileId: key.profileId,
+    resumeProjects: resumeProjects.map((item) => ({ id: item.id, name: item.name })),
+    links: resumeProjectLinkRepository?.list(key.profileId, resumeHash) ?? [],
+    projects: projectRecords.map((record) => {
+      const matchingProject = projectSnapshot.projects.find((item) => item.id === record.id);
+      const sourceIds = (projectMemoryRepository?.listProjectSources(record.id) ?? []).filter((source) => source.sourceRole === "overview" && source.sourceType === "document").map((source) => source.sourceId);
+      const overviewChunks = knowledgeRepository?.listChunksByDocumentIds(sourceIds) ?? [];
+      const fallbackText = matchingProject ? [matchingProject.name, matchingProject.description, matchingProject.role, ...matchingProject.technologyStack].filter(Boolean).join("\n") : record.name;
+      const fallbackChunk = fallbackText.trim() ? [{ id: `project-overview-${record.id}`, text: fallbackText, metadata: { documentId: `project-overview-${record.id}`, filename: `${record.name}-overview`, documentType: "project" as const, scope: "project" as const, projectId: record.id, sourceRole: "overview" } }] : [];
+      const questionBank = questionBankRepository?.listQuestions({ status: "active", scope: "project", profileId: key.profileId, projectId: record.id, exactProject: true, limit: 5000 }) ?? [];
+      return { id: record.id, name: record.name, aliases: record.aliases ?? [], questionBankIndex: questionBank, questionAnswers: questionBank, overviewChunks: overviewChunks.length ? overviewChunks : fallbackChunk };
+    })
   });
 }
 
@@ -2489,12 +2519,12 @@ function registerIpc(): void {
     // explicit user action so opening the app or editing a profile cannot
     // silently create paid LLM requests.
     const saved = profileRepository?.save(input);
-    interviewContextCache.release();
+    releaseInterviewCaches();
     return saved;
   });
-  ipcMain.handle("profiles:delete", (_event, profileId: string) => { profileRepository?.delete(profileId); interviewContextCache.release(); return true; });
-  ipcMain.handle("profiles:clone", (_event, profileId: string, name: string) => { const cloned = profileRepository?.clone(profileId, name); interviewContextCache.release(); return cloned; });
-  ipcMain.handle("profiles:select-active", (_event, profileId: string) => { const selected = profileRepository?.setActive(profileId); interviewContextCache.release(); return selected; });
+  ipcMain.handle("profiles:delete", (_event, profileId: string) => { profileRepository?.delete(profileId); releaseInterviewCaches(); return true; });
+  ipcMain.handle("profiles:clone", (_event, profileId: string, name: string) => { const cloned = profileRepository?.clone(profileId, name); releaseInterviewCaches(); return cloned; });
+  ipcMain.handle("profiles:select-active", (_event, profileId: string) => { const selected = profileRepository?.setActive(profileId); releaseInterviewCaches(); return selected; });
   ipcMain.handle("profiles:active", () => profileRepository?.active());
   ipcMain.handle("profiles:attach-material", async (_event, input: { profileId: string; kind: "resume" | "jobDescription"; filename: string; mimeType: string; bytes: Uint8Array }) => {
     if (!profileRepository) throw new Error("Profile database is still initializing");
@@ -2506,7 +2536,7 @@ function registerIpc(): void {
     const summary = parsed.text.replace(/\s+/g, " ").trim().slice(0, 800);
     const material = { rawContent: parsed.text, summary, filename: input.filename, mimeType: input.mimeType, uploadedAt: Date.now(), parseStatus: "parsed" as const, analysisStatus: "not_started" as const };
     const saved = profileRepository.save({ ...profile, ...(input.kind === "resume" ? { resume: material } : { jobDescription: material }), updatedAt: Date.now() });
-    interviewContextCache.release();
+    releaseInterviewCaches();
     return saved;
   });
   ipcMain.handle("profiles:remove-material", (_event, profileId: string, kind: "resume" | "jobDescription") => {
@@ -2514,20 +2544,21 @@ function registerIpc(): void {
     const profile = profileRepository.get(profileId);
     if (!profile) throw new Error("Profile not found");
     const saved = profileRepository.save({ ...profile, ...(kind === "resume" ? { resume: undefined } : { jobDescription: undefined }), updatedAt: Date.now() });
-    interviewContextCache.release();
+    releaseInterviewCaches();
     return saved;
   });
   ipcMain.handle("resume-project-links:list", (_event, profileId: string, resumeHash?: string) => resumeProjectLinkRepository?.list(profileId, resumeHash) ?? []);
-  ipcMain.handle("resume-project-links:save", (_event, input: Parameters<SqliteResumeProjectLinkRepository["save"]>[0]) => resumeProjectLinkRepository?.save(input));
+  ipcMain.handle("resume-project-links:save", (_event, input: Parameters<SqliteResumeProjectLinkRepository["save"]>[0]) => resumeProjectLinkRepository?.save({ ...input, resumeHash: input.resumeHash || currentResumeHash(input.profileId) }));
   ipcMain.handle("resume-project-links:confirm", (_event, linkId: string) => resumeProjectLinkRepository?.confirm(linkId));
   ipcMain.handle("resume-project-links:delete", (_event, linkId: string) => resumeProjectLinkRepository?.delete(linkId) ?? false);
-  ipcMain.handle("self-introduction:get", (_event, profileId: string, resumeHash?: string) => profileSelfIntroductionRepository?.get(profileId, resumeHash));
-  ipcMain.handle("self-introduction:save", (_event, input: Parameters<SqliteProfileSelfIntroductionRepository["save"]>[0]) => profileSelfIntroductionRepository?.save(input));
-  ipcMain.handle("self-introduction:approve", (_event, input: { id: string; resumeHash?: string }) => profileSelfIntroductionRepository?.approve(input.id, input.resumeHash));
-  ipcMain.handle("self-introduction:continue-using", (_event, input: { id: string; resumeHash: string }) => profileSelfIntroductionRepository?.rebindToCurrent(input.id, input.resumeHash));
+  ipcMain.handle("self-introduction:get", (_event, profileId: string, resumeHash?: string) => profileSelfIntroductionRepository?.get(profileId, resumeHash ?? currentResumeHash(profileId)));
+  ipcMain.handle("self-introduction:save", (_event, input: Parameters<SqliteProfileSelfIntroductionRepository["save"]>[0]) => profileSelfIntroductionRepository?.save({ ...input, resumeHash: input.resumeHash || currentResumeHash(input.profileId) }));
+  ipcMain.handle("self-introduction:approve", (_event, input: { id: string; resumeHash?: string }) => { const record = profileSelfIntroductionRepository?.getById(input.id); return profileSelfIntroductionRepository?.approve(input.id, input.resumeHash ?? (record ? currentResumeHash(record.profileId) : undefined)); });
+  ipcMain.handle("self-introduction:continue-using", (_event, input: { id: string; resumeHash: string }) => { const record = profileSelfIntroductionRepository?.getById(input.id); return record ? profileSelfIntroductionRepository?.rebindToCurrent(input.id, input.resumeHash || currentResumeHash(record.profileId)) : undefined; });
+  ipcMain.handle("self-introduction:generate", (_event, input: { profileId: string; targetDurationSeconds?: number; language?: string }) => generateSelfIntroduction(input.profileId, input.targetDurationSeconds, input.language));
   ipcMain.handle("self-introduction:upload", async (_event, input: { profileId: string; resumeHash: string; filename: string; mimeType: string; bytes: Uint8Array; targetDurationSeconds?: number; language?: string }) => {
     const parsed = await parseDocument({ documentId: `self-introduction-${Date.now()}`, filename: input.filename, mimeType: input.mimeType, bytes: input.bytes });
-    return profileSelfIntroductionRepository?.save({ profileId: input.profileId, resumeHash: input.resumeHash, text: parsed.text, source: "uploaded", approved: false, targetDurationSeconds: input.targetDurationSeconds, language: input.language });
+    return profileSelfIntroductionRepository?.save({ profileId: input.profileId, resumeHash: input.resumeHash || currentResumeHash(input.profileId), text: parsed.text, source: "uploaded", approved: false, targetDurationSeconds: input.targetDurationSeconds, language: input.language });
   });
   ipcMain.handle("knowledge:list-bases", () => knowledgeRepository?.listKnowledgeBases() ?? []);
   ipcMain.handle("knowledge:create-base", (_event, name: string) => knowledgeRepository?.createKnowledgeBase(name));
@@ -2599,18 +2630,18 @@ function registerIpc(): void {
   });
   ipcMain.handle("question-bank:list", (_event, options?: QuestionBankListOptions) => questionBankRepository?.listQuestions(options) ?? []);
   ipcMain.handle("question-bank:count", (_event, options?: Omit<QuestionBankListOptions, "limit" | "offset" | "sort">) => questionBankRepository?.countQuestions(options) ?? 0);
-  ipcMain.handle("question-bank:bulk-update", (_event, input: { questionIds: string[]; patch: QuestionBankBulkPatch }) => questionBankRepository?.bulkUpdate(input.questionIds, input.patch) ?? 0);
+  ipcMain.handle("question-bank:bulk-update", (_event, input: { questionIds: string[]; patch: QuestionBankBulkPatch }) => { const result = questionBankRepository?.bulkUpdate(input.questionIds, input.patch) ?? 0; releaseInterviewCaches(); return result; });
   ipcMain.handle("question-bank:duplicates", (_event, limit?: number) => questionBankRepository?.duplicateClusters(limit) ?? []);
-  ipcMain.handle("question-bank:merge-duplicates", (_event, input: { canonicalId: string; duplicateIds: string[] }) => questionBankRepository?.mergeDuplicates(input.canonicalId, input.duplicateIds));
+  ipcMain.handle("question-bank:merge-duplicates", (_event, input: { canonicalId: string; duplicateIds: string[] }) => { const result = questionBankRepository?.mergeDuplicates(input.canonicalId, input.duplicateIds); releaseInterviewCaches(); return result; });
   ipcMain.handle("question-bank:get", (_event, questionId: string) => questionBankRepository?.getQuestion(questionId));
-  ipcMain.handle("question-bank:save-question", (_event, input: Parameters<SqliteQuestionBankRepository["saveQuestion"]>[0]) => questionBankRepository?.saveQuestion(input));
-  ipcMain.handle("question-bank:delete-question", (_event, questionId: string) => { questionBankRepository?.deleteQuestion(questionId); return true; });
-  ipcMain.handle("question-bank:save-answer", (_event, input: Parameters<SqliteQuestionBankRepository["saveAnswerCard"]>[0]) => questionBankRepository?.saveAnswerCard(input));
-  ipcMain.handle("question-bank:delete-answer", (_event, answerCardId: string) => { questionBankRepository?.deleteAnswerCard(answerCardId); return true; });
+  ipcMain.handle("question-bank:save-question", (_event, input: Parameters<SqliteQuestionBankRepository["saveQuestion"]>[0]) => { const result = questionBankRepository?.saveQuestion(input); releaseInterviewCaches(); return result; });
+  ipcMain.handle("question-bank:delete-question", (_event, questionId: string) => { questionBankRepository?.deleteQuestion(questionId); releaseInterviewCaches(); return true; });
+  ipcMain.handle("question-bank:save-answer", (_event, input: Parameters<SqliteQuestionBankRepository["saveAnswerCard"]>[0]) => { const result = questionBankRepository?.saveAnswerCard(input); releaseInterviewCaches(); return result; });
+  ipcMain.handle("question-bank:delete-answer", (_event, answerCardId: string) => { questionBankRepository?.deleteAnswerCard(answerCardId); releaseInterviewCaches(); return true; });
   ipcMain.handle("question-bank:route", (_event, text: string, options?: Parameters<SqliteQuestionBankRepository["routeQuestion"]>[1]) => questionBankRepository?.routeQuestion(text, options));
-  ipcMain.handle("question-bank:save-relation", (_event, input: Parameters<SqliteQuestionBankRepository["saveRelation"]>[0]) => questionBankRepository?.saveRelation(input));
+  ipcMain.handle("question-bank:save-relation", (_event, input: Parameters<SqliteQuestionBankRepository["saveRelation"]>[0]) => { const result = questionBankRepository?.saveRelation(input); releaseInterviewCaches(); return result; });
   ipcMain.handle("question-bank:list-relations", (_event, questionId?: string) => questionBankRepository?.listRelations(questionId) ?? []);
-  ipcMain.handle("question-bank:delete-relation", (_event, relationId: string) => { questionBankRepository?.deleteRelation(relationId); return true; });
+  ipcMain.handle("question-bank:delete-relation", (_event, relationId: string) => { questionBankRepository?.deleteRelation(relationId); releaseInterviewCaches(); return true; });
   ipcMain.handle("question-bank:list-skills", (_event, search?: string) => questionBankRepository?.listSkills(search) ?? []);
   ipcMain.handle("question-bank:save-skill", (_event, input: Parameters<SqliteQuestionBankRepository["saveSkill"]>[0]) => questionBankRepository?.saveSkill(input));
   ipcMain.handle("question-bank:save-skill-point", (_event, input: Parameters<SqliteQuestionBankRepository["saveSkillPoint"]>[0]) => questionBankRepository?.saveSkillPoint(input));
@@ -2642,15 +2673,15 @@ function registerIpc(): void {
   ipcMain.handle("project-memory:get", (_event, profileId: string) => projectMemoryService?.get(profileId));
   ipcMain.handle("project-memory:stats", (_event, profileId: string, projectId?: string) => projectMemoryRepository?.stats(profileId, projectId) ?? { projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0, questions: 0, facts: 0, eligibleFacts: 0, reviewRequiredFacts: 0, userActionRequiredFacts: 0, conflictingFacts: 0, conflictGroups: 0, userActions: 0, staleFacts: 0 });
   ipcMain.handle("project-memory:list-facts", (_event, profileId: string, projectId?: string, options?: { includeStale?: boolean; includeRejected?: boolean }) => projectMemoryRepository?.listFacts(profileId, projectId, options) ?? []);
-  ipcMain.handle("project-memory:add-candidate-fact", (_event, fact: import("@interview-copilot/shared").ProjectFact) => { const saved = projectMemoryRepository?.addCandidateFact(fact); interviewContextCache.release(); return saved; });
-  ipcMain.handle("project-memory:add-responsibility", (_event, profileId: string, projectId: string, content: string) => { const saved = projectMemoryRepository?.addUserResponsibility(profileId, projectId, content); interviewContextCache.release(); return saved; });
-  ipcMain.handle("project-memory:confirm-fact", (_event, factId: string) => { const saved = projectMemoryRepository?.confirmFactAsUser(factId); interviewContextCache.release(); return saved; });
-  ipcMain.handle("project-memory:verify-fact", (_event, factId: string, verified: boolean) => { const saved = projectMemoryRepository?.setFactVerification(factId, verified); interviewContextCache.release(); return saved; });
-  ipcMain.handle("project-memory:review-fact", (_event, factId: string, status: import("@interview-copilot/shared").ProjectFact["status"]) => { const saved = projectMemoryRepository?.setFactReviewStatus(factId, status); interviewContextCache.release(); return saved; });
-  ipcMain.handle("project-memory:resolve-conflict", (_event, conflictGroupId: string, selectedFactId: string, keepBoth?: boolean, variantContexts?: Record<string, string>) => { const saved = projectMemoryRepository?.resolveConflict(conflictGroupId, selectedFactId, Boolean(keepBoth), variantContexts) ?? []; interviewContextCache.release(); return saved; });
+  ipcMain.handle("project-memory:add-candidate-fact", (_event, fact: import("@interview-copilot/shared").ProjectFact) => { const saved = projectMemoryRepository?.addCandidateFact(fact); releaseInterviewCaches(); return saved; });
+  ipcMain.handle("project-memory:add-responsibility", (_event, profileId: string, projectId: string, content: string) => { const saved = projectMemoryRepository?.addUserResponsibility(profileId, projectId, content); releaseInterviewCaches(); return saved; });
+  ipcMain.handle("project-memory:confirm-fact", (_event, factId: string) => { const saved = projectMemoryRepository?.confirmFactAsUser(factId); releaseInterviewCaches(); return saved; });
+  ipcMain.handle("project-memory:verify-fact", (_event, factId: string, verified: boolean) => { const saved = projectMemoryRepository?.setFactVerification(factId, verified); releaseInterviewCaches(); return saved; });
+  ipcMain.handle("project-memory:review-fact", (_event, factId: string, status: import("@interview-copilot/shared").ProjectFact["status"]) => { const saved = projectMemoryRepository?.setFactReviewStatus(factId, status); releaseInterviewCaches(); return saved; });
+  ipcMain.handle("project-memory:resolve-conflict", (_event, conflictGroupId: string, selectedFactId: string, keepBoth?: boolean, variantContexts?: Record<string, string>) => { const saved = projectMemoryRepository?.resolveConflict(conflictGroupId, selectedFactId, Boolean(keepBoth), variantContexts) ?? []; releaseInterviewCaches(); return saved; });
   ipcMain.handle("project-memory:conflict-groups", (_event, projectId: string, includeResolved?: boolean) => projectMemoryRepository?.listConflictGroups(projectId, Boolean(includeResolved)) ?? []);
   ipcMain.handle("project-memory:user-actions", (_event, projectId: string) => projectMemoryRepository?.listUserActions(projectId) ?? []);
-  ipcMain.handle("project-memory:repair-semantics", (_event, projectId: string) => { const repaired = projectMemoryRepository?.repairProjectFactSemantics(projectId) ?? []; interviewContextCache.release(); return repaired; });
+  ipcMain.handle("project-memory:repair-semantics", (_event, projectId: string) => { const repaired = projectMemoryRepository?.repairProjectFactSemantics(projectId) ?? []; releaseInterviewCaches(); return repaired; });
   ipcMain.handle("project-memory:sources", (_event, projectId: string) => projectMemoryRepository?.listSourceDetails(projectId) ?? []);
   ipcMain.handle("project-memory:completeness", (_event, profileId: string, projectId: string) => projectMemoryRepository?.getProjectCompleteness(profileId, projectId));
   ipcMain.handle("project-memory:analysis-runs", (_event, profileId: string) => knowledgeAnalysisRepository?.list(profileId) ?? []);
@@ -2659,9 +2690,9 @@ function registerIpc(): void {
   ipcMain.handle("project-memory:analysis-jobs", (_event, profileId: string) => projectMemoryService?.listProjectAnalysisJobs(profileId) ?? []);
   ipcMain.handle("project-memory:cancel-analysis", (_event, projectId: string, jobId?: string) => projectMemoryService?.cancelProjectAnalysis(projectId, jobId));
   ipcMain.handle("project-memory:retry-analysis", (_event, profileId: string, projectId: string) => projectMemoryService?.retryProjectAnalysis(profileId, projectId));
-  ipcMain.handle("project-memory:assign-source", (_event, input: Parameters<NonNullable<typeof projectMemoryService>["assignSource"]>[0]) => { projectMemoryService?.assignSource(input); interviewContextCache.release(); return true; });
-  ipcMain.handle("project-memory:unassign-source", (_event, projectId: string, sourceType: import("@interview-copilot/shared").ProjectSourceType, sourceId: string) => { projectMemoryRepository?.unassignSource(projectId, sourceType, sourceId); interviewContextCache.release(); return true; });
-  ipcMain.handle("project-memory:assign-document", (_event, profileId: string, documentId: string, projectId?: string) => { const assigned = projectMemoryService?.assignDocument(profileId, documentId, projectId); interviewContextCache.release(); return assigned; });
+  ipcMain.handle("project-memory:assign-source", (_event, input: Parameters<NonNullable<typeof projectMemoryService>["assignSource"]>[0]) => { projectMemoryService?.assignSource(input); releaseInterviewCaches(); return true; });
+  ipcMain.handle("project-memory:unassign-source", (_event, projectId: string, sourceType: import("@interview-copilot/shared").ProjectSourceType, sourceId: string) => { projectMemoryRepository?.unassignSource(projectId, sourceType, sourceId); releaseInterviewCaches(); return true; });
+  ipcMain.handle("project-memory:assign-document", (_event, profileId: string, documentId: string, projectId?: string) => { const assigned = projectMemoryService?.assignDocument(profileId, documentId, projectId); releaseInterviewCaches(); return assigned; });
   ipcMain.handle("job-targets:list", (_event, profileId: string) => jobTargetRepository?.list(profileId) ?? []);
   ipcMain.handle("retrieval:list", (_event, profileId: string, limit?: number) => retrievalRepository?.list(profileId, limit) ?? []);
   ipcMain.handle("project-memory:rebuild", async (_event, profileId: string) => {
@@ -2842,10 +2873,10 @@ function registerIpc(): void {
     return runProviderPreflight({ llm: providerConfigStore.get("llm"), asr: providerConfigStore.get("asr"), embedding: providerConfigStore.get("embedding") }, Boolean(checkReachability), providerPreflightCache);
   });
   ipcMain.handle("projects:list", (_event, profileId?: string) => projectRepository?.list(profileId) ?? []);
-  ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => { const created = projectRepository?.create(input.name, input.profileId, Date.now(), input.ownershipMode, input.ownershipNote); interviewContextCache.release(); return created; });
-  ipcMain.handle("projects:rename", (_event, projectId: string, name: string) => { const renamed = projectRepository?.rename(projectId, name); interviewContextCache.release(); return renamed; });
-  ipcMain.handle("projects:update", (_event, projectId: string, input: { name?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => { const updated = projectRepository?.update(projectId, input); interviewContextCache.release(); return updated; });
-  ipcMain.handle("projects:delete", (_event, projectId: string) => { projectRepository?.delete(projectId); interviewContextCache.release(); return true; });
+  ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => { const created = projectRepository?.create(input.name, input.profileId, Date.now(), input.ownershipMode, input.ownershipNote); releaseInterviewCaches(); return created; });
+  ipcMain.handle("projects:rename", (_event, projectId: string, name: string) => { const renamed = projectRepository?.rename(projectId, name); releaseInterviewCaches(); return renamed; });
+  ipcMain.handle("projects:update", (_event, projectId: string, input: { name?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => { const updated = projectRepository?.update(projectId, input); releaseInterviewCaches(); return updated; });
+  ipcMain.handle("projects:delete", (_event, projectId: string) => { projectRepository?.delete(projectId); releaseInterviewCaches(); return true; });
 }
 
 async function generateQuestionBankAnswers(input: { questionIds?: string[]; onlyUnanswered?: boolean } = {}): Promise<import("./database").QuestionBankAnswerGenerationResult> {
@@ -2946,6 +2977,37 @@ async function generateProjectQuestionBank(projectId: string): Promise<ProjectQa
   })();
   projectQaGeneration = task;
   try { return await task; } finally { projectQaGeneration = undefined; }
+}
+
+async function generateSelfIntroduction(profileId: string, targetDurationSeconds = 50, language = "zh-CN"): Promise<import("./database").ProfileSelfIntroductionRecord> {
+  if (!profileRepository || !profileSelfIntroductionRepository) throw new Error("SELF_INTRODUCTION_NOT_READY");
+  const profile = profileRepository.get(profileId);
+  if (!profile) throw new Error("PROFILE_NOT_FOUND");
+  const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings;
+  if (!settings.apiKey) throw new Error("LLM_NOT_CONFIGURED: 请先配置 LLM API Key，再生成自我介绍");
+  const resumeHash = resumeAnalysisHash(profile.resume?.rawContent ?? "");
+  const analysis = resumeAnalysisRepository?.get(profileId, resumeHash)?.artifact;
+  const confirmedLinks = resumeProjectLinkRepository?.list(profileId, resumeHash).filter((link) => link.confirmed) ?? [];
+  const projects = projectMemoryRepository?.listProjects(profileId) ?? [];
+  const projectOverview = projects.map((project) => `${project.name}: ${(projectMemoryRepository?.listSourceDetails(project.id) ?? []).filter((source) => source.sourceRole === "overview").map((source) => source.text ?? source.title).join(" ")}`.trim()).filter(Boolean).slice(0, 8);
+  const prompt = [
+    `目标：生成一段可直接口述的${language === "en-US" ? "英文" : "中文"}自我介绍，时长约 ${Math.max(30, Math.min(90, Math.round(targetDurationSeconds)))} 秒。`,
+    "只使用下面的已提供材料，不得补写不存在的公司、职责、项目指标、技术选型或个人结果。",
+    "结构：当前身份/方向 → 最相关的技能或经历 → 已确认的项目亮点 → 与目标岗位的连接。语气自然、第一人称、不要加标题、不要输出资料标签。",
+    `Resume：\n${(profile.resume?.rawContent ?? "").slice(0, 12_000)}`,
+    `Resume analysis：\n${analysis ? JSON.stringify({ summary: analysis.summary, projects: analysis.projects, skills: analysis.skills, workExperience: analysis.workExperience }) : "无当前分析"}`,
+    `Confirmed skills：\n${profile.skills.map((skill) => `${skill.name}: ${skill.content}`).join("\n") || "无"}`,
+    `Confirmed Resume→Project links：\n${confirmedLinks.map((link) => `${link.resumeProjectId} -> ${link.projectId}`).join("\n") || "无"}`,
+    `Project Overview：\n${projectOverview.join("\n") || "无"}`,
+    `Job Description：\n${(profile.jobDescription?.rawContent ?? "").slice(0, 8_000)}`
+  ].join("\n\n");
+  let text = "";
+  for await (const delta of answerProvider.stream({ model: taskModel(settings, "profileBuilderModel", "fastModel"), maxOutputTokens: 900, sections: [
+    { name: "system/base", content: "你是本地面试资料整理器。只能依据输入材料生成草稿；不访问远程资料，不创建新事实，不把项目技术事实升级为候选人职责。" },
+    { name: "question", content: prompt }
+  ] })) text += delta;
+  if (!text.trim()) throw new Error("SELF_INTRODUCTION_GENERATION_EMPTY");
+  return profileSelfIntroductionRepository.save({ profileId, resumeHash, text: text.trim(), source: "ai_generated", approved: false, targetDurationSeconds: Math.max(30, Math.min(90, Math.round(targetDurationSeconds))), language });
 }
 
 function stopWrittenTest(): void {
@@ -3107,7 +3169,8 @@ if (hasSingleInstanceLock) {
     // local intent/semantic pass; rich retrieval does that I/O in background.
     const fastQuestionAnalysis = new QuestionAnalyzer().analyze(fastNormalizedQuestion, cached.currentProject ? [cached.currentProject] : []);
     const fastTargetProjectId = interviewContext?.projectId;
-    const fastProjectIntent = analyzeProjectQuestionIntent({ question: fastNormalizedQuestion, targetProjectId: fastTargetProjectId, answerIntent: fastAnswerIntent, questionAnalysisType: fastQuestionAnalysis.type, followUpContext: interviewContext?.followUpContext });
+    const fastInitialResolution = projectInterviewCache.resolveProject(fastNormalizedQuestion, { explicitProjectId: fastTargetProjectId });
+    const fastProjectIntent = analyzeProjectQuestionIntent({ question: fastNormalizedQuestion, targetProjectId: fastTargetProjectId ?? fastInitialResolution.projectId, answerIntent: fastAnswerIntent, questionAnalysisType: fastQuestionAnalysis.type, followUpContext: interviewContext?.followUpContext });
     const fastUnderstandingRoute = fastProjectIntent.projectQuestionRequested
       ? new ProjectComprehensionRetriever().search(fastNormalizedQuestion, undefined, 0).route
       : undefined;
@@ -3118,21 +3181,48 @@ if (hasSingleInstanceLock) {
       && !fastAnswerIntent.requiresPersonalResult
       && !fastAnswerIntent.asksBehavioralEpisode;
     if (interviewContext?.contextMode === "fast") {
+      const selfIntroIntent = analyzeSelfIntroductionIntent(question.text);
+      const cachedIntro = cached.selfIntroduction;
+      if (selfIntroIntent.matched && cachedIntro?.approved) {
+        const selfIntroMode = selfIntroIntent.hasAdditionalConstraint ? "self_intro_rewrite" as const : "self_intro_direct" as const;
+        const selfIntroPreparedAnswer = { content: cachedIntro.text, score: 1, verified: true, source: "self-introduction", answerCardId: cachedIntro.id };
+        const selfIntroPlan = { mode: selfIntroMode, projectAnchorAvailable: false, projectQuestionRequested: false, qaMatchLevel: "none" as const, preserveStoredAnswerFacts: true, allowProjectKnowledge: false, allowGeneralKnowledge: false, allowSessionEvidence: false, answerRewriteUsed: selfIntroMode === "self_intro_rewrite" };
+        return {
+          ...cached,
+          contextMode: "fast" as const,
+          recentTranscript: recentTranscript.slice(-8),
+          preparedAnswer: selfIntroPreparedAnswer,
+          answerSourcePlan: selfIntroPlan,
+          projectQaEvidence: [],
+          retrievedKnowledge: [],
+          experienceContext: selfIntroMode === "self_intro_rewrite" ? [cachedIntro.text] : [],
+          questionTelemetry: {
+            normalizedText: fastNormalizedQuestion,
+            canonicalText: fastNormalizedQuestion,
+            selfIntroductionDetected: true,
+            selfIntroductionDirect: selfIntroMode === "self_intro_direct",
+            selfIntroductionRewrite: selfIntroMode === "self_intro_rewrite"
+          }
+        };
+      }
       const fastCoreTechnicalQa = matchCoreTechnicalQa(fastNormalizedQuestion);
-      const fastRoute = questionBankRepository?.routeQuestion(fastNormalizedQuestion, {
+      const fastResolution = fastProjectIntent.projectQuestionRequested ? projectInterviewCache.resolveProject(fastNormalizedQuestion, { explicitProjectId: fastTargetProjectId }) : { reason: "none" as const, score: 0, ambiguous: false };
+      const resolvedProjectId = fastResolution.projectId;
+      const fastProjectQa = resolvedProjectId ? projectInterviewCache.routeProjectQuestion(fastNormalizedQuestion, resolvedProjectId) : undefined;
+      const fastOverviewHits = resolvedProjectId && fastProjectIntent.projectQuestionRequested ? projectInterviewCache.searchOverview(fastNormalizedQuestion, resolvedProjectId, 4) : [];
+      const fastRoute = fastProjectQa ? undefined : questionBankRepository?.routeQuestion(fastNormalizedQuestion, {
         ...(fastProjectIntent.projectQuestionRequested ? {} : { scope: "global" as const }),
         profileId,
-        ...(fastProjectIntent.projectQuestionRequested && fastTargetProjectId ? { projectId: fastTargetProjectId } : {}),
+        ...(fastProjectIntent.projectQuestionRequested && resolvedProjectId ? { projectId: resolvedProjectId } : {}),
         limit: 5
       });
-      const fastProjectQa = fastProjectIntent.projectQuestionRequested ? fastRoute?.projectQa : undefined;
       const fastMatch = fastProjectQa?.top ?? fastRoute?.top;
       const fastCard = fastMatch?.question.answerCards.find((card) => card.verified && !card.stale) ?? fastMatch?.question.answerCards.find((card) => card.mode === "standard") ?? fastMatch?.question.answerCards[0];
       const fastPreparedAnswer = fastMatch && fastCard ? { content: `${fastCard.content}${fastCard.codeContent ? `\n代码：\n${fastCard.codeContent}` : ""}${fastCard.complexity ? `\n复杂度：${fastCard.complexity}` : ""}${fastCard.limitations ? `\n边界与限制：${fastCard.limitations}` : ""}`, score: fastMatch.score, verified: fastCard.verified, stale: fastCard.stale, answerCardId: fastCard.id, questionId: fastMatch.question.id } : undefined;
       const fastPersonalQuestion = fastAnswerIntent.requiresPersonalIdentity || fastAnswerIntent.requiresPersonalOwnership || fastAnswerIntent.requiresPersonalMetric || fastAnswerIntent.requiresPersonalResult || fastAnswerIntent.asksBehavioralEpisode;
       const fastSourcePlan = planAnswerSource({
-        projectId: fastTargetProjectId,
-        projectAnchorAvailable: fastProjectIntent.projectAnchorAvailable,
+        projectId: resolvedProjectId,
+        projectAnchorAvailable: fastProjectIntent.projectAnchorAvailable || Boolean(resolvedProjectId),
         projectQuestion: fastProjectIntent.projectQuestionRequested,
         personalQuestion: fastPersonalQuestion,
         projectQa: fastProjectQa,
@@ -3158,6 +3248,7 @@ if (hasSingleInstanceLock) {
         ...(fastPreparedAnswer ? { preparedAnswer: fastPreparedAnswer } : {}),
         answerSourcePlan: fastSourcePlan,
         projectQaEvidence: fastSourcePlan.mode === "project_qa_direct" && fastPreparedAnswer ? [fastPreparedAnswer.content] : [],
+        projectEvidence: fastSourcePlan.mode === "project_qa_direct" ? [] : fastOverviewHits.map((chunk) => `[PROJECT_SOURCE] ${chunk.metadata.filename}: ${chunk.text}`),
         retrievedKnowledge: fastTechnicalOnly
           ? []
           : [
@@ -3170,7 +3261,8 @@ if (hasSingleInstanceLock) {
           projectAnchorAvailable: fastProjectIntent.projectAnchorAvailable,
           projectQuestionRequested: fastProjectIntent.projectQuestionRequested,
           projectQuestionMode: fastProjectIntent.projectQuestionMode,
-          ...(fastProjectIntent.projectQuestionRequested && fastTargetProjectId ? { projectAutoAnchorId: fastTargetProjectId } : {}),
+          ...(resolvedProjectId ? { projectAutoAnchorId: resolvedProjectId, projectResolutionReason: fastResolution.reason, projectCacheHit: true } : {}),
+          projectOverviewHitCount: fastOverviewHits.length,
           ...(fastCoreTechnicalQa ? { coreQaMatchLevel: "strong" as const, coreQaScore: fastCoreTechnicalQa ? 1 : 0, coreQaQuestionId: fastCoreTechnicalQa.id } : {}),
           ...(fastProjectQa?.top ? { projectQaMatchLevel: fastProjectQa.level, projectQaQuestionId: fastProjectQa.top.question.id } : {})
         }

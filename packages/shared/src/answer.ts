@@ -85,6 +85,12 @@ export interface AnswerTelemetry {
   coreQaScore?: number;
   projectQaMatchLevel?: string;
   projectQaQuestionId?: string;
+  selfIntroductionDetected?: boolean;
+  selfIntroductionDirect?: boolean;
+  selfIntroductionRewrite?: boolean;
+  projectOverviewHitCount?: number;
+  projectCacheHit?: boolean;
+  projectResolutionReason?: string;
   technicalGuardDecision?: "allow" | "rewrite";
   technicalGuardIssues?: string[];
   technicalViolationCount?: number;
@@ -128,6 +134,8 @@ export interface AnswerContextInput {
   personalMemoryEvidence?: string[];
   retrievedKnowledge?: string[];
   preparedAnswer?: PreparedAnswer;
+  /** Approved, current self-introduction cached for the live fast lane. */
+  selfIntroduction?: { id: string; text: string; approved: boolean; language: string; targetDurationSeconds?: number };
   questionBankMatches?: QuestionBankRouteHit[];
   answerSourcePlan?: AnswerSourcePlan;
   coreTechnicalQa?: CoreTechnicalQaCard;
@@ -199,6 +207,7 @@ export class ContextRouter {
     const answerSourcePlan = snapshot?.answerSourcePlan ?? input.answerSourcePlan;
     const projectQaEvidence = snapshot?.projectQaEvidence ?? input.projectQaEvidence ?? [];
     const directProjectQa = answerSourcePlan?.mode === "project_qa_direct";
+    const selfIntroduction = answerSourcePlan?.mode === "self_intro_direct" || answerSourcePlan?.mode === "self_intro_rewrite";
     const coreTechnicalQa = directProjectQa || answerSourcePlan?.projectQuestionRequested ? undefined : input.coreTechnicalQa ?? matchCoreTechnicalQa(question);
     const routedSessionEvidence = snapshot
       ? (snapshot.sessionEvidence ?? snapshot.candidateStatements ?? [])
@@ -223,7 +232,7 @@ export class ContextRouter {
       skills,
       experienceContext: (snapshot?.experienceContext ?? input.experienceContext ?? []).slice(0, 5),
       personalMemoryEvidence: (snapshot?.personalMemoryEvidence ?? input.personalMemoryEvidence ?? []).slice(0, 5),
-      retrievedKnowledge: directProjectQa || Boolean(coreTechnicalQa) ? [] : (snapshot?.retrievedKnowledge ?? input.retrievedKnowledge ?? []).slice(0, 6),
+      retrievedKnowledge: directProjectQa || selfIntroduction || Boolean(coreTechnicalQa) ? [] : (snapshot?.retrievedKnowledge ?? input.retrievedKnowledge ?? []).slice(0, 6),
       preparedAnswer: input.preparedAnswer,
       questionBankMatches: (input.questionBankMatches ?? []).slice(0, 5),
       ...(answerSourcePlan ? { answerSourcePlan } : {}),
@@ -234,7 +243,7 @@ export class ContextRouter {
       currentProject: snapshot?.currentProject ?? input.currentProject,
       currentTopic: snapshot?.currentTopic ?? input.currentTopic,
       currentModule: snapshot?.currentModule ?? input.currentModule,
-      projectEvidence: directProjectQa ? [] : (snapshot?.projectEvidence ?? input.projectEvidence ?? input.personalMemoryEvidence ?? input.experienceContext ?? []).slice(0, 8),
+      projectEvidence: directProjectQa || selfIntroduction ? [] : (snapshot?.projectEvidence ?? input.projectEvidence ?? input.personalMemoryEvidence ?? input.experienceContext ?? []).slice(0, 8),
       verifiedResumeEvidence: (snapshot?.verifiedResumeEvidence ?? input.verifiedResumeEvidence ?? []).slice(0, 5),
       verifiedPersonalProjectFacts: (snapshot?.verifiedPersonalProjectFacts ?? input.verifiedPersonalProjectFacts ?? []).slice(0, 8),
       recentTranscript,
@@ -276,6 +285,9 @@ export class PromptBuilder {
     if ((sourceMode === "project_qa_direct" || sourceMode === "project_qa_augmented") && context.preparedAnswer?.content.trim()) {
       const direct = sourceMode === "project_qa_direct";
       sections.push({ name: "project-qa-context", content: `${direct ? "这是当前项目已确认的标准答案。以它为事实底稿，只做口语化改写和必要的当前问题对齐；保留原答案中的事实、技术选择、数字和边界，不要新增项目事实。" : "这是当前项目的相似标准答案。优先复用其中已确认的事实，再结合项目资料补足当前问题；不能把未确认内容写成候选人亲自负责。"}\n${context.preparedAnswer.content}` });
+    }
+    if (sourceMode === "self_intro_rewrite" && context.preparedAnswer?.content.trim()) {
+      sections.push({ name: "experience-context", content: `这是候选人已审核的自我介绍底稿。只根据当前问题的时长、语言和表达要求做轻量改写，不得新增简历、项目、职责或指标事实；只输出改写后的自我介绍。\n${context.preparedAnswer.content}` });
     }
     if (context.coreTechnicalQa?.verified && sourceMode === "general_core_qa") {
       const card = context.coreTechnicalQa;

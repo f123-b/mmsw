@@ -8,7 +8,7 @@ import type { AudioCapability, AudioChannelCapability, AudioDevices, AudioDrift,
 import { AnswerThreadStore, QUESTION_BANK_BANK_LABELS, QUESTION_BANK_BANK_TYPES, QUESTION_BANK_TYPE_LABELS, QUESTION_BANK_TYPES, answerRelationForQuestion, validateLlmModelConfiguration, type AnswerThread, type OverlayAnswerRelation } from "@interview-copilot/shared";
 import { QWEN_REALTIME_ASR_MODEL, QWEN_REALTIME_ASR_URL, type AsrProviderType, type ChatAction, type ChatResponse, type ProjectAnalysisJob, type ProjectFact, type ProjectMaterialImportReport, type ProjectMemorySnapshot, type ProjectQaGenerationResult, type ProjectQuestionBankImportReport, type ProjectSourceRole, type QuestionBankBankType, type QuestionBankCoverageResult, type QuestionBankJobProfileRecord, type QuestionBankQuestionRecord, type QuestionBankSkillRecord, type QuestionBankType, type QuestionCandidate, type QuestionEvent, type SessionState, type SkillSuggestion, type SkillSuggestionStatus, type TechnicalDomain, type TechnicalTerm, type TerminologyRolloutMode, type TranscriptSnapshot } from "@interview-copilot/shared";
 import type { Profile } from "@interview-copilot/shared";
-import type { JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectMemoryStats, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, RetrievalRunRecord, ResumeAnalysisRecord } from "../main/database";
+import type { JobTargetRecord, KnowledgeAnalysisRunRecord, ProfileBuilderArtifactRecord, ProjectMemoryStats, ProjectRecord, ProfileSelfIntroductionRecord, QuestionBankAnswerCardInput, QuestionBankAnswerGenerationResult, QuestionBankBulkPatch, QuestionBankDuplicateCluster, QuestionBankImportResult, QuestionBankListOptions, QuestionBankQuestionInput, QuestionBankSkillInput, RetrievalRunRecord, ResumeAnalysisRecord, ResumeProjectLinkRecord } from "../main/database";
 import type { LlmModelProfileInput, ProviderCenterPublicConfig, PublicProviderSettings, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
 import { DEFAULT_OVERLAY_PREFERENCES, type OverlayPreferences } from "../shared/overlay-preferences";
 import type { RuntimeOperationMode } from "../shared/runtime-operation-mode";
@@ -915,6 +915,8 @@ export function App(): JSX.Element {
   const [profileId, setProfileId] = useState("");
   const [profileBuilderArtifact, setProfileBuilderArtifact] = useState<ProfileBuilderArtifactRecord>();
   const [resumeAnalysis, setResumeAnalysis] = useState<ResumeAnalysisRecord>();
+  const [resumeProjectLinks, setResumeProjectLinks] = useState<ResumeProjectLinkRecord[]>([]);
+  const [selfIntroduction, setSelfIntroduction] = useState<ProfileSelfIntroductionRecord>();
   const [skillSuggestions, setSkillSuggestions] = useState<SkillSuggestion[]>([]);
   const [profileBuilderRunning, setProfileBuilderRunning] = useState(false);
   const [resumeAnalysisRunning, setResumeAnalysisRunning] = useState(false);
@@ -1230,6 +1232,8 @@ export function App(): JSX.Element {
     if (!profileId) {
       setProfileBuilderArtifact(undefined);
       setResumeAnalysis(undefined);
+      setResumeProjectLinks([]);
+      setSelfIntroduction(undefined);
       setSkillSuggestions([]);
       setProjectMemory(undefined);
     setProjectMemoryStats({ projects: 0, modules: 0, technicalPoints: 0, problems: 0, interviewQuestions: 0, questions: 0, facts: 0, eligibleFacts: 0, reviewRequiredFacts: 0, userActionRequiredFacts: 0, conflictingFacts: 0, conflictGroups: 0, userActions: 0, staleFacts: 0 });
@@ -1249,6 +1253,8 @@ export function App(): JSX.Element {
     }).catch(() => setProjects([]));
     void window.interviewCopilot.profileBuilder.get(profileId).then(setProfileBuilderArtifact).catch(() => setProfileBuilderArtifact(undefined));
     void window.interviewCopilot.resumeAnalysis.get(profileId).then(setResumeAnalysis).catch(() => setResumeAnalysis(undefined));
+    void window.interviewCopilot.resumeProjectLinks.list(profileId).then(setResumeProjectLinks).catch(() => setResumeProjectLinks([]));
+    void window.interviewCopilot.selfIntroduction.get(profileId).then(setSelfIntroduction).catch(() => setSelfIntroduction(undefined));
     void window.interviewCopilot.profileBuilder.listSkillSuggestions(profileId).then(setSkillSuggestions).catch(() => setSkillSuggestions([]));
     void Promise.all([window.interviewCopilot.projectMemory.get(profileId), window.interviewCopilot.projectMemory.stats(profileId)]).then(([memory, stats]) => { setProjectMemory(memory); setProjectMemoryStats(stats); }).catch(() => undefined);
      void Promise.all([window.interviewCopilot.projectMemory.listFacts(profileId), window.interviewCopilot.jobTargets.list(profileId), window.interviewCopilot.projectMemory.analysisRuns(profileId), window.interviewCopilot.retrieval.list(profileId, 20), window.interviewCopilot.projectMemory.analysisJobs(profileId)]).then(([facts, targets, analyses, retrievals, analysisJobs]) => { setProjectFacts(facts); setJobTargets(targets); setKnowledgeAnalysisRuns(analyses); setRetrievalRuns(retrievals); setProjectAnalysisJobs(analysisJobs); }).catch(() => undefined);
@@ -1619,7 +1625,7 @@ export function App(): JSX.Element {
     try {
       const updated = await window.interviewCopilot.profiles.attachMaterial({ profileId, kind, filename: file.name, mimeType: file.type || "application/octet-stream", bytes: new Uint8Array(await file.arrayBuffer()) });
       if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile));
-      if (kind === "resume") setResumeAnalysis(undefined);
+      if (kind === "resume") { setResumeAnalysis(undefined); void window.interviewCopilot.selfIntroduction.get(profileId).then(setSelfIntroduction).catch(() => setSelfIntroduction(undefined)); }
       store.setNotice(`${kind === "resume" ? "Resume" : "JD"} 已解析并保存`);
     } catch (error) {
       store.setNotice(`材料解析失败：${userFacingError(error)}`);
@@ -1671,7 +1677,63 @@ export function App(): JSX.Element {
   };
   const addSkill = async () => { if (!selectedProfile) return; const name = await requestDialog({ kind: "form", title: "新增 Skill", label: "Skill 名称", required: true }); if (typeof name !== "string" || !name.trim()) return; const content = await requestDialog({ kind: "form", title: "Skill 内容", label: "内容", multiline: true, confirmLabel: "保存" }); const skill = { id: `skill-${Date.now()}`, name: name.trim(), description: "", content: typeof content === "string" ? content : "", tags: [] }; const updated = await window.interviewCopilot.profiles.save({ ...selectedProfile, skills: [...selectedProfile.skills, skill] }); if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); };
   const editSkill = async (skillId: string) => { if (!selectedProfile) return; const skill = selectedProfile.skills.find((item) => item.id === skillId); if (!skill) return; const content = await requestDialog({ kind: "form", title: `编辑 Skill：${skill.name}`, label: "内容", defaultValue: skill.content, multiline: true, confirmLabel: "保存" }); if (typeof content !== "string") return; const updated = await window.interviewCopilot.profiles.save({ ...selectedProfile, skills: selectedProfile.skills.map((item) => item.id === skillId ? { ...item, content } : item) }); if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); };
-  const removeProfileMaterial = async (kind: "resume" | "jobDescription") => { if (!selectedProfile) return; const updated = await window.interviewCopilot.profiles.removeMaterial(selectedProfile.id, kind); if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); if (kind === "resume") setResumeAnalysis(undefined); };
+  const removeProfileMaterial = async (kind: "resume" | "jobDescription") => { if (!selectedProfile) return; const updated = await window.interviewCopilot.profiles.removeMaterial(selectedProfile.id, kind); if (updated) setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); if (kind === "resume") { setResumeAnalysis(undefined); void window.interviewCopilot.selfIntroduction.get(profileId).then(setSelfIntroduction).catch(() => setSelfIntroduction(undefined)); } };
+  const saveResumeProjectLink = async (resumeProjectId: string, projectId: string) => {
+    if (!profileId) return;
+    try {
+      const saved = await window.interviewCopilot.resumeProjectLinks.save({ profileId, resumeHash: "", resumeProjectId, projectId, source: "manual", confidence: 1, confirmed: true });
+      if (saved) setResumeProjectLinks((current) => [saved, ...current.filter((item) => !(item.resumeProjectId === saved.resumeProjectId && item.projectId === saved.projectId))]);
+      store.setNotice("Resume 项目关联已确认");
+    } catch (error) { store.setNotice(`项目关联失败：${userFacingError(error)}`); }
+  };
+  const createProjectForResume = async (resumeProjectId: string, name: string) => {
+    if (!profileId) return;
+    try {
+      const created = await window.interviewCopilot.projects.create({ name, profileId });
+      if (created) await saveResumeProjectLink(resumeProjectId, created.id);
+      await refreshProjectState(profileId);
+    } catch (error) { store.setNotice(`创建项目失败：${userFacingError(error)}`); }
+  };
+  const saveSelfIntroduction = async (text: string, targetDurationSeconds: number, language: string) => {
+    if (!profileId) return;
+    try {
+      const saved = await window.interviewCopilot.selfIntroduction.save({ profileId, resumeHash: "", text, source: "manual", approved: false, targetDurationSeconds, language });
+      if (saved) setSelfIntroduction(saved);
+      store.setNotice("自我介绍草稿已保存，审核通过后才会进入直接快车道");
+    } catch (error) { store.setNotice(`自我介绍保存失败：${userFacingError(error)}`); }
+  };
+  const uploadSelfIntroduction = async (file: File) => {
+    if (!profileId) return;
+    try {
+      const saved = await window.interviewCopilot.selfIntroduction.upload({ profileId, resumeHash: "", filename: file.name, mimeType: file.type || "application/octet-stream", bytes: new Uint8Array(await file.arrayBuffer()) });
+      if (saved) setSelfIntroduction(saved);
+      store.setNotice("自我介绍稿件已导入，请审核后使用");
+    } catch (error) { store.setNotice(`自我介绍导入失败：${userFacingError(error)}`); }
+  };
+  const generateSelfIntroduction = async (targetDurationSeconds: number, language: string) => {
+    if (!profileId) return;
+    try {
+      const generated = await window.interviewCopilot.selfIntroduction.generate(profileId, targetDurationSeconds, language);
+      if (generated) setSelfIntroduction(generated);
+      store.setNotice("自我介绍 AI 草稿已生成，请检查并审核");
+    } catch (error) { store.setNotice(`自我介绍生成失败：${userFacingError(error)}`); }
+  };
+  const approveSelfIntroduction = async () => {
+    if (!selfIntroduction) return;
+    try {
+      const approved = await window.interviewCopilot.selfIntroduction.approve(selfIntroduction.id);
+      if (approved) setSelfIntroduction(approved);
+      store.setNotice("自我介绍已审核，可在面试中直接使用");
+    } catch (error) { store.setNotice(`审核失败：${userFacingError(error)}`); }
+  };
+  const continueUsingSelfIntroduction = async () => {
+    if (!selfIntroduction) return;
+    try {
+      const rebound = await window.interviewCopilot.selfIntroduction.continueUsing(selfIntroduction.id, "");
+      if (rebound) setSelfIntroduction(rebound);
+      store.setNotice("已确认继续使用旧自我介绍");
+    } catch (error) { store.setNotice(`继续使用失败：${userFacingError(error)}`); }
+  };
   const rebuildProfileBuilder = async () => {
     if (!selectedProfile || profileBuilderRunning) return;
     try {
@@ -1969,7 +2031,7 @@ export function App(): JSX.Element {
       : page === "job-targets"
       ? <JobTargetsPage targets={jobTargets} onUploadJob={uploadJobDescription} onOpenProfile={() => setPage("profiles")} />
       : page === "profiles"
-        ? <ProfileWorkspacePage profiles={profiles} profileId={profileId} selectedProfile={selectedProfile} knowledgeBases={knowledgeBases} artifact={profileBuilderArtifact} resumeAnalysis={resumeAnalysis} suggestions={skillSuggestions} analysisRunning={profileBuilderRunning} resumeAnalysisRunning={resumeAnalysisRunning} onSelectProfile={(id) => { setProfileId(id); void window.interviewCopilot.profiles.selectActive(id); }} onCreateProfile={async () => { const created = await window.interviewCopilot.profiles.save({ name: `面试档案 ${profiles.length + 1}`, language: "zh-CN", skills: [], knowledgeBaseIds: knowledgeBases[0] ? [knowledgeBases[0].id] : [] }); if (created) { setProfiles((current) => [created, ...current]); setProfileId(created.id); } }} onAttachMaterial={attachProfileMaterial} onRemoveMaterial={removeProfileMaterial} onEditInstructions={() => void editInstructions()} onEditCompanyContext={() => void editCompanyContext()} onEditSalaryExpectation={() => void editSalaryExpectation()} onAddSkill={() => void addSkill()} onEditSkill={(id) => void editSkill(id)} onDeleteSkill={(id) => void deleteSkill(id)} onCloneProfile={() => void cloneProfile()} onRenameProfile={() => void renameProfile()} onDeleteProfile={() => void deleteProfile()} onToggleKnowledgeBase={(id, linked) => void toggleKnowledgeBase(id, linked)} onReviewSuggestion={(id, status) => void reviewSkillSuggestion(id, status)} onRebuildAnalysis={() => void rebuildProfileBuilder()} onAnalyzeResume={() => void analyzeResume()} onUpdateExpression={(patch) => void updateProfileExpression(patch)} />
+        ? <ProfileWorkspacePage profiles={profiles} profileId={profileId} selectedProfile={selectedProfile} knowledgeBases={knowledgeBases} artifact={profileBuilderArtifact} resumeAnalysis={resumeAnalysis} suggestions={skillSuggestions} analysisRunning={profileBuilderRunning} resumeAnalysisRunning={resumeAnalysisRunning} onSelectProfile={(id) => { setProfileId(id); void window.interviewCopilot.profiles.selectActive(id); }} onCreateProfile={async () => { const created = await window.interviewCopilot.profiles.save({ name: `面试档案 ${profiles.length + 1}`, language: "zh-CN", skills: [], knowledgeBaseIds: knowledgeBases[0] ? [knowledgeBases[0].id] : [] }); if (created) { setProfiles((current) => [created, ...current]); setProfileId(created.id); } }} onAttachMaterial={attachProfileMaterial} onRemoveMaterial={removeProfileMaterial} onEditInstructions={() => void editInstructions()} onEditCompanyContext={() => void editCompanyContext()} onEditSalaryExpectation={() => void editSalaryExpectation()} onAddSkill={() => void addSkill()} onEditSkill={(id) => void editSkill(id)} onDeleteSkill={(id) => void deleteSkill(id)} onCloneProfile={() => void cloneProfile()} onRenameProfile={() => void renameProfile()} onDeleteProfile={() => void deleteProfile()} onToggleKnowledgeBase={(id, linked) => void toggleKnowledgeBase(id, linked)} onReviewSuggestion={(id, status) => void reviewSkillSuggestion(id, status)} onRebuildAnalysis={() => void rebuildProfileBuilder()} onAnalyzeResume={() => void analyzeResume()} onUpdateExpression={(patch) => void updateProfileExpression(patch)} projects={projects} resumeProjectLinks={resumeProjectLinks} selfIntroduction={selfIntroduction} onSaveResumeProjectLink={(resumeProjectId, projectId) => void saveResumeProjectLink(resumeProjectId, projectId)} onCreateProjectForResume={(resumeProjectId, name) => void createProjectForResume(resumeProjectId, name)} onSaveSelfIntroduction={(text, duration, language) => void saveSelfIntroduction(text, duration, language)} onUploadSelfIntroduction={(file) => void uploadSelfIntroduction(file)} onGenerateSelfIntroduction={(duration, language) => void generateSelfIntroduction(duration, language)} onApproveSelfIntroduction={() => void approveSelfIntroduction()} onContinueUsingSelfIntroduction={() => void continueUsingSelfIntroduction()} />
       : page === "help"
         ? <HelpPage onNavigate={setPage} onSettingsSection={setSettingsSection} onOpenSetup={() => { setPage("interview"); openInterviewSetup(); }} />
       : undefined;
