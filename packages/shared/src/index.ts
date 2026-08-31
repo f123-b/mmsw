@@ -111,6 +111,7 @@ export { DEFAULT_PROJECT_QA_ROUTING_POLICY, questionBankAnswerIsReady } from "./
 export type { ProjectQaMatchLevel, ProjectQaRouteResult, ProjectQaRoutingPolicy, QuestionBankRouteHit, QuestionBankRouteOptions, QuestionBankRouteResult } from "./question-bank-router";
 export type { QuestionCategory, QuestionClassification } from "./question-classifier";
 export { TurnCompletionGate, decideTurnCompletion, type TurnCompletionContext, type TurnCompletionDecision, type TurnCompletionState } from "./interview/turn-completion-gate";
+export { PendingQuestionDraftAssembler, classifySegmentRole, type PendingQuestionDraft, type PendingQuestionDraftOptions, type PendingQuestionRawSegment, type PendingQuestionDraftUpdate, type SegmentSemanticRole } from "./interview/pending-question-draft";
 export { UnresolvedAsrGate, type AsrUnderstandingQuality, type UnresolvedAsrDecision } from "./interview/unresolved-asr-gate";
 export { analyzeQuestionNucleus, type QuestionNucleusAnalysis, type QuestionNucleusIntent } from "./question/question-nucleus";
 export { ProjectAliasResolver, type ProjectAliasCandidate, type ProjectAliasResolution } from "./project-alias-resolver";

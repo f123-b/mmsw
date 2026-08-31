@@ -399,6 +399,10 @@ let overlayAnswer;
 let overlayControl;
 try {
   await waitFor(() => document.documentElement?.dataset.appReady === "true");
+  if (await main.evaluate("Boolean(document.querySelector('.onboarding-modal'))")) {
+    await clickSelector(".onboarding-modal .dark-pill");
+    await waitFor(() => !document.querySelector(".onboarding-modal"));
+  }
   if (answerRequests.length !== 0) throw new Error(`STARTUP_LLM_REQUEST_DETECTED: ${answerRequests.length}`);
   evidence.push("Startup: PASS; STARTUP_NO_LLM_REQUESTS: PASS");
   await clickText("设置");
@@ -751,7 +755,8 @@ try {
 
   await waitForNode(() => answerRequests.length >= 3, 15_000);
   const currentQuestionText = await overlay.evaluate("document.querySelector('.current-question-text')?.textContent ?? ''");
-  if (!interviewQuestions.auto.some((question) => currentQuestionText.includes(question))) throw new Error(`CURRENT_QUESTION_VIEW_MODEL failed: ${JSON.stringify({ currentQuestionText, interviewQuestions })}`);
+  const compactQuestion = (value) => value.replace(/[\\s，。！？、,.!?；;:：]+/gu, "");
+  if (!interviewQuestions.auto.some((question) => compactQuestion(currentQuestionText).includes(compactQuestion(question)))) throw new Error(`CURRENT_QUESTION_VIEW_MODEL failed: ${JSON.stringify({ currentQuestionText, interviewQuestions })}`);
   const questionHistory = await overlay.evaluate("(() => { const details = document.querySelector('.overlay-history'); return { present: Boolean(details), open: details?.open ?? false }; })()");
   if (questionHistory?.open) throw new Error(`QUESTION_HISTORY_NOT_COLLAPSED failed: ${JSON.stringify(questionHistory)}`);
   evidence.push("Supersede: PASS");
@@ -785,8 +790,9 @@ try {
     const capturedProjectRequests = projectAnswerRequests.slice(beforeProjectQuestion);
     const capturedAnswerRequests = answerRequests.slice(beforeAnswerRequest);
     const answerPrompt = JSON.stringify([...capturedProjectRequests, ...capturedAnswerRequests]);
+    const comparableAnswerPrompt = answerPrompt.replace(/\s+/gu, "");
     if (capturedProjectRequests.length === 0 && capturedAnswerRequests.length === 0) throw new Error(`${assertion.label} produced no provider request`);
-    if (!assertion.markers.every((marker) => answerPrompt.includes(marker))) throw new Error(`${assertion.label} failed: ${answerPrompt.slice(0, 8_000)}`);
+    if (!assertion.markers.every((marker) => comparableAnswerPrompt.includes(marker.replace(/\s+/gu, "")))) throw new Error(`${assertion.label} failed: ${answerPrompt.slice(0, 8_000)}`);
   }
   evidence.push("Interview Project Context: PASS; EXACT_PARAMETER_RETRIEVAL: PASS; TECHNICAL_DECISION_RETRIEVAL: PASS; PROBLEM_CHAIN_RETRIEVAL: PASS");
 

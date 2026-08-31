@@ -217,4 +217,18 @@ describe("2026-08-29 real interview runtime pipeline replay", () => {
     expect(result.traceNames.filter((name) => name === "ANSWER_REQUEST_CREATED")).toHaveLength(1);
     vi.useRealTimers();
   });
+
+  it("supplements a strong late constraint after the first answer is visible", async () => {
+    vi.useFakeTimers();
+    const result = await replay([
+      { text: "假设现场出现偶发性 HardFault，你会如何一步步定位？", at: 0, startMs: 0, endMs: 900 },
+      { text: "包括异常现场捕获、寄存器解析、栈回溯、map 文件和看门狗策略。", at: 900, startMs: 900, endMs: 1_600 }
+    ], 900);
+
+    expect(result.answers).toHaveLength(2);
+    expect(result.answers[1]).toContain("map 文件");
+    expect(result.traceNames).toEqual(expect.arrayContaining(["LATE_CONSTRAINT_RECEIVED", "LATE_CONSTRAINT_MERGED", "LATE_CONSTRAINT_SUPPLEMENTED"]));
+    expect(result.traceNames).not.toContain("LATE_CONSTRAINT_DROPPED");
+    vi.useRealTimers();
+  });
 });

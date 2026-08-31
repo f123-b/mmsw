@@ -2,6 +2,7 @@ import type { QuestionRelationType } from "./turn-builder";
 
 export type AnswerCancellationReason = "user" | "asr_revision" | "provider_timeout" | "session_stop";
 export type AnswerSchedulerAction = "start" | "queue" | "merge" | "ignore";
+export type AnswerSchedulerState = "ASSEMBLING" | "READY" | "CONTEXT_BUILDING" | "REQUEST_SENT" | "STREAMING" | "COMPLETED";
 
 export interface AnswerMergePlan {
   question: string;
@@ -19,11 +20,14 @@ export interface AnswerSchedulerQuestion {
 
 export interface AnswerSchedulerActive extends AnswerSchedulerQuestion {
   startedAt: number;
+  state: AnswerSchedulerState;
   visibleText: string;
   hasVisibleOutput: boolean;
   /** True once the provider request has left the process. */
   requestSent: boolean;
   plan: AnswerMergePlan;
+  canMergeBeforeRequest: boolean;
+  canSupplementAfterRequest: boolean;
 }
 
 export interface AnswerSchedulerRequestOptions {
@@ -94,9 +98,20 @@ export class AnswerScheduler {
   private requestCount = 0;
   private mergeCount = 0;
   private queueCount = 0;
+  private lastState: AnswerSchedulerState = "COMPLETED";
+
+  get state(): AnswerSchedulerState { return this.activeAnswer?.state ?? this.lastState; }
+  get canMergeBeforeRequest(): boolean { return Boolean(this.activeAnswer && !this.activeAnswer.requestSent && !this.activeAnswer.hasVisibleOutput); }
+  get canSupplementAfterRequest(): boolean { return Boolean(this.activeAnswer?.requestSent); }
 
   get active(): AnswerSchedulerActive | undefined {
-    return this.activeAnswer ? { ...this.activeAnswer, plan: clonePlan(this.activeAnswer.plan) } : undefined;
+    if (!this.activeAnswer) return undefined;
+    return {
+      ...this.activeAnswer,
+      plan: clonePlan(this.activeAnswer.plan),
+      canMergeBeforeRequest: this.canMergeBeforeRequest,
+      canSupplementAfterRequest: this.canSupplementAfterRequest
+    };
   }
 
   get queue(): AnswerSchedulerQuestion[] {
@@ -107,6 +122,7 @@ export class AnswerScheduler {
 
   reset(): void {
     this.activeAnswer = undefined;
+    this.lastState = "COMPLETED";
     this.queuedAnswers.length = 0;
     this.requestCount = 0;
     this.mergeCount = 0;
@@ -136,14 +152,18 @@ export class AnswerScheduler {
       this.activeAnswer = {
         ...enriched,
         startedAt: options.now ?? Date.now(),
+        state: "ASSEMBLING",
         visibleText: "",
         hasVisibleOutput: false,
         requestSent: false,
-        plan: initialPlan(enriched)
+        plan: initialPlan(enriched),
+        canMergeBeforeRequest: true,
+        canSupplementAfterRequest: false
       };
+      this.lastState = "ASSEMBLING";
       return { action: "start", question: cloneQuestion(enriched), reason: "scheduler-idle", queueDepth: 0, active: this.active };
     }
-    if (mergeableRelation(enriched.relationType) && !this.activeAnswer.hasVisibleOutput && !this.activeAnswer.requestSent && enriched.groupId === this.activeAnswer.groupId) {
+    if (mergeableRelation(enriched.relationType) && this.canMergeBeforeRequest && enriched.groupId === this.activeAnswer.groupId) {
       this.activeAnswer.plan = mergePlan(this.activeAnswer.plan, enriched);
       this.mergeCount += 1;
       return { action: "merge", question: cloneQuestion(enriched), reason: "augmentation-merged-before-request", queueDepth: this.queueDepth, active: this.active };
@@ -158,17 +178,32 @@ export class AnswerScheduler {
     if (!this.activeAnswer) return;
     this.activeAnswer.visibleText += delta;
     this.activeAnswer.hasVisibleOutput = hasEffectiveOutput(this.activeAnswer.visibleText);
+    if (this.activeAnswer.hasVisibleOutput) this.activeAnswer.state = "STREAMING";
   }
 
   markVisibleOutput(text = ""): void {
     if (!this.activeAnswer) return;
     this.activeAnswer.visibleText += text;
     this.activeAnswer.hasVisibleOutput = true;
+    this.activeAnswer.state = "STREAMING";
+  }
+
+  markContextBuilding(questionId: string): boolean {
+    if (this.activeAnswer?.id !== questionId) return false;
+    this.activeAnswer.state = "CONTEXT_BUILDING";
+    return true;
+  }
+
+  markReady(questionId: string): boolean {
+    if (this.activeAnswer?.id !== questionId) return false;
+    this.activeAnswer.state = "READY";
+    return true;
   }
 
   markRequestSent(questionId: string): boolean {
     if (this.activeAnswer?.id !== questionId) return false;
     this.activeAnswer.requestSent = true;
+    this.activeAnswer.state = "REQUEST_SENT";
     return true;
   }
 
@@ -183,6 +218,7 @@ export class AnswerScheduler {
       return { cancelled: false, reason: reason === "asr_revision" ? "effective-output-protected" : "no-active-answer" };
     }
     this.activeAnswer = undefined;
+    this.lastState = "COMPLETED";
     return { cancelled: true, next: undefined, reason };
   }
 
@@ -191,7 +227,8 @@ export class AnswerScheduler {
     this.activeAnswer = undefined;
     const next = this.queuedAnswers.shift();
     if (next && options.activateNext !== false) {
-      this.activeAnswer = { ...next, startedAt: Date.now(), visibleText: "", hasVisibleOutput: false, requestSent: false, plan: initialPlan(next) };
+      this.activeAnswer = { ...next, startedAt: Date.now(), state: "ASSEMBLING", visibleText: "", hasVisibleOutput: false, requestSent: false, plan: initialPlan(next), canMergeBeforeRequest: true, canSupplementAfterRequest: false };
+      this.lastState = "ASSEMBLING";
     }
     return next ? cloneQuestion(next) : undefined;
   }

@@ -30,6 +30,8 @@ describe("AnswerScheduler", () => {
   it("merges an augmentation into the active plan instead of queueing", () => {
     const scheduler = new AnswerScheduler();
     scheduler.request(q1, { now: 1_000 });
+    expect(scheduler.state).toBe("ASSEMBLING");
+    expect(scheduler.canMergeBeforeRequest).toBe(true);
     const augmentation = scheduler.request({ id: "q2", text: "以及常见误区？", groupId: "g1", relationType: "SAME_QUESTION_AUGMENTATION" }, { relationType: "SAME_QUESTION_AUGMENTATION" });
     expect(augmentation.action).toBe("merge");
     expect(scheduler.queueDepth).toBe(0);
@@ -51,12 +53,21 @@ describe("AnswerScheduler", () => {
   it("does not merge an augmentation after the provider request was sent", () => {
     const scheduler = new AnswerScheduler();
     scheduler.request(q1, { now: 1_000 });
+    expect(scheduler.markContextBuilding("q1")).toBe(true);
+    expect(scheduler.state).toBe("CONTEXT_BUILDING");
+    expect(scheduler.markReady("q1")).toBe(true);
+    expect(scheduler.state).toBe("READY");
     expect(scheduler.markRequestSent("q1")).toBe(true);
+    expect(scheduler.state).toBe("REQUEST_SENT");
+    expect(scheduler.canMergeBeforeRequest).toBe(false);
+    expect(scheduler.canSupplementAfterRequest).toBe(true);
 
     const augmentation = scheduler.request({ id: "q4", text: "再补充一个边界条件。", groupId: "g1", relationType: "SAME_QUESTION_AUGMENTATION" }, { relationType: "SAME_QUESTION_AUGMENTATION" });
     expect(augmentation.action).toBe("queue");
     expect(augmentation.reason).toBe("active-answer-protected");
     expect(scheduler.active?.plan.constraints).toEqual([]);
     expect(scheduler.queue.map((item) => item.id)).toEqual(["q4"]);
+    scheduler.observeOutput("回答已经开始显示。");
+    expect(scheduler.state).toBe("STREAMING");
   });
 });

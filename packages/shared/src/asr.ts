@@ -432,7 +432,10 @@ export class DashScopeTaskStreamingAsrProvider implements StreamingAsrProvider {
       if (text && this.segmentListener) {
         const startMs = Math.max(0, Math.round(sentence?.begin_time ?? 0));
         const endMs = Math.max(startMs, Math.round(sentence?.end_time ?? startMs));
-        this.segmentListener({ source: this.source, text, startMs, endMs, final: Boolean(sentence?.sentence_end), endpoint: Boolean(sentence?.sentence_end), endOfTurn: Boolean(sentence?.sentence_end) });
+        // DashScope's sentence_end closes an ASR sentence. It is deliberately
+        // not promoted to an interview-turn endpoint; the coordinator still
+        // waits for the local semantic draft to settle.
+        this.segmentListener({ source: this.source, text, startMs, endMs, final: Boolean(sentence?.sentence_end) });
       }
       return;
     }
@@ -474,7 +477,7 @@ export class QwenRealtimeAsrProvider implements StreamingAsrProvider {
   private sentAudioMs = 0;
   private lastFinalEndMs = 0;
   private activeItemId?: string;
-  private readonly itemRanges = new Map<string, { startMs: number; endMs?: number }>();
+  private readonly itemRanges = new Map<string, { startMs: number; endMs?: number; speechStopped?: boolean }>();
   private readyWaiter?: { resolve: () => void; reject: (error: ProviderError) => void; timer: ReturnType<typeof setTimeout> };
   private finalizing = false;
   private finalizeWaiters: Array<{ resolve: () => void; timer: ReturnType<typeof setTimeout> }> = [];
@@ -638,7 +641,7 @@ export class QwenRealtimeAsrProvider implements StreamingAsrProvider {
     if (message.type === "input_audio_buffer.speech_stopped") {
       const itemId = message.item_id || this.activeItemId || `active-${this.source}`;
       const current = this.itemRanges.get(itemId) ?? { startMs: this.lastFinalEndMs };
-      this.itemRanges.set(itemId, { ...current, endMs: Math.max(current.startMs, Math.round(message.audio_end_ms ?? this.sentAudioMs)) });
+      this.itemRanges.set(itemId, { ...current, endMs: Math.max(current.startMs, Math.round(message.audio_end_ms ?? this.sentAudioMs)), speechStopped: true });
       return;
     }
     if (message.type === "conversation.item.input_audio_transcription.text") {
@@ -663,7 +666,7 @@ export class QwenRealtimeAsrProvider implements StreamingAsrProvider {
     const range = this.itemRanges.get(itemId) ?? { startMs: this.lastFinalEndMs };
     const startMs = Math.max(0, Math.round(range.startMs));
     const endMs = Math.max(startMs, Math.round(range.endMs ?? this.sentAudioMs));
-    this.segmentListener({ source: this.source, text, startMs, endMs, final, utteranceId: itemId, ...(final ? { endpoint: true, speechFinal: true, utteranceEnd: true, endOfTurn: true } : {}) });
+    this.segmentListener({ source: this.source, text, startMs, endMs, final, utteranceId: itemId, ...(final && range.speechStopped ? { endpoint: true } : {}) });
     if (final) {
       this.lastFinalEndMs = endMs;
       this.itemRanges.delete(itemId);

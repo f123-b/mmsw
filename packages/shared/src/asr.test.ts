@@ -124,8 +124,8 @@ describe("stereo ASR routing", () => {
       { model: "qwen3-asr-flash-realtime", language: "zh-CN", apiKey: "secret" },
       (options) => { requests.push(options); return socket; }
     );
-    const segments: Array<{ text: string; startMs: number; endMs: number; final: boolean }> = [];
-    const connecting = provider.connect("remote", (segment) => segments.push({ text: segment.text, startMs: segment.startMs, endMs: segment.endMs, final: segment.final }));
+    const segments: Array<{ text: string; startMs: number; endMs: number; final: boolean; endpoint?: boolean; endOfTurn?: boolean }> = [];
+    const connecting = provider.connect("remote", (segment) => segments.push({ text: segment.text, startMs: segment.startMs, endMs: segment.endMs, final: segment.final, ...(segment.endpoint === undefined ? {} : { endpoint: segment.endpoint }), ...(segment.endOfTurn === undefined ? {} : { endOfTurn: segment.endOfTurn }) }));
     socket.openSocket();
     await Promise.resolve();
     expect(new URL(requests[0]?.url ?? "wss://invalid").searchParams.get("model")).toBe("qwen3-asr-flash-realtime");
@@ -144,7 +144,7 @@ describe("stereo ASR routing", () => {
     socket.emit(JSON.stringify({ type: "conversation.item.input_audio_transcription.completed", item_id: "item-1", transcript: "解释一下 DMA" }));
     expect(segments).toEqual([
       { text: "解释一下", startMs: 120, endMs: 120, final: false },
-      { text: "解释一下 DMA", startMs: 120, endMs: 760, final: true }
+      { text: "解释一下 DMA", startMs: 120, endMs: 760, final: true, endpoint: true }
     ]);
 
     const finalizing = provider.finalize(750);
@@ -180,8 +180,8 @@ describe("stereo ASR routing", () => {
       { model: "fun-asr-realtime", language: "zh-CN", apiKey: "secret" },
       (options) => { requests.push(options); return socket; }
     );
-    const segments: Array<{ text: string; final: boolean }> = [];
-    const connecting = provider.connect("remote", (segment) => segments.push({ text: segment.text, final: segment.final }));
+    const segments: Array<{ text: string; final: boolean; endpoint?: boolean; endOfTurn?: boolean }> = [];
+    const connecting = provider.connect("remote", (segment) => segments.push({ text: segment.text, final: segment.final, ...(segment.endpoint === undefined ? {} : { endpoint: segment.endpoint }), ...(segment.endOfTurn === undefined ? {} : { endOfTurn: segment.endOfTurn }) }));
     socket.openSocket();
     await Promise.resolve();
     const runTask = JSON.parse(socket.sentText[0] ?? "{}") as { header?: { action?: string }; payload?: { model?: string } };

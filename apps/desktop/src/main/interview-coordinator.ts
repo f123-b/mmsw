@@ -30,7 +30,9 @@ import {
   QuestionDetector,
   QuestionDetector2,
   SessionStateMachine,
-  TranscriptAggregator,
+  PendingQuestionDraftAssembler,
+  type PendingQuestionDraft,
+  type PendingQuestionDraftUpdate,
   TurnCompletionGate,
   UnresolvedAsrGate,
   type AnswerContextInput,
@@ -134,7 +136,6 @@ export interface InterviewCoordinatorOptions {
   detector?: QuestionDetector;
   questionDetector2?: QuestionDetector2;
   memory?: InterviewMemory;
-  aggregator?: TranscriptAggregator;
   history?: InterviewHistoryPort;
   contextProvider?: (question: QuestionCandidate, profileId: string, recentTranscript: string[], context?: InterviewContextSelection) => AnswerContextInput | Promise<AnswerContextInput>;
   terminologyLexiconProvider?: (profileId: string, projectId?: string, jobTargetId?: string) => DynamicTechnicalLexicon | Promise<DynamicTechnicalLexicon>;
@@ -197,7 +198,7 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly brain: InterviewBrain;
   private readonly followUpContextResolver = new FollowUpContextResolver();
   private readonly memory: InterviewMemory;
-  private readonly aggregator: TranscriptAggregator;
+  private readonly pendingQuestionDraft = new PendingQuestionDraftAssembler();
   private readonly history: InterviewHistoryPort;
   private readonly now: () => number;
   private readonly speechActClassifier = new SpeechActClassifier();
@@ -280,7 +281,6 @@ export class InterviewCoordinator extends EventEmitter {
     this.detector2 = options.questionDetector2 ?? new QuestionDetector2();
     this.brain = options.interviewBrain ?? new InterviewBrain();
     this.memory = options.memory ?? new InterviewMemory(10);
-    this.aggregator = options.aggregator ?? new TranscriptAggregator();
     this.history = options.history ?? new InterviewHistoryStore();
     this.now = options.now ?? (() => Date.now());
     this.anchorStore = new ContextAnchorStore(this.now);
@@ -305,7 +305,7 @@ export class InterviewCoordinator extends EventEmitter {
       pendingQuestions,
       activeAnswers,
       activeStreams,
-      transcriptQueueDepth: this.aggregator.pendingCount + this.questionTasks.size,
+      transcriptQueueDepth: (this.pendingQuestionDraft.current ? 1 : 0) + this.questionTasks.size,
       answerQueueDepth: this.answerQueue.length,
       activeAbortControllers: this.runtimeAbortControllers.size,
       activeTimers: this.runtimeTimers.size,
@@ -524,7 +524,7 @@ export class InterviewCoordinator extends EventEmitter {
       this.questionConfirmedAt.clear();
       this.recentTranscript.length = 0;
       this.clearRemoteAssemblyTimer();
-      this.aggregator.clear();
+      this.pendingQuestionDraft.reset();
       this.recordRuntimeTrace("INTERVIEW_SESSION_STARTED", {}, { reasonCode: "session-created" });
       const warmup = this.options.questionClassifierWarmup
         ? (async () => {
@@ -629,7 +629,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.pendingTopicTransition = false;
     this.questionConfirmedAt.clear();
     this.recentTranscript.length = 0;
-    this.aggregator.clear();
+    this.pendingQuestionDraft.reset();
     this.clearRuntimeTimers();
     this.finalQuestionQueue = undefined;
     this.detector.reset();
@@ -784,6 +784,7 @@ export class InterviewCoordinator extends EventEmitter {
     try {
       const answerOperation = this.runtimeAnswers.get(operationId);
       if (answerOperation) answerOperation.state = "context_loading";
+      this.answerScheduler.markContextBuilding(question.id);
       this.recordRuntimeTrace("CONTEXT_BUILDING", {}, { questionId: question.id, providerRequestId });
       this.recordRuntimeTrace("FAST_CONTEXT_STARTED", {}, { questionId: question.id, providerRequestId });
       this.markLatency(question.id, "fastContextStartedAt");
@@ -882,6 +883,7 @@ export class InterviewCoordinator extends EventEmitter {
       };
       if (answerOperation) answerOperation.state = "provider_pending";
       if (answerOperation) answerOperation.state = "request_ready";
+      this.answerScheduler.markReady(question.id);
       this.recordRuntimeTrace("REQUEST_READY", {}, { questionId: question.id, providerRequestId });
       this.recordRuntimeTrace("PROJECT_CONTEXT_READY", {}, { questionId: question.id, providerRequestId });
       // A queued question must retain the topic and transcript that existed
@@ -1193,8 +1195,8 @@ export class InterviewCoordinator extends EventEmitter {
           });
         }
       }
-      // A candidate answer marks a hard turn boundary for the remote
-      // aggregator. Flush and analyze the remote turn before starting the
+      // A candidate answer marks a hard turn boundary for the pending remote
+      // question draft. Flush and analyze the remote turn before starting the
       // candidate answer; previously this flush discarded the last question.
       if (segment.final && segment.source === "mic") {
         this.clearRemoteAssemblyTimer();
@@ -1208,14 +1210,31 @@ export class InterviewCoordinator extends EventEmitter {
         this.scheduleQuestionFlush();
         return;
       }
-      // A provider final marks a stable ASR segment, not necessarily the end
-      // of the interviewer's sentence. Keep assembling until a short adaptive
-      // silence expires, then analyze the complete utterance exactly once.
-      const utterance = this.aggregator.push(segment, receivedAt, rawSegment.text);
-      if (!utterance) return;
-      this.clearQuestionFlushTimer();
-      this.drainCompletedRemoteUtterances();
-      this.scheduleRemoteAssembly(utterance, segment);
+      // A provider final only freezes this ASR fragment. It is not a semantic
+      // end-of-turn signal. Keep a local draft so setup, constraints and
+      // several question nuclei reach the detector as one canonical prompt.
+      const draftUpdate = this.pendingQuestionDraft.add(segment, receivedAt);
+      this.recordRuntimeTrace("QUESTION_DRAFT_UPDATED", {
+        role: draftUpdate.role,
+        accepted: draftUpdate.accepted,
+        late: draftUpdate.late,
+        segmentId: segment.id,
+        segmentLength: segment.text.length,
+        draftId: draftUpdate.draft?.id,
+        canonicalText: draftUpdate.draft ? this.pendingQuestionDraft.canonicalText(draftUpdate.draft) : undefined,
+        asrFinal: segment.final,
+        asrEndpoint: segment.endpoint
+      }, { reasonCode: draftUpdate.reason });
+      if (!draftUpdate.accepted) return;
+      if (draftUpdate.completed) {
+        this.clearRemoteAssemblyTimer();
+        this.enqueueFinalUtterance(this.pendingQuestionDraft.toUtterance(draftUpdate.completed, receivedAt));
+      }
+      if (draftUpdate.late) {
+        this.handleLateDraftUpdate(draftUpdate, segment);
+        return;
+      }
+      if (draftUpdate.draft) this.scheduleRemoteAssembly(draftUpdate.draft, segment);
     });
     this.asr.on("message", (message: RealtimeServerMessage) => {
       if (!this.activeInterviewId || this.runtimeSessionState !== "running") {
@@ -1362,41 +1381,110 @@ export class InterviewCoordinator extends EventEmitter {
     this.trackQuestionTask(tracked);
   }
 
-  private drainCompletedRemoteUtterances(): number {
-    const completed = this.aggregator.drainCompleted("remote");
-    if (!completed.length) return 0;
-    // The previous turn has now been closed by a semantic boundary. Do not
-    // let its assembly timer fire against the new turn.
-    this.clearRemoteAssemblyTimer();
-    completed.forEach((utterance) => this.enqueueFinalUtterance(utterance));
-    return completed.length;
-  }
-
   private flushRemoteUtterances(): void {
-    this.aggregator.flush("remote", this.now()).forEach((utterance) => this.enqueueFinalUtterance(utterance));
+    const finalizedAt = this.now();
+    const draft = this.pendingQuestionDraft.finalize(finalizedAt);
+    if (draft) this.enqueueFinalUtterance(this.pendingQuestionDraft.toUtterance(draft, finalizedAt));
   }
 
-  private scheduleRemoteAssembly(utterance: TranscriptUtterance, latest: TranscriptSegment): void {
+  private scheduleRemoteAssembly(draft: PendingQuestionDraft, latest: TranscriptSegment): void {
     this.runtimeTimers.clear("remote-assembly");
     this.remoteAssemblyStartedAt ??= this.now();
     const elapsed = Math.max(0, this.now() - this.remoteAssemblyStartedAt);
     const remaining = Math.max(120, 1_800 - elapsed);
-    const text = utterance.text.trim();
+    const text = this.pendingQuestionDraft.canonicalText(draft).trim();
     this.recordRuntimeTrace("TURN_COMPLETION_STARTED", { textLength: text.length }, { reasonCode: "remote-final-assembly" });
     const completion = this.turnCompletionGate.decide(text, {
       previousText: latest.text,
       currentTopic: this.anchorStore.snapshot(this.now()).currentTopic,
-      asrEndpoint: Boolean(latest.endpoint || latest.speechFinal || latest.utteranceEnd || latest.endOfTurn)
+      // ASR endpoint markers close an audio fragment, not the semantic draft.
+      // The draft's role-based horizon is the only completion authority here.
+      asrEndpoint: false
     });
-    // The semantic gate owns the completion horizon. A punctuation mark must
-    // not shorten an open conditional/setup clause.
-    const delay = completion.recommendedWaitMs;
+    // A setup/constraint-only draft must stay open long enough for the
+    // question nucleus. Once a nucleus exists, keep the fast 220ms coalescing
+    // window so the first answer still appears quickly.
+    const delay = Math.max(this.pendingQuestionDraft.waitMs, completion.recommendedWaitMs);
     this.runtimeTimers.set("remote-assembly", () => {
       this.remoteAssemblyTimer = undefined;
       this.remoteAssemblyStartedAt = undefined;
-      this.recordRuntimeTrace("TURN_COMPLETION_COMPLETED", { state: completion.state, waitMs: completion.recommendedWaitMs }, { reasonCode: completion.reason });
+      this.recordRuntimeTrace("TURN_COMPLETION_COMPLETED", { state: completion.state, waitMs: delay }, { reasonCode: "pending-question-draft-ready" });
       this.flushRemoteUtterances();
     }, Math.min(delay, remaining));
+  }
+
+  private handleLateDraftUpdate(update: PendingQuestionDraftUpdate, segment: TranscriptSegment): void {
+    const question = this.currentQuestion;
+    const recent = update.draft;
+    if (!question?.groupId || !recent) {
+      this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "late-question-context", role: update.role }, { reasonCode: "no-active-question-group" });
+      this.recordRuntimeTrace("LATE_CONSTRAINT_DROPPED", { role: update.role, textLength: segment.text.length }, { questionId: question?.id, reasonCode: "no-active-question-group" });
+      return;
+    }
+    this.recordRuntimeTrace("LATE_CONSTRAINT_RECEIVED", { role: update.role, textLength: segment.text.length }, { questionId: question.id, reasonCode: update.reason });
+    const group = this.questionGroups.getGroup(question.groupId);
+    if (!group || group.status === "closed") {
+      this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "late-question-context", role: update.role }, { questionId: question.id, reasonCode: "question-group-closed" });
+      this.recordRuntimeTrace("LATE_CONSTRAINT_DROPPED", { role: update.role, textLength: segment.text.length }, { questionId: question.id, reasonCode: "question-group-closed" });
+      return;
+    }
+    const turn = question.turnId ? this.turns.get(question.turnId) : undefined;
+    const lateCandidate: QuestionCandidate = {
+      id: `late-constraint-${question.id}-${segment.id ?? segment.endMs}`,
+      text: segment.text.trim(),
+      rawText: segment.text,
+      normalizedText: segment.text.trim(),
+      canonicalText: segment.text.trim(),
+      confidence: "high",
+      score: 1,
+      source: "rules",
+      detectedAt: this.now(),
+      status: "confirmed",
+      final: true,
+      answerable: false,
+      shouldAnswer: false,
+      groupId: question.groupId,
+      turnId: question.turnId,
+      utteranceId: `late-${question.id}`,
+      segmentIds: [segment.id ?? `${segment.startMs}-${segment.endMs}`],
+      relationType: "ANSWER_CONSTRAINT",
+      threadItemType: "ANSWER_CONSTRAINT",
+      contextRelation: "continuation",
+      topic: question.topic
+    };
+    const groupResult = this.questionGroups.add({
+      turn: turn ?? this.turnBuilder.build({ id: question.turnId ?? question.id, text: question.text, receivedAt: question.detectedAt }),
+      question: lateCandidate,
+      now: this.now(),
+      relationType: "ANSWER_CONSTRAINT"
+    });
+    if (groupResult.group.id !== question.groupId) {
+      this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "late-question-context", role: update.role }, { questionId: question.id, reasonCode: "question-group-mismatch" });
+      this.recordRuntimeTrace("LATE_CONSTRAINT_DROPPED", { role: update.role, textLength: segment.text.length }, { questionId: question.id, reasonCode: "question-group-mismatch" });
+      return;
+    }
+    this.emitQuestionGroupResult(groupResult);
+    this.recordRuntimeTrace("LATE_CONSTRAINT_MERGED", { role: update.role, groupId: question.groupId }, { questionId: question.id, reasonCode: "same-question-group" });
+    // A late output-shape request (for example, "从这几个角度说一下") is
+    // already preserved in the same group, but does not by itself warrant a
+    // second provider request. Strong factual constraints (hardware,
+    // numeric/map/stack requirements) need an explicit supplement after the
+    // answer has started, because they change what must be covered.
+    if (this.activeOptions?.automationMode !== "AUTO" || update.role !== "CONSTRAINT") return;
+    const augmentation: QuestionCandidate = {
+      ...lateCandidate,
+      id: `augmentation-${question.id}-${segment.id ?? segment.endMs}`,
+      text: `请基于当前主问题和已有回答，补充说明以下要求：${segment.text.trim()}`,
+      answerable: true,
+      shouldAnswer: true,
+      relationType: "SAME_QUESTION_AUGMENTATION",
+      threadItemType: "SAME_QUESTION_AUGMENTATION",
+      parentQuestionId: question.id,
+      rootQuestionId: question.rootQuestionId ?? question.id
+    };
+    this.recordRuntimeTrace("LATE_AUGMENTATION_QUEUED", { groupId: question.groupId, type: "AUGMENTATION" }, { questionId: question.id, reasonCode: "late-context-supplement" });
+    this.recordRuntimeTrace("LATE_CONSTRAINT_SUPPLEMENTED", { groupId: question.groupId, type: "AUGMENTATION" }, { questionId: question.id, reasonCode: "late-context-supplement" });
+    void this.trackAnswerTask(this.answer(augmentation));
   }
 
   private clearRemoteAssemblyTimer(): void {

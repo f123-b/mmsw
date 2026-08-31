@@ -1039,7 +1039,9 @@ async function runNativeMouseSmoke(main: BrowserWindow): Promise<void> {
   })()`, true) as { x: number; y: number } | undefined;
   if (!dialogueWheelPoint) throw new Error("Native dialogue wheel target was not found");
   const dialogueWheelScreenPoint = nativePoint(questionWindow, dialogueWheelPoint);
-  await nativeMouseWheel(dialogueWheelScreenPoint.x, dialogueWheelScreenPoint.y, 480);
+  // Windows mouseData -480 means wheel-down. The helper normalizes it to
+  // positive DOM deltaY so the dialogue reader scrolls toward its tail.
+  await nativeMouseWheel(dialogueWheelScreenPoint.x, dialogueWheelScreenPoint.y, -480);
   const dialogueWheelAfter = await questionWindow.webContents.executeJavaScript(`(() => {
     const region = document.querySelector('.overlay-scroll-region');
     return region ? { scrollHeight: region.scrollHeight, clientHeight: region.clientHeight, scrollTop: region.scrollTop } : undefined;
@@ -2942,6 +2944,9 @@ if (hasSingleInstanceLock) {
     const fastQuestionAnalysis = new QuestionAnalyzer().analyze(fastNormalizedQuestion, cached.currentProject ? [cached.currentProject] : []);
     const fastTargetProjectId = interviewContext?.projectId;
     const fastProjectIntent = analyzeProjectQuestionIntent({ question: fastNormalizedQuestion, targetProjectId: fastTargetProjectId, answerIntent: fastAnswerIntent, questionAnalysisType: fastQuestionAnalysis.type, followUpContext: interviewContext?.followUpContext });
+    const fastUnderstandingRoute = fastProjectIntent.projectQuestionRequested
+      ? new ProjectComprehensionRetriever().search(fastNormalizedQuestion, undefined, 0).route
+      : undefined;
     const fastTechnicalOnly = !fastProjectIntent.projectQuestionRequested
       && !fastAnswerIntent.requiresPersonalIdentity
       && !fastAnswerIntent.requiresPersonalOwnership
@@ -2989,7 +2994,12 @@ if (hasSingleInstanceLock) {
         ...(fastPreparedAnswer ? { preparedAnswer: fastPreparedAnswer } : {}),
         answerSourcePlan: fastSourcePlan,
         projectQaEvidence: fastSourcePlan.mode === "project_qa_direct" && fastPreparedAnswer ? [fastPreparedAnswer.content] : [],
-        retrievedKnowledge: fastTechnicalOnly ? [] : cached.retrievedKnowledge ?? [],
+        retrievedKnowledge: fastTechnicalOnly
+          ? []
+          : [
+            ...(fastUnderstandingRoute ? [`PROJECT_UNDERSTANDING_ROUTE=${fastUnderstandingRoute}`] : []),
+            ...(cached.retrievedKnowledge ?? [])
+          ],
         questionTelemetry: {
           normalizedText: fastNormalizedQuestion,
           canonicalText: fastNormalizedQuestion,
@@ -3176,7 +3186,7 @@ if (hasSingleInstanceLock) {
     }
     const retrievedKnowledge = sourcePlan.mode === "project_qa_direct" || sourcePlan.mode === "general_core_qa" ? [] : [
       ...(projectQuestionRequested && targetProject ? [`项目回答视角政策：${resolveProjectAnswerPerspective(targetProject, relevantFactMatches[0]?.fact ?? { type: "background", title: "项目", content: "", id: "", projectId: targetProject.id, confidence: 0, verified: false, sourceIds: [] }).instruction}`] : []),
-      ...(understandingContext ? [`PROJECT_UNDERSTANDING_ROUTE=${understandingRetrieval.route}\n${understandingContext}`] : []),
+      ...(projectQuestionRequested ? [`PROJECT_UNDERSTANDING_ROUTE=${understandingRetrieval.route}${understandingContext ? `\n${understandingContext}` : ""}`] : []),
       ...structuredProjectRetrieval,
       ...(preparedAnswerContent && questionBankMatch?.question.scope !== "project" ? [`[GLOBAL_REFERENCE] ${preparedAnswerContent}`] : []),
       ...jobContext,
