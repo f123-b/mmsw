@@ -439,7 +439,7 @@ export class OverlayManager {
     const existing = this.getWindow(panel);
     if (existing) return existing;
     const bounds = this.nativeBounds(panel);
-    const window = new BrowserWindow({ ...bounds, title: panel === "control" ? "Interview Copilot Overlay Controls" : `Interview Copilot ${panel} Overlay`, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, show: false, focusable: false, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false } });
+    const window = new BrowserWindow({ ...bounds, title: panel === "control" ? "Interview Copilot Overlay Controls" : `Interview Copilot ${panel} Overlay`, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: false, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false } });
     this.windows[panel] = window;
     this.syncZOrderWindows();
     const load = Promise.resolve(this.options.loadRenderer(window, panel)).then(() => {
