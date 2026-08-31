@@ -45,3 +45,11 @@ ASR Final → First Visible Token      P50 231ms / P95 241ms / MAX 241ms
 - Help Center 提供 12 个主题和 5 步 Quick Start deep link；首次启动可跳过 onboarding，完成状态使用现有 device-local persistence。
 - Overlay 显示模式复用 `appearance.mode`；`text_only` 透明、无 shadow/border/backdrop，并增加文字 shadow。自动跟随在问题、对话、回答内容变化时恢复到最新尾部，用户手动上滚仍可暂停。
 - Windows wheel test 覆盖 native `-120`（向下 → DOM `+120`）和 `+120`（向上 → DOM `-120`），middle-click 路径继续独立处理。
+
+## 收口验证（2026-08-31）
+
+- Shared full regression: 96 test files, 477 tests passed.
+- Desktop full regression: 57 test files, 288 tests passed, 1 skipped; coordinator replay 14/14 with 0 failures and 0 premature answers.
+- Terminology rollout benchmark: Question Recall 1.00, Constraint Coverage 1.00, False Normalization Rate 0, Shadow Parity 1.00, High-Confidence Precision 0.90, normalization P95 1.90ms. Default remains `high_confidence`; `dynamic` is opt-in and no remote terminology correction was added.
+- Runtime latency benchmark: ASR final → question confirmed P50 228ms / P95 238ms / MAX 238ms; question confirmed → provider request P50 1ms / P95 2ms / MAX 2ms; provider request → first token P50 3ms / P95 4ms / MAX 4ms; ASR final → first visible P50 231ms / P95 242ms / MAX 242ms.
+- Windows installer: `apps/desktop/release/Interview Copilot Setup 0.1.0.exe` (195,624,857 bytes); `verify:package` passed. SHA-256: `1415BB50C4B97D1C5CB28E643FA78461BB7E26A2A8162D2DE0883659733B408E`.

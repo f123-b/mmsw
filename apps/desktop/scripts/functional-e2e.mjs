@@ -409,10 +409,10 @@ try {
   await waitFor(() => Boolean(document.querySelector(".settings-page")));
   await screenshot("01-settings.png");
   const settingsNav = await main.evaluate(`(() => {
-    const sections = ["general", "overlay", "models", "asr", "retrieval", "shortcuts", "privacy", "about"];
+    const sections = ["general", "overlay", "models", "asr", "retrieval", "shortcuts", "privacy", "terminology", "about"];
     return { present: sections.every((section) => Boolean(document.querySelector("[data-testid='settings-nav-" + section + "']"))), count: document.querySelectorAll(".settings-subnav [data-testid^='settings-nav-']").length };
   })()`);
-  if (!settingsNav?.present || settingsNav.count !== 8) throw new Error(`SETTINGS_SECONDARY_NAV_INVALID: ${JSON.stringify(settingsNav)}`);
+  if (!settingsNav?.present || settingsNav.count !== 9) throw new Error(`SETTINGS_SECONDARY_NAV_INVALID: ${JSON.stringify(settingsNav)}`);
   await clickText("模型与 API");
   await waitFor(() => Boolean(document.querySelector("[data-testid='settings-models-page']")));
   if (!(await main.evaluate("document.body.innerText.includes('配置档案') && document.body.innerText.includes('默认模型') && document.body.innerText.includes('高级任务路由')"))) throw new Error("SETTINGS_MODEL_PAGE_INCOMPLETE");
