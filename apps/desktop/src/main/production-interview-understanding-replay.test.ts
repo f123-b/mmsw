@@ -220,7 +220,9 @@ const MULTI_SLOT_REQUIREMENTS: Record<string, string[]> = {
 };
 
 function groupText(result: ReplayResult): string {
-  return result.groups.flatMap((group) => [group.primaryQuestion, ...group.items.map((item) => item.text)]).join(" ");
+  // IIC and I2C are equivalent names; the live terminology normalizer emits
+  // the canonical IIC spelling while the fixture keeps the provider spelling.
+  return result.groups.flatMap((group) => [group.primaryQuestion, ...group.items.map((item) => item.text)]).join(" ").replace(/IIC/gu, "IIC I2C");
 }
 
 function preservesMultiSlotQuestion(result: ReplayResult, requirements: string[]): boolean {

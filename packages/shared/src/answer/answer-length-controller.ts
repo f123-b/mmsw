@@ -30,6 +30,7 @@ export const ANSWER_DURATION_POLICY: Record<AnswerMode, AnswerDurationRange> = {
 };
 
 export const FOLLOW_UP_DURATION_POLICY: AnswerDurationRange = { min: 10, max: 30, target: 20 };
+export const DEEP_FOLLOW_UP_DURATION_POLICY: AnswerDurationRange = { min: 30, max: 50, target: 40 };
 
 // Kept as a compatibility export for integrations that still consume the old
 // character-based formatter contract. New answer planning uses the policy
@@ -54,7 +55,7 @@ function complexityAdjustment(complexity: "low" | "medium" | "high", range: Answ
 
 export class AnswerLengthController {
   durationRange(mode: AnswerMode, kind: AnswerQuestionKind, complexity: "low" | "medium" | "high" = "medium"): AnswerDurationRange {
-    const base = kind === "follow-up" ? FOLLOW_UP_DURATION_POLICY : ANSWER_DURATION_POLICY[mode];
+    const base = kind === "follow-up" || kind === "short-clarification" ? FOLLOW_UP_DURATION_POLICY : kind === "deep-follow-up" ? DEEP_FOLLOW_UP_DURATION_POLICY : ANSWER_DURATION_POLICY[mode];
     return complexityAdjustment(complexity, base);
   }
 
@@ -70,7 +71,7 @@ export class AnswerLengthController {
       maxCharacters,
       targetCharacters,
       maxSentenceCharacters: kind === "code" ? 120 : 72,
-      maxSentences: kind === "code" ? 12 : mode === "FAST" || kind === "follow-up" ? 4 : mode === "DEEP" ? 9 : 6
+      maxSentences: kind === "code" ? 12 : mode === "FAST" || kind === "follow-up" || kind === "short-clarification" ? 4 : mode === "DEEP" || kind === "deep-follow-up" ? 9 : 6
     };
   }
 

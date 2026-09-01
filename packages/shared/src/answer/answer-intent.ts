@@ -47,8 +47,9 @@ export function analyzeAnswerIntent(input: AnswerIntentInput | string, kind?: An
   );
   const requiresPersonalIdentity = IDENTITY_QUESTION.test(normalized) && !asksGeneralTechnicalKnowledge;
   const requiresPersonalOwnership = !technicalNucleusWithAnchor && !requiresPersonalIdentity && (OWNERSHIP_QUESTION.test(normalized) || asksBehavioralEpisode);
-  const requiresPersonalMetric = !technicalNucleusWithAnchor && !requiresPersonalIdentity && (PERSONAL_TECHNICAL_METRIC_QUESTION.test(normalized) || METRIC_QUESTION.test(normalized) && (PROJECT_CUE.test(normalized) || asksBehavioralEpisode || resolvedKind === "follow-up" || /\d+(?:\.\d+)?\s*(?:%|ms|us|秒|分钟|小时|天|Hz|MHz|kHz|MB|KB)/.test(normalized)));
-  const requiresPersonalResult = !technicalNucleusWithAnchor && !requiresPersonalIdentity && (RESULT_QUESTION.test(normalized) && (PROJECT_CUE.test(normalized) || asksBehavioralEpisode || resolvedKind === "follow-up"));
+  const followUpKind = ["follow-up", "short-clarification", "deep-follow-up"].includes(resolvedKind);
+  const requiresPersonalMetric = !technicalNucleusWithAnchor && !requiresPersonalIdentity && (PERSONAL_TECHNICAL_METRIC_QUESTION.test(normalized) || METRIC_QUESTION.test(normalized) && (PROJECT_CUE.test(normalized) || asksBehavioralEpisode || followUpKind || /\d+(?:\.\d+)?\s*(?:%|ms|us|秒|分钟|小时|天|Hz|MHz|kHz|MB|KB)/.test(normalized)));
+  const requiresPersonalResult = !technicalNucleusWithAnchor && !requiresPersonalIdentity && (RESULT_QUESTION.test(normalized) && (PROJECT_CUE.test(normalized) || asksBehavioralEpisode || followUpKind));
   return {
     requiresPersonalIdentity,
     requiresPersonalOwnership,

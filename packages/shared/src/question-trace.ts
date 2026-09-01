@@ -55,6 +55,24 @@ export interface QuestionTraceInput {
   blockedClaimCount?: number;
   llmRequestAt?: number;
   answerFinishedAt?: number;
+  /** Canonical remote-turn evidence retained for developer diagnostics. */
+  rawSegments?: string[];
+  assembledTurn?: string;
+  dependency?: "INDEPENDENT" | "DEPENDS_ON_PREVIOUS" | "EXPECTS_NEXT" | "CONTINUATION";
+  semanticCompleteness?: "COMPLETE" | "INCOMPLETE" | "DEPENDENT";
+  shouldAnswer?: boolean;
+  commitReason?: string;
+  discardReason?: string;
+}
+
+/** Runtime 4.1 trace contract; QuestionTrace remains the bounded builder. */
+export interface QuestionRuntimeTrace extends QuestionTraceInput {
+  questionTraceId: string;
+  rawSegments: string[];
+  assembledTurn: string;
+  dependency: "INDEPENDENT" | "DEPENDS_ON_PREVIOUS" | "EXPECTS_NEXT" | "CONTINUATION";
+  semanticCompleteness: "COMPLETE" | "INCOMPLETE" | "DEPENDENT";
+  shouldAnswer: boolean;
 }
 
 export interface QuestionTraceMetrics {

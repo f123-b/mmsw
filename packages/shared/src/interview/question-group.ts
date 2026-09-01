@@ -180,6 +180,7 @@ function isExample(question: QuestionCandidate): boolean {
 }
 
 function isAnswerableQuestion(question: QuestionCandidate): boolean {
+  if (question.relationType === "ANSWER_CONSTRAINT" || question.threadItemType === "ANSWER_CONSTRAINT") return false;
   if (question.answerabilityState && question.answerabilityState !== "ANSWERABLE" && question.answerabilityState !== "CONTEXT_DEPENDENT") return false;
   if (question.answerable === true || question.shouldAnswer === true) return true;
   if (["QUESTION", "ANSWER_REQUEST", "CODE_REQUEST", "FOLLOW_UP"].includes(question.speechAct ?? "")) return true;
@@ -206,6 +207,7 @@ function itemTypeFor(question: QuestionCandidate, previous?: QuestionItem, detec
   if (question.speechAct === "TOPIC_TRANSITION" || question.speechAct === "TOPIC_ANNOUNCEMENT") return "TOPIC_FRAGMENT";
   if (isExplicitNewTopic(question)) return "NEW_TOPIC";
   if (question.relationType === "ASR_REVISION" || detectedRelation === "ASR_REVISION") return "ASR_REVISION";
+  if (question.relationType === "ANSWER_CONSTRAINT" || detectedRelation === "ANSWER_CONSTRAINT") return "ANSWER_CONSTRAINT";
   if (isTransitionPrefixedQuestion(question)) return "NEW_TOPIC";
   // Answerability is a semantic signal. A lexical “比如” prefix must never
   // outrank a complete question form.
@@ -285,7 +287,11 @@ export class QuestionGroupManager {
 
   add(input: AddQuestionInput): AddQuestionResult {
     const now = input.now ?? input.question.detectedAt;
-    const current = this.currentGroup();
+    const requestedGroup = input.question.groupId ? this.groups.get(input.question.groupId) : undefined;
+    // A late constraint carries the group id that it decorates. That explicit
+    // target remains valid even if the group was marked closed by a racing
+    // detector callback; reopening or splitting it would lose the relation.
+    const current = requestedGroup ?? this.currentGroup();
     const previousItem = current?.items.at(-1);
     const previous = previousItem?.question;
     const previousTurn = previous ? this.turnFor(previous) : undefined;
@@ -367,6 +373,45 @@ export class QuestionGroupManager {
       ...(relation ? { relationFromPrevious: relation } : {})
     };
     group.items.push(item);
+    // A constraint may arrive before the first answerable nucleus is
+    // confirmed. Preserve it as a real group item once that nucleus creates
+    // the displayable group; keeping it only in `constraints` loses the
+    // relation in overlay/replay telemetry.
+    if (pendingContext?.constraints.length) {
+      pendingContext.constraints.forEach((text, index) => {
+        const constraintId = `pending-constraint-${input.question.id}-${index + 1}`;
+        const constraintQuestion: QuestionCandidate = {
+          id: constraintId,
+          text,
+          rawText: text,
+          normalizedText: text,
+          canonicalText: text,
+          confidence: "medium",
+          score: 0,
+          source: "extractor",
+          detectedAt: now,
+          status: "confirmed",
+          final: true,
+          answerable: false,
+          shouldAnswer: false,
+          groupId: group.id,
+          turnId: group.turnId,
+          relationType: "ANSWER_CONSTRAINT",
+          threadItemType: "ANSWER_CONSTRAINT",
+          contextRelation: "continuation"
+        };
+        const constraintItem: QuestionItem = {
+          question: constraintQuestion,
+          ordinal: group.items.length,
+          state: "ignored",
+          itemType: "ANSWER_CONSTRAINT",
+          answerable: false,
+          slotIds: []
+        };
+        group.items.push(constraintItem);
+        this.questionToGroup.set(constraintId, group.id);
+      });
+    }
     group.updatedAt = now;
     if (answerable) { group.status = "active"; group.displayable = true; }
     this.questionToGroup.set(input.question.id, group.id);

@@ -210,14 +210,14 @@ function buildAnalysisWithClassifier(
     ?? context.latestAnchor?.topic
     ?? contextText.match(/(?:STL|TCP|UDP|IIC|I2C|SPI|UART|CAN|FOC|DMA|PWM|ADC|FreeRTOS|RTOS|C\+\+|虚函数|堆和栈|EEPROM|Flash|链表|进程间通信|三次握手|四次挥手)/i)?.[0]
     ?? (contextText.length >= 4 ? contextText.replace(/^(?:面试官|候选人|我)\s*[:：]\s*/i, "").slice(0, 32) : undefined);
-  const speech = classifyInterviewSpeechAct(normalized, {
+  const speech = context.semanticTurnDecision?.classification ?? classifyInterviewSpeechAct(normalized, {
     memory: context.memory,
     recentTranscript: context.recentTranscript,
     currentTopic: contextTopic,
     latestAnchor: context.latestAnchor ?? (contextTopic ? { text: contextTopic, topic: contextTopic, speechAct: "TOPIC_ANCHOR" } : undefined),
     pendingCodeContext: context.pendingCodeContext
   });
-  const answerability = decideSemanticAnswerability(normalized, {
+  const answerability = context.semanticTurnDecision?.answerability ?? decideSemanticAnswerability(normalized, {
     speechAct: speech.speechAct,
     currentTopic: contextTopic,
     latestQuestionText: context.latestAnchor?.text,

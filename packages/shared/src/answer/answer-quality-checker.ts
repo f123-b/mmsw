@@ -1,6 +1,7 @@
 import type { AnswerMode, AnswerQuestionKind } from "../answer";
 import type { AnswerTelemetry } from "../answer";
 import { AnswerLengthController } from "./answer-length-controller";
+import type { AnswerCoverageResult } from "./answer-plan-coverage-checker";
 
 export interface AnswerQualityResult {
   score: number;
@@ -13,6 +14,7 @@ export interface AnswerQualityResult {
   qaMatchLevel?: string;
   projectTruthDecision?: "ALLOW" | "REWRITE" | "BLOCK";
   telemetry?: AnswerTelemetry;
+  coverage?: AnswerCoverageResult;
 }
 
 export interface AnswerQualityInput {

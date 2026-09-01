@@ -4,6 +4,7 @@ import type { InterviewSpeechAct, SpeechActAnchorContext } from "../interview/sp
 import type { TerminologyCorrection } from "../terminology";
 import type { QuestionSemanticFrame } from "./semantic-frame";
 import type { AnswerabilityState } from "../interview/semantic-answerability";
+import type { SemanticTurnDecision } from "../interview/semantic-turn-gate";
 
 export type QuestionDetectionType = "technical" | "project" | "behavior" | "follow_up" | "clarification" | "not_question";
 export type QuestionSpeechAct = InterviewSpeechAct | "SMALL_TALK" | "INSTRUCTION";
@@ -34,6 +35,8 @@ export interface QuestionDetectionContext {
   contextText?: string;
   latestAnchor?: SpeechActAnchorContext;
   pendingCodeContext?: boolean;
+  /** The live runtime has already passed the canonical turn through its sole semantic gate. */
+  semanticTurnDecision?: SemanticTurnDecision;
 }
 
 export interface QuestionAnalysisSnapshot {

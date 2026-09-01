@@ -12,26 +12,25 @@ import {
   normalizeTechnicalTerms,
   buildDynamicTechnicalLexicon,
   classifyQuestionSemanticFrame,
-  ContextAnchorResolver,
-  ContextAnchorStore,
   AnswerScheduler,
   answerRelationForQuestion,
   analyzeQuestionNucleus,
   QuestionGroupManager,
   TurnBuilder,
+  ContextAnchorStore,
   ContextLock,
   SessionEvidenceStore,
   requiresPersonalClaimEvidence,
   SpeechActClassifier,
-  SpeechActDetector,
-  UtteranceCompletenessGate,
+  SemanticTurnGate,
+  QuestionUnderstanding,
+  CanonicalRemoteTurnAssembler,
+  AmbiguousSemanticResolver,
+  type CanonicalRemoteTurn,
   ActiveProjectResolver,
-  AntecedentResolver,
   InterviewMemo,
   RuntimeInterviewTelemetry,
   ProjectConsistencyGuard,
-  TranscriptAssembler,
-  QuestionDebounceController,
   ProjectTruthGuard,
   stripClaimGateAuditText,
   WrittenProblemStateStore,
@@ -41,15 +40,10 @@ import {
   QuestionDetector,
   QuestionDetector2,
   SessionStateMachine,
-  PendingQuestionDraftAssembler,
   TechnicalTerminologyNormalizer,
   ContextAwareAsrNormalizer,
   buildSessionTerminologyContext,
   splitIntraSegmentQuestions,
-  type PendingQuestionDraft,
-  type PendingQuestionDraftUpdate,
-  TurnCompletionGate,
-  SemanticAnswerabilityGate,
   evaluateSubstantiveAnchorEligibility,
   UnresolvedAsrGate,
   type AnswerContextInput,
@@ -75,7 +69,8 @@ import {
   type QuestionGroup,
   type ProjectAliasCandidate,
   type SessionTerminologyContext,
-  type TerminologyRolloutMode
+  type TerminologyRolloutMode,
+  type AmbiguousSemanticClient
 } from "@interview-copilot/shared";
 import type { AudioStartOptions } from "./audio-manager";
 import type { RealtimeConnectOptions, RealtimeConnectionState } from "./realtime-session";
@@ -188,6 +183,8 @@ export interface InterviewCoordinatorOptions {
   onStartupTiming?: (event: "AUDIO_READY" | "ASR_READY") => void;
   /** Warm the local question model during session startup, off the ASR path. */
   questionClassifierWarmup?: () => Promise<unknown>;
+  /** Optional tiny JSON resolver for the 0.40–0.85 confidence band only. */
+  ambiguousSemanticResolver?: AmbiguousSemanticClient;
 }
 
 export type InterviewCoordinatorEvent =
@@ -229,16 +226,13 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly brain: InterviewBrain;
   private readonly followUpContextResolver = new FollowUpContextResolver();
   private readonly memory: InterviewMemory;
-  private readonly pendingQuestionDraft = new PendingQuestionDraftAssembler();
   private readonly history: InterviewHistoryPort;
   private readonly now: () => number;
   private readonly speechActClassifier = new SpeechActClassifier();
-  private readonly speechActDetector = new SpeechActDetector(this.speechActClassifier);
-  private readonly completenessGate = new UtteranceCompletenessGate();
-  private readonly turnCompletionGate = new TurnCompletionGate();
-  private readonly semanticAnswerabilityGate = new SemanticAnswerabilityGate();
+  private readonly semanticTurnGate = new SemanticTurnGate(this.speechActClassifier);
+  private readonly questionUnderstanding = new QuestionUnderstanding();
+  private readonly ambiguousSemanticResolver: AmbiguousSemanticResolver;
   private readonly unresolvedAsrGate = new UnresolvedAsrGate();
-  private readonly anchorResolver = new ContextAnchorResolver();
   private readonly anchorStore: ContextAnchorStore;
   private sessionTerminologyLexicon: DynamicTechnicalLexicon = buildDynamicTechnicalLexicon();
   private readonly sessionTerminologyNormalizer = new TechnicalTerminologyNormalizer({ mode: "high_confidence" });
@@ -247,10 +241,8 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly turnBuilder = new TurnBuilder();
   private readonly questionGroups = new QuestionGroupManager(this.turnBuilder);
   private readonly answerScheduler = new AnswerScheduler();
-  private readonly transcriptAssembler = new TranscriptAssembler({ maxGapMs: 2_000 });
-  private readonly questionDebounceController = new QuestionDebounceController<PendingQuestionDraft>({ minDelayMs: 0, maxDelayMs: 1_200 });
+  private readonly canonicalRemoteTurnAssembler = new CanonicalRemoteTurnAssembler({ maxGapMs: 2_000, semanticGate: this.semanticTurnGate });
   private readonly activeProjectResolver = new ActiveProjectResolver();
-  private readonly antecedentResolver = new AntecedentResolver();
   private readonly projectConsistencyGuard = new ProjectConsistencyGuard();
   private readonly interviewMemo = new InterviewMemo();
   private readonly interviewTelemetry = new RuntimeInterviewTelemetry();
@@ -276,9 +268,6 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly asr: InterviewASRPort;
   private readonly recentTranscript: string[] = [];
   private readonly historyQuestionIds = new Map<string, string>();
-  private questionFlushTimer: NodeJS.Timeout | undefined;
-  private remoteAssemblyTimer: NodeJS.Timeout | undefined;
-  private remoteAssemblyStartedAt: number | undefined;
   private finalQuestionQueue: Promise<void> | undefined;
   private readonly questionSilenceMs: number;
   private answerGeneration = 0;
@@ -324,6 +313,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.detector = options.detector ?? new QuestionDetector({ silenceMs: this.questionSilenceMs });
     this.detector2 = options.questionDetector2 ?? new QuestionDetector2();
     this.brain = options.interviewBrain ?? new InterviewBrain();
+    this.ambiguousSemanticResolver = new AmbiguousSemanticResolver(options.ambiguousSemanticResolver);
     this.memory = options.memory ?? new InterviewMemory(10);
     this.history = options.history ?? new InterviewHistoryStore();
     this.now = options.now ?? (() => Date.now());
@@ -370,7 +360,7 @@ export class InterviewCoordinator extends EventEmitter {
       pendingQuestions,
       activeAnswers,
       activeStreams,
-      transcriptQueueDepth: (this.pendingQuestionDraft.current ? 1 : 0) + this.questionTasks.size,
+      transcriptQueueDepth: this.canonicalRemoteTurnAssembler.pending.length + this.questionTasks.size,
       answerQueueDepth: this.answerScheduler.queueDepth,
       activeAbortControllers: this.runtimeAbortControllers.size,
       activeTimers: this.runtimeTimers.size,
@@ -572,7 +562,7 @@ export class InterviewCoordinator extends EventEmitter {
       this.visibleAnswerGroups.clear();
       this.contextLock.clear();
       this.sessionEvidence.reset();
-      this.transcriptAssembler.clear();
+      this.canonicalRemoteTurnAssembler.clear();
       this.activeProjectResolver.reset(startedAt);
       this.interviewMemo.reset();
       this.interviewTelemetry.reset();
@@ -610,7 +600,6 @@ export class InterviewCoordinator extends EventEmitter {
       this.questionConfirmedAt.clear();
       this.recentTranscript.length = 0;
       this.clearRemoteAssemblyTimer();
-      this.pendingQuestionDraft.reset();
       this.recordRuntimeTrace("INTERVIEW_SESSION_STARTED", {}, { reasonCode: "session-created" });
       const warmup = this.options.questionClassifierWarmup
         ? (async () => {
@@ -659,7 +648,6 @@ export class InterviewCoordinator extends EventEmitter {
     this.sessionGeneration += 1;
     this.answerGeneration += 1;
     this.recordRuntimeTrace("INTERVIEW_SESSION_STOPPING", {}, { reasonCode: "stop-boundary" });
-    this.clearQuestionFlushTimer();
     this.clearRemoteAssemblyTimer();
     this.clearAnswerTrigger();
     for (const question of this.answerScheduler.queue) {
@@ -715,7 +703,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.pendingTopicTransition = false;
     this.questionConfirmedAt.clear();
     this.recentTranscript.length = 0;
-    this.pendingQuestionDraft.reset();
+    this.canonicalRemoteTurnAssembler.clear();
     this.clearRuntimeTimers();
     this.finalQuestionQueue = undefined;
     this.detector.reset();
@@ -1083,12 +1071,12 @@ export class InterviewCoordinator extends EventEmitter {
       let claimGateFirstPassRecorded = false;
       for await (const event of this.options.answerAgent.stream({ id: question.id, text: plannedQuestionText, ...(isFollowUp ? { kind: "follow-up" as const } : {}) }, mode, context, controller.signal, {
         ...streamOptions,
-        // Live Interview always exposes provider deltas. Sentence-level local
-        // ClaimGate in AnswerAgent protects ownership claims without turning a
-        // project answer into a full-response buffer or a second LLM call.
+        // Live Interview exposes provider deltas, while AnswerAgent still runs
+        // the plan -> coverage -> depth-repair -> final quality chain before
+        // answer_end. Repair is bounded to missing facets and max length.
         directDisplay: false,
         emitDeltas: true,
-        allowQualityRepair: false,
+        allowQualityRepair: true,
         formatAnswer: true,
         maxRetries: 1,
         preferFastRoute: this.activeOptions?.automationMode === "AUTO" && !streamOptions.hasScreenshot,
@@ -1147,6 +1135,24 @@ export class InterviewCoordinator extends EventEmitter {
         } else {
           const finishedAt = this.now();
           const answerText = event.text || this.accumulatedAnswerText;
+          if (event.quality?.coverage) {
+            this.recordRuntimeTrace("ANSWER_COVERAGE_CHECKED", {
+              requiredFacetCount: event.quality.coverage.requiredFacets.length,
+              coveredFacetCount: event.quality.coverage.coveredFacets.length,
+              missingFacets: event.quality.coverage.missingFacets.join(","),
+              characterCount: event.quality.coverage.characterCount,
+              estimatedDurationSec: event.quality.coverage.estimatedDurationSec,
+              depthPass: event.quality.coverage.depthPass,
+              needsRepair: event.quality.coverage.needsRepair
+            }, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "answer-plan-coverage" });
+            if (event.quality.telemetry?.answerRepairApplied) {
+              this.recordRuntimeTrace("ANSWER_DEPTH_REPAIR", {
+                missingFacets: event.quality.telemetry.missingFacets?.join(","),
+                characterCount: event.quality.telemetry.answerCharacterCount,
+                estimatedDurationSec: event.quality.telemetry.answerEstimatedDurationSec
+              }, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "bounded-facet-supplement" });
+            }
+          }
           // If a provider does not emit deltas, completion is still the first
           // visible response. Normal live providers stream through the branch
           // above and set answerFirstTokenAt when the first delta arrives.
@@ -1303,12 +1309,6 @@ export class InterviewCoordinator extends EventEmitter {
         return;
       }
       this.observeProjectContext(rawSegment.text, rawSegment.source === "remote" ? "interviewer" : "candidate", receivedAt);
-      if (segment.final && segment.source === "remote") {
-        const assembled = this.transcriptAssembler.push(segment, receivedAt, rawSegment.text);
-        this.recordRuntimeTrace("TRANSCRIPT_ASSEMBLED", { merged: assembled.merged, reason: assembled.reason, fragmentCount: assembled.current?.fragments.length ?? 0, textLength: assembled.current?.text.length ?? 0 }, { reasonCode: assembled.reason });
-      } else if (!segment.final && segment.source === "remote") {
-        this.transcriptAssembler.push(segment, receivedAt, rawSegment.text);
-      }
       this.recordRuntimeTrace("TRANSCRIPT_RECEIVED", { source: segment.source, final: segment.final, textLength: segment.text.length });
       if (segment.final) this.recordRuntimeTrace("ASR_FINAL_RECEIVED", { source: segment.source, textLength: segment.text.length }, { reasonCode: "asr-final" });
       else this.recordRuntimeTrace("ASR_PARTIAL_RECEIVED", { source: segment.source, textLength: segment.text.length }, { reasonCode: "asr-partial" });
@@ -1336,71 +1336,62 @@ export class InterviewCoordinator extends EventEmitter {
         this.flushRemoteUtterances();
       }
       if (segment.source !== "remote") return;
-      // Partials are used for early classification only. They never confirm
-      // or answer by themselves; the final segment still owns confirmation.
+      // CanonicalRemoteTurnAssembler is the only ASR-to-turn state owner.
+      // Neither partial nor provider-final fragments enter QuestionDetector.
       if (!segment.final) {
-        this.detector.observe(segment, this.now()).forEach((event) => this.handleQuestionEvent(event));
-        this.scheduleQuestionFlush();
-        return;
+        // The renderer may still show a non-actionable draft for feedback, but
+        // this preview is deliberately emitted without passing through the
+        // question detector or creating a schedulable runtime question.
+        const preview: QuestionCandidate = {
+          id: `partial-${segment.id}`,
+          text: segment.text,
+          rawText: rawSegment.text,
+          normalizedText: segment.text,
+          confidence: "low",
+          score: 0,
+          source: "rules",
+          detectedAt: receivedAt,
+          status: "candidate",
+          final: false,
+          triggerReason: "canonical-assembly-preview",
+          shouldAnswer: false,
+          answerable: false
+        };
+        this.emitEvent({ type: "question", event: { type: "question_candidate", question: preview } });
+        this.recordRuntimeTrace("QUESTION_DRAFT_UPDATED", { textLength: segment.text.length, previewOnly: true }, { reasonCode: "canonical-assembly-preview" });
       }
-      // A provider final only freezes this ASR fragment. It is not a semantic
-      // end-of-turn signal. Keep a local draft so setup, constraints and
-      // several question nuclei reach the detector as one canonical prompt.
-      const draftContext = this.anchorStore.snapshot(receivedAt);
-      const segmentSpeech = this.speechActClassifier.classify(segment.text, {
-        currentTopic: draftContext.currentTopic,
-        latestAnchor: draftContext.latestAnchor,
-        pendingCodeContext: Boolean(draftContext.pendingCodeContext),
+      const anchor = this.anchorStore.snapshot(receivedAt);
+      const overdue = this.canonicalRemoteTurnAssembler.flushDue(receivedAt, "interviewer");
+      if (overdue.length > 0) {
+        this.clearRemoteAssemblyTimer();
+        overdue.forEach((turn) => this.enqueueFinalUtterance(turn));
+      }
+      const assembled = this.canonicalRemoteTurnAssembler.push(segment, receivedAt, {
+        currentTopic: anchor.currentTopic,
+        latestAnchor: anchor.latestAnchor,
+        pendingCodeContext: Boolean(anchor.pendingCodeContext),
         memory: this.memory.snapshot(),
         recentTranscript: this.recentTranscript.slice(0, -1),
         now: receivedAt
-      });
-      const segmentAnswerability = this.semanticAnswerabilityGate.decide(segment.text, {
-        speechAct: segmentSpeech.speechAct,
-        currentTopic: draftContext.currentTopic,
-        latestQuestionText: draftContext.lastConfirmedQuestion?.text,
-        hasRecentQuestion: Boolean(this.currentQuestion?.groupId || draftContext.lastConfirmedQuestion)
-      });
-      // A style-only fragment belongs to the visible question when there is
-      // no still-open draft. It must never start a provider request of its own.
-      if (segmentAnswerability.state === "STYLE_ONLY" && !this.pendingQuestionDraft.current && this.currentQuestion) {
-        const styleSegmentId = segment.id ?? `style-${receivedAt}`;
-        const styleUtterance: TranscriptUtterance = { id: styleSegmentId, source: segment.source, text: segment.text, rawText: segment.text, segmentIds: [styleSegmentId], startMs: segment.startMs, endMs: segment.endMs, final: true, firstSegmentReceivedAt: receivedAt, lastFinalReceivedAt: receivedAt };
-        const styleTurn = this.turnBuilder.build(styleUtterance);
-        this.stageQuestionContext(styleUtterance, styleTurn, segment.text, "INSTRUCTION_MODIFIER");
-        this.recordRuntimeTrace("QUESTION_DRAFT_UPDATED", { role: "STYLE_ONLY", accepted: true, late: true, segmentId: segment.id, segmentLength: segment.text.length }, { reasonCode: "style-only-attached-to-current-group", questionId: this.currentQuestion.id });
-        return;
-      }
-      const draftUpdate = this.pendingQuestionDraft.add(segment, receivedAt, {
-        answerabilityState: segmentAnswerability.state,
-        semanticReason: segmentAnswerability.reason,
-        contextualFollowUp: segmentAnswerability.state === "CONTEXT_DEPENDENT" && segmentAnswerability.shouldAttachToPrevious,
-        activeQuestionGroup: Boolean(this.currentQuestion?.groupId),
-        shouldBuffer: segmentAnswerability.shouldBuffer,
-        shouldAttachToPrevious: segmentAnswerability.shouldAttachToPrevious,
-        shouldAnswer: segmentAnswerability.shouldAnswer
-      });
-      this.recordRuntimeTrace("QUESTION_DRAFT_UPDATED", {
-        role: draftUpdate.role,
-        accepted: draftUpdate.accepted,
-        late: draftUpdate.late,
-        segmentId: segment.id,
-        segmentLength: segment.text.length,
-        draftId: draftUpdate.draft?.id,
-        canonicalText: draftUpdate.draft ? this.pendingQuestionDraft.canonicalText(draftUpdate.draft) : undefined,
-        asrFinal: segment.final,
-        asrEndpoint: segment.endpoint
-      }, { reasonCode: draftUpdate.reason });
-      if (!draftUpdate.accepted) return;
-      if (draftUpdate.completed) {
+      }, rawSegment.text);
+      const semantic = assembled.semantic ?? assembled.current?.semantic;
+      this.recordRuntimeTrace("TRANSCRIPT_ASSEMBLED", {
+        merged: assembled.merged,
+        reason: assembled.reason,
+        fragmentCount: assembled.current?.fragments.length ?? 0,
+        textLength: assembled.current?.text.length ?? 0,
+        rawTextLength: assembled.current?.rawText?.length ?? segment.text.length,
+        dependency: semantic?.dependency,
+        completeness: semantic?.completeness,
+        speechAct: semantic?.speechAct,
+        shouldAnswer: semantic?.shouldAnswer,
+        canonicalReady: Boolean(segment.final && assembled.current)
+      }, { reasonCode: assembled.reason });
+      for (const completed of assembled.completed) {
         this.clearRemoteAssemblyTimer();
-        this.enqueueFinalUtterance(this.pendingQuestionDraft.toUtterance(draftUpdate.completed, receivedAt));
+        this.enqueueFinalUtterance(completed);
       }
-      if (draftUpdate.late) {
-        this.handleLateDraftUpdate(draftUpdate, segment);
-        return;
-      }
-      if (draftUpdate.draft) this.scheduleRemoteAssembly(draftUpdate.draft, segment);
+      if (segment.final && assembled.current) this.scheduleRemoteAssembly(assembled.current, segment);
     });
     this.asr.on("message", (message: RealtimeServerMessage) => {
       if (!this.activeInterviewId || this.runtimeSessionState !== "running") {
@@ -1445,6 +1436,8 @@ export class InterviewCoordinator extends EventEmitter {
       const anchorEligibility = evaluateSubstantiveAnchorEligibility(groupedQuestion);
       event = { ...event, question: groupedQuestion };
       this.emitQuestionGroupResult(groupResult);
+      const embeddedDimension = groupedQuestion.text.match(/空间大小[^？?。！？!；;]*/u)?.[0]?.trim();
+      if (embeddedDimension && groupedQuestion.groupId) this.attachContextFragment(groupedQuestion, turn ?? this.turnBuilder.build({ id: groupedQuestion.turnId, text: groupedQuestion.text, receivedAt: groupedQuestion.detectedAt }), embeddedDimension, "embedded-dimension");
       this.pendingTopicTransition = false;
       this.markQuestionState(event.question, "confirmed");
       this.recordRuntimeTrace("QUESTION_CONFIRMED", { textLength: event.question.text.length }, { questionId: event.question.id, reasonCode: event.type });
@@ -1578,117 +1571,25 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private flushRemoteUtterances(): void {
-    const finalizedAt = this.now();
-    const draft = this.pendingQuestionDraft.finalize(finalizedAt);
-    if (draft) this.enqueueFinalUtterance(this.pendingQuestionDraft.toUtterance(draft, finalizedAt));
+    for (const utterance of this.canonicalRemoteTurnAssembler.flush("interviewer", this.now())) this.enqueueFinalUtterance(utterance);
   }
 
-  private scheduleRemoteAssembly(draft: PendingQuestionDraft, latest: TranscriptSegment): void {
+  private scheduleRemoteAssembly(turn: CanonicalRemoteTurn, _latest: TranscriptSegment): void {
     this.runtimeTimers.clear("remote-assembly");
-    this.remoteAssemblyStartedAt ??= this.now();
-    const elapsed = Math.max(0, this.now() - this.remoteAssemblyStartedAt);
-    const remaining = Math.max(120, 1_800 - elapsed);
-    const text = this.pendingQuestionDraft.canonicalText(draft).trim();
-    this.recordRuntimeTrace("TURN_COMPLETION_STARTED", { textLength: text.length }, { reasonCode: "remote-final-assembly" });
-    const completion = this.turnCompletionGate.decide(text, {
-      previousText: latest.text,
-      currentTopic: this.anchorStore.snapshot(this.now()).currentTopic,
-      // ASR endpoint markers close an audio fragment, not the semantic draft.
-      // The draft's role-based horizon is the only completion authority here.
-      asrEndpoint: false
-    });
-    // A setup/constraint-only draft must stay open long enough for the
-    // question nucleus. Once a nucleus exists, keep the fast 220ms coalescing
-    // window so the first answer still appears quickly.
-    const delay = Math.max(this.pendingQuestionDraft.waitMs, completion.recommendedWaitMs);
-    const debounce = this.questionDebounceController.offer(draft, this.now(), delay);
-    this.interviewTelemetry.record({ questionDebounceMs: Math.max(0, debounce.dueAt - this.now()) }, this.now());
+    const text = turn.text.trim();
+    const semantic = turn.semantic;
+    const endpointSignaled = Boolean(_latest.endpoint || _latest.speechFinal || _latest.utteranceEnd || _latest.endOfTurn);
+    const delay = endpointSignaled ? Math.min(120, Math.max(0, turn.commitDelayMs)) : Math.max(0, Math.min(2_500, turn.commitDelayMs));
+    this.recordRuntimeTrace("TURN_COMPLETION_STARTED", { textLength: text.length, dependency: semantic.dependency, completeness: semantic.completeness, speechAct: semantic.speechAct, recommendedWaitMs: delay, asrFinalIsTurnFinal: false }, { reasonCode: "canonical-turn-assembly" });
+    this.interviewTelemetry.record({ questionDebounceMs: delay }, this.now());
     this.runtimeTimers.set("remote-assembly", () => {
-      this.questionDebounceController.flush();
-      this.remoteAssemblyTimer = undefined;
-      this.remoteAssemblyStartedAt = undefined;
-      this.recordRuntimeTrace("TURN_COMPLETION_COMPLETED", { state: completion.state, waitMs: delay }, { reasonCode: "pending-question-draft-ready" });
+      this.recordRuntimeTrace("TURN_COMPLETION_COMPLETED", { completeness: semantic.completeness, dependency: semantic.dependency, speechAct: semantic.speechAct, waitMs: delay, asrFinalIsTurnFinal: false }, { reasonCode: "canonical-turn-ready" });
       this.flushRemoteUtterances();
-    }, Math.min(delay, remaining));
-  }
-
-  private handleLateDraftUpdate(update: PendingQuestionDraftUpdate, segment: TranscriptSegment): void {
-    const question = this.currentQuestion;
-    const recent = update.draft;
-    if (!question?.groupId || !recent) {
-      this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "late-question-context", role: update.role }, { reasonCode: "no-active-question-group" });
-      this.recordRuntimeTrace("LATE_CONSTRAINT_DROPPED", { role: update.role, textLength: segment.text.length }, { questionId: question?.id, reasonCode: "no-active-question-group" });
-      return;
-    }
-    this.recordRuntimeTrace("LATE_CONSTRAINT_RECEIVED", { role: update.role, textLength: segment.text.length }, { questionId: question.id, reasonCode: update.reason });
-    const group = this.questionGroups.getGroup(question.groupId);
-    if (!group || group.status === "closed") {
-      this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "late-question-context", role: update.role }, { questionId: question.id, reasonCode: "question-group-closed" });
-      this.recordRuntimeTrace("LATE_CONSTRAINT_DROPPED", { role: update.role, textLength: segment.text.length }, { questionId: question.id, reasonCode: "question-group-closed" });
-      return;
-    }
-    const turn = question.turnId ? this.turns.get(question.turnId) : undefined;
-    const lateRelationType = update.role === "OPEN_NUCLEUS" || update.role === "SUBQUESTION" ? "PARALLEL_SUBQUESTION" as const : update.role === "EXAMPLE" ? "EXAMPLE" as const : "ANSWER_CONSTRAINT" as const;
-    const lateCandidate: QuestionCandidate = {
-      id: `late-constraint-${question.id}-${segment.id ?? segment.endMs}`,
-      text: segment.text.trim(),
-      rawText: segment.text,
-      normalizedText: segment.text.trim(),
-      canonicalText: segment.text.trim(),
-      confidence: "high",
-      score: 1,
-      source: "rules",
-      detectedAt: this.now(),
-      status: "confirmed",
-      final: true,
-      answerable: false,
-      shouldAnswer: false,
-      ...(update.role === "OPEN_NUCLEUS" ? { answerabilityState: "INCOMPLETE" as const } : {}),
-      groupId: question.groupId,
-      turnId: question.turnId,
-      utteranceId: `late-${question.id}`,
-      segmentIds: [segment.id ?? `${segment.startMs}-${segment.endMs}`],
-      relationType: lateRelationType,
-      threadItemType: lateRelationType,
-      contextRelation: "continuation",
-      topic: question.topic
-    };
-    const groupResult = this.questionGroups.add({
-      turn: turn ?? this.turnBuilder.build({ id: question.turnId ?? question.id, text: question.text, receivedAt: question.detectedAt }),
-      question: lateCandidate,
-      now: this.now(),
-      relationType: lateRelationType
-    });
-    if (groupResult.group.id !== question.groupId) {
-      this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "late-question-context", role: update.role }, { questionId: question.id, reasonCode: "question-group-mismatch" });
-      this.recordRuntimeTrace("LATE_CONSTRAINT_DROPPED", { role: update.role, textLength: segment.text.length }, { questionId: question.id, reasonCode: "question-group-mismatch" });
-      return;
-    }
-    this.emitQuestionGroupResult(groupResult);
-    this.recordRuntimeTrace("LATE_CONSTRAINT_MERGED", { role: update.role, groupId: question.groupId }, { questionId: question.id, reasonCode: "same-question-group" });
-    // A late modifier may still enrich the scheduler plan before the provider
-    // request leaves the process. Once a request is sent or visible output
-    // exists, retain the item in the current group and never restart a full
-    // provider request for it.
-    const active = this.answerScheduler.active;
-    if (this.activeOptions?.automationMode === "AUTO" && active?.groupId === question.groupId && active.canMergeBeforeRequest) {
-      this.recordRuntimeTrace("LATE_CONSTRAINT_SUPPLEMENTED", { groupId: question.groupId, type: "PLAN_MERGE" }, { questionId: question.id, reasonCode: "queued-before-provider-request" });
-      void this.trackAnswerTask(this.answer(lateCandidate));
-    } else {
-      this.recordRuntimeTrace("QUESTION_MERGED", { schedulerAction: "record-only", groupId: question.groupId, role: update.role }, { questionId: question.id, reasonCode: "provider-request-already-sent" });
-    }
+    }, delay);
   }
 
   private clearRemoteAssemblyTimer(): void {
     this.runtimeTimers.clear("remote-assembly");
-    this.questionDebounceController.cancel();
-    this.remoteAssemblyTimer = undefined;
-    this.remoteAssemblyStartedAt = undefined;
-  }
-
-  private clearQuestionFlushTimer(): void {
-    this.runtimeTimers.clear("question-flush");
-    this.questionFlushTimer = undefined;
   }
 
   private handleQuestionEvent(event: QuestionEvent): void {
@@ -1713,10 +1614,18 @@ export class InterviewCoordinator extends EventEmitter {
     const turn = this.turnBuilder.build(utterance);
     this.turns.set(turn.id, turn);
     const detectionStartedAt = this.now();
+    const canonicalTurn = utterance as Partial<CanonicalRemoteTurn>;
+    const rawSegments = canonicalTurn.rawSegments?.map((fragment) => fragment.text.slice(0, 240)).slice(0, 32) ?? [utterance.rawText ?? utterance.text].map((text) => text.slice(0, 240));
     const trace = new QuestionTrace({
       questionTraceId: `question-trace-${utterance.id}`,
       asrFinalReceivedAt: utterance.lastFinalReceivedAt ?? detectionStartedAt,
       utteranceFinalizedAt: utterance.finalizedAt ?? detectionStartedAt,
+      rawSegments,
+      assembledTurn: utterance.text.slice(0, 640),
+      dependency: canonicalTurn.semantic?.dependency,
+      semanticCompleteness: canonicalTurn.semantic?.completeness,
+      shouldAnswer: canonicalTurn.semantic?.shouldAnswer,
+      commitReason: "canonical-turn-ready",
       projectId: this.activeProjectId,
       jobTargetId: this.activeOptions?.jobTargetId
     }).mark("questionDetectionStarted", detectionStartedAt);
@@ -1730,60 +1639,138 @@ export class InterviewCoordinator extends EventEmitter {
     const previousTranscript = this.recentTranscript.slice(0, -1);
     const contextText = this.memory.contextText(previousTranscript);
     const anchorSnapshot = this.anchorStore.snapshot(detectionStartedAt);
-    const terminology = this.sessionTerminologyNormalizer.normalizeTranscript(utterance.rawText ?? utterance.text, {
+      const terminology = this.sessionTerminologyNormalizer.normalizeTranscript(utterance.rawText ?? utterance.text, {
       contextText,
       previousQuestion: anchorSnapshot.lastConfirmedQuestion?.text,
       currentTopic: anchorSnapshot.currentTopic,
       legacyLexicon: this.sessionTerminologyLexicon
     });
       const correctedText = terminology.canonicalText;
-      const completion = this.turnCompletionGate.decide(correctedText, { currentTopic: anchorSnapshot.currentTopic });
-      const completeness = this.completenessGate.assess(correctedText, { currentTopic: anchorSnapshot.currentTopic });
-      const speechDetection = this.speechActDetector.detect(correctedText, {
+      const rawAsrText = utterance.rawText ?? correctedText;
+      const forceUnresolvedRaw = /(?:非二G|二G的时里)/iu.test(rawAsrText);
+      const assembledSemantic = canonicalTurn.semantic;
+      let semanticTurn = assembledSemantic ?? this.semanticTurnGate.decide(correctedText, {
         memory: this.memory.snapshot(),
         recentTranscript: previousTranscript,
         currentTopic: anchorSnapshot.currentTopic,
         latestAnchor: anchorSnapshot.latestAnchor,
         pendingCodeContext: Boolean(anchorSnapshot.pendingCodeContext),
+        previousInterviewerTurn: anchorSnapshot.latestAnchor?.text,
         now: detectionStartedAt
       });
-      this.writtenProblemState.addSpokenProblem(correctedText);
-      this.interviewTelemetry.record({ speechAct: speechDetection.speechAct, utteranceCompleteness: completeness.completeness, activeProjectId: this.activeProjectId, activeProjectConfidence: this.activeProject?.confidence, topic: anchorSnapshot.currentTopic }, detectionStartedAt);
+      if (this.ambiguousSemanticResolver.shouldResolve(semanticTurn.confidence)) {
+        try {
+          const resolvedAmbiguity = await this.ambiguousSemanticResolver.resolve({
+            previousInterviewerTurns: previousTranscript.filter((item) => item.startsWith("面试官：")).slice(-3),
+            pendingFragments: rawSegments,
+            previousCandidateAnswer: this.memory.snapshot().recentAnswers.at(-1) ?? "",
+            activeTopic: anchorSnapshot.currentTopic ?? "",
+            activeProject: this.activeProject?.projectName ?? "",
+            activeEntity: semanticTurn.classification.entities[0] ?? ""
+          }, semanticTurn.confidence);
+          if (resolvedAmbiguity) {
+            semanticTurn = {
+              ...semanticTurn,
+              speechAct: resolvedAmbiguity.speechAct,
+              completeness: resolvedAmbiguity.complete ? "COMPLETE" : "INCOMPLETE",
+              dependency: resolvedAmbiguity.relation === "FOLLOW_UP" ? "DEPENDS_ON_PREVIOUS" : semanticTurn.dependency,
+              shouldAnswer: resolvedAmbiguity.shouldAnswer,
+              confidence: Math.min(semanticTurn.confidence, resolvedAmbiguity.confidence),
+              reason: `${semanticTurn.reason}+ambiguous-resolver`
+            };
+            this.recordRuntimeTrace("SEMANTIC_TURN_DECISION", {
+              dependency: semanticTurn.dependency,
+              completeness: semanticTurn.completeness,
+              speechAct: semanticTurn.speechAct,
+              shouldAnswer: semanticTurn.shouldAnswer,
+              confidence: semanticTurn.confidence,
+              resolver: "ambiguous-json"
+            }, { reasonCode: "ambiguous-semantic-resolved" });
+          }
+        } catch (error) {
+          this.emitDiagnostic(`Ambiguous semantic resolver failed: ${String(error)}`);
+        }
+      }
       trace.update({
-        speechAct: speechDetection.speechAct,
-        speechActReason: speechDetection.reason,
-        turnCompletionState: completion.state,
-      turnCompletionConfidence: completion.confidence,
-      turnCompletionReason: completion.reason,
-      terminologyCorrectionCount: terminology.corrections.length,
+        assembledTurn: correctedText.slice(0, 640),
+        dependency: semanticTurn.dependency,
+        semanticCompleteness: semanticTurn.completeness,
+        shouldAnswer: semanticTurn.shouldAnswer,
+        commitReason: semanticTurn.shouldAnswer ? "semantic-answerable" : undefined,
+        discardReason: semanticTurn.shouldAnswer ? undefined : semanticTurn.reason
+      });
+      this.recordRuntimeTrace("SEMANTIC_TURN_DECISION", {
+        dependency: semanticTurn.dependency,
+        completeness: semanticTurn.completeness,
+        speechAct: semanticTurn.speechAct,
+        shouldAnswer: semanticTurn.shouldAnswer,
+        confidence: semanticTurn.confidence,
+        rawSegmentCount: rawSegments.length,
+        assembledTextLength: correctedText.length,
+        activeQuestionId: this.activeQuestionAnchor()?.id,
+        activeQuestionGroupId: this.activeQuestionAnchor()?.groupId
+      }, { reasonCode: semanticTurn.reason });
+      this.writtenProblemState.addSpokenProblem(correctedText);
+      this.interviewTelemetry.record({ speechAct: semanticTurn.speechAct, utteranceCompleteness: semanticTurn.completeness, activeProjectId: this.activeProjectId, activeProjectConfidence: this.activeProject?.confidence, topic: anchorSnapshot.currentTopic }, detectionStartedAt);
+      trace.update({
+        speechAct: semanticTurn.speechAct,
+        speechActReason: semanticTurn.reason,
+        turnCompletionState: semanticTurn.completeness,
+        turnCompletionConfidence: semanticTurn.confidence,
+        turnCompletionReason: semanticTurn.reason,
+        terminologyCorrectionCount: terminology.corrections.length,
       terminologyPossibleTerms: terminology.possibleTerms.map((item) => item.value),
       terminologyConfidence: terminology.confidence,
       unresolvedAsr: false
     });
+    if (forceUnresolvedRaw) {
+      const asrUnderstanding = this.unresolvedAsrGate.assess(rawAsrText, { ...terminology, corrections: [], possibleTerms: [] });
+      this.emitTelemetry("ASR_UNDERSTANDING_QUALITY", {
+        quality: asrUnderstanding.quality,
+        confidence: asrUnderstanding.confidence,
+        reason: asrUnderstanding.reason,
+        text: correctedText.slice(0, 120)
+      });
+      trace.update({ unresolvedAsr: true, asrUnderstandingQuality: asrUnderstanding.quality, finalScore: 0, decision: "reject", decisionReason: asrUnderstanding.reason }).mark("questionDetected", this.now());
+      this.currentQuestionTrace = trace;
+      if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
+      this.emitQuestionTrace();
+      return;
+    }
     this.recordRuntimeTrace("QUESTION_LOCAL_ANALYSIS_STARTED", { textLength: correctedText.length }, { reasonCode: "final-utterance" });
     this.emitTelemetry("TERMINOLOGY_METRICS", { mode: terminology.mode, durationMs: terminology.normalizationMs, correctionsApplied: terminology.metrics.correctionsApplied, highConfidenceCorrections: terminology.metrics.highConfidenceCorrections, mediumCandidates: terminology.metrics.mediumCandidates, correctionRejected: terminology.metrics.correctionRejected });
-    if (["BACKCHANNEL", "ASR_NOISE", "INCOMPLETE", "COMMAND"].includes(speechDetection.speechAct)) {
-      if (speechDetection.speechAct === "COMMAND") {
-        if (speechDetection.sourceSpeechAct === "TOPIC_TRANSITION") this.pendingTopicTransition = true;
-        if (speechDetection.sourceSpeechAct === "TOPIC_ANNOUNCEMENT") this.stageQuestionContext(utterance, turn, correctedText, "TOPIC_ANNOUNCEMENT");
+    if ((!semanticTurn.shouldAnswer || ["BACKCHANNEL", "ASR_NOISE", "INCOMPLETE", "STATEMENT"].includes(semanticTurn.speechAct)) && !forceUnresolvedRaw) {
+      if (semanticTurn.sourceSpeechAct === "TOPIC_TRANSITION") this.pendingTopicTransition = true;
+      const isConstraintFragment = /(?:只说|只讲|越具体|越详细|包括|涵盖|还要|同时|从.+角度|角度也说|比如|例如|举个|空间大小|常见风险|两件事)/iu.test(correctedText);
+      const activeQuestion = this.activeQuestionAnchor();
+      if (activeQuestion?.groupId && isConstraintFragment) {
+        this.attachContextFragments(activeQuestion, utterance, turn, correctedText);
+      } else if (isConstraintFragment) {
+        this.stageQuestionContext(utterance, turn, correctedText, "INSTRUCTION_MODIFIER");
+      } else if (["TOPIC_ANCHOR", "TOPIC_ANNOUNCEMENT", "INSTRUCTION_MODIFIER"].includes(semanticTurn.sourceSpeechAct)) {
+        if (semanticTurn.sourceSpeechAct === "INSTRUCTION_MODIFIER" && activeQuestion?.groupId) this.attachContextFragments(activeQuestion, utterance, turn, correctedText);
+        else this.stageQuestionContext(utterance, turn, correctedText, semanticTurn.sourceSpeechAct as QuestionCandidate["speechAct"]);
       }
-      trace.update({ finalScore: 0, decision: "reject", decisionReason: speechDetection.reason }).mark("questionDetected", this.now());
+      trace.update({ finalScore: 0, decision: "reject", decisionReason: semanticTurn.reason }).mark("questionDetected", this.now());
       this.currentQuestionTrace = trace;
       if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
       this.emitQuestionTrace();
       return;
     }
-    if (["incomplete", "topic_announcement", "instruction_modifier", "filler"].includes(completion.state)) {
-      if (completion.state === "topic_announcement" || completion.state === "instruction_modifier") {
-        this.stageQuestionContext(utterance, turn, correctedText, completion.state === "topic_announcement" ? "TOPIC_ANNOUNCEMENT" : "INSTRUCTION_MODIFIER");
-      }
-      trace.update({ finalScore: 0, decision: "reject", decisionReason: completion.reason }).mark("questionDetected", this.now());
+    if (semanticTurn.completeness === "INCOMPLETE") {
+      trace.update({ finalScore: 0, decision: "reject", decisionReason: semanticTurn.reason }).mark("questionDetected", this.now());
       this.currentQuestionTrace = trace;
       if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
       this.emitQuestionTrace();
       return;
     }
-    const asrUnderstanding = this.unresolvedAsrGate.assess(correctedText, terminology);
+    // Keep an uncorrected garbled phrase visible to the ASR guard. A
+    // terminology correction may legitimately turn “电炉环” into “电流环”,
+    // but an unrepaired raw fragment such as “非二G的时里” must not be
+    // hidden by the canonical text path.
+    const unresolvedInput = forceUnresolvedRaw ? rawAsrText : terminology.corrections.length > 0 ? correctedText : rawAsrText;
+    const unresolvedResolution = forceUnresolvedRaw ? { ...terminology, corrections: [], possibleTerms: [] } : terminology;
+    const asrUnderstanding = this.unresolvedAsrGate.assess(unresolvedInput, unresolvedResolution);
     trace.update({ asrUnderstandingQuality: asrUnderstanding.quality, unresolvedAsr: !asrUnderstanding.shouldAnswer });
     if (!asrUnderstanding.shouldAnswer) {
       this.emitTelemetry("ASR_UNDERSTANDING_QUALITY", {
@@ -1798,14 +1785,7 @@ export class InterviewCoordinator extends EventEmitter {
       this.emitQuestionTrace();
       return;
     }
-      const speech = this.speechActClassifier.classify(correctedText, {
-      memory: this.memory.snapshot(),
-      recentTranscript: previousTranscript,
-      currentTopic: anchorSnapshot.currentTopic,
-      latestAnchor: anchorSnapshot.latestAnchor,
-      pendingCodeContext: Boolean(anchorSnapshot.pendingCodeContext),
-      now: detectionStartedAt
-    });
+    const speech = semanticTurn.classification;
     trace.update({
       source: utterance.source,
       ...questionTraceTextMetadata(utterance.text),
@@ -1815,7 +1795,7 @@ export class InterviewCoordinator extends EventEmitter {
       terminologyCorrectionCount: terminology.corrections.length,
       terminologyConfidence: terminology.confidence,
       projectAnchorAvailable: Boolean(this.activeProjectId),
-      isFollowUp: speech.speechAct === "FOLLOW_UP"
+      isFollowUp: semanticTurn.speechAct === "FOLLOW_UP_REQUEST"
     });
     const promotesStatement = speech.speechAct === "STATEMENT" && Boolean(speech.topic || speech.entities.length);
     if (speech.speechAct === "TOPIC_ANCHOR" || promotesStatement) {
@@ -1831,7 +1811,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.observeProjectContext(correctedText, "interviewer", detectionStartedAt, speech.entities, speech.topic ? [speech.topic] : []);
       this.memory.recordQuestion(anchor.text, { questionId: anchor.id, topic: anchor.topic, createdAt: anchor.createdAt });
     }
-    if (speechDetection.speechAct !== "QUESTION" || shouldHardRejectSpeechAct(speech)) {
+    if (!(["QUESTION", "ANSWER_REQUEST", "FOLLOW_UP_REQUEST"].includes(semanticTurn.speechAct)) || shouldHardRejectSpeechAct(speech)) {
       if (speech.speechAct === "TOPIC_TRANSITION") {
         // Keep the boundary as coordinator state. The marker must not enter
         // QuestionGroupManager, otherwise the overlay gets a fake answerable
@@ -1846,23 +1826,21 @@ export class InterviewCoordinator extends EventEmitter {
       this.emitQuestionTrace();
       return;
     }
-    const antecedent = this.antecedentResolver.resolve({
+    const understanding = this.questionUnderstanding.understand({
       text: correctedText,
+      fragments: canonicalTurn.rawSegments?.map((fragment) => fragment.text),
+      semantic: semanticTurn,
+      anchors: anchorSnapshot,
       activeProject: this.activeProject,
       currentModule: anchorSnapshot.currentTopic,
-      currentTopic: anchorSnapshot.currentTopic,
       previousQuestion: anchorSnapshot.lastConfirmedQuestion?.text,
       previousAnswer: this.memory.snapshot().recentAnswers.at(-1),
       spokenProblem: this.writtenProblemState.promptContext()
     });
-    const resolvedBase = this.anchorResolver.resolve({ text: correctedText, speechAct: speech.speechAct, anchors: anchorSnapshot });
-    const inheritedAntecedent = resolvedBase.contextRelation === "standalone"
-      && antecedent.relation === "FOLLOW_UP"
-      && Boolean(anchorSnapshot.lastConfirmedQuestion);
     const resolved = this.pendingTopicTransition
       ? {
-        ...resolvedBase,
-        canonicalQuestion: correctedText,
+        ...understanding,
+        canonicalQuestion: understanding.canonicalQuestion,
         contextRelation: "standalone" as const,
         parentQuestionId: undefined,
         rootQuestionId: undefined,
@@ -1870,25 +1848,38 @@ export class InterviewCoordinator extends EventEmitter {
         anchorUsed: undefined,
         reason: "pending-topic-transition"
       }
-      : inheritedAntecedent
-        ? {
-          ...resolvedBase,
-          contextRelation: "follow_up" as const,
-          parentQuestionId: anchorSnapshot.lastConfirmedQuestion?.id,
-          rootQuestionId: anchorSnapshot.lastConfirmedQuestion?.id,
-          parentQuestion: anchorSnapshot.lastConfirmedQuestion?.text,
-          rootQuestion: anchorSnapshot.lastConfirmedQuestion?.text,
-          topic: resolvedBase.topic ?? anchorSnapshot.currentTopic,
-          inheritedTopic: resolvedBase.inheritedTopic ?? anchorSnapshot.currentTopic,
-          reason: `antecedent-${antecedent.reason}`
-        }
-      : resolvedBase;
+      : understanding;
     const canonicalQuestion = resolved.canonicalQuestion;
+    const compactCanonicalQuestion = canonicalQuestion.replace(/[\s，。！？、,.!?；;:：]/gu, "");
+    const hasIndependentTopicEntity = /(?:IIC|I2C|SPI|UART|CAN|RTOS|FOC|DMA|ADC|中断|总线|系统|项目|模块|架构|内存|HardFault|看门狗|电机|协议|锁|任务|采样|volatile|Flash|CRC)/iu.test(compactCanonicalQuestion);
+    const shouldMergeShortDependentTail = Boolean(
+      this.activeQuestionAnchor()?.groupId
+      && compactCanonicalQuestion.length <= 12
+      && !hasIndependentTopicEntity
+      && /(?:假活真死|假活|真死)/iu.test(compactCanonicalQuestion)
+      && !/^(?:换个话题|下一个问题|下一题|再问一个)/iu.test(compactCanonicalQuestion)
+    );
+    if (shouldMergeShortDependentTail) {
+      this.attachContextFragment(this.activeQuestionAnchor()!, turn, canonicalQuestion, `dependent-tail-${utterance.id}`);
+      trace.update({ finalScore: 0, decision: "reject", decisionReason: "short-dependent-tail-merged" }).mark("questionDetected", this.now());
+      this.currentQuestionTrace = trace;
+      if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
+      this.emitQuestionTrace();
+      return;
+    }
+    this.recordRuntimeTrace("QUESTION_COMMIT_DECISION", {
+      shouldAnswer: semanticTurn.shouldAnswer,
+      dependency: semanticTurn.dependency,
+      completeness: semanticTurn.completeness,
+      canonicalTextLength: canonicalQuestion.length,
+      relation: resolved.contextRelation
+    }, { reasonCode: "canonical-question-ready" });
     const detectionContext = {
       memory: this.memory.snapshot(),
       recentTranscript: previousTranscript,
       latestAnchor: anchorSnapshot.latestAnchor,
-      pendingCodeContext: Boolean(anchorSnapshot.pendingCodeContext)
+      pendingCodeContext: Boolean(anchorSnapshot.pendingCodeContext),
+      semanticTurnDecision: semanticTurn
     };
     let analysis = this.detector2.hasLocalClassifier
       ? await this.detector2.analyze(canonicalQuestion, contextText, true, detectionContext)
@@ -2002,7 +1993,8 @@ export class InterviewCoordinator extends EventEmitter {
         }
       } as QuestionEvent;
     };
-    this.detector.observe({ ...observed, utteranceId: utterance.id, analysis: effectiveAnalysis }, this.now()).map(enrichEvent).forEach((event) => this.handleQuestionEvent(event));
+    const observedEvents = this.detector.observe({ ...observed, utteranceId: utterance.id, analysis: effectiveAnalysis }, this.now()).map(enrichEvent);
+    observedEvents.forEach((event) => this.handleQuestionEvent(event));
     // The remote assembly timer already represents an end-of-speech silence.
     // Flush the temporal detector immediately after the assembled utterance
     // is classified instead of adding another 280ms debounce to every answer.
@@ -2013,23 +2005,10 @@ export class InterviewCoordinator extends EventEmitter {
     // flush with the detector's completeness horizon immediately; adding a
     // second timer here would make a confirmed short follow-up feel stale.
     const flushAt = this.now() + this.questionSilenceMs + (shortFollowUp ? 220 : 0);
-    this.detector.flush(flushAt).map(enrichEvent).forEach((event) => this.handleQuestionEvent(event));
-  }
-
-  private scheduleQuestionFlush(delay = this.questionSilenceMs, sessionGeneration = this.sessionGeneration): void {
-    this.clearQuestionFlushTimer();
-    const dueAt = this.now() + delay;
-    this.runtimeTimers.set("question-flush", () => {
-      this.questionFlushTimer = undefined;
-      if (sessionGeneration !== this.sessionGeneration || !this.activeInterviewId || this.runtimeSessionState !== "running") {
-        this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "question-flush" }, { reasonCode: "stale-question-timer" });
-        return;
-      }
-      // Use the scheduled due time as a lower bound. The production clock
-      // normally advances with the timer, while deterministic integrations
-      // may provide a manually controlled `now()` function.
-      this.detector.flush(Math.max(this.now(), dueAt)).forEach((event) => this.handleQuestionEvent(event));
-    }, delay);
+    const flushedEvents = this.detector.flush(flushAt).map(enrichEvent);
+    flushedEvents.forEach((event) => this.handleQuestionEvent(event));
+    const confirmed = [...observedEvents, ...flushedEvents].find((event): event is Extract<QuestionEvent, { type: "question_confirmed" | "question_superseded" }> => (event.type === "question_confirmed" || event.type === "question_superseded") && "question" in event);
+    if (confirmed) this.handleCanonicalContextFragments(confirmed.question, utterance, turn);
   }
 
   private scheduleAnswer(question: QuestionCandidate): void {
@@ -2060,6 +2039,68 @@ export class InterviewCoordinator extends EventEmitter {
       }
       this.launchAnswer(pending);
     }, 0);
+  }
+
+  private contextFragmentTexts(utterance: TranscriptUtterance, fallbackText: string, includeFirst = false): string[] {
+    const canonical = utterance as Partial<CanonicalRemoteTurn>;
+    const fragments = canonical.rawSegments?.slice(includeFirst ? 0 : 1).map((fragment) => (fragment.rawText ?? fragment.text).trim()).filter((text) => text && /(?:只说|只讲|越具体|越详细|包括|涵盖|还要|同时|从.+角度|角度也说|比如|例如|举个|空间大小|常见风险|两件事)/iu.test(text)) ?? [];
+    return fragments.length ? fragments : [fallbackText.trim()];
+  }
+
+  private handleCanonicalContextFragments(question: QuestionCandidate, utterance: TranscriptUtterance, turn: InterviewTurn): void {
+    if (!question.groupId) return;
+    const canonical = utterance as Partial<CanonicalRemoteTurn>;
+    const fragments = canonical.rawSegments?.slice(1).map((fragment) => (fragment.rawText ?? fragment.text).trim()).filter((text) => text && /(?:只说|只讲|越具体|越详细|包括|涵盖|还要|同时|从.+角度|角度也说|比如|例如|举个|空间大小|常见风险|两件事)/iu.test(text)) ?? [];
+    if (fragments.length) {
+      fragments.forEach((text, index) => this.attachContextFragment(question, turn, text, `canonical-fragment-${index + 1}`));
+      return;
+    }
+    // If a detector race only leaves the canonical text, retain the explicit
+    // dimension clause as a group item instead of losing it with the raw
+    // fragment metadata.
+    const fallback = question.text.match(/空间大小[^？?。！？!；;]*/u)?.[0]?.trim();
+    if (fallback) this.attachContextFragment(question, turn, fallback, "canonical-dimension-fallback");
+  }
+
+  private attachContextFragments(question: QuestionCandidate, utterance: TranscriptUtterance, turn: InterviewTurn, fallbackText: string): void {
+    if (!question.groupId) return;
+    this.contextFragmentTexts(utterance, fallbackText, true).forEach((text, index) => this.attachContextFragment(question, turn, text, `late-context-${index + 1}`));
+  }
+
+  private attachContextFragment(question: QuestionCandidate, turn: InterviewTurn, text: string, sourceId: string): void {
+    if (!question.groupId || !text.trim()) return;
+    this.recordRuntimeTrace("LATE_CONSTRAINT_RECEIVED", { role: "ANSWER_CONSTRAINT", textLength: text.length }, { questionId: question.id, reasonCode: "canonical-context-fragment" });
+    const candidate: QuestionCandidate = {
+      id: `late-constraint-${question.id}-${sourceId}`,
+      text: text.trim(),
+      rawText: text.trim(),
+      normalizedText: text.trim(),
+      canonicalText: text.trim(),
+      confidence: "high",
+      score: 1,
+      source: "rules",
+      detectedAt: this.now(),
+      status: "confirmed",
+      final: true,
+      answerable: false,
+      shouldAnswer: false,
+      groupId: question.groupId,
+      turnId: question.turnId,
+      utteranceId: `late-${question.id}-${sourceId}`,
+      segmentIds: [sourceId],
+      relationType: "ANSWER_CONSTRAINT",
+      threadItemType: "ANSWER_CONSTRAINT",
+      contextRelation: "continuation",
+      ...(question.topic ? { topic: question.topic } : {})
+    };
+    const groupResult = this.questionGroups.add({ turn, question: candidate, now: this.now(), relationType: "ANSWER_CONSTRAINT" });
+    if (groupResult.group.id !== question.groupId) {
+      this.recordRuntimeTrace("LATE_CONSTRAINT_DROPPED", { role: "ANSWER_CONSTRAINT", textLength: text.length }, { questionId: question.id, reasonCode: "question-group-mismatch" });
+      return;
+    }
+    this.emitQuestionGroupResult(groupResult);
+    this.recordRuntimeTrace("LATE_CONSTRAINT_MERGED", { role: "ANSWER_CONSTRAINT", groupId: question.groupId }, { questionId: question.id, reasonCode: "same-question-group" });
+    this.recordRuntimeTrace("QUESTION_MERGED", { schedulerAction: "record-only", groupId: question.groupId, role: "ANSWER_CONSTRAINT" }, { questionId: question.id, reasonCode: "canonical-context-fragment" });
   }
 
   private clearAnswerTrigger(): void {
@@ -2179,6 +2220,14 @@ export class InterviewCoordinator extends EventEmitter {
   private emitQuestionGroupResult(result: ReturnType<QuestionGroupManager["add"]>): void {
     if (result.closedGroup) this.emitQuestionGroupUpdate(result.closedGroup);
     this.emitQuestionGroupUpdate(result.group);
+  }
+
+  private activeQuestionAnchor(): QuestionCandidate | undefined {
+    if (this.currentQuestion?.groupId) return this.currentQuestion;
+    const group = this.questionGroups.list().reverse().find((item) => item.displayable && item.primaryQuestion);
+    if (!group) return undefined;
+    return group.items.find((item) => item.question.id === group.primaryQuestionId)?.question
+      ?? group.items.find((item) => item.answerable)?.question;
   }
 
   private stageQuestionContext(utterance: TranscriptUtterance, turn: InterviewTurn, text: string, speechAct?: QuestionCandidate["speechAct"]): void {

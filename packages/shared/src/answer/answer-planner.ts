@@ -41,9 +41,11 @@ export interface AnswerPlan {
   reason: string;
 }
 
-function complexityFor(question: string, kind: AnswerQuestionKind, followUp?: FollowUpContext): "low" | "medium" | "high" {
-  if (kind === "follow-up" || kind === "clarification") return "low";
+function complexityFor(question: string, kind: AnswerQuestionKind, followUp?: FollowUpContext, slotCount = 1): "low" | "medium" | "high" {
+  if (kind === "follow-up" || kind === "short-clarification" || kind === "clarification") return "low";
+  if (kind === "deep-follow-up") return "high";
   if (kind === "code" || kind === "system-design" || kind === "project" || kind === "behavioral") return "high";
+  if (slotCount > 1 || /项目|架构|分层|实现|设计|排查|验证|故障|对比|区别|原因|过程|怎么做/iu.test(question)) return "high";
   if (followUp?.parentAnswer && followUp.parentAnswer.length > 220) return "high";
   if ((question.match(/[？?]/g)?.length ?? 0) > 1 || question.length > 58) return "high";
   return "medium";
@@ -75,7 +77,7 @@ export class AnswerPlanner {
         spokenGuidance: "可以结合项目技术事实，但不要把项目实现说成候选人本人负责。"
       }
       : baseStrategy;
-    const complexity = complexityFor(question, kind, input.followUpContext);
+    const complexity = complexityFor(question, kind, input.followUpContext, questionDecomposition.slots.length);
     const answerMode = input.interviewMode ?? "NORMAL";
     const length = this.lengthController.policy(answerMode, kind, complexity);
     const useCurrentProject = strategy.useCurrentProject && intent.allowsProjectEvidence && Boolean(input.currentProject || input.followUpContext?.relatedProject || hasProjectEvidence);

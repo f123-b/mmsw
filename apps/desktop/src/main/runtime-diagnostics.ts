@@ -23,6 +23,10 @@ export const RUNTIME_TRACE_EVENTS = [
   "TURN_COMPLETION_COMPLETED",
   "QUESTION_LOCAL_ANALYSIS_STARTED",
   "QUESTION_LOCAL_ANALYSIS_COMPLETED",
+  "SEMANTIC_TURN_DECISION",
+  "QUESTION_COMMIT_DECISION",
+  "ANSWER_COVERAGE_CHECKED",
+  "ANSWER_DEPTH_REPAIR",
   "QUESTION_CLASSIFIER_WARMUP_STARTED",
   "QUESTION_CLASSIFIER_WARMUP_COMPLETED",
   "QUESTION_CLASSIFIER_WARMUP_FAILED",
@@ -171,12 +175,25 @@ export class RuntimeAbortRegistry {
 
 export class RuntimeTraceBuffer {
   private readonly events: RuntimeTraceEvent[] = [];
+  private readonly retainedLifecycleEvents = new Set<RuntimeTraceEventName>([
+    "QUESTION_CONFIRMED",
+    "ANSWER_REQUEST_CREATED",
+    "QUESTION_FINISHED",
+    "QUESTION_CANCELLED",
+    "QUESTION_FAILED",
+    "ANSWER_COMMITTED",
+    "PROVIDER_STREAM_FAILED",
+    "RUNTIME_IDLE"
+  ]);
 
   constructor(private readonly limit = 300) {}
 
   push(event: RuntimeTraceEvent): RuntimeTraceEvent {
     this.events.push({ ...event, ...(event.fields ? { fields: { ...event.fields } } : {}) });
-    while (this.events.length > this.limit) this.events.shift();
+    while (this.events.length > this.limit) {
+      const discardIndex = this.events.findIndex((item) => !this.retainedLifecycleEvents.has(item.name));
+      this.events.splice(discardIndex >= 0 ? discardIndex : 0, 1);
+    }
     return event;
   }
 

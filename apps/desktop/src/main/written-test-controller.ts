@@ -100,6 +100,7 @@ export class WrittenTestController extends EventEmitter {
           hasScreenshot: true,
           attachments: [{ mimeType: "image/png", dataUrl }],
           maxOutputTokens: this.answerModeValue === "FAST" ? 1_600 : this.answerModeValue === "DEEP" ? 3_200 : 2_400,
+          emitDeltas: true,
           instruction: "这是笔试模式的截图题。请以图片内容为准，不要等待语音转录；答案按识别出的题型组织，代码题必须输出完整代码，代码块和解释都要完整结束。"
         }
       )) {

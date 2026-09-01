@@ -20,6 +20,8 @@ import { matchCoreTechnicalQa, type CoreTechnicalQaCard } from "./answer/core-te
 import { TechnicalAccuracyGuard } from "./answer/technical-accuracy-guard";
 import { enforceHrProfilePolicy } from "./answer/hr-profile-policy";
 import { ProjectTruthGuard } from "./answer/project-truth-guard";
+import { AnswerPlanCoverageChecker, type AnswerCoverageResult } from "./answer/answer-plan-coverage-checker";
+import { AnswerDepthRepair } from "./answer/answer-depth-repair";
 
 export * from "./answer/claim-gate";
 export * from "./answer/evidence-context";
@@ -125,6 +127,12 @@ export interface AnswerTelemetry {
   providerFirstTokenMs?: number;
   asrFinalToFirstTokenMs?: number;
   timings?: Record<string, number | undefined>;
+  coveredFacets?: string[];
+  missingFacets?: string[];
+  answerCharacterCount?: number;
+  answerEstimatedDurationSec?: number;
+  answerDepthPass?: boolean;
+  answerRepairApplied?: boolean;
 }
 
 export interface PreparedAnswer {
@@ -212,9 +220,10 @@ export interface ContextPack {
   interviewMemo?: string;
 }
 
-function answerTokenBudget(mode: AnswerMode, kind: AnswerQuestionKind): number {
+function answerTokenBudget(mode: AnswerMode, kind: AnswerQuestionKind, plan?: AnswerPlan): number {
   if (kind === "code") return mode === "FAST" ? 1_024 : mode === "DEEP" ? 2_400 : 1_600;
-  return mode === "FAST" ? 512 : mode === "DEEP" ? 1_600 : 1_024;
+  const baseline = mode === "FAST" ? 768 : mode === "DEEP" ? 2_048 : 1_536;
+  return Math.max(baseline, plan ? Math.ceil(plan.length.maxCharacters / 1.8) : baseline);
 }
 
 function relevance(question: string, skill: AnswerSkillContext): number {
@@ -369,6 +378,8 @@ export class PromptBuilder {
       project: "只使用提供的简历、项目和面试素材，按‘核心回答、项目经历、具体实现、问题解决’组织，但要像面试口述一样自然，不要机械套模板；资料没有的内容明确说没有证据。",
       behavioral: "使用真实经历回答，按情境、任务、行动、结果和反思组织；没有对应经历就说明资料不足，不要编造。",
       "follow-up": "承接上一轮上下文，只补充面试官追问的新增信息，不重复整段答案。",
+      "short-clarification": "只补充当前追问点，控制在短澄清范围，不重复整段答案。",
+      "deep-follow-up": "承接上一轮上下文，补充设计、实现、原因和验证等新增细节，不重复整段背景。",
       clarification: "先直接解释被追问的概念，再用一个简短例子说明。",
       concept: "先给定义或结论，再解释原理、关键点和常见误区；不要为了显得个性化而硬塞项目经历。",
       technical: "直接回答技术问题，再补充关键依据、风险或验证方式；只有问题明确要求时才引用项目。"
@@ -441,7 +452,7 @@ export interface AnswerGenerationOptions {
   directDisplay?: boolean;
   /** Whether answer_delta events should be exposed to the UI. */
   emitDeltas?: boolean;
-  /** Repair is intentionally disabled for low-latency live interview answers. */
+  /** Enables bounded coverage/depth repair when the answer is buffered. */
   allowQualityRepair?: boolean;
   /** Preserve the model's completed text instead of rewriting it after generation. */
   formatAnswer?: boolean;
@@ -511,7 +522,8 @@ export class AnswerAgent {
     private readonly formatter = new SpokenAnswerFormatter(),
     private readonly qualityChecker = new AnswerQualityChecker(),
     private readonly answerPlanner = new AnswerPlanner(),
-    private readonly spokenQualityChecker = new SpokenQualityChecker()
+    private readonly spokenQualityChecker = new SpokenQualityChecker(),
+    private readonly coverageChecker = new AnswerPlanCoverageChecker()
   ) {}
 
   getModelSnapshot(): ModelSnapshot { return this.modelRouter.snapshot(); }
@@ -577,7 +589,7 @@ export class AnswerAgent {
       sections,
       attachments: options.attachments,
       thinking: mode === "DEEP",
-      maxOutputTokens: options.maxOutputTokens ?? answerTokenBudget(mode, kind),
+       maxOutputTokens: options.maxOutputTokens ?? answerTokenBudget(mode, kind, plan),
       maxRetries: options.maxRetries
     };
     let text = "";
@@ -652,7 +664,10 @@ export class AnswerAgent {
     ].filter(Boolean).join("\n");
     const personalAnswerValidator = new PersonalAnswerValidator();
     const personalQuestionAnalysis = new QuestionAnalyzer().analyze(routedQuestion.text);
+    let coverage: AnswerCoverageResult = this.coverageChecker.check(plan, formattedText);
+    let repairApplied = false;
     const evaluateQuality = (answer: string): AnswerQualityResult => {
+      coverage = this.coverageChecker.check(plan, answer);
       let result = this.qualityChecker.check({ question: routedQuestion.text, answer, mode, kind, groundingText });
       const spoken = this.spokenQualityChecker.check({ question: routedQuestion.text, answer, mode, kind, plan, projectEvidence: [...context.projectEvidence, ...context.projectQaEvidence], groundingText });
       result = {
@@ -660,7 +675,8 @@ export class AnswerAgent {
         score: Math.min(result.score, spoken.score),
         issues: [...new Set([...result.issues, ...spoken.issues])],
         suggestions: [...new Set([...result.suggestions, ...spoken.suggestions])],
-        needsRepair: result.needsRepair || spoken.needsRepair
+        needsRepair: result.needsRepair || spoken.needsRepair,
+        coverage
       };
       const personalEvidence = [
         ...context.sessionEvidence.map((item) => item.text),
@@ -685,9 +701,40 @@ export class AnswerAgent {
           needsRepair: result.needsRepair || !validation.valid
         };
       }
-      return result;
+      return { ...result, coverage };
     };
     let quality = evaluateQuality(formattedText);
+    // A depth repair is a bounded supplement, not a second full answer. It is
+    // deliberately performed after coverage inspection so longer output has
+    // to add missing technical content instead of padding with filler.
+    const qualityRepairEnabled = options.allowQualityRepair !== false && options.emitDeltas !== true;
+    if (qualityRepairEnabled && mode !== "FAST" && !options.strictPersonalGrounding && !groundingText.trim() && coverage.needsRepair && coverage.missingFacets.length > 0 && coverage.characterCount < plan.length.maxCharacters) {
+      const depthRepair = new AnswerDepthRepair({
+        generate: async (instruction) => {
+          let repaired = "";
+          for await (const delta of provider.stream({
+            model: selection.model,
+            sections: [...sections, { name: "output-format", content: instruction }],
+            attachments: options.attachments,
+            thinking: mode === "DEEP",
+            maxOutputTokens: Math.min(768, Math.max(192, Math.ceil((plan.length.maxCharacters - coverage.characterCount) / 1.5))),
+            maxRetries: options.maxRetries
+          }, signal)) repaired += delta;
+          return repaired;
+        }
+      });
+      const supplement = this.formatter.format(await depthRepair.repair({ question: routedQuestion.text, existingAnswer: formattedText, missingFacets: coverage.missingFacets, targetCharacters: plan.length.targetCharacters, plan, evidenceText: groundingText }), mode, kind, plan);
+      if (supplement.trim()) {
+        const combined = `${formattedText.trim()}\n${supplement.trim()}`.trim();
+        const combinedCoverage = this.coverageChecker.check(plan, combined);
+        if (combined.length <= plan.length.maxCharacters && (combinedCoverage.coveredFacets.length > coverage.coveredFacets.length || combinedCoverage.characterCount > coverage.characterCount)) {
+          formattedText = combined;
+          repairApplied = true;
+          quality = evaluateQuality(formattedText);
+          if (!options.directDisplay && options.emitDeltas !== false) yield { type: "answer_delta", answerId, delta: `\n${supplement.trim()}` };
+        }
+      }
+    }
     // Repair only when grounded profile material exists. This keeps the
     // realtime path low-latency for generic answers while preventing a
     // clearly poor or ungrounded answer from being shown as final.
@@ -698,7 +745,7 @@ export class AnswerAgent {
       "question-mismatch",
       "not-first-person"
     ].includes(issue));
-    if (options.allowQualityRepair !== false && quality.needsRepair && (groundingText.trim() || repairableFormatIssue)) {
+    if (qualityRepairEnabled && quality.needsRepair && (groundingText.trim() || repairableFormatIssue)) {
       const repairInstruction = [
         "这是同一个面试问题的答案修正，不是新问题。只输出修正后的最终答案。",
         `原始问题：${routedQuestion.text}`,
@@ -721,7 +768,7 @@ export class AnswerAgent {
         ],
         attachments: options.attachments,
         thinking: mode === "DEEP",
-        maxOutputTokens: options.maxOutputTokens ?? answerTokenBudget(mode, kind),
+         maxOutputTokens: options.maxOutputTokens ?? answerTokenBudget(mode, kind, plan),
         maxRetries: options.maxRetries
       }, signal)) repaired += delta;
       const repairedText = this.formatter.format(repaired, mode, kind, plan);
@@ -799,7 +846,29 @@ export class AnswerAgent {
       projectQaMatch: context.answerSourcePlan?.qaMatchLevel,
       ...(context.answerSourcePlan?.qaMatch?.questionId ? { projectQaQuestionId: context.answerSourcePlan.qaMatch.questionId } : {})
     };
-    quality.projectTruthDecision = projectTruth.decision;
+     quality.projectTruthDecision = projectTruth.decision;
+     quality.coverage = this.coverageChecker.check(plan, formattedText);
+     quality.coverage = { ...quality.coverage };
+     if (repairApplied) quality.issues = [...new Set([...quality.issues, "answer-depth-repair-applied"])];
+      // Keep the final coverage verdict truthful. A repair attempt may be
+      // rejected by the max-length or grounding guards, so it must not turn
+      // an incomplete answer into a false “passed” result.
+     // Once a safety gate has rewritten or removed unsupported personal facts,
+     // do not report the pre-gate depth deficit as another generation failure.
+     // There is intentionally no safe evidence with which to deepen that
+     // personal answer; the gate's sanitized result is the terminal output.
+     quality.needsRepair = quality.coverage.needsRepair
+       && claimGate.decision === "allow"
+       && projectTruth.decision === "ALLOW";
+     quality.telemetry = {
+       ...quality.telemetry,
+       coveredFacets: quality.coverage.coveredFacets,
+       missingFacets: quality.coverage.missingFacets,
+       answerCharacterCount: quality.coverage.characterCount,
+       answerEstimatedDurationSec: quality.coverage.estimatedDurationSec,
+       answerDepthPass: quality.coverage.depthPass,
+       answerRepairApplied: repairApplied
+     };
     quality.blockedClaimCount = Math.max(claimGate.blockedClaims.length, projectTruth.blockedClaimCount);
     quality.telemetry = { ...quality.telemetry, blockedClaimCount: projectTruth.blockedClaimCount, projectTruthDecision: projectTruth.decision };
     yield { type: "answer_end", answerId, text: formattedText, quality };

@@ -11,6 +11,8 @@ export type AnswerQuestionKind =
   | "project"
   | "behavioral"
   | "follow-up"
+  | "short-clarification"
+  | "deep-follow-up"
   | "clarification";
 
 export type AnswerPlanQuestionType = AnswerQuestionKind | "project_troubleshooting";
@@ -39,6 +41,7 @@ const ANSWER_KIND_HINTS: Record<string, AnswerQuestionKind> = {
 /** Routes a question to a response strategy instead of using one universal template. */
 export function classifyAnswerQuestion(text: string, hint?: string): AnswerQuestionKind {
   const normalized = normalizeTechnicalTerms(text);
+  if (hint === "follow-up" || hint === "FOLLOW_UP") return /具体|怎么|如何|设计|实现|分层|架构|排查|原因|取舍|为什么/iu.test(normalized) ? "deep-follow-up" : "short-clarification";
   if (hint && ANSWER_KIND_HINTS[hint]) return ANSWER_KIND_HINTS[hint];
   if (/代码|编程|手写|实现一个|写一个|补全|伪代码|算法题|时间复杂度|空间复杂度|输出结果|leetcode|debug|修复这段|code\b/i.test(normalized)) return "code";
   if (/系统设计|架构设计|设计一个系统|高并发|可扩展|容灾|降级|限流|服务拆分|数据库设计|缓存设计|消息队列/.test(normalized)) return "system-design";
@@ -47,7 +50,7 @@ export function classifyAnswerQuestion(text: string, hint?: string): AnswerQuest
   if (/排查|定位|故障|报错|异常|线上问题|怎么解决|如何解决|怎么验证|监控|告警/.test(normalized)) return "troubleshooting";
   if (/团队|冲突|压力|困难|失败|沟通|协作|领导|决策|优势|缺点|成长|资源有限|高目标|高压力|自主学习|案例/.test(normalized) && /你|我|经历|遇到|如何|分享/.test(normalized)) return "behavioral";
   if (/项目|负责|主导|经历|做过|落地|交付|简历|成果|业绩|为什么.*设计|怎么.*实现|遇到什么问题|怎么解决|具体实现/.test(normalized)) return "project";
-  if (/上一题|刚才|继续|具体一点|展开|那如果|然后|还有/.test(normalized) && normalized.length < 34) return "follow-up";
+  if (/上一题|刚才|继续|具体一点|展开|那如果|然后|还有/.test(normalized) && normalized.length < 34) return /具体|怎么|如何|设计|实现|分层|架构|排查|原因|取舍/.test(normalized) ? "deep-follow-up" : "short-clarification";
   if (/具体一点|什么意思|没听清|再说一遍|能展开|详细一点|指的是|怎么理解/.test(normalized)) return "clarification";
   if (/什么是|原理|定义|作用|为什么|如何|怎么|怎样|是什么/.test(normalized)) return "concept";
   return "technical";
@@ -143,6 +146,24 @@ const STRATEGIES: Record<AnswerQuestionKind, Omit<AnswerStrategy, "id">> = {
     useCurrentProject: true,
     openingGuidance: "承接上一轮，只回答这次追问新增的部分。",
     spokenGuidance: "不要重新复述整段背景；优先使用当前主题、上一问和上一版回答。"
+  },
+  "short-clarification": {
+    kind: "short-clarification",
+    structure: ["new_detail", "direct_reason"],
+    requiredEvidence: ["follow_up_context", "technical_fact"],
+    mustUseFirstPerson: false,
+    useCurrentProject: true,
+    openingGuidance: "只解释当前追问点，先给一句直接结论。",
+    spokenGuidance: "控制在短澄清范围，不重复上一轮背景。"
+  },
+  "deep-follow-up": {
+    kind: "deep-follow-up",
+    structure: ["new_detail", "direct_reason", "contextual_example"],
+    requiredEvidence: ["follow_up_context", "technical_fact"],
+    mustUseFirstPerson: false,
+    useCurrentProject: true,
+    openingGuidance: "承接上一轮，先说这次追问的核心设计或实现结论。",
+    spokenGuidance: "允许完整覆盖方案、原因、关键细节和验证，不要机械重述上一轮。"
   },
   clarification: {
     kind: "clarification",
