@@ -159,7 +159,7 @@ function isTopicFragment(question: QuestionCandidate): boolean {
 function isInstructionModifier(question: QuestionCandidate): boolean {
   const text = question.text.trim();
   return question.speechAct === "INSTRUCTION_MODIFIER"
-    || /^(?:从|围绕|包括|展开|具体一点|具体来说|请(?:你)?(?:重点)?(?:讲|说明|展开)|说说你的策略)/.test(text)
+    || /^(?:从|围绕|包括|涵盖|还要|需要|同时|展开|具体一点|具体来说|只说|越具体|请(?:你)?(?:重点)?(?:讲|说明|展开)|说说你的策略)/.test(text)
     || /(?:空间大小|常见风险|分配方式|释放方式|生命周期|访问速度).*(?:说|讲|考虑|角度)/.test(text);
 }
 

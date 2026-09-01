@@ -143,13 +143,13 @@ describe("question scoring", () => {
     "如果速度再低一点……",
     "CAN 这里你具体讲……",
     "那 FreeRTOS 这个……"
-  ])("allows local/context signals to rescue a low-confidence speech act: %s", async (text) => {
+  ])("keeps incomplete local/context fragments out of answering: %s", async (text) => {
     const detector = new QuestionDetector2({
       localClassifier: { predict: async () => ({ type: "QUESTION", confidence: 0.96 }) }
     });
     const result = await detector.analyze(text, "面试官：请介绍一下 FOC 项目。候选人：我负责控制环和 RTOS 任务。", true);
-    expect(result.isQuestion).toBe(true);
-    expect(result.speechAct).toMatch(/QUESTION|FOLLOW_UP/);
+    expect(result.isQuestion).toBe(false);
+    expect(result.shouldAnswer).toBe(false);
     expect(result.score.localClassifierScore).toBe(0.96);
   });
 

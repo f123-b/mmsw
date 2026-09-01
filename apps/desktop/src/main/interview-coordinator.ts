@@ -37,6 +37,7 @@ import {
   type PendingQuestionDraftUpdate,
   TurnCompletionGate,
   SemanticAnswerabilityGate,
+  evaluateSubstantiveAnchorEligibility,
   UnresolvedAsrGate,
   type AnswerContextInput,
   type AnswerTelemetry,
@@ -725,7 +726,12 @@ export class InterviewCoordinator extends EventEmitter {
       score: 1,
       source: "extractor",
       detectedAt: this.now(),
-      status: "confirmed"
+      status: "confirmed",
+      speechAct: "QUESTION",
+      detectionType: "technical",
+      answerable: true,
+      shouldAnswer: true,
+      answerabilityState: "ANSWERABLE"
     };
     if (this.activeInterviewId) {
       const emitted = this.emitQuestion({ type: "question_confirmed", question });
@@ -1257,7 +1263,16 @@ export class InterviewCoordinator extends EventEmitter {
       // end-of-turn signal. Keep a local draft so setup, constraints and
       // several question nuclei reach the detector as one canonical prompt.
       const draftContext = this.anchorStore.snapshot(receivedAt);
+      const segmentSpeech = this.speechActClassifier.classify(segment.text, {
+        currentTopic: draftContext.currentTopic,
+        latestAnchor: draftContext.latestAnchor,
+        pendingCodeContext: Boolean(draftContext.pendingCodeContext),
+        memory: this.memory.snapshot(),
+        recentTranscript: this.recentTranscript.slice(0, -1),
+        now: receivedAt
+      });
       const segmentAnswerability = this.semanticAnswerabilityGate.decide(segment.text, {
+        speechAct: segmentSpeech.speechAct,
         currentTopic: draftContext.currentTopic,
         latestQuestionText: draftContext.lastConfirmedQuestion?.text,
         hasRecentQuestion: Boolean(this.currentQuestion?.groupId || draftContext.lastConfirmedQuestion)
@@ -1273,7 +1288,13 @@ export class InterviewCoordinator extends EventEmitter {
         return;
       }
       const draftUpdate = this.pendingQuestionDraft.add(segment, receivedAt, {
-        contextualFollowUp: segmentAnswerability.state === "CONTEXT_DEPENDENT" && segmentAnswerability.shouldAttachToPrevious
+        answerabilityState: segmentAnswerability.state,
+        semanticReason: segmentAnswerability.reason,
+        contextualFollowUp: segmentAnswerability.state === "CONTEXT_DEPENDENT" && segmentAnswerability.shouldAttachToPrevious,
+        activeQuestionGroup: Boolean(this.currentQuestion?.groupId),
+        shouldBuffer: segmentAnswerability.shouldBuffer,
+        shouldAttachToPrevious: segmentAnswerability.shouldAttachToPrevious,
+        shouldAnswer: segmentAnswerability.shouldAnswer
       });
       this.recordRuntimeTrace("QUESTION_DRAFT_UPDATED", {
         role: draftUpdate.role,
@@ -1337,12 +1358,13 @@ export class InterviewCoordinator extends EventEmitter {
       const groupedQuestion = this.pendingTopicTransition
         ? { ...groupResult.item.question, relationType: "NEW_TOPIC" as const, contextRelation: "standalone" as const, parentQuestionId: undefined, rootQuestionId: undefined }
         : groupResult.item.question;
+      const anchorEligibility = evaluateSubstantiveAnchorEligibility(groupedQuestion);
       event = { ...event, question: groupedQuestion };
       this.emitQuestionGroupResult(groupResult);
       this.pendingTopicTransition = false;
       this.markQuestionState(event.question, "confirmed");
       this.recordRuntimeTrace("QUESTION_CONFIRMED", { textLength: event.question.text.length }, { questionId: event.question.id, reasonCode: event.type });
-      if (groupResult.displayable && groupResult.item.answerable) this.currentQuestion = event.question;
+      if (groupResult.displayable && anchorEligibility.eligible) this.currentQuestion = event.question;
       const trace = this.pendingQuestionTrace ?? new QuestionTrace({ questionTraceId: `question-trace-${event.question.id}`, questionScore: event.question.score, questionType: event.question.detectionType, followUp: event.question.speechAct === "FOLLOW_UP", projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId });
       const traceSnapshot = trace.snapshot();
       this.runtimeLatency.start(event.question.id, traceSnapshot.asrFinalReceivedAt ?? this.now());
@@ -1352,8 +1374,12 @@ export class InterviewCoordinator extends EventEmitter {
       this.markLatency(event.question.id, "questionConfirmedAt", confirmedAt);
       this.currentQuestionTrace = trace;
       this.pendingQuestionTrace = undefined;
-      this.memory.recordQuestion(event.question.text, { questionId: event.question.id, parentQuestionId: event.question.parentQuestionId, rootQuestionId: event.question.rootQuestionId, groupId: event.question.groupId, relationType: event.question.relationType, createdAt: event.question.detectedAt });
-      this.anchorStore.recordConfirmedQuestion({ id: event.question.id, text: event.question.text, confidence: event.question.score, topic: event.question.topic, createdAt: event.question.detectedAt });
+      if (anchorEligibility.eligible) {
+        this.memory.recordQuestion(event.question.text, { questionId: event.question.id, parentQuestionId: event.question.parentQuestionId, rootQuestionId: event.question.rootQuestionId, groupId: event.question.groupId, relationType: event.question.relationType, createdAt: event.question.detectedAt });
+        this.anchorStore.recordConfirmedQuestion({ id: event.question.id, text: event.question.text, confidence: event.question.score, topic: event.question.topic, createdAt: event.question.detectedAt });
+      } else {
+        this.recordRuntimeTrace("QUESTION_MERGED", { anchorEligibility: anchorEligibility.reason }, { questionId: event.question.id, reasonCode: "non-substantive-confirmed-question" });
+      }
       if (this.activeInterviewId) {
         const stored = this.history.addQuestion({
           interviewId: this.activeInterviewId,
@@ -1410,7 +1436,9 @@ export class InterviewCoordinator extends EventEmitter {
       && event.question.contextRelation !== "standalone"
       && (event.question.speechAct === "FOLLOW_UP"
       || event.question.detectionType === "follow_up"
-      || event.question.category === "followup");
+      || event.question.category === "followup"
+      || event.question.contextRelation === "follow_up"
+      || event.question.contextRelation === "continuation");
     if (!isFollowUp || !previous || previous.id === event.question.id) return event;
     return {
       ...event,
@@ -1509,6 +1537,7 @@ export class InterviewCoordinator extends EventEmitter {
       return;
     }
     const turn = question.turnId ? this.turns.get(question.turnId) : undefined;
+    const lateRelationType = update.role === "OPEN_NUCLEUS" || update.role === "SUBQUESTION" ? "PARALLEL_SUBQUESTION" as const : update.role === "EXAMPLE" ? "EXAMPLE" as const : "ANSWER_CONSTRAINT" as const;
     const lateCandidate: QuestionCandidate = {
       id: `late-constraint-${question.id}-${segment.id ?? segment.endMs}`,
       text: segment.text.trim(),
@@ -1523,12 +1552,13 @@ export class InterviewCoordinator extends EventEmitter {
       final: true,
       answerable: false,
       shouldAnswer: false,
+      ...(update.role === "OPEN_NUCLEUS" ? { answerabilityState: "INCOMPLETE" as const } : {}),
       groupId: question.groupId,
       turnId: question.turnId,
       utteranceId: `late-${question.id}`,
       segmentIds: [segment.id ?? `${segment.startMs}-${segment.endMs}`],
-      relationType: "ANSWER_CONSTRAINT",
-      threadItemType: "ANSWER_CONSTRAINT",
+      relationType: lateRelationType,
+      threadItemType: lateRelationType,
       contextRelation: "continuation",
       topic: question.topic
     };
@@ -1536,7 +1566,7 @@ export class InterviewCoordinator extends EventEmitter {
       turn: turn ?? this.turnBuilder.build({ id: question.turnId ?? question.id, text: question.text, receivedAt: question.detectedAt }),
       question: lateCandidate,
       now: this.now(),
-      relationType: "ANSWER_CONSTRAINT"
+      relationType: lateRelationType
     });
     if (groupResult.group.id !== question.groupId) {
       this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "late-question-context", role: update.role }, { questionId: question.id, reasonCode: "question-group-mismatch" });
@@ -1545,26 +1575,17 @@ export class InterviewCoordinator extends EventEmitter {
     }
     this.emitQuestionGroupResult(groupResult);
     this.recordRuntimeTrace("LATE_CONSTRAINT_MERGED", { role: update.role, groupId: question.groupId }, { questionId: question.id, reasonCode: "same-question-group" });
-    // A late output-shape request (for example, "从这几个角度说一下") is
-    // already preserved in the same group, but does not by itself warrant a
-    // second provider request. Strong factual constraints (hardware,
-    // numeric/map/stack requirements) need an explicit supplement after the
-    // answer has started, because they change what must be covered.
-    if (this.activeOptions?.automationMode !== "AUTO" || update.role !== "CONSTRAINT") return;
-    const augmentation: QuestionCandidate = {
-      ...lateCandidate,
-      id: `augmentation-${question.id}-${segment.id ?? segment.endMs}`,
-      text: `请基于当前主问题和已有回答，补充说明以下要求：${segment.text.trim()}`,
-      answerable: true,
-      shouldAnswer: true,
-      relationType: "SAME_QUESTION_AUGMENTATION",
-      threadItemType: "SAME_QUESTION_AUGMENTATION",
-      parentQuestionId: question.id,
-      rootQuestionId: question.rootQuestionId ?? question.id
-    };
-    this.recordRuntimeTrace("LATE_AUGMENTATION_QUEUED", { groupId: question.groupId, type: "AUGMENTATION" }, { questionId: question.id, reasonCode: "late-context-supplement" });
-    this.recordRuntimeTrace("LATE_CONSTRAINT_SUPPLEMENTED", { groupId: question.groupId, type: "AUGMENTATION" }, { questionId: question.id, reasonCode: "late-context-supplement" });
-    void this.trackAnswerTask(this.answer(augmentation));
+    // A late modifier may still enrich the scheduler plan before the provider
+    // request leaves the process. Once a request is sent or visible output
+    // exists, retain the item in the current group and never restart a full
+    // provider request for it.
+    const active = this.answerScheduler.active;
+    if (this.activeOptions?.automationMode === "AUTO" && active?.groupId === question.groupId && active.canMergeBeforeRequest) {
+      this.recordRuntimeTrace("LATE_CONSTRAINT_SUPPLEMENTED", { groupId: question.groupId, type: "PLAN_MERGE" }, { questionId: question.id, reasonCode: "queued-before-provider-request" });
+      void this.trackAnswerTask(this.answer(lateCandidate));
+    } else {
+      this.recordRuntimeTrace("QUESTION_MERGED", { schedulerAction: "record-only", groupId: question.groupId, role: update.role }, { questionId: question.id, reasonCode: "provider-request-already-sent" });
+    }
   }
 
   private clearRemoteAssemblyTimer(): void {
@@ -1586,9 +1607,11 @@ export class InterviewCoordinator extends EventEmitter {
         this.scheduleAnswer(question);
       } else if (question.groupId && question.threadItemType !== "TOPIC_FRAGMENT" && question.threadItemType !== "ASR_REVISION" && (this.answerScheduler.active?.groupId === question.groupId || this.visibleAnswerGroups.has(question.groupId))) {
         // Constraints/examples are not standalone questions. They update the
-        // active plan before first output, or become a same-group supplement
-        // after a visible answer already exists.
-        void this.trackAnswerTask(this.answer(question));
+        // active plan before the provider request. After request/visible
+        // output they remain group metadata and never create a second request.
+        const active = this.answerScheduler.active;
+        if (active?.groupId === question.groupId && active.canMergeBeforeRequest) void this.trackAnswerTask(this.answer(question));
+        else this.recordRuntimeTrace("QUESTION_MERGED", { schedulerAction: "record-only", groupId: question.groupId }, { questionId: question.id, reasonCode: "provider-request-already-sent" });
       }
     }
   }
@@ -1743,7 +1766,9 @@ export class InterviewCoordinator extends EventEmitter {
       type: analysis.isQuestion
         ? speech.speechAct === "FOLLOW_UP" ? "follow_up" : analysis.type
         : "not_question",
-      speechAct: analysis.isQuestion ? speech.speechAct : analysis.speechAct,
+      speechAct: analysis.isQuestion && (resolved.contextRelation === "follow_up" || resolved.contextRelation === "continuation")
+        ? "FOLLOW_UP"
+        : analysis.isQuestion ? speech.speechAct : analysis.speechAct,
       normalizedQuestion: canonicalQuestion,
       anchorUsedId: resolved.anchorUsed?.id,
       shouldAnswer: analysis.shouldAnswer,
@@ -1869,7 +1894,9 @@ export class InterviewCoordinator extends EventEmitter {
   private scheduleAnswer(question: QuestionCandidate): void {
     if (question.answerable !== true || question.shouldAnswer !== true) return;
     const isCoveredEllipticalFollowUp = /^(?:你会(?:更)?倾向于?用?哪(?:一个|个)|哪一个|这两个|前者|后者|其中|然后呢|还有(?:吗|呢)?|具体(?:呢)?)[？?。！!\s]*$/iu.test(question.text.trim());
-    if (question.answerabilityState === "CONTEXT_DEPENDENT" && isCoveredEllipticalFollowUp && question.groupId && (this.visibleAnswerGroups.has(question.groupId) || this.answerScheduler.active?.groupId === question.groupId)) {
+    const questionClauses = question.text.split(/[？?。！!；;]/u).map((clause) => clause.trim()).filter(Boolean);
+    const hasMultipleQuestionClauses = questionClauses.filter((clause) => /(?:为什么|为何|怎么|如何|怎样|哪些|哪个|什么|是否|有没有|能不能|可不可以|吗|呢|作用|原理|区别|排查|定位|设计|实现|验证|解决|优化)/iu.test(clause)).length > 1;
+    if (question.answerabilityState === "CONTEXT_DEPENDENT" && (isCoveredEllipticalFollowUp || hasMultipleQuestionClauses) && question.groupId && (this.visibleAnswerGroups.has(question.groupId) || this.answerScheduler.active?.groupId === question.groupId)) {
       this.recordRuntimeTrace("QUESTION_MERGED", { schedulerAction: "ignore", groupId: question.groupId, reason: "context-follow-up-already-covered" }, { questionId: question.id, reasonCode: "context-follow-up-already-covered" });
       return;
     }
@@ -2033,6 +2060,14 @@ export class InterviewCoordinator extends EventEmitter {
     // an example after the primary question), but a pending fragment never
     // emits a visible group on its own.
     if (result.displayable) this.emitQuestionGroupResult(result);
+    if (result.displayable && speechAct === "INSTRUCTION_MODIFIER" && this.activeOptions?.automationMode === "AUTO") {
+      const active = this.answerScheduler.active;
+      if (active && active.groupId === result.item.question.groupId && active.canMergeBeforeRequest) {
+        void this.trackAnswerTask(this.answer(result.item.question));
+      } else {
+        this.recordRuntimeTrace("QUESTION_MERGED", { schedulerAction: "record-only", groupId: result.item.question.groupId }, { questionId: result.item.question.id, reasonCode: "modifier-after-provider-request" });
+      }
+    }
   }
 
   private markQuestionGroup(questionId: string, state: Parameters<QuestionGroupManager["mark"]>[1]): void {

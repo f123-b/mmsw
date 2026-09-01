@@ -92,4 +92,15 @@ describe("PendingQuestionDraftAssembler", () => {
     expect(followUp.draft?.subQuestions).toContain("你会更倾向于用哪一个？");
     expect(assembler.canonicalText(followUp.draft!)).toContain("UART 和 SPI");
   });
+
+  it("keeps an open predicate out of the fast finalize path until its object arrives", () => {
+    const assembler = new PendingQuestionDraftAssembler();
+    assembler.add(segment("open", "中断里能不能用。", 0), 0, { answerabilityState: "OPEN_PREDICATE", semanticReason: "predicate-missing-object", shouldBuffer: true });
+    expect(assembler.current?.openNuclei).toContain("中断里能不能用。");
+    expect(assembler.waitMs).toBe(760);
+    const completed = assembler.add(segment("object", "或是锁，如果不能，你会用什么机制？", 500), 500, { answerabilityState: "ANSWERABLE", semanticReason: "independent-question-nucleus", shouldAnswer: true });
+    expect(completed.draft?.openNuclei).toContain("中断里能不能用。");
+    expect(completed.draft?.nucleus).toContain("或是锁，如果不能，你会用什么机制？");
+    expect(assembler.waitMs).toBe(220);
+  });
 });

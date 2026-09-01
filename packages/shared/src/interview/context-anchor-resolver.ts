@@ -31,19 +31,6 @@ function hasExplicitStandaloneSubject(text: string): boolean {
   return /^(?:请)?(?:简述|说明|解释|介绍)(?!一下$).{2,}/.test(compact);
 }
 
-function isElliptical(text: string): boolean {
-  const compact = text.replace(/[？?。！!，,、\s]/g, "");
-  if (hasExplicitStandaloneSubject(text)) return false;
-  return /^(?:讲一下|讲讲|说一下|说说|具体|为什么|怎么|如何|用过哪些|用在什么地方|还有呢?|哪一个|这两个|前者|后者|其中|你会更倾向于?用?哪(?:一个|个)|什么(?:场景|情况|时候|原因|区别|作用|问题|地方|方式|方法|结果|影响|风险|优缺点).*)[？?。！!]?$/i.test(text)
-    || /^(?:那|然后|还有|这个|它|这里|其中|接下来|再).{0,12}$/.test(compact);
-}
-
-function isCompleteStandaloneQuestion(text: string): boolean {
-  const compact = text.replace(/[？?。！!，,、\s]/g, "");
-  return hasExplicitStandaloneSubject(text)
-    || compact.length >= 8 && /第\s*\d+\s*题|(?:什么是|为什么|为何|怎么|如何|哪些|哪种|哪个|哪里|在哪|多少|几个|几路|上限|容量|吗|呢)/.test(text);
-}
-
 function topicFromText(text: string): string | undefined {
   return text.match(/(?:Linux|ARM|Cortex-M|C\+\+|volatile|static|const|TCP|UDP|IIC|I2C|SPI|UART|CAN(?: FD)?|FOC|SVPWM|ADC|DMA|PWM|FreeRTOS|RTOS|Flash|文件系统|堆|栈|中断|仲裁)/i)?.[0];
 }
@@ -57,8 +44,8 @@ export class ContextAnchorResolver {
     const contextualReference = Boolean(anchor && hasContextReference(text) && !hasStandaloneTopicSubject(text));
     const standalone = input.speechAct === "CODE_REQUEST"
       || hasStandaloneTopicSubject(text)
-      || (input.speechAct === "QUESTION" && !contextualReference && (!isElliptical(text) || isCompleteStandaloneQuestion(text) || /第\s*\d+\s*题/.test(text)))
-      || boundary.relation === "NEW_TOPIC";
+      || boundary.relation === "NEW_TOPIC"
+      || (!anchor && (input.speechAct === "QUESTION" || input.speechAct === "ANSWER_REQUEST"));
     if (standalone) {
       return {
         canonicalQuestion: text,

@@ -1,6 +1,6 @@
 import type { TranscriptSegment } from "@interview-copilot/protocol";
 import { normalizeTechnicalTerms } from "../terminology";
-import { isDanglingQuestionTail, isStyleOnly } from "./semantic-answerability";
+import { isDanglingQuestionTail, isStyleOnly, type AnswerabilityState } from "./semantic-answerability";
 
 export type SegmentSemanticRole =
   | "SETUP"
@@ -10,12 +10,15 @@ export type SegmentSemanticRole =
   | "EXAMPLE"
   | "SUBQUESTION"
   | "FILLER"
+  | "OPEN_NUCLEUS"
   | "SUPPORTING_FRAGMENT";
 
 export interface PendingQuestionRawSegment {
   segment: TranscriptSegment;
   role: SegmentSemanticRole;
   receivedAt: number;
+  answerabilityState?: AnswerabilityState;
+  semanticReason?: string;
 }
 
 export interface PendingQuestionDraft {
@@ -28,6 +31,7 @@ export interface PendingQuestionDraft {
   outputRequirements: string[];
   examples: string[];
   subQuestions: string[];
+  openNuclei: string[];
   supportingFragments: string[];
   styleModifiers: string[];
   firstReceivedAt: number;
@@ -42,6 +46,17 @@ export interface PendingQuestionDraftUpdate {
   late: boolean;
   accepted: boolean;
   reason: string;
+}
+
+export interface PendingQuestionDraftSemanticContext {
+  answerabilityState?: AnswerabilityState;
+  semanticReason?: string;
+  contextualFollowUp?: boolean;
+  /** The coordinator already has a visible question group for this session. */
+  activeQuestionGroup?: boolean;
+  shouldBuffer?: boolean;
+  shouldAttachToPrevious?: boolean;
+  shouldAnswer?: boolean;
 }
 
 export interface PendingQuestionDraftOptions {
@@ -61,6 +76,32 @@ const OUTPUT_REQUIREMENT = /^(?:请给(?:出|我)?|给(?:出|我)?|列出|需要
 const EXAMPLE = /^(?:比如|例如|举例(?:来说)?|像是|举个)/iu;
 const QUESTION_FORM = /(?:什么|为什么|为何|怎么|如何|怎样|哪些|哪种|哪个|是否|有没有|能不能|可不可以|多少|几个|吗|呢|请问|介绍|解释|说明|说说|讲讲|排查|定位|设计|优化|验证|解决)/iu;
 const NEW_TOPIC = /^(?:换个话题|换个方向|另一个问题|下一个问题|下个问题|接下来问|再问一个)/iu;
+
+function roleFromSemanticContext(context: PendingQuestionDraftSemanticContext & { hasNucleus?: boolean; hasSetup?: boolean }): SegmentSemanticRole | undefined {
+  switch (context.answerabilityState) {
+    case "FILLER":
+    case "META_CONVERSATION":
+      return "FILLER";
+    case "TOPIC_ANNOUNCEMENT":
+      return "FILLER";
+    case "TOPIC_FRAGMENT":
+    case "SETUP_ONLY":
+      return "SETUP";
+    case "STYLE_ONLY":
+      return context.hasNucleus || context.hasSetup ? "SUPPORTING_FRAGMENT" : "SETUP";
+    case "ANSWER_CONSTRAINT":
+      return "CONSTRAINT";
+    case "OPEN_PREDICATE":
+    case "INCOMPLETE":
+      return "OPEN_NUCLEUS";
+    case "CONTEXT_DEPENDENT":
+      return "SUBQUESTION";
+    case "ANSWERABLE":
+      return context.contextualFollowUp || context.shouldAttachToPrevious ? "SUBQUESTION" : "NUCLEUS";
+    default:
+      return undefined;
+  }
+}
 
 function clean(value: string): string {
   return normalizeTechnicalTerms(value).replace(/\s+/g, " ").trim();
@@ -95,9 +136,11 @@ function hasQuestionShape(value: string): boolean {
   return /[？?]/u.test(text) || /(?:吗|呢)[。！？?！\s]*$/u.test(text) || QUESTION_FORM.test(text);
 }
 
-export function classifySegmentRole(text: string, context: { hasNucleus?: boolean; hasSetup?: boolean } = {}): SegmentSemanticRole {
+export function classifySegmentRole(text: string, context: PendingQuestionDraftSemanticContext & { hasNucleus?: boolean; hasSetup?: boolean } = {}): SegmentSemanticRole {
   const normalized = clean(text);
   if (!normalized || FILLER.test(normalized)) return "FILLER";
+  const semanticRole = roleFromSemanticContext(context);
+  if (semanticRole) return semanticRole;
   if (isStyleOnly(normalized)) return context.hasNucleus || context.hasSetup ? "SUPPORTING_FRAGMENT" : "SETUP";
   // “来个基础的，你说说” is a request to start a question, not a question
   // nucleus. Keeping it in SETUP prevents the detector's lexical “说说” rule
@@ -118,6 +161,7 @@ export function buildCanonicalQuestion(draft: PendingQuestionDraft): string {
   const primary = [
     ...draft.setup,
     ...draft.constraints,
+    ...draft.openNuclei,
     ...draft.nucleus,
     ...draft.supportingFragments,
     ...draft.subQuestions,
@@ -125,7 +169,7 @@ export function buildCanonicalQuestion(draft: PendingQuestionDraft): string {
     ...draft.examples
   ].map(withoutTerminalPunctuation);
   const canonical = joinFragments(primary.filter(Boolean));
-  const hasQuestionSignal = [...draft.nucleus, ...draft.subQuestions].some((value) => /[？?]$/u.test(value.trim()) || /(?:吗|呢)[。！？?！\s]*$/u.test(value.trim()));
+  const hasQuestionSignal = [...draft.openNuclei, ...draft.nucleus, ...draft.subQuestions].some((value) => /[？?]$/u.test(value.trim()) || /(?:吗|呢)[。！？?！\s]*$/u.test(value.trim()));
   return hasQuestionSignal && canonical && !/[？?]$/u.test(canonical) ? `${canonical}？` : canonical;
 }
 
@@ -144,6 +188,7 @@ function copyDraft(draft: PendingQuestionDraft): PendingQuestionDraft {
     outputRequirements: [...draft.outputRequirements],
     examples: [...draft.examples],
     subQuestions: [...draft.subQuestions],
+    openNuclei: [...draft.openNuclei],
     supportingFragments: [...draft.supportingFragments],
     styleModifiers: [...draft.styleModifiers]
   };
@@ -151,6 +196,10 @@ function copyDraft(draft: PendingQuestionDraft): PendingQuestionDraft {
 
 function hasNucleus(draft: PendingQuestionDraft | undefined): boolean {
   return Boolean(draft?.nucleus.length);
+}
+
+function hasAnswerableQuestion(draft: PendingQuestionDraft | undefined): boolean {
+  return Boolean(draft && (draft.nucleus.length > 0 || draft.subQuestions.length > 0));
 }
 
 /**
@@ -182,8 +231,13 @@ export class PendingQuestionDraftAssembler {
   get recent(): PendingQuestionDraft | undefined { return this.recentFinalizedDraft ? copyDraft(this.recentFinalizedDraft) : undefined; }
   get waitMs(): number {
     if (!this.activeDraft) return this.setupWaitMs;
-    if (hasNucleus(this.activeDraft) && isDanglingQuestionTail(this.canonicalText(this.activeDraft))) return this.incompleteNucleusWaitMs;
-    return hasNucleus(this.activeDraft) ? this.nucleusWaitMs : this.setupWaitMs;
+    if (!hasNucleus(this.activeDraft) && this.activeDraft.openNuclei.length) return this.incompleteNucleusWaitMs;
+    if (hasNucleus(this.activeDraft) && this.activeDraft.openNuclei.length === 0 && isDanglingQuestionTail(this.canonicalText(this.activeDraft))) return this.incompleteNucleusWaitMs;
+    // A complete contextual follow-up is stored in subQuestions rather than
+    // nucleus, but it is still an answerable turn and should keep the short
+    // confirmation horizon. Open predicates and setup-only drafts take the
+    // longer waits above/below so they can collect their missing object.
+    return hasAnswerableQuestion(this.activeDraft) ? this.nucleusWaitMs : this.setupWaitMs;
   }
 
   reset(): void {
@@ -191,39 +245,47 @@ export class PendingQuestionDraftAssembler {
     this.recentFinalizedDraft = undefined;
   }
 
-  add(segment: TranscriptSegment, receivedAt: number, options: { contextualFollowUp?: boolean } = {}): PendingQuestionDraftUpdate {
+  add(segment: TranscriptSegment, receivedAt: number, options: PendingQuestionDraftSemanticContext = {}): PendingQuestionDraftUpdate {
     if (!segment.final || !segment.text.trim()) return { role: "SUPPORTING_FRAGMENT", late: false, accepted: false, reason: "unstable-asr-segment" };
-    const role = classifySegmentRole(segment.text, { hasNucleus: hasNucleus(this.activeDraft), hasSetup: Boolean(this.activeDraft?.setup.length || this.recentFinalizedDraft?.setup.length) });
+    const role = classifySegmentRole(segment.text, { ...options, hasNucleus: hasNucleus(this.activeDraft), hasSetup: Boolean(this.activeDraft?.setup.length || this.recentFinalizedDraft?.setup.length) });
     if (role === "FILLER") return { role, draft: this.current, late: false, accepted: false, reason: "filler-only" };
 
     const recent = this.recentFinalizedDraft;
     const recentAge = recent ? receivedAt - (recent.finalizedAt ?? recent.lastReceivedAt) : Number.POSITIVE_INFINITY;
+    if (!this.activeDraft && recent && options.activeQuestionGroup && options.contextualFollowUp && hasNucleus(recent) && recentAge <= this.recentQuestionContextRetentionMs && role === "SUBQUESTION") {
+      this.start(segment, role, receivedAt, options);
+      return { role, draft: this.current, late: false, accepted: true, reason: "active-question-follow-up-new-draft" };
+    }
+    if (!this.activeDraft && recent && options.activeQuestionGroup && !options.contextualFollowUp && hasNucleus(recent) && recentAge <= this.lateModifierWindowMs && ["CONSTRAINT", "OUTPUT_REQUIREMENT", "EXAMPLE", "SUBQUESTION", "OPEN_NUCLEUS", "SUPPORTING_FRAGMENT"].includes(role)) {
+      this.append(recent, segment, role, receivedAt, options);
+      return { role, draft: copyDraft(recent), late: true, accepted: true, reason: "late-context-attached-to-active-question" };
+    }
     if (!this.activeDraft && recent && options.contextualFollowUp && hasNucleus(recent) && recentAge <= this.recentQuestionContextRetentionMs) {
       this.activeDraft = recent;
       this.recentFinalizedDraft = undefined;
-      const followUpRole = classifySegmentRole(segment.text, { hasNucleus: true, hasSetup: true });
-      this.append(this.activeDraft, segment, followUpRole, receivedAt);
+      const followUpRole = classifySegmentRole(segment.text, { ...options, hasNucleus: true, hasSetup: true });
+      this.append(this.activeDraft, segment, followUpRole, receivedAt, options);
       return { role: followUpRole, draft: this.current, late: false, accepted: true, reason: "context-follow-up-reopened-recent-question" };
     }
     if (!this.activeDraft && recent && !hasNucleus(recent) && recentAge <= this.orphanSetupRetentionMs && this.canReopenOrphan(recent, role)) {
       this.activeDraft = recent;
       this.recentFinalizedDraft = undefined;
-      this.append(this.activeDraft, segment, role, receivedAt);
+      this.append(this.activeDraft, segment, role, receivedAt, options);
       return { role, draft: this.current, late: false, accepted: true, reason: "orphan-setup-reopened" };
     }
-    if (!this.activeDraft && recent && hasNucleus(recent) && recentAge <= this.lateModifierWindowMs && ["CONSTRAINT", "OUTPUT_REQUIREMENT", "EXAMPLE", "SUBQUESTION", "SUPPORTING_FRAGMENT"].includes(role)) {
-      this.append(recent, segment, role, receivedAt);
+    if (!this.activeDraft && recent && hasNucleus(recent) && recentAge <= this.lateModifierWindowMs && ["CONSTRAINT", "OUTPUT_REQUIREMENT", "EXAMPLE", "SUBQUESTION", "OPEN_NUCLEUS", "SUPPORTING_FRAGMENT"].includes(role)) {
+      this.append(recent, segment, role, receivedAt, options);
       return { role, draft: copyDraft(recent), late: true, accepted: true, reason: "late-context-attached-to-recent-question" };
     }
 
     if (this.activeDraft && hasNucleus(this.activeDraft) && role === "NUCLEUS" && (NEW_TOPIC.test(clean(segment.text)) || receivedAt - this.activeDraft.lastReceivedAt > this.lateModifierWindowMs)) {
       const completed = this.finalize(receivedAt);
-      this.start(segment, role, receivedAt);
+      this.start(segment, role, receivedAt, options);
       return { role, draft: this.current, completed, late: false, accepted: true, reason: "new-question-boundary" };
     }
 
-    if (!this.activeDraft) this.start(segment, role, receivedAt);
-    else this.append(this.activeDraft, segment, role, receivedAt);
+    if (!this.activeDraft) this.start(segment, role, receivedAt, options);
+    else this.append(this.activeDraft, segment, role, receivedAt, options);
     return { role, draft: this.current, late: false, accepted: true, reason: "draft-updated" };
   }
 
@@ -276,7 +338,7 @@ export class PendingQuestionDraftAssembler {
     };
   }
 
-  private start(segment: TranscriptSegment, role: SegmentSemanticRole, receivedAt: number): void {
+  private start(segment: TranscriptSegment, role: SegmentSemanticRole, receivedAt: number, semantic?: PendingQuestionDraftSemanticContext): void {
     const id = segment.id ?? `${segment.source ?? "remote"}-${segment.startMs}-${segment.endMs}`;
     this.activeDraft = {
       id,
@@ -288,26 +350,29 @@ export class PendingQuestionDraftAssembler {
       outputRequirements: [],
       examples: [],
       subQuestions: [],
+      openNuclei: [],
       supportingFragments: [],
       styleModifiers: [],
       firstReceivedAt: receivedAt,
       lastReceivedAt: receivedAt
     };
-    this.append(this.activeDraft, segment, role, receivedAt);
+    this.append(this.activeDraft, segment, role, receivedAt, semantic);
   }
 
-  private append(draft: PendingQuestionDraft, segment: TranscriptSegment, role: SegmentSemanticRole, receivedAt: number): void {
+  private append(draft: PendingQuestionDraft, segment: TranscriptSegment, role: SegmentSemanticRole, receivedAt: number, semantic?: PendingQuestionDraftSemanticContext): void {
     const id = segment.id ?? `${segment.source ?? "remote"}-${segment.startMs}-${segment.endMs}`;
     const existing = draft.rawSegments.find((item) => item.segment.id === id);
     if (existing) {
       existing.segment = { ...segment };
       existing.role = role;
       existing.receivedAt = receivedAt;
+      existing.answerabilityState = semantic?.answerabilityState;
+      existing.semanticReason = semantic?.semanticReason;
       draft.lastReceivedAt = receivedAt;
       return;
     }
     draft.segmentIds.push(id);
-    draft.rawSegments.push({ segment: { ...segment, id }, role, receivedAt });
+    draft.rawSegments.push({ segment: { ...segment, id }, role, receivedAt, ...(semantic?.answerabilityState ? { answerabilityState: semantic.answerabilityState } : {}), ...(semantic?.semanticReason ? { semanticReason: semantic.semanticReason } : {}) });
     draft.lastReceivedAt = receivedAt;
     const value = clean(segment.text);
     if (role === "SETUP") uniquePush(draft.setup, value);
@@ -316,13 +381,14 @@ export class PendingQuestionDraftAssembler {
     else if (role === "OUTPUT_REQUIREMENT") uniquePush(draft.outputRequirements, value);
     else if (role === "EXAMPLE") uniquePush(draft.examples, value);
     else if (role === "SUBQUESTION") uniquePush(draft.subQuestions, value);
+    else if (role === "OPEN_NUCLEUS") uniquePush(draft.openNuclei, value);
     else if (role === "SUPPORTING_FRAGMENT" && !isStyleOnly(value)) uniquePush(draft.supportingFragments, value);
     if (isStyleOnly(value)) uniquePush(draft.styleModifiers, value);
   }
 
   private canReopenOrphan(draft: PendingQuestionDraft, role: SegmentSemanticRole): boolean {
-    if (!(role === "NUCLEUS" || role === "SUPPORTING_FRAGMENT" || role === "SETUP")) return false;
+    if (!(role === "NUCLEUS" || role === "OPEN_NUCLEUS" || role === "SUPPORTING_FRAGMENT" || role === "SETUP")) return false;
     if (draft.supportingFragments.length > 0) return true;
-    return draft.setup.some((value) => /(?:在这个|在该|项目中|项目里|简历里|围绕|针对|关于|最后一个追问|如果|假设|若|当|情况下|出现|日志|系统)/iu.test(value));
+    return draft.setup.some((value) => /(?:在这个|在该|项目中|项目里|简历里|围绕|针对|关于|最后一个追问|如果|假设|若|当|情况下|出现|日志|系统|语言里|语言中|指针|数组|STL|C\+\+|C语言|RTOS|FOC|DMA|I2C|SPI|UART|CAN)/iu.test(value));
   }
 }

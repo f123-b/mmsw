@@ -47,7 +47,7 @@ export interface SpeechActClassification {
 const ACKNOWLEDGEMENT = /^(?:嗯+|呃+|啊+|哦+|好+|好的|对|那|明白了?|知道了?|可以|行)[。！？?！\s，,、]*$/i;
 const TOPIC_TRANSITION = /^(?:(?:好|好的|行|可以|嗯+|那)[，,、\s]*)?(?:下一个问题|下个问题|下一题|换一个问题|换个问题|换个话题|再来一个(?:问题)?|再问一个(?:问题)?|另一个问题|接下来(?:问)?)[。！？?！\s，,、]*$/i;
 const CONTROL = /^(?:(?:好|好的|行|可以|嗯+|那)[，,、\s]*)?(?:继续|暂停|停止|开始)(?:[。！？?！\s，,、]*)$/i;
-const META_CONVERSATION = /(?:你能看到吗|看得到吗|你能听到吗|听得到吗|你在动鼠标吗|动我鼠标|鼠标|屏幕能看到吗|能看到屏幕|声音听得到吗|卡了吗|软件怎么了|网络卡吗|你怎么知道我这里|你操作我电脑了吗|你操作了吗|能看到我这边|能听到我这边)/i;
+const META_CONVERSATION = /(?:你能看到吗|看得到吗|你能听到吗|听得到吗|你在动鼠标吗|动我鼠标|鼠标|屏幕能看到吗|能看到屏幕|声音听得到吗|卡了吗|软件怎么了|网络卡吗|你怎么知道我这里|你操作我电脑了吗|你操作了吗|能看到我这边|能听到我这边|我(?:直接)?来几个(?:偏基础|基础)?|大家(?:很)?常问|我一个个问|逐个问|问完(?:你)?答|你答完我再(?:继续)?追问|我再(?:继续)?追问|先来几个(?:问题)?)/i;
 const META_REPAIR = /^(?:你觉得(?:呢)?|怎么(?:回答|答|说)|答案(?:是什么|呢))[。！？?！\s]*$/i;
 const CODE_CONTEXT = /(?:现在|接下来|下面|来)?(?:考你|问你)?(?:一个)?代码题|算法题|编程题/i;
 const CODE_REQUEST = /(?:写.{0,18}(?:代码|函数|程序)|手写|代码实现|实现一下|写一个|写个|给一段代码|(?:^请?|\s请?)用\s*C(?:\+\+|语言)?\s*(?:写|实现)|用\s*C\+\+\s*写|伪代码|补全(?:这段)?代码|(?:^请?|\s请?)输出(?:一个)?[^。！？?]{0,20}(?:代码|示例)|字符串.{0,12}(?:代码|实现)|链表.{0,12}(?:代码|函数|实现)|排序.{0,12}(?:代码|实现))/i;
@@ -60,12 +60,13 @@ const FOLLOW_UP_PREFIX = /^(?:那|然后|还有|具体|如果|再|这个|它|这
 const ELLIPTICAL_FOLLOW_UP = /^(?:为什么|为何|怎么|如何|具体(?:呢)?|还有(?:呢|吗)?|然后呢|用过哪些|用在什么地方|哪几个|哪种|哪一个|这两个|前者|后者|其中|那低速呢|再具体一点|能不能具体一点|你会关注哪些点|考虑哪些可能性|有哪些可能性|快速排查清单|给(?:个|一份)?(?:快速)?(?:排查|检查)(?:清单|步骤)|简单比较(?:一下)?|简单对比(?:一下)?|对比一下|具体细节|你会更倾向于?用?哪(?:一个|个))[？?。！!\s]*$/iu;
 const CONTEXTUAL_OUTPUT_FOLLOW_UP = /^(?:请)?(?:简单|重点|分别)?(?:比较|对比|讲|说|列出|给)(?:一下|一下子)?[^。！？?！]{0,18}[。！？?！\s]*$/iu;
 const ELLIPTICAL_ANSWER_REQUEST = /^(?:讲一下|讲讲|说一下|说说|展开讲一下|详细讲述|具体说)[？?。！!\s]*$/i;
+const CONTEXTUAL_ELLIPTICAL_REQUEST = /^(?:(?:嗯+|呃+|好+|好的|哦+|那)[，,、\s]*)?(?:说说|讲讲|展开说(?:说)?|具体说|再说说|再讲讲)[。！？?！\s，,、]*$/iu;
 const STRONG_TOPIC = /(?:STL|TCP|UDP|HTTP|MQTT|CoAP|LwIP|IIC|I2C|SPI|UART|CAN(?: FD)?|LIN|FlexRay|Modbus|FOC|DMA|PWM|ADC|DAC|GPIO|NVIC|SysTick|MPU|MMU|FreeRTOS|RT-Thread|Zephyr|Linux|RTOS|C\+\+|C语言|RISC-V|Cortex-[MAR]|虚函数|堆和栈|进程间通信|进程线程|链表|字符串|排序|同步机制|三次握手|四次挥手|容器|上拉电阻|EEPROM|Flash|内存管理|低速抖动|系统架构|完整过程|实现过程)/i;
 const ASSERTIVE_STATEMENT = /^(?:我|我们|系统|项目|这个项目|当前项目|当前|这个方案|这次优化|它|该模块).*(?:是|为|通过|使用|采用|完成|下降|提升|增加|减少|切换|实现了|负责了)[^？?]*[。！!]$/;
 const SMALL_TALK = /^(?:你好|您好|谢谢|辛苦了|哈哈|嗨)[。！？?！\s]*$/i;
 const CANDIDATE_SPEECH = /^(?:我|我们|本人|候选人).*(?:负责|做过|参与|实现|采用|使用|认为|觉得|已经|目前|先|会|可以).*[。！!]$/;
 const TOPIC_ANNOUNCEMENT = /^(?:(?:(?:下面聊(?:一下)?|接下来问一个|继续问一个|我们先聊(?:一下)?|先聊(?:一下)?|再聊(?:一下)?|我换个(?:更底层的)?|换个(?:话题|方向)?)(?:\s*(?:RTOS|FreeRTOS|C\+\+基础|底层驱动|通信协议|系统设计|项目经验|异常恢复|CAN|UART|DMA|FOC)(?:这个|相关)?(?:话题|部分|问题)?|(?:更?底层|技术|方向)?(?:的)?(?:话题|问题)?))|(?:RTOS|FreeRTOS|C\+\+基础|底层驱动|通信协议|系统设计|项目经验|异常恢复|CAN|UART|DMA|FOC)(?:这个|相关)?(?:话题|部分|问题)?)[。！？?！\s，,、]*$/iu;
-const INSTRUCTION_MODIFIER = /^(?!.*(?:什么|为什么|为何|怎么|如何|怎样|哪些|哪种|哪个|哪一个|是否|有没有|吗|呢|[？?]))(?:请你|请)?(?:(?:重点|着重)(?:讲|说|说明|展开)(?:一下|一点)?(?:\s*[^\n。！？?！]{0,30})?|展开一点|具体一点|(?:简单|大概)(?:说|讲)(?:说|一下|讲一下)?(?:思路)?(?:就行|即可)?|说重点|不用展开|简短(?:一点|说一下)?|控制在\s*\d+\s*(?:秒|分钟)|结合项目(?:说|讲)|只讲|[^\n。！？?！]{1,32}角度(?:也)?(?:说|讲|考虑)(?:一下|一点)?)(?:[。！？?！\s，,、]*)$/iu;
+const INSTRUCTION_MODIFIER = /^(?!.*(?:什么|为什么|为何|怎么|如何|怎样|哪些|哪种|哪个|哪一个|是否|有没有|吗|呢|[？?]))(?:请你|请)?(?:(?:重点|着重)(?:讲|说|说明|展开)(?:一下|一点)?(?:\s*[^\n。！？?！]{0,30})?|展开一点|具体一点|越具体(?:一点|越好)?|(?:简单|大概)(?:说|讲)(?:说|一下|讲一下)?(?:思路)?(?:就行|即可)?|说重点|不用展开|简短(?:一点|说一下)?|控制在\s*\d+\s*(?:秒|分钟)|结合项目(?:说|讲)|只讲|只说(?:你会)?[^\n。！？?！]{0,20}\d+\s*(?:件|点|条|个)|[^\n。！？?！]{1,32}角度(?:也)?(?:说|讲|考虑)(?:一下|一点)?)(?:[。！？?！\s，,、]*)$/iu;
 const SELF_INTRODUCTION = /^(?:请你|请|能否|可以)?(?:先)?(?:做|进行|来)(?:一下)?(?:一分钟|一段|个)?自我介绍[。！？?！\s，,、]*$/iu;
 
 const KNOWN_ENTITIES = [
@@ -137,6 +138,12 @@ export class SpeechActClassifier {
     if (TOPIC_TRANSITION.test(normalizedText)) return { speechAct: "TOPIC_TRANSITION", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "topic-transition-marker", topic, entities };
     if (CONTROL.test(normalizedText)) return { speechAct: "CONTROL", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "interview-control", topic, entities };
     if (ACKNOWLEDGEMENT.test(normalizedText) || /^(?:那个)[。！？?！\s]*$/i.test(normalizedText)) return { speechAct: "ACKNOWLEDGEMENT", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "acknowledgement", topic, entities };
+    // “好，说说” is an elliptical follow-up when a question is already
+    // anchored. Treat it as a request for the remembered topic, while keeping
+    // the same words as a style modifier when no question context exists.
+    if (context.latestAnchor?.text || context.currentTopic || context.memory?.currentTopic) {
+      if (CONTEXTUAL_ELLIPTICAL_REQUEST.test(normalizedText)) return { speechAct: "FOLLOW_UP", shouldAnswer: true, confidence: 0.94, normalizedText, reason: "contextual-elliptical-answer-request", topic, entities };
+    }
     if (isStyleOnly(normalizedText) || INSTRUCTION_MODIFIER.test(normalizedText)) return { speechAct: "INSTRUCTION_MODIFIER", shouldAnswer: false, confidence: 0.97, normalizedText, reason: "instruction-modifier", topic, entities };
     if (TOPIC_ANNOUNCEMENT.test(normalizedText) && !QUESTION_FORM.test(normalizedText)) return { speechAct: "TOPIC_ANNOUNCEMENT", shouldAnswer: false, confidence: 0.96, normalizedText, reason: "topic-announcement", topic, entities };
     if (SELF_INTRODUCTION.test(normalizedText)) return { speechAct: "ANSWER_REQUEST", shouldAnswer: true, confidence: 0.98, normalizedText, reason: "self-introduction", topic, entities };

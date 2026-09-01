@@ -122,9 +122,10 @@ export { DEFAULT_PROJECT_QA_ROUTING_POLICY, questionBankAnswerIsReady } from "./
 export type { ProjectQaMatchLevel, ProjectQaRouteResult, ProjectQaRoutingPolicy, QuestionBankRouteHit, QuestionBankRouteOptions, QuestionBankRouteResult } from "./question-bank-router";
 export type { QuestionCategory, QuestionClassification } from "./question-classifier";
 export { TurnCompletionGate, decideTurnCompletion, type TurnCompletionContext, type TurnCompletionDecision, type TurnCompletionState } from "./interview/turn-completion-gate";
-export { SemanticAnswerabilityGate, decideSemanticAnswerability, hasContextReference, hasIndependentQuestionNucleus, isDanglingQuestionTail, isStyleOnly, type AnswerabilityDecision, type AnswerabilityState, type SemanticAnswerabilityContext } from "./interview/semantic-answerability";
-export { PendingQuestionDraftAssembler, classifySegmentRole, type PendingQuestionDraft, type PendingQuestionDraftOptions, type PendingQuestionRawSegment, type PendingQuestionDraftUpdate, type SegmentSemanticRole } from "./interview/pending-question-draft";
-export { splitIntraSegmentQuestions, type IntraSegmentQuestionPart, type IntraSegmentQuestionSplitOptions } from "./interview/intra-segment-question-splitter";
+export { SemanticAnswerabilityGate, decideSemanticAnswerability, hasContextReference, hasIndependentQuestionNucleus, isDanglingQuestionTail, isOpenPredicate, isStyleOnly, type AnswerabilityDecision, type AnswerabilityState, type SemanticAnswerabilityContext } from "./interview/semantic-answerability";
+export { PendingQuestionDraftAssembler, classifySegmentRole, type PendingQuestionDraft, type PendingQuestionDraftOptions, type PendingQuestionRawSegment, type PendingQuestionDraftSemanticContext, type PendingQuestionDraftUpdate, type SegmentSemanticRole } from "./interview/pending-question-draft";
+export { splitIntraSegmentQuestions, detectExplicitQuestionBoundary, type ExplicitSplitDecision, type ExplicitSplitReason, type IntraSegmentQuestionPart, type IntraSegmentQuestionSplitOptions } from "./interview/intra-segment-question-splitter";
+export { evaluateSubstantiveAnchorEligibility, isSubstantiveAnchorEligible, type SubstantiveAnchorEligibilityDecision, type SubstantiveAnchorEligibilityInput } from "./interview/substantive-anchor-eligibility";
 export { UnresolvedAsrGate, type AsrUnderstandingQuality, type UnresolvedAsrDecision } from "./interview/unresolved-asr-gate";
 export { analyzeQuestionNucleus, type QuestionNucleusAnalysis, type QuestionNucleusIntent } from "./question/question-nucleus";
 export { ProjectAliasResolver, type ProjectAliasCandidate, type ProjectAliasResolution } from "./project-alias-resolver";

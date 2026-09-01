@@ -38,11 +38,14 @@ export function decideTurnCompletion(text: string, context: TurnCompletionContex
   if (TOPIC_ANNOUNCEMENT.test(normalized) && !QUESTION_FORM.test(normalized)) return { state: "topic_announcement", confidence: 0.96, reason: "topic-announcement", recommendedWaitMs: 180 };
   if (CONDITIONAL_OPEN.test(normalized) && !/(?:怎么|如何|怎样|怎么办|会不会|是否|能不能|可不可以|吗|呢|[？?])/iu.test(normalized)) return { state: "incomplete", confidence: 0.94, reason: "conditional-clause-open", recommendedWaitMs: 760 };
   if (isDanglingQuestionTail(normalized)) return { state: "incomplete", confidence: 0.91, reason: "dangling-question-tail", recommendedWaitMs: 760 };
+  // A terminal question mark closes the semantic turn even when the final
+  // Chinese character also matches a generic open-tail heuristic (for
+  // example, “是干什么的？”).
+  if (QUESTION_FORM.test(normalized) || /[？?]$/.test(normalized)) return { state: "complete", confidence: 0.96, reason: context.asrEndpoint ? "explicit-question-endpoint" : "explicit-question", recommendedWaitMs: context.asrEndpoint ? 0 : 140 };
   if (INCOMPLETE_TAIL.test(normalized) || INCOMPLETE_SENTENCE.test(normalized)) return { state: "incomplete", confidence: 0.94, reason: "semantic-clause-open", recommendedWaitMs: 620 };
   if (context.previousText && /(?:如果|若|假设|在|关于|针对|比如|包括|以及|并且|而且|尤其)[。！？?！；;，,、\s]*$/u.test(context.previousText)) {
     return { state: "incomplete", confidence: 0.88, reason: "previous-clause-open", recommendedWaitMs: 620 };
   }
-  if (QUESTION_FORM.test(normalized) || /[？?]$/.test(normalized)) return { state: "complete", confidence: 0.96, reason: context.asrEndpoint ? "explicit-question-endpoint" : "explicit-question", recommendedWaitMs: context.asrEndpoint ? 0 : 140 };
   if (/[。！？!；;]$/.test(normalized)) return { state: "complete", confidence: 0.82, reason: context.asrEndpoint ? "terminal-punctuation-endpoint" : "terminal-punctuation", recommendedWaitMs: context.asrEndpoint ? 0 : 180 };
   return { state: "ambiguous", confidence: clamp(normalized.length >= 8 ? 0.66 : 0.48), reason: context.asrEndpoint ? "ambiguous-endpoint" : "no-semantic-boundary", recommendedWaitMs: context.asrEndpoint ? 80 : 260 };
 }

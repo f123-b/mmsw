@@ -28,4 +28,23 @@ describe("semantic answerability gate", () => {
     const result = decideSemanticAnswerability("你会更倾向于用哪一个？", recent);
     expect(result).toMatchObject({ state: "CONTEXT_DEPENDENT", shouldAnswer: true, shouldAttachToPrevious: true });
   });
+
+  it("accepts complete elliptical follow-ups without treating them as style-only", () => {
+    expect(decideSemanticAnswerability("好，说说", { ...recent, speechAct: "FOLLOW_UP" })).toMatchObject({ state: "CONTEXT_DEPENDENT", shouldAnswer: true });
+    expect(decideSemanticAnswerability("那如果换成 RTOS？", { ...recent, speechAct: "FOLLOW_UP" })).toMatchObject({ state: "CONTEXT_DEPENDENT", shouldAnswer: true });
+  });
+
+  it("rejects predicate-only questions that are missing their object", () => {
+    expect(decideSemanticAnswerability("中断里能不能用。", recent)).toMatchObject({ state: "OPEN_PREDICATE", shouldAnswer: false, shouldBuffer: true });
+    expect(decideSemanticAnswerability("这里怎么配置。", recent).state).toBe("OPEN_PREDICATE");
+  });
+
+  it("does not allow a strong local classifier to rescue a hard negative", () => {
+    expect(decideSemanticAnswerability("来个基础的，你说说。", { ...recent, localClassifierConfidence: 0.99 }).state).toBe("SETUP_ONLY");
+    expect(decideSemanticAnswerability("中断里能不能用。", { ...recent, localClassifierConfidence: 0.99 }).state).toBe("OPEN_PREDICATE");
+  });
+
+  it("holds a short ASR object that is likely to be completed by the next fragment", () => {
+    expect(decideSemanticAnswerability("怎么避免假？", recent)).toMatchObject({ state: "INCOMPLETE", shouldAnswer: false, isDangling: true });
+  });
 });
