@@ -13,10 +13,10 @@ export interface TopicBoundaryDecision {
 
 /** Stable entities used only for topic-boundary decisions, not as a question classifier. */
 export const TECHNICAL_TOPIC_ENTITIES = [
-  "Linux 文件系统", "Linux", "ARM", "Cortex-M", "Cortex-A", "Cortex-R", "C++", "C语言", "volatile", "static", "const", "virtual",
+  "Linux 文件系统", "反转链表", "内存泄漏", "内存溢出", "内存管理", "进程间通信", "C语言", "Linux", "ARM", "Cortex-M", "Cortex-A", "Cortex-R", "C++", "volatile", "static", "const", "virtual",
   "TCP", "UDP", "HTTP", "MQTT", "IIC", "I2C", "SPI", "UART", "CAN FD", "CAN", "LIN", "FOC", "SVPWM", "Clarke", "Park",
   "ADC", "DMA", "PWM", "GPIO", "NVIC", "HardFault", "FreeRTOS", "RTOS", "Flash", "EEPROM", "文件系统", "堆", "栈", "链表",
-  "中断", "实时采样", "电流环", "速度环", "仲裁", "架构"
+  "中断", "实时采样", "电流环", "速度环", "仲裁", "架构", "进程", "线程", "链表"
 ] as const;
 
 const EXPLICIT_TOPIC_SWITCH = /^(?:换个话题|换一个话题|另一个问题|下一个问题|接下来问|再问一个|说到另一个)/;
@@ -36,7 +36,10 @@ function escaped(value: string): string {
 
 export function extractTopicEntities(text: string): string[] {
   const normalized = normalizeTechnicalTerms(text);
-  return TECHNICAL_TOPIC_ENTITIES.filter((entity) => new RegExp(escaped(entity), "iu").test(normalized)).map(String);
+  return [...TECHNICAL_TOPIC_ENTITIES]
+    .filter((entity) => new RegExp(escaped(entity), "iu").test(normalized))
+    .sort((left, right) => right.length - left.length)
+    .map(String);
 }
 
 export function hasStandaloneTopicSubject(text: string): boolean {

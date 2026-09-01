@@ -15,11 +15,20 @@ export interface ContextAnchor {
   confidence: number;
 }
 
+export interface PendingTopicAnchor {
+  topic: string;
+  sourceText: string;
+  confidence: number;
+  createdAt: number;
+  expiresAt: number;
+}
+
 export interface ContextAnchorSnapshot {
   latestAnchor?: ContextAnchor;
   lastConfirmedQuestion?: ContextAnchor;
   currentTopic?: string;
   currentTopicAnchor?: { topic: string; sourceAnchorId: string; createdAt: number; expiresAt: number };
+  pendingTopicAnchor?: PendingTopicAnchor;
   pendingCodeContext?: ContextAnchor;
   anchors: ContextAnchor[];
 }
@@ -27,7 +36,7 @@ export interface ContextAnchorSnapshot {
 function normalize(text: string): string { return text.replace(/\s+/g, " ").trim(); }
 
 function inferTopic(text: string): string | undefined {
-  const entities = ["STL", "TCP", "UDP", "IIC", "SPI", "UART", "CAN", "FOC", "DMA", "PWM", "FreeRTOS", "C++", "虚函数", "堆和栈", "EEPROM", "链表", "字符串", "进程间通信", "三次握手", "四次挥手"];
+  const entities = ["反转链表", "内存泄漏", "内存溢出", "内存管理", "C语言", "STL", "TCP", "UDP", "IIC", "I2C", "SPI", "UART", "CAN", "FOC", "DMA", "PWM", "FreeRTOS", "Linux", "C++", "volatile", "HardFault", "虚函数", "堆和栈", "EEPROM", "链表", "字符串", "进程间通信", "三次握手", "四次挥手"];
   return entities.find((entity) => text.toLowerCase().includes(entity.toLowerCase())) ?? (normalize(text).replace(/[。！？?！]/g, "").slice(0, 40) || undefined);
 }
 
@@ -41,7 +50,9 @@ export class ContextAnchorStore {
   private currentTopicAnchorId?: string;
   private counter = 0;
 
-  constructor(private readonly now: () => number = () => Date.now(), private readonly topicTtlMs = 7_000, private readonly codeTtlMs = 12_000) {}
+  private pendingTopicAnchor?: PendingTopicAnchor;
+
+  constructor(private readonly now: () => number = () => Date.now(), private readonly topicTtlMs = 7_000, private readonly codeTtlMs = 12_000, private readonly pendingTopicTtlMs = 5_000) {}
 
   reset(): void {
     this.values.length = 0;
@@ -51,6 +62,7 @@ export class ContextAnchorStore {
     this.currentTopic = undefined;
     this.currentTopicExpiresAt = 0;
     this.currentTopicAnchorId = undefined;
+    this.pendingTopicAnchor = undefined;
   }
 
   addAnchor(input: { text: string; speechAct: ContextAnchorSpeechAct; confidence?: number; topic?: string; entities?: string[]; createdAt?: number; ttlMs?: number }): ContextAnchor {
@@ -74,6 +86,15 @@ export class ContextAnchorStore {
       this.currentTopic = anchor.topic;
       this.currentTopicExpiresAt = anchor.expiresAt;
       this.currentTopicAnchorId = anchor.id;
+      if (anchor.speechAct === "TOPIC_ANCHOR") {
+        this.pendingTopicAnchor = {
+          topic: anchor.topic,
+          sourceText: anchor.text,
+          confidence: anchor.confidence,
+          createdAt: anchor.createdAt,
+          expiresAt: anchor.createdAt + this.pendingTopicTtlMs
+        };
+      }
     }
     if (anchor.speechAct === "CODE_CONTEXT") this.pendingCodeContext = anchor;
     return anchor;
@@ -94,11 +115,30 @@ export class ContextAnchorStore {
 
   clearCodeContext(): void { this.pendingCodeContext = undefined; }
 
+  addPendingTopicAnchor(input: { topic: string; sourceText: string; confidence?: number; createdAt?: number; ttlMs?: number }): PendingTopicAnchor {
+    const createdAt = input.createdAt ?? this.now();
+    this.pendingTopicAnchor = {
+      topic: normalize(input.topic),
+      sourceText: normalize(input.sourceText),
+      confidence: input.confidence ?? 0.9,
+      createdAt,
+      expiresAt: createdAt + (input.ttlMs ?? this.pendingTopicTtlMs)
+    };
+    return { ...this.pendingTopicAnchor };
+  }
+
+  consumePendingTopicAnchor(at = this.now()): PendingTopicAnchor | undefined {
+    const value = this.pendingTopicAnchor && this.pendingTopicAnchor.expiresAt > at ? { ...this.pendingTopicAnchor } : undefined;
+    this.pendingTopicAnchor = undefined;
+    return value;
+  }
+
   snapshot(at = this.now()): ContextAnchorSnapshot {
     const active = this.values.filter((anchor) => anchor.expiresAt > at);
     this.latest = this.latest && this.latest.expiresAt > at ? this.latest : active.at(-1);
     this.lastConfirmedQuestion = this.lastConfirmedQuestion && this.lastConfirmedQuestion.expiresAt > at ? this.lastConfirmedQuestion : undefined;
     this.pendingCodeContext = this.pendingCodeContext && this.pendingCodeContext.expiresAt > at ? this.pendingCodeContext : undefined;
+    this.pendingTopicAnchor = this.pendingTopicAnchor && this.pendingTopicAnchor.expiresAt > at ? this.pendingTopicAnchor : undefined;
     const activeTopicAnchor = [...active].reverse().find((anchor) => anchor.topic);
     if (activeTopicAnchor && activeTopicAnchor.id !== this.currentTopicAnchorId) {
       this.currentTopic = activeTopicAnchor.topic;
@@ -115,6 +155,7 @@ export class ContextAnchorStore {
       ...(this.lastConfirmedQuestion ? { lastConfirmedQuestion: { ...this.lastConfirmedQuestion } } : {}),
       ...(this.currentTopic ? { currentTopic: this.currentTopic } : {}),
       ...(activeTopicAnchor?.topic ? { currentTopicAnchor: { topic: activeTopicAnchor.topic, sourceAnchorId: activeTopicAnchor.id, createdAt: activeTopicAnchor.createdAt, expiresAt: activeTopicAnchor.expiresAt } } : {}),
+      ...(this.pendingTopicAnchor ? { pendingTopicAnchor: { ...this.pendingTopicAnchor } } : {}),
       ...(this.pendingCodeContext ? { pendingCodeContext: { ...this.pendingCodeContext } } : {}),
       anchors: active.map((anchor) => ({ ...anchor }))
     };

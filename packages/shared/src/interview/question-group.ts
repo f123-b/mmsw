@@ -128,7 +128,13 @@ function copySlot(slot: QuestionSlot): QuestionSlot {
 function copyItem(item: QuestionItem): QuestionItem {
   return {
     ...item,
-    question: { ...item.question, ...(item.question.questionSlotIds ? { questionSlotIds: [...item.question.questionSlotIds] } : {}) },
+    question: {
+      ...item.question,
+      ...(item.question.questionSlotIds ? { questionSlotIds: [...item.question.questionSlotIds] } : {}),
+      ...(item.question.subQuestions ? { subQuestions: [...item.question.subQuestions] } : {}),
+      ...(item.question.nuclei ? { nuclei: item.question.nuclei.map((nucleus) => ({ ...nucleus })) } : {}),
+      ...(item.question.questionDecomposition ? { questionDecomposition: { ...item.question.questionDecomposition, slots: item.question.questionDecomposition.slots.map((slot) => ({ ...slot })) } } : {})
+    },
     slotIds: [...item.slotIds],
     ...(item.relationFromPrevious ? { relationFromPrevious: { ...item.relationFromPrevious } } : {})
   };
@@ -342,6 +348,11 @@ export class QuestionGroupManager {
     if (type === "ANSWER_CONSTRAINT") group.constraints.push(input.question.text.trim());
     if (type === "EXAMPLE") group.examples.push(input.question.text.trim());
     if (type === "PARALLEL_SUBQUESTION") group.subQuestions.push(input.question.text.trim());
+    if (answerable && (input.question.subQuestions?.length ?? 0) > 1) {
+      for (const subQuestion of input.question.subQuestions ?? []) {
+        if (subQuestion.trim() && !group.subQuestions.includes(subQuestion.trim())) group.subQuestions.push(subQuestion.trim());
+      }
+    }
     const slotIds: string[] = [];
     if (answerable && type !== "TOPIC_FRAGMENT") {
       const slotText = type === "QUESTION_NUCLEUS" ? (group.primaryQuestion ?? input.question.text) : input.question.text.trim();

@@ -46,6 +46,7 @@ import {
   splitIntraSegmentQuestions,
   evaluateSubstantiveAnchorEligibility,
   UnresolvedAsrGate,
+  planAnswerSource,
   type AnswerContextInput,
   type AnswerTelemetry,
   type DynamicTechnicalLexicon,
@@ -332,7 +333,12 @@ export class InterviewCoordinator extends EventEmitter {
   getRuntimeInterviewTelemetry() { return this.interviewTelemetry.snapshot(); }
 
   private get activeProjectId(): string | undefined {
-    return this.activeProjectResolver.state.activeProject?.projectId ?? this.activeOptions?.projectId;
+    // The resolver is the single source of truth. A start-option project is
+    // applied through setManual during start(); falling back to the option
+    // here would bypass AMBIGUOUS/CONFLICT/UNRESOLVED hard gates.
+    return this.activeProjectResolver.state.status === "ACTIVE"
+      ? this.activeProjectResolver.state.activeProject?.projectId
+      : undefined;
   }
 
   private observeProjectContext(text: string, speaker: "interviewer" | "candidate", now: number, entities: readonly string[] = [], topics: readonly string[] = []): void {
@@ -892,7 +898,7 @@ export class InterviewCoordinator extends EventEmitter {
       // async profile/knowledge retrieval still remains cancellable below.
       const isPromiseLike = (value: AnswerContextInput | Promise<AnswerContextInput>): value is Promise<AnswerContextInput> => Boolean(value && typeof (value as PromiseLike<AnswerContextInput>).then === "function");
       const contextTimeoutMs = Math.max(50, this.options.contextTimeoutMs ?? this.options.answerTimeoutMs ?? 20_000);
-      const providerContext: AnswerContextInput | undefined = isPromiseLike(providerContextResult)
+      let providerContext: AnswerContextInput | undefined = isPromiseLike(providerContextResult)
         ? await withRuntimeTimeout(providerContextResult, contextTimeoutMs, () => {
           if (controller.signal.aborted || generation !== this.answerGeneration) return;
           this.emitDiagnostic(`PROJECT_CONTEXT_TIMEOUT: ${question.id}`);
@@ -904,6 +910,33 @@ export class InterviewCoordinator extends EventEmitter {
       if (!providerContext || controller.signal.aborted || generation !== this.answerGeneration) {
         if (streamOptions.screenshotRequestId) throw Object.assign(new Error("Screenshot vision request cancelled"), { name: "AbortError" });
         return;
+      }
+      const routeKind = classifyAnswerQuestion(question.text, question.detectionType);
+      const routeIntent = analyzeAnswerIntent({ question: question.text, kind: routeKind });
+      const projectQuestionRequested = routeKind === "project"
+        || routeIntent.asksProjectImplementation
+        || routeIntent.allowsProjectEvidence
+        || /(?:这个|该|当前)?项目|简历里|你们的系统|这套方案|实际实现|项目中|项目里/iu.test(question.text);
+      if (projectQuestionRequested && !this.activeProjectId) {
+        const unresolvedPlan = planAnswerSource({ projectQuestion: true, projectAnchorAvailable: false });
+        providerContext = {
+          ...providerContext,
+          answerSourcePlan: unresolvedPlan,
+          projectQaEvidence: [],
+          projectEvidence: [],
+          preparedAnswer: undefined,
+          currentProject: undefined,
+          questionTelemetry: {
+            ...(providerContext.questionTelemetry ?? {}),
+            projectQuestionRequested: true,
+            projectResolutionReason: this.activeProjectResolver.state.lastReason ?? "project-context-unresolved"
+          }
+        };
+        this.recordRuntimeTrace("PROJECT_CONTEXT_UNRESOLVED", {
+          questionRequested: true,
+          resolverStatus: this.activeProjectResolver.state.status,
+          sourceMode: unresolvedPlan.mode
+        }, { questionId: question.id, providerRequestId, reasonCode: "project-hard-gate" });
       }
       const memorySnapshot = frozenContext.memory;
       const contextFinishedAt = this.now();
@@ -1152,6 +1185,21 @@ export class InterviewCoordinator extends EventEmitter {
                 estimatedDurationSec: event.quality.telemetry.answerEstimatedDurationSec
               }, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "bounded-facet-supplement" });
             }
+            const answerRuntimeTrace = event.quality.telemetry?.answerRuntimeTrace;
+            if (answerRuntimeTrace) {
+              this.recordRuntimeTrace("ANSWER_RUNTIME_TRACE", {
+                sourceMode: answerRuntimeTrace.sourceMode,
+                requiredFacetCount: answerRuntimeTrace.requiredFacets.length,
+                coveredFacetCount: answerRuntimeTrace.coveredFacets.length,
+                missingFacets: answerRuntimeTrace.missingFacets.join(","),
+                initialCharacterCount: answerRuntimeTrace.initialCharacterCount,
+                finalCharacterCount: answerRuntimeTrace.finalCharacterCount,
+                estimatedDurationSec: answerRuntimeTrace.estimatedDurationSec,
+                depthPass: answerRuntimeTrace.depthPass,
+                needsRepair: answerRuntimeTrace.needsRepair,
+                repairApplied: answerRuntimeTrace.repairApplied
+              }, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "answer-runtime-trace" });
+            }
           }
           // If a provider does not emit deltas, completion is still the first
           // visible response. Normal live providers stream through the branch
@@ -1375,6 +1423,9 @@ export class InterviewCoordinator extends EventEmitter {
         now: receivedAt
       }, rawSegment.text);
       const semantic = assembled.semantic ?? assembled.current?.semantic;
+      if (segment.final && semantic && !semantic.shouldAnswer && ["TOPIC_ANCHOR", "TOPIC_ANNOUNCEMENT"].includes(semantic.sourceSpeechAct)) {
+        this.stageSemanticTopicAnchor(segment.text, semantic, receivedAt);
+      }
       this.recordRuntimeTrace("TRANSCRIPT_ASSEMBLED", {
         merged: assembled.merged,
         reason: assembled.reason,
@@ -1384,6 +1435,8 @@ export class InterviewCoordinator extends EventEmitter {
         dependency: semantic?.dependency,
         completeness: semantic?.completeness,
         speechAct: semantic?.speechAct,
+        sourceSpeechAct: semantic?.sourceSpeechAct,
+        classificationSpeechAct: semantic?.classification.speechAct,
         shouldAnswer: semantic?.shouldAnswer,
         canonicalReady: Boolean(segment.final && assembled.current)
       }, { reasonCode: assembled.reason });
@@ -1592,6 +1645,24 @@ export class InterviewCoordinator extends EventEmitter {
     this.runtimeTimers.clear("remote-assembly");
   }
 
+  private stageSemanticTopicAnchor(text: string, semantic: { classification: { confidence: number; topic?: string; entities: string[]; codeContext?: boolean }; sourceSpeechAct: string }, createdAt: number): void {
+    const normalizedText = text.trim();
+    const existing = this.anchorStore.snapshot(createdAt).latestAnchor;
+    const anchorSpeechAct = "TOPIC_ANCHOR" as const;
+    if (existing?.speechAct === anchorSpeechAct && existing.text === normalizedText) return;
+    const anchor = this.anchorStore.addAnchor({
+      text: normalizedText,
+      speechAct: anchorSpeechAct,
+      confidence: semantic.classification.confidence,
+      topic: semantic.classification.topic,
+      entities: semantic.classification.entities,
+      createdAt,
+      ttlMs: 7_000
+    });
+    this.observeProjectContext(normalizedText, "interviewer", createdAt, semantic.classification.entities, semantic.classification.topic ? [semantic.classification.topic] : []);
+    this.memory.recordQuestion(anchor.text, { questionId: anchor.id, topic: anchor.topic, createdAt: anchor.createdAt });
+  }
+
   private handleQuestionEvent(event: QuestionEvent): void {
     const effectiveEvent = this.emitQuestion(event);
     if ((effectiveEvent.type === "question_confirmed" || effectiveEvent.type === "question_superseded") && this.activeOptions?.automationMode === "AUTO") {
@@ -1739,7 +1810,25 @@ export class InterviewCoordinator extends EventEmitter {
     }
     this.recordRuntimeTrace("QUESTION_LOCAL_ANALYSIS_STARTED", { textLength: correctedText.length }, { reasonCode: "final-utterance" });
     this.emitTelemetry("TERMINOLOGY_METRICS", { mode: terminology.mode, durationMs: terminology.normalizationMs, correctionsApplied: terminology.metrics.correctionsApplied, highConfidenceCorrections: terminology.metrics.highConfidenceCorrections, mediumCandidates: terminology.metrics.mediumCandidates, correctionRejected: terminology.metrics.correctionRejected });
-    if ((!semanticTurn.shouldAnswer || ["BACKCHANNEL", "ASR_NOISE", "INCOMPLETE", "STATEMENT"].includes(semanticTurn.speechAct)) && !forceUnresolvedRaw) {
+    const canResolveWithPendingTopic = Boolean(anchorSnapshot.pendingTopicAnchor && semanticTurn.dependency === "DEPENDS_ON_PREVIOUS");
+    if ((!semanticTurn.shouldAnswer || ["BACKCHANNEL", "ASR_NOISE", "INCOMPLETE", "STATEMENT"].includes(semanticTurn.speechAct)) && !forceUnresolvedRaw && !canResolveWithPendingTopic) {
+      if (["TOPIC_ANCHOR", "TOPIC_ANNOUNCEMENT"].includes(semanticTurn.sourceSpeechAct)) {
+        const topicClassification = semanticTurn.classification;
+        const existing = this.anchorStore.snapshot(detectionStartedAt).latestAnchor;
+        if (!(existing?.speechAct === "TOPIC_ANCHOR" && existing.text === correctedText)) {
+          const anchor = this.anchorStore.addAnchor({
+            text: correctedText,
+            speechAct: "TOPIC_ANCHOR",
+            confidence: topicClassification.confidence,
+            topic: topicClassification.topic,
+            entities: topicClassification.entities,
+            createdAt: detectionStartedAt,
+            ttlMs: 7_000
+          });
+          this.observeProjectContext(correctedText, "interviewer", detectionStartedAt, topicClassification.entities, topicClassification.topic ? [topicClassification.topic] : []);
+          this.memory.recordQuestion(anchor.text, { questionId: anchor.id, topic: anchor.topic, createdAt: anchor.createdAt });
+        }
+      }
       if (semanticTurn.sourceSpeechAct === "TOPIC_TRANSITION") this.pendingTopicTransition = true;
       const isConstraintFragment = /(?:只说|只讲|越具体|越详细|包括|涵盖|还要|同时|从.+角度|角度也说|比如|例如|举个|空间大小|常见风险|两件事)/iu.test(correctedText);
       const activeQuestion = this.activeQuestionAnchor();
@@ -1757,7 +1846,7 @@ export class InterviewCoordinator extends EventEmitter {
       this.emitQuestionTrace();
       return;
     }
-    if (semanticTurn.completeness === "INCOMPLETE") {
+    if (semanticTurn.completeness === "INCOMPLETE" && !canResolveWithPendingTopic) {
       trace.update({ finalScore: 0, decision: "reject", decisionReason: semanticTurn.reason }).mark("questionDetected", this.now());
       this.currentQuestionTrace = trace;
       if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
@@ -1770,8 +1859,33 @@ export class InterviewCoordinator extends EventEmitter {
     // hidden by the canonical text path.
     const unresolvedInput = forceUnresolvedRaw ? rawAsrText : terminology.corrections.length > 0 ? correctedText : rawAsrText;
     const unresolvedResolution = forceUnresolvedRaw ? { ...terminology, corrections: [], possibleTerms: [] } : terminology;
-    const asrUnderstanding = this.unresolvedAsrGate.assess(unresolvedInput, unresolvedResolution);
-    trace.update({ asrUnderstandingQuality: asrUnderstanding.quality, unresolvedAsr: !asrUnderstanding.shouldAnswer });
+    const asrUnderstanding = this.unresolvedAsrGate.assess(unresolvedInput, unresolvedResolution, {
+      acousticConfidence: utterance.confidence,
+      terminologyConfidence: terminology.confidence,
+      currentTopic: anchorSnapshot.currentTopic,
+      recentInterviewerTurns: previousTranscript.filter((item) => item.startsWith("面试官：")).slice(-4),
+      knownTerms: this.sessionTerminologyNormalizer.listTerms().flatMap((term) => [term.canonical, ...term.aliases]),
+      syntaxComplete: semanticTurn.shouldAnswer || canResolveWithPendingTopic,
+      contextConsistent: true,
+      plausible: semanticTurn.speechAct !== "ASR_NOISE"
+    });
+    const asrAssessment = asrUnderstanding.assessment;
+    trace.update({
+      asrUnderstandingQuality: asrUnderstanding.quality,
+      unresolvedAsr: !asrUnderstanding.shouldAnswer,
+      asrTrustConfidence: asrAssessment?.confidence,
+      asrTrustDecision: asrAssessment?.decision,
+      unresolvedTerms: asrAssessment?.unresolvedTerms,
+      suspiciousTerms: asrAssessment?.suspiciousTerms,
+      contextConsistent: asrAssessment?.contextConsistent
+    });
+    this.recordRuntimeTrace("ASR_TRUST_ASSESSMENT", {
+      confidence: asrAssessment?.confidence,
+      decision: asrAssessment?.decision,
+      unresolvedTermCount: asrAssessment?.unresolvedTerms.length ?? 0,
+      suspiciousTermCount: asrAssessment?.suspiciousTerms.length ?? 0,
+      contextConsistent: asrAssessment?.contextConsistent
+    }, { reasonCode: asrUnderstanding.reason });
     if (!asrUnderstanding.shouldAnswer) {
       this.emitTelemetry("ASR_UNDERSTANDING_QUALITY", {
         quality: asrUnderstanding.quality,
@@ -1849,6 +1963,25 @@ export class InterviewCoordinator extends EventEmitter {
         reason: "pending-topic-transition"
       }
       : understanding;
+    const topicBoundaryRelation = resolved.contextRelation === "standalone"
+      ? (resolved.explicitTopic && anchorSnapshot.currentTopic && resolved.explicitTopic.toLowerCase() !== anchorSnapshot.currentTopic.toLowerCase() ? "NEW_TOPIC" : "SAME_OR_NEW_TOPIC")
+      : resolved.contextRelation === "continuation" ? "RELATED_TOPIC" : "SAME_TOPIC";
+    trace.update({
+      explicitTopic: resolved.explicitTopic,
+      topicBoundaryRelation,
+      subQuestions: resolved.subQuestions,
+      primaryQuestion: resolved.primaryQuestion,
+      contextTopic: resolved.topic ?? anchorSnapshot.currentTopic,
+      projectResolutionStatus: this.activeProjectResolver.state.status,
+      projectResolutionReason: this.activeProjectResolver.state.lastReason
+    });
+    this.recordRuntimeTrace("TOPIC_BOUNDARY_DECISION", {
+      relation: topicBoundaryRelation,
+      explicitTopic: resolved.explicitTopic,
+      previousTopic: anchorSnapshot.currentTopic,
+      confidence: resolved.explicitTopic ? 0.96 : 0.7
+    }, { reasonCode: resolved.explicitTopic ? "explicit-topic-evaluated" : "inherited-topic-evaluated" });
+    if (anchorSnapshot.pendingTopicAnchor) this.anchorStore.consumePendingTopicAnchor(detectionStartedAt);
     const canonicalQuestion = resolved.canonicalQuestion;
     const compactCanonicalQuestion = canonicalQuestion.replace(/[\s，。！？、,.!?；;:：]/gu, "");
     const hasIndependentTopicEntity = /(?:IIC|I2C|SPI|UART|CAN|RTOS|FOC|DMA|ADC|中断|总线|系统|项目|模块|架构|内存|HardFault|看门狗|电机|协议|锁|任务|采样|volatile|Flash|CRC)/iu.test(compactCanonicalQuestion);
@@ -1904,14 +2037,37 @@ export class InterviewCoordinator extends EventEmitter {
       normalizedQuestion: canonicalQuestion,
       anchorUsedId: resolved.anchorUsed?.id,
       shouldAnswer: analysis.shouldAnswer,
+      primaryQuestion: resolved.primaryQuestion,
+      subQuestions: [...resolved.subQuestions],
+      nuclei: resolved.nuclei.map((nucleus) => ({ ...nucleus })),
+      questionDecomposition: { ...resolved.questionDecomposition, slots: resolved.questionDecomposition.slots.map((slot) => ({ ...slot })) },
+      explicitTopic: resolved.explicitTopic,
       reason: `${speech.reason}+${resolved.reason}`,
       ...(speech.codeContext ? { codeContext: true } : {})
     };
+    if (canResolveWithPendingTopic && !analysis.isQuestion) {
+      analysis = {
+        ...analysis,
+        isQuestion: true,
+        shouldAnswer: true,
+        type: "technical",
+        speechAct: "QUESTION",
+        confidence: Math.max(analysis.confidence, semanticTurn.confidence),
+        normalizedQuestion: canonicalQuestion,
+        answerabilityState: "CONTEXT_DEPENDENT",
+        score: {
+          ...analysis.score,
+          semanticScore: Math.max(analysis.score.semanticScore, semanticTurn.confidence),
+          finalScore: Math.max(analysis.score.finalScore, semanticTurn.confidence, 0.86)
+        },
+        reason: `${analysis.reason}+pending-topic-anchor`
+      };
+    }
     // InterviewBrain retains a compatibility rescue for short implicit
     // follow-ups. The local semantic gate is authoritative for live turns so
     // a bare request/setup/dangling tail cannot be promoted back into an
     // answerable question by that rescue.
-    if (analysis.answerabilityState && !["ANSWERABLE", "CONTEXT_DEPENDENT"].includes(analysis.answerabilityState)) {
+    if (analysis.answerabilityState && !["ANSWERABLE", "CONTEXT_DEPENDENT"].includes(analysis.answerabilityState) && !canResolveWithPendingTopic) {
       trace.update({ finalScore: 0, decision: "reject", decisionReason: analysis.reason }).mark("questionDetected", this.now());
       this.currentQuestionTrace = trace;
       this.emitQuestionTrace();
@@ -1983,6 +2139,11 @@ export class InterviewCoordinator extends EventEmitter {
           inheritedTopic: resolved.inheritedTopic,
           topic: resolved.topic,
           terminologyCorrections: terminology.corrections,
+          primaryQuestion: resolved.primaryQuestion,
+          subQuestions: [...resolved.subQuestions],
+          nuclei: resolved.nuclei.map((nucleus) => ({ ...nucleus })),
+          questionDecomposition: { ...resolved.questionDecomposition, slots: resolved.questionDecomposition.slots.map((slot) => ({ ...slot })) },
+          explicitTopic: resolved.explicitTopic,
           utteranceId: utterance.id,
           segmentIds: [...utterance.segmentIds],
           turnId: turn.id,

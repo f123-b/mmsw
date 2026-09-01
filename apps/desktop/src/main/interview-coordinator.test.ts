@@ -148,7 +148,7 @@ describe("InterviewCoordinator software E2E", () => {
     const provider: AnswerProvider = { stream: async function* () { modelCalls += 1; yield "不应调用模型"; } };
     const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
     const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, contextProvider: (question) => ({ preparedAnswer: { content: question.text.includes("项目") ? "项目题库已确认答案。" : "我是一名嵌入式工程师。", score: 1, verified: true }, answerSourcePlan: question.text.includes("项目") ? { mode: "project_qa_direct", projectAnchorAvailable: true, projectQuestionRequested: true, projectId: "p1", qaMatchLevel: "exact", preserveStoredAnswerFacts: true, allowProjectKnowledge: false, allowGeneralKnowledge: false, allowSessionEvidence: true, answerRewriteUsed: false } : { mode: "self_intro_direct", projectAnchorAvailable: false, projectQuestionRequested: false, qaMatchLevel: "none", preserveStoredAnswerFacts: true, allowProjectKnowledge: false, allowGeneralKnowledge: false, allowSessionEvidence: false, answerRewriteUsed: false }, questionTelemetry: { selfIntroductionDetected: !question.text.includes("项目"), projectQuestionRequested: question.text.includes("项目") } }) });
-    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
+    await coordinator.start({ profileId: "p1", projectId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
     await coordinator.answerQuestionText("介绍一下你的项目");
     await coordinator.answerQuestionText("请做个自我介绍");
     expect(modelCalls).toBe(0);

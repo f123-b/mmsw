@@ -42,8 +42,9 @@ export interface AnswerPlan {
 }
 
 function complexityFor(question: string, kind: AnswerQuestionKind, followUp?: FollowUpContext, slotCount = 1): "low" | "medium" | "high" {
-  if (kind === "follow-up" || kind === "short-clarification" || kind === "clarification") return "low";
+  if (kind === "short-clarification" || kind === "clarification") return "low";
   if (kind === "deep-follow-up") return "high";
+  if (kind === "follow-up") return /怎么|如何|为什么|原因|设计|实现|排查|验证|区别|取舍/iu.test(question) ? "high" : "medium";
   if (kind === "code" || kind === "system-design" || kind === "project" || kind === "behavioral") return "high";
   if (slotCount > 1 || /项目|架构|分层|实现|设计|排查|验证|故障|对比|区别|原因|过程|怎么做/iu.test(question)) return "high";
   if (followUp?.parentAnswer && followUp.parentAnswer.length > 220) return "high";

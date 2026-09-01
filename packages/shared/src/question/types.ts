@@ -5,6 +5,7 @@ import type { TerminologyCorrection } from "../terminology";
 import type { QuestionSemanticFrame } from "./semantic-frame";
 import type { AnswerabilityState } from "../interview/semantic-answerability";
 import type { SemanticTurnDecision } from "../interview/semantic-turn-gate";
+import type { QuestionDecomposition, QuestionSlot } from "./question-decomposer";
 
 export type QuestionDetectionType = "technical" | "project" | "behavior" | "follow_up" | "clarification" | "not_question";
 export type QuestionSpeechAct = InterviewSpeechAct | "SMALL_TALK" | "INSTRUCTION";
@@ -75,4 +76,9 @@ export interface QuestionAnalysis extends QuestionDetectionResult {
   semanticFrame?: QuestionSemanticFrame;
   terminologyCorrections?: TerminologyCorrection[];
   answerabilityState?: AnswerabilityState;
+  primaryQuestion?: string;
+  subQuestions?: string[];
+  nuclei?: QuestionSlot[];
+  questionDecomposition?: QuestionDecomposition;
+  explicitTopic?: string;
 }

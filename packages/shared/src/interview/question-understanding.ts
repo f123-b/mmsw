@@ -4,6 +4,8 @@ import { ContextAnchorResolver, type ResolvedQuestionContext } from "./context-a
 import { AntecedentResolver, type AntecedentResolution } from "./antecedent-resolver";
 import type { ActiveProjectState } from "./project-context-state";
 import type { SemanticTurnDecision } from "./semantic-turn-gate";
+import { decomposeQuestion, type QuestionDecomposition, type QuestionSlot } from "../question/question-decomposer";
+import { detectTopicBoundary, extractTopicEntities } from "./topic-boundary-detector";
 
 export interface QuestionUnderstandingInput {
   text: string;
@@ -24,6 +26,12 @@ export interface QuestionUnderstandingResult extends ResolvedQuestionContext {
     confidence: number;
   };
   fragments: string[];
+  /** All interrogative nuclei retained for multi-slot planning and replay. */
+  nuclei: QuestionSlot[];
+  subQuestions: string[];
+  primaryQuestion: string;
+  questionDecomposition: QuestionDecomposition;
+  explicitTopic?: string;
 }
 
 const QUESTION_TAIL = /^(?:是)?(?:什么|为什么|为何|怎么|如何|怎样|会怎么样|会有什么问题|有哪些|有哪几种|有什么区别|哪里用了|然后呢|还有呢|还有)[？?。！!\s，,、]*$/iu;
@@ -59,6 +67,13 @@ export function canonicalizeQuestion(text: string, fragments = [text]): string {
   const values = fragments.map((item) => normalizeTechnicalTerms(item).trim()).filter(Boolean);
   if (!values.length) return "";
   const cleaned = values.map(stripTerminal);
+  // Multiple interrogative marks are multiple nuclei, not punctuation noise.
+  // Preserve their boundaries before the single-question canonicalization
+  // rules run, otherwise a four-piece project question collapses into one
+  // slot and the answer planner can only see its final clause.
+  if (values.length > 1 && values.filter((value) => /[？?]/u.test(value)).length > 1) {
+    return withQuestionMark(compactSpaces(values.join(" ")));
+  }
   if (cleaned.length === 1) {
     const single = compactSpaces(cleaned[0]);
     const subjectTail = single.match(SUBJECT_TAIL);
@@ -101,30 +116,51 @@ export class QuestionUnderstanding {
   understand(input: QuestionUnderstandingInput): QuestionUnderstandingResult {
     const fragments = input.fragments?.length ? input.fragments : [input.text];
     let canonicalQuestion = canonicalizeQuestion(input.text, fragments);
-    const topicAnchor = input.anchors?.latestAnchor;
+    const pendingTopic = input.anchors?.pendingTopicAnchor;
+    const topicAnchor = pendingTopic
+      ? { speechAct: "TOPIC_ANCHOR" as const, text: pendingTopic.sourceText, topic: pendingTopic.topic }
+      : input.anchors?.latestAnchor;
     const dependentTail = QUESTION_TAIL.test(fragments[0]?.trim() ?? "") || PREFIX_QUESTION.test(fragments[0]?.trim() ?? "");
     // When the ASR stream delivered a topic statement and the question tail
     // arrived as a separate turn, retain the spoken subject in the canonical
     // question. This is the bridge between “C语言里，指针和数组。” and
     // “有什么区别？”; metadata alone is insufficient for retrieval/history.
-    if (dependentTail && topicAnchor?.speechAct === "TOPIC_ANCHOR" && !input.anchors?.lastConfirmedQuestion && topicAnchor.text !== canonicalQuestion) {
+    const compactTopicAnchor = topicAnchor?.text?.replace(/[。．.！？?！；;，,、\s]+/gu, "").toLowerCase();
+    const compactCanonicalQuestion = canonicalQuestion.replace(/[。．.！？?！；;，,、\s]+/gu, "").toLowerCase();
+    const alreadyIncludesTopic = Boolean(compactTopicAnchor && compactCanonicalQuestion.startsWith(compactTopicAnchor));
+    if (dependentTail && topicAnchor?.speechAct === "TOPIC_ANCHOR" && !input.anchors?.lastConfirmedQuestion && topicAnchor.text !== canonicalQuestion && !alreadyIncludesTopic) {
       canonicalQuestion = canonicalizeQuestion(canonicalQuestion, [topicAnchor.text, ...fragments]);
     }
+    const explicitTopic = extractTopicEntities(canonicalQuestion)[0];
+    const previousTopic = input.anchors?.currentTopic;
+    const boundary = explicitTopic && previousTopic
+      ? detectTopicBoundary({ previousText: input.anchors?.latestAnchor?.text, previousTopic, currentText: canonicalQuestion, currentTopic: explicitTopic })
+      : undefined;
     const anchorResolution = input.anchors
       ? this.anchorResolver.resolve({ text: canonicalQuestion, speechAct: input.semantic.sourceSpeechAct as Parameters<ContextAnchorResolver["resolve"]>[0]["speechAct"], anchors: input.anchors })
       : { canonicalQuestion, contextRelation: input.semantic.dependency === "CONTINUATION" ? "continuation" as const : input.semantic.dependency === "DEPENDS_ON_PREVIOUS" ? "follow_up" as const : "standalone" as const, confidence: input.semantic.confidence, reason: "semantic-turn-context" };
     const antecedent = this.antecedentResolver.resolve({ text: canonicalQuestion, activeProject: input.activeProject, currentModule: input.currentModule, currentTopic: input.anchors?.currentTopic, previousQuestion: input.previousQuestion ?? input.anchors?.lastConfirmedQuestion?.text, previousAnswer: input.previousAnswer, spokenProblem: input.spokenProblem });
-    const relation = input.semantic.dependency === "CONTINUATION" ? "continuation" : input.semantic.dependency === "DEPENDS_ON_PREVIOUS" || antecedent.relation !== "STANDALONE" ? "follow_up" : anchorResolution.contextRelation;
-    const topic = TOPIC.test(canonicalQuestion) ? canonicalQuestion.match(TOPIC)?.[0] : anchorResolution.topic ?? input.anchors?.currentTopic;
+    const explicitTopicSwitch = Boolean(explicitTopic && previousTopic && explicitTopic.toLowerCase() !== previousTopic.toLowerCase() && boundary?.relation === "NEW_TOPIC");
     const parent = input.anchors?.lastConfirmedQuestion;
+    const pendingTopicQuestion = Boolean(pendingTopic && explicitTopic && !parent);
+    const relation = explicitTopicSwitch || pendingTopicQuestion
+      ? "standalone"
+      : input.semantic.dependency === "CONTINUATION" ? "continuation" : input.semantic.dependency === "DEPENDS_ON_PREVIOUS" || antecedent.relation !== "STANDALONE" ? "follow_up" : anchorResolution.contextRelation;
+    const topic = explicitTopic ?? pendingTopic?.topic ?? anchorResolution.topic ?? input.anchors?.currentTopic;
+    const questionDecomposition = decomposeQuestion(canonicalQuestion);
     return {
       ...anchorResolution,
       canonicalQuestion,
       contextRelation: relation,
       ...(topic ? { topic } : {}),
-      ...(relation !== "standalone" && (anchorResolution.parentQuestion || parent) ? { parentQuestion: anchorResolution.parentQuestion ?? parent?.text, parentQuestionId: anchorResolution.parentQuestionId ?? parent?.id, rootQuestion: anchorResolution.rootQuestion ?? parent?.text, rootQuestionId: anchorResolution.rootQuestionId ?? parent?.id, inheritedTopic: anchorResolution.inheritedTopic ?? input.anchors?.currentTopic } : {}),
+      ...(relation !== "standalone" && !explicitTopicSwitch && (anchorResolution.parentQuestion || parent) ? { parentQuestion: anchorResolution.parentQuestion ?? parent?.text, parentQuestionId: anchorResolution.parentQuestionId ?? parent?.id, rootQuestion: anchorResolution.rootQuestion ?? parent?.text, rootQuestionId: anchorResolution.rootQuestionId ?? parent?.id, inheritedTopic: anchorResolution.inheritedTopic ?? input.anchors?.currentTopic } : {}),
       antecedent: mapAntecedent(input, antecedent),
-      fragments: [...fragments]
+      fragments: [...fragments],
+      nuclei: questionDecomposition.slots,
+      subQuestions: questionDecomposition.slots.map((slot) => slot.question),
+      primaryQuestion: canonicalQuestion,
+      questionDecomposition,
+      ...(explicitTopic ? { explicitTopic } : {})
     };
   }
 }

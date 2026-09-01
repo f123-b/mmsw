@@ -19,6 +19,11 @@ export interface QuestionTraceInput {
   terminologyCorrectionCount?: number;
   terminologyPossibleTerms?: string[];
   terminologyConfidence?: number;
+  asrTrustConfidence?: number;
+  asrTrustDecision?: "ACCEPT" | "RESOLVE" | "WAIT" | "UNRESOLVED";
+  unresolvedTerms?: string[];
+  suspiciousTerms?: string[];
+  contextConsistent?: boolean;
   unresolvedAsr?: boolean;
   asrUnderstandingQuality?: string;
   projectAnchorAvailable?: boolean;
@@ -28,6 +33,13 @@ export interface QuestionTraceInput {
   projectAutoAnchorConfidence?: number;
   parentQuestionId?: string;
   isFollowUp?: boolean;
+  explicitTopic?: string;
+  topicBoundaryRelation?: string;
+  projectResolutionStatus?: string;
+  projectResolutionReason?: string;
+  subQuestions?: string[];
+  primaryQuestion?: string;
+  sourceRoute?: string;
   finalScore?: number;
   decision?: "answer" | "reject";
   decisionReason?: string;

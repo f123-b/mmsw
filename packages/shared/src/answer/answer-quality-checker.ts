@@ -23,6 +23,9 @@ export interface AnswerQualityInput {
   mode: AnswerMode;
   kind?: AnswerQuestionKind;
   groundingText?: string;
+  coverage?: AnswerCoverageResult;
+  unresolvedQuestion?: boolean;
+  projectContextConflict?: boolean;
 }
 
 /** Lightweight deterministic guardrail; it does not call an LLM or alter SQLite data. */
@@ -37,7 +40,8 @@ export class AnswerQualityChecker {
     const answer = input.answer.trim();
     const grounding = `${input.groundingText || ""} ${input.question}`.toLowerCase();
     let score = 1;
-    if (answer.length < policy.minCharacters && input.mode !== "FAST") {
+    const tooShort = answer.length < policy.minCharacters && input.mode !== "FAST";
+    if (tooShort) {
       issues.push("answer-too-short");
       suggestions.push(`补充到约 ${policy.minCharacters}~${policy.maxCharacters} 字，补足题型要求的关键内容`);
       score -= 0.18;
@@ -46,6 +50,18 @@ export class AnswerQualityChecker {
       issues.push("answer-too-long");
       suggestions.push(`压缩到约 ${policy.minCharacters}~${policy.maxCharacters} 字`);
       score -= 0.2;
+    }
+    if (input.coverage && input.coverage.missingFacets.length > 0) {
+      issues.push("missing-core-facets");
+      suggestions.push(`补足：${input.coverage.missingFacets.join("、")}`);
+    }
+    if (input.unresolvedQuestion) {
+      issues.push("unresolved-question");
+      suggestions.push("问题语义未确认，不要编造答案");
+    }
+    if (input.projectContextConflict) {
+      issues.push("project-context-conflict");
+      suggestions.push("项目未解析或证据与当前项目冲突时，只说明资料不足");
     }
     if ((kind === "project" || kind === "behavioral") && !/(我|我们|我会|我一般|在项目中|我的)/.test(answer)) {
       issues.push("not-first-person");
@@ -69,6 +85,12 @@ export class AnswerQualityChecker {
       score -= 0.25;
     }
     const normalizedScore = Math.max(0, Math.min(1, Number(score.toFixed(2))));
-    return { score: normalizedScore, issues, suggestions, needsRepair: normalizedScore < 0.65 || issues.includes("possibly-invented-experience") };
+    const hardFailure = tooShort
+      || issues.includes("missing-core-facets")
+      || issues.includes("question-mismatch")
+      || issues.includes("possibly-invented-experience")
+      || issues.includes("unresolved-question")
+      || issues.includes("project-context-conflict");
+    return { score: normalizedScore, issues, suggestions, needsRepair: hardFailure || normalizedScore < 0.65 };
   }
 }

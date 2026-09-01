@@ -127,7 +127,7 @@ export { SemanticAnswerabilityGate, decideSemanticAnswerability, hasContextRefer
 export { PendingQuestionDraftAssembler, classifySegmentRole, type PendingQuestionDraft, type PendingQuestionDraftOptions, type PendingQuestionRawSegment, type PendingQuestionDraftSemanticContext, type PendingQuestionDraftUpdate, type SegmentSemanticRole } from "./interview/pending-question-draft";
 export { splitIntraSegmentQuestions, detectExplicitQuestionBoundary, type ExplicitSplitDecision, type ExplicitSplitReason, type IntraSegmentQuestionPart, type IntraSegmentQuestionSplitOptions } from "./interview/intra-segment-question-splitter";
 export { evaluateSubstantiveAnchorEligibility, isSubstantiveAnchorEligible, type SubstantiveAnchorEligibilityDecision, type SubstantiveAnchorEligibilityInput } from "./interview/substantive-anchor-eligibility";
-export { UnresolvedAsrGate, type AsrUnderstandingQuality, type UnresolvedAsrDecision } from "./interview/unresolved-asr-gate";
+export { UnresolvedAsrGate, type AsrUnderstandingQuality, type UnresolvedAsrDecision, type AsrSemanticAssessment, type AsrSemanticContext, type AsrSemanticDecision } from "./interview/unresolved-asr-gate";
 export { analyzeQuestionNucleus, type QuestionNucleusAnalysis, type QuestionNucleusIntent } from "./question/question-nucleus";
 export { ProjectAliasResolver, type ProjectAliasCandidate, type ProjectAliasResolution } from "./project-alias-resolver";
 export { detectSelfIntroductionIntent, analyzeSelfIntroductionIntent, isSelfIntroductionRequest, type SelfIntroductionIntent } from "./interview/self-introduction-intent";
@@ -318,6 +318,11 @@ export interface QuestionCandidate {
   groupTitle?: string;
   answerable?: boolean;
   questionSlotIds?: string[];
+  /** Canonical multi-nucleus question data retained through grouping and answer planning. */
+  subQuestions?: string[];
+  nuclei?: import("./question/question-decomposer").QuestionSlot[];
+  questionDecomposition?: import("./question/question-decomposer").QuestionDecomposition;
+  explicitTopic?: string;
 }
 
 export type QuestionEvent =
@@ -572,7 +577,14 @@ export class QuestionDetector {
       topic: analysis?.topic,
       semanticFrame: analysis?.semanticFrame ?? classifyQuestionSemanticFrame(analysis?.normalizedQuestion ?? text, analysis?.type),
       terminologyCorrections: analysis?.terminologyCorrections,
-      answerabilityState: analysis?.answerabilityState
+      answerabilityState: analysis?.answerabilityState,
+      primaryQuestion: analysis?.primaryQuestion,
+      subQuestions: analysis?.subQuestions ? [...analysis.subQuestions] : undefined,
+      nuclei: analysis?.nuclei?.map((nucleus) => ({ ...nucleus })),
+      questionDecomposition: analysis?.questionDecomposition
+        ? { ...analysis.questionDecomposition, slots: analysis.questionDecomposition.slots.map((slot) => ({ ...slot })) }
+        : undefined,
+      explicitTopic: analysis?.explicitTopic
     };
   }
 

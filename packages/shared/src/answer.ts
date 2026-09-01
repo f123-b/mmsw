@@ -23,6 +23,9 @@ import { ProjectTruthGuard } from "./answer/project-truth-guard";
 import { AnswerPlanCoverageChecker, type AnswerCoverageResult } from "./answer/answer-plan-coverage-checker";
 import { AnswerDepthRepair } from "./answer/answer-depth-repair";
 
+export { planAnswerSource } from "./answer/project-answer-source-planner";
+export type { AnswerSourcePlan, AnswerSourceMode } from "./answer/project-answer-source-planner";
+
 export * from "./answer/claim-gate";
 export * from "./answer/evidence-context";
 export * from "./answer/answer-intent";
@@ -129,10 +132,29 @@ export interface AnswerTelemetry {
   timings?: Record<string, number | undefined>;
   coveredFacets?: string[];
   missingFacets?: string[];
+  requiredFacets?: string[];
+  initialAnswerCharacterCount?: number;
+  finalAnswerCharacterCount?: number;
   answerCharacterCount?: number;
   answerEstimatedDurationSec?: number;
   answerDepthPass?: boolean;
   answerRepairApplied?: boolean;
+  answerRuntimeTrace?: AnswerRuntimeTrace;
+}
+
+export interface AnswerRuntimeTrace {
+  questionId?: string;
+  answerId?: string;
+  sourceMode?: string;
+  requiredFacets: string[];
+  coveredFacets: string[];
+  missingFacets: string[];
+  initialCharacterCount: number;
+  finalCharacterCount: number;
+  estimatedDurationSec: number;
+  depthPass: boolean;
+  needsRepair: boolean;
+  repairApplied: boolean;
 }
 
 export interface PreparedAnswer {
@@ -236,7 +258,8 @@ export class ContextRouter {
   route(question: string, input: AnswerContextInput = {}): ContextPack {
     const snapshot = input.evidenceSnapshot;
     const answerSourcePlan = snapshot?.answerSourcePlan ?? input.answerSourcePlan;
-    const projectQaEvidence = snapshot?.projectQaEvidence ?? input.projectQaEvidence ?? [];
+    const projectContextUnresolved = answerSourcePlan?.mode === "project_context_unresolved";
+    const projectQaEvidence = projectContextUnresolved ? [] : snapshot?.projectQaEvidence ?? input.projectQaEvidence ?? [];
     const directProjectQa = answerSourcePlan?.mode === "project_qa_direct";
     const selfIntroduction = answerSourcePlan?.mode === "self_intro_direct" || answerSourcePlan?.mode === "self_intro_rewrite";
     const coreTechnicalQa = directProjectQa || answerSourcePlan?.projectQuestionRequested ? undefined : input.coreTechnicalQa ?? matchCoreTechnicalQa(question);
@@ -263,18 +286,18 @@ export class ContextRouter {
       skills,
       experienceContext: (snapshot?.experienceContext ?? input.experienceContext ?? []).slice(0, 5),
       personalMemoryEvidence: (snapshot?.personalMemoryEvidence ?? input.personalMemoryEvidence ?? []).slice(0, 5),
-      retrievedKnowledge: directProjectQa || selfIntroduction || Boolean(coreTechnicalQa) ? [] : (snapshot?.retrievedKnowledge ?? input.retrievedKnowledge ?? []).slice(0, 6),
-      preparedAnswer: input.preparedAnswer,
+      retrievedKnowledge: directProjectQa || selfIntroduction || Boolean(coreTechnicalQa) || projectContextUnresolved ? [] : (snapshot?.retrievedKnowledge ?? input.retrievedKnowledge ?? []).slice(0, 6),
+      ...(projectContextUnresolved ? {} : (input.preparedAnswer ? { preparedAnswer: input.preparedAnswer } : {})),
       questionBankMatches: (input.questionBankMatches ?? []).slice(0, 5),
       ...(answerSourcePlan ? { answerSourcePlan } : {}),
       ...(coreTechnicalQa ? { coreTechnicalQa } : {}),
       ...(input.companyContext ? { companyContext: input.companyContext } : {}),
       ...(input.salaryExpectation ? { salaryExpectation: { ...input.salaryExpectation } } : {}),
       projectQaEvidence: projectQaEvidence.slice(0, 8),
-      currentProject: snapshot?.currentProject ?? input.currentProject,
+      ...(projectContextUnresolved ? {} : { currentProject: snapshot?.currentProject ?? input.currentProject }),
       currentTopic: snapshot?.currentTopic ?? input.currentTopic,
       currentModule: snapshot?.currentModule ?? input.currentModule,
-      projectEvidence: directProjectQa || selfIntroduction ? [] : (snapshot?.projectEvidence ?? input.projectEvidence ?? input.personalMemoryEvidence ?? input.experienceContext ?? []).slice(0, 8),
+      projectEvidence: directProjectQa || selfIntroduction || projectContextUnresolved ? [] : (snapshot?.projectEvidence ?? input.projectEvidence ?? input.personalMemoryEvidence ?? input.experienceContext ?? []).slice(0, 8),
       verifiedResumeEvidence: (snapshot?.verifiedResumeEvidence ?? input.verifiedResumeEvidence ?? []).slice(0, 5),
       verifiedPersonalProjectFacts: (snapshot?.verifiedPersonalProjectFacts ?? input.verifiedPersonalProjectFacts ?? []).slice(0, 8),
       recentTranscript,
@@ -668,7 +691,7 @@ export class AnswerAgent {
     let repairApplied = false;
     const evaluateQuality = (answer: string): AnswerQualityResult => {
       coverage = this.coverageChecker.check(plan, answer);
-      let result = this.qualityChecker.check({ question: routedQuestion.text, answer, mode, kind, groundingText });
+      let result = this.qualityChecker.check({ question: routedQuestion.text, answer, mode, kind, groundingText, coverage });
       const spoken = this.spokenQualityChecker.check({ question: routedQuestion.text, answer, mode, kind, plan, projectEvidence: [...context.projectEvidence, ...context.projectQaEvidence], groundingText });
       result = {
         ...result,
@@ -704,6 +727,7 @@ export class AnswerAgent {
       return { ...result, coverage };
     };
     let quality = evaluateQuality(formattedText);
+    const initialAnswerCharacterCount = coverage.characterCount;
     // A depth repair is a bounded supplement, not a second full answer. It is
     // deliberately performed after coverage inspection so longer output has
     // to add missing technical content instead of padding with filler.
@@ -865,9 +889,29 @@ export class AnswerAgent {
        coveredFacets: quality.coverage.coveredFacets,
        missingFacets: quality.coverage.missingFacets,
        answerCharacterCount: quality.coverage.characterCount,
+       requiredFacets: quality.coverage.requiredFacets,
        answerEstimatedDurationSec: quality.coverage.estimatedDurationSec,
        answerDepthPass: quality.coverage.depthPass,
        answerRepairApplied: repairApplied
+     };
+     quality.telemetry = {
+       ...quality.telemetry,
+       initialAnswerCharacterCount,
+       finalAnswerCharacterCount: quality.coverage.characterCount,
+       answerRuntimeTrace: {
+         questionId: routedQuestion.id,
+         answerId,
+         sourceMode: context.answerSourcePlan?.mode,
+         requiredFacets: quality.coverage.requiredFacets,
+         coveredFacets: quality.coverage.coveredFacets,
+         missingFacets: quality.coverage.missingFacets,
+         initialCharacterCount: initialAnswerCharacterCount,
+         finalCharacterCount: quality.coverage.characterCount,
+         estimatedDurationSec: quality.coverage.estimatedDurationSec,
+         depthPass: quality.coverage.depthPass,
+         needsRepair: quality.needsRepair,
+         repairApplied
+       }
      };
     quality.blockedClaimCount = Math.max(claimGate.blockedClaims.length, projectTruth.blockedClaimCount);
     quality.telemetry = { ...quality.telemetry, blockedClaimCount: projectTruth.blockedClaimCount, projectTruthDecision: projectTruth.decision };

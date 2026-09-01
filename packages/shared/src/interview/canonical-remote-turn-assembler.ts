@@ -60,6 +60,20 @@ function hasContinuationCue(text: string): boolean {
   return /(?:比如|例如|包括|哪些|分别|不能|绝对|场景|第一步|首先|然后|以及|这几个角度|最难|举个)/iu.test(text);
 }
 
+function isProjectCompoundContinuation(previousText: string, nextText: string): boolean {
+  return /(?:项目|系统|方案|架构)/iu.test(previousText)
+    && /(?:几个人|多少人|负责|分工|主要做|分别)/iu.test(previousText)
+    && /(?:负责|分工|主要做|分别|职责|几个人|多少人)/iu.test(nextText);
+}
+
+function adaptiveCommitDelay(text: string, semantic: SemanticTurnDecision, fragmentCount: number): number {
+  const compoundProject = fragmentCount >= 2
+    && /(?:项目|系统|方案|架构)/iu.test(text)
+    && /(?:几个人|多少人|负责|分工|主要做|分别)/iu.test(text);
+  if (compoundProject) return Math.max(1_000, Math.min(1_600, semantic.recommendedWaitMs));
+  return semantic.recommendedWaitMs;
+}
+
 function preserveAnswerableSemantic(previous: CanonicalRemoteTurn, next: SemanticTurnDecision): SemanticTurnDecision {
   if (!previous.semantic.shouldAnswer || !["STATEMENT", "INCOMPLETE"].includes(next.speechAct)) return next;
   return {
@@ -76,6 +90,7 @@ function preserveAnswerableSemantic(previous: CanonicalRemoteTurn, next: Semanti
 
 function shouldSplit(previous: CanonicalRemoteTurn, next: SemanticTurnDecision, nextText: string): boolean {
   if (isTopicBoundary(nextText)) return true;
+  if (isProjectCompoundContinuation(previous.text, nextText)) return false;
   if (previous.semantic.dependency === "EXPECTS_NEXT") return false;
   const nextIsAnswerableQuestion = ["QUESTION", "ANSWER_REQUEST", "FOLLOW_UP_REQUEST"].includes(next.speechAct);
   const nextIsExplicitAnswerRequest = /^(?:请|你|能否|可以)?(?:说说|讲讲|介绍一下|解释一下|说明一下|回答一下|谈谈|聊聊|给我讲|告诉我)/iu.test(nextText);
@@ -109,7 +124,7 @@ function makeTurn(fragment: TranscriptFragment, semantic: SemanticTurnDecision, 
     lastFinalReceivedAt: receivedAt,
     rawSegments: [copyFragment(fragment)],
     semantic,
-    commitDelayMs: semantic.recommendedWaitMs,
+    commitDelayMs: adaptiveCommitDelay(text, semantic, 1),
     ...(fragment.confidence !== undefined ? { confidence: fragment.confidence } : {})
   };
 }
@@ -166,7 +181,7 @@ export class CanonicalRemoteTurnAssembler {
         previous.endMs = previous.endTs;
         previous.lastFinalReceivedAt = receivedAt;
         previous.semantic = preserveAnswerableSemantic(previous, this.semanticGate.decide(previous.text, context));
-        previous.commitDelayMs = previous.semantic.recommendedWaitMs;
+        previous.commitDelayMs = adaptiveCommitDelay(previous.text, previous.semantic, previous.fragments.length);
         return { current: copy(previous), completed: [], merged: true, reason: "revised", semantic: previous.semantic };
       }
       const gap = fragment.startTs - previous.endTs;
@@ -187,7 +202,7 @@ export class CanonicalRemoteTurnAssembler {
         previous.endMs = previous.endTs;
         previous.lastFinalReceivedAt = receivedAt;
         previous.semantic = preserveAnswerableSemantic(previous, this.semanticGate.decide(previous.text, context));
-        previous.commitDelayMs = previous.semantic.recommendedWaitMs;
+        previous.commitDelayMs = adaptiveCommitDelay(previous.text, previous.semantic, previous.fragments.length);
         if (fragment.confidence !== undefined) previous.confidence = fragment.confidence;
         return { current: copy(previous), completed: [], merged: true, reason: "merged", semantic: previous.semantic };
       }

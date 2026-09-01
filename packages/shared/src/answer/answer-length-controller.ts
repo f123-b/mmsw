@@ -55,23 +55,24 @@ function complexityAdjustment(complexity: "low" | "medium" | "high", range: Answ
 
 export class AnswerLengthController {
   durationRange(mode: AnswerMode, kind: AnswerQuestionKind, complexity: "low" | "medium" | "high" = "medium"): AnswerDurationRange {
-    const base = kind === "follow-up" || kind === "short-clarification" ? FOLLOW_UP_DURATION_POLICY : kind === "deep-follow-up" ? DEEP_FOLLOW_UP_DURATION_POLICY : ANSWER_DURATION_POLICY[mode];
+    const base = kind === "short-clarification" ? FOLLOW_UP_DURATION_POLICY : kind === "deep-follow-up" ? DEEP_FOLLOW_UP_DURATION_POLICY : ANSWER_DURATION_POLICY[mode];
     return complexityAdjustment(complexity, base);
   }
 
   policy(mode: AnswerMode, kind: AnswerQuestionKind, complexity: "low" | "medium" | "high" = "medium"): AnswerLengthPolicy {
     const range = this.durationRange(mode, kind, complexity);
     const code = kind === "code" ? CODE_LENGTH_POLICY[mode] : undefined;
-    const minCharacters = code?.min ?? Math.ceil(range.min * MIN_CHARACTERS_PER_SECOND);
-    const maxCharacters = code?.max ?? Math.floor(range.max * MAX_CHARACTERS_PER_SECOND);
-    const targetCharacters = code ? Math.round((code.min + code.max) / 2) : Math.round(range.target * CHARACTERS_PER_SECOND);
+    const project = kind === "project";
+    const minCharacters = code?.min ?? (project ? 180 : Math.ceil(range.min * MIN_CHARACTERS_PER_SECOND));
+    const maxCharacters = code?.max ?? (project ? 320 : Math.floor(range.max * MAX_CHARACTERS_PER_SECOND));
+    const targetCharacters = code ? Math.round((code.min + code.max) / 2) : project ? 240 : Math.round(range.target * CHARACTERS_PER_SECOND);
     return {
       ...range,
       minCharacters,
       maxCharacters,
       targetCharacters,
       maxSentenceCharacters: kind === "code" ? 120 : 72,
-      maxSentences: kind === "code" ? 12 : mode === "FAST" || kind === "follow-up" || kind === "short-clarification" ? 4 : mode === "DEEP" || kind === "deep-follow-up" ? 9 : 6
+      maxSentences: kind === "code" ? 12 : kind === "short-clarification" ? 4 : mode === "DEEP" || kind === "deep-follow-up" ? 9 : 6
     };
   }
 

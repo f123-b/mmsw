@@ -39,7 +39,7 @@ describe("Answer planning and strategy selection", () => {
     expect(answerStrategyFor("troubleshooting", question, true).id).toBe("project_troubleshooting");
   });
 
-  it("keeps follow-up answers short and lowers their planning complexity", () => {
+  it("keeps short clarifications short without collapsing normal follow-ups", () => {
     const plan = planner.plan({
       question: "具体一点",
       questionType: "follow-up",
@@ -53,10 +53,13 @@ describe("Answer planning and strategy selection", () => {
       interviewMode: "FAST"
     });
 
-    expect(plan.complexity).toBe("low");
-    expect(plan.durationRangeSec).toEqual({ min: 10, max: 30 });
-    expect(plan.targetDurationSec).toBe(15);
+    expect(plan.complexity).toBe("medium");
+    expect(plan.durationRangeSec).toEqual({ min: 15, max: 25 });
+    expect(plan.targetDurationSec).toBe(20);
     expect(plan.requiredEvidence).toContain("follow_up_context");
+    const short = planner.plan({ question: "还有呢？", questionType: "short-clarification", interviewMode: "FAST" });
+    expect(short.complexity).toBe("low");
+    expect(short.durationRangeSec.max).toBeLessThanOrEqual(30);
   });
 
   it("maps speaking time to a stable character band", () => {
