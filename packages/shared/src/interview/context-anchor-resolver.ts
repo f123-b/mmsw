@@ -1,6 +1,7 @@
 import type { ContextAnchor, ContextAnchorSnapshot } from "./context-anchor-store";
 import type { InterviewSpeechAct } from "./speech-act-classifier";
 import { detectTopicBoundary, hasStandaloneTopicSubject } from "./topic-boundary-detector";
+import { hasContextReference } from "./semantic-answerability";
 
 export interface ResolvedQuestionContext {
   canonicalQuestion: string;
@@ -33,7 +34,7 @@ function hasExplicitStandaloneSubject(text: string): boolean {
 function isElliptical(text: string): boolean {
   const compact = text.replace(/[？?。！!，,、\s]/g, "");
   if (hasExplicitStandaloneSubject(text)) return false;
-  return /^(?:讲一下|讲讲|说一下|说说|具体|为什么|怎么|如何|用过哪些|用在什么地方|还有呢?|什么(?:场景|情况|时候|原因|区别|作用|问题|地方|方式|方法|结果|影响|风险|优缺点).*)[？?。！!]?$/i.test(text)
+  return /^(?:讲一下|讲讲|说一下|说说|具体|为什么|怎么|如何|用过哪些|用在什么地方|还有呢?|哪一个|这两个|前者|后者|其中|你会更倾向于?用?哪(?:一个|个)|什么(?:场景|情况|时候|原因|区别|作用|问题|地方|方式|方法|结果|影响|风险|优缺点).*)[？?。！!]?$/i.test(text)
     || /^(?:那|然后|还有|这个|它|这里|其中|接下来|再).{0,12}$/.test(compact);
 }
 
@@ -53,9 +54,10 @@ export class ContextAnchorResolver {
     const anchors = input.anchors;
     const anchor = anchors.latestAnchor ?? anchors.lastConfirmedQuestion;
     const boundary = anchor ? detectTopicBoundary({ previousText: anchor.text, previousTopic: anchors.currentTopic, currentText: text }) : detectTopicBoundary({ currentText: text });
+    const contextualReference = Boolean(anchor && hasContextReference(text) && !hasStandaloneTopicSubject(text));
     const standalone = input.speechAct === "CODE_REQUEST"
       || hasStandaloneTopicSubject(text)
-      || (input.speechAct === "QUESTION" && (!isElliptical(text) || isCompleteStandaloneQuestion(text) || /第\s*\d+\s*题/.test(text)))
+      || (input.speechAct === "QUESTION" && !contextualReference && (!isElliptical(text) || isCompleteStandaloneQuestion(text) || /第\s*\d+\s*题/.test(text)))
       || boundary.relation === "NEW_TOPIC";
     if (standalone) {
       return {

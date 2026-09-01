@@ -1,4 +1,5 @@
 import { normalizeTechnicalTerms } from "../terminology";
+import { hasContextReference } from "./semantic-answerability";
 
 export type TopicBoundaryRelation = "SAME_TOPIC" | "RELATED_TOPIC" | "NEW_TOPIC" | "AMBIGUOUS";
 
@@ -20,7 +21,7 @@ export const TECHNICAL_TOPIC_ENTITIES = [
 
 const EXPLICIT_TOPIC_SWITCH = /^(?:换个话题|换一个话题|另一个问题|下一个问题|接下来问|再问一个|说到另一个)/;
 const FOLLOW_UP_PREFIX = /^(?:那|那么|然后|还有|这个|它|这里|其中|接下来|再|具体|如果|假如|对于这个|针对这个)/;
-const GENERIC_FOLLOW_UP = /^(?:为什么|为何|怎么|如何|具体(?:呢)?|还有(?:呢|吗)?|然后呢|用过哪些|用在什么地方|哪几个|哪种|仲裁呢?|采样呢?|它呢?|你会关注哪些点|考虑哪些可能性|有哪些可能性|快速排查清单|给(?:个|一份)?(?:快速)?(?:排查|检查)(?:清单|步骤)|简单比较(?:一下)?|简单对比(?:一下)?|对比一下|具体细节)[？?。！!\s]*$/iu;
+const GENERIC_FOLLOW_UP = /^(?:为什么|为何|怎么|如何|具体(?:呢)?|还有(?:呢|吗)?|然后呢|用过哪些|用在什么地方|哪几个|哪种|哪一个|这两个|前者|后者|其中|仲裁呢?|采样呢?|它呢?|你会关注哪些点|考虑哪些可能性|有哪些可能性|快速排查清单|给(?:个|一份)?(?:快速)?(?:排查|检查)(?:清单|步骤)|简单比较(?:一下)?|简单对比(?:一下)?|对比一下|具体细节|你会更倾向于?用?哪(?:一个|个))[？?。！!\s]*$/iu;
 const CONTEXTUAL_WHY_FOLLOW_UP = /^(?:为什么|为何|怎么|如何|怎样)\s*(?:这样|这么|这种|这个|那个|它|此)/iu;
 const ANSWER_REQUEST_WITH_SUBJECT = /^(?:请)?(?:口述|描述|介绍(?:一下)?|详细介绍|讲一下|讲讲|讲述|说一下|说说|说明(?:一下)?|解释(?:一下)?|展开讲一下|展开说|列举一下|总结一下|分析一下)\s*(?:你对)?(.{2,})[？?。！!]?$/iu;
 const QUESTION_WITH_SUBJECT = /^(?:什么是|什么|为什么|为何|怎么|如何|怎样|哪些|哪种|哪个|区别|原理|作用|原因|流程|介绍|解释|说明)\s*(.{2,})[？?。！!]?$/iu;
@@ -73,6 +74,12 @@ export function detectTopicBoundary(input: { previousText?: string; previousTopi
     return { relation: currentEntities.length || hasStandaloneTopicSubject(current) ? "NEW_TOPIC" : "AMBIGUOUS", confidence: currentEntities.length ? 0.96 : 0.52, previousEntities, currentEntities, reason: "no-previous-topic" };
   }
   if (EXPLICIT_TOPIC_SWITCH.test(current)) return { relation: "NEW_TOPIC", confidence: 0.99, previousEntities, currentEntities, reason: "explicit-topic-switch" };
+  // Context-dependent references must be resolved before the generic
+  // standalone/entity rules. “你会更倾向于用哪一个？” has no new subject;
+  // attaching it here keeps it in the prior conversation group.
+  if (hasContextReference(current) && !hasStandaloneTopicSubject(current)) {
+    return { relation: "SAME_TOPIC", confidence: 0.94, previousEntities, currentEntities, reason: "context-dependent-reference" };
+  }
   const overlap = currentEntities.filter((entity) => previousEntities.includes(entity));
   if (currentEntities.length > 0 && overlap.length === 0 && hasStandaloneTopicSubject(current)) {
     return { relation: "NEW_TOPIC", confidence: 0.98, previousEntities, currentEntities, reason: "standalone-entity-without-overlap" };

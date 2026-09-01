@@ -168,6 +168,7 @@ function isExample(question: QuestionCandidate): boolean {
 }
 
 function isAnswerableQuestion(question: QuestionCandidate): boolean {
+  if (question.answerabilityState && question.answerabilityState !== "ANSWERABLE" && question.answerabilityState !== "CONTEXT_DEPENDENT") return false;
   if (question.answerable === true || question.shouldAnswer === true) return true;
   if (["QUESTION", "ANSWER_REQUEST", "CODE_REQUEST", "FOLLOW_UP"].includes(question.speechAct ?? "")) return true;
   const text = question.text.trim();

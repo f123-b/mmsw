@@ -69,6 +69,10 @@ function initialPlan(question: AnswerSchedulerQuestion): AnswerMergePlan {
   return { question: question.text, constraints: [], examples: [], subQuestions: [] };
 }
 
+function questionKey(text: string): string {
+  return text.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+}
+
 function mergeableRelation(relationType?: QuestionRelationType): boolean {
   return relationType === "SAME_QUESTION_AUGMENTATION"
     || relationType === "ANSWER_CONSTRAINT"
@@ -147,6 +151,11 @@ export class AnswerScheduler {
     this.requestCount += 1;
     if (this.activeAnswer?.id === enriched.id || this.queuedAnswers.some((candidate) => candidate.id === enriched.id)) {
       return { action: "ignore", question: cloneQuestion(enriched), reason: "duplicate-question", queueDepth: this.queueDepth, ...(this.active ? { active: this.active } : {}) };
+    }
+    const enrichedKey = questionKey(enriched.text);
+    if (enriched.groupId && enrichedKey && ((this.activeAnswer?.groupId === enriched.groupId && questionKey(this.activeAnswer.text) === enrichedKey)
+      || this.queuedAnswers.some((candidate) => candidate.groupId === enriched.groupId && questionKey(candidate.text) === enrichedKey))) {
+      return { action: "ignore", question: cloneQuestion(enriched), reason: "duplicate-question-same-group", queueDepth: this.queueDepth, ...(this.active ? { active: this.active } : {}) };
     }
     if (!this.activeAnswer) {
       this.activeAnswer = {

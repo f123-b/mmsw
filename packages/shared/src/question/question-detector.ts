@@ -3,6 +3,7 @@ import type { LocalQuestionModel, LocalQuestionResult } from "./local-classifier
 import type { QuestionAnalysis, QuestionDetectionContext, QuestionDetectionType, QuestionLLMConfirmer, QuestionRecognitionMode, QuestionScore, QuestionSpeechAct } from "./types";
 import { normalizeTechnicalTerms } from "../terminology";
 import { classifyInterviewSpeechAct, shouldHardRejectSpeechAct } from "../interview/speech-act-classifier";
+import { decideSemanticAnswerability } from "../interview/semantic-answerability";
 import { classifyQuestionSemanticFrame } from "./semantic-frame";
 
 const RULE_KEYWORDS = /什么|为什么|为何|怎么|如何|介绍|原理|区别|优化|请问|能不能|是否|有没有|哪些|哪种|哪个|哪里|解释|说明|讲一下|说一下|说说|展开|常见误区|作用|困难|挑战|设计|架构|系统|如果.*(重新|改|换|设计)/;
@@ -216,6 +217,13 @@ function buildAnalysisWithClassifier(
     latestAnchor: context.latestAnchor ?? (contextTopic ? { text: contextTopic, topic: contextTopic, speechAct: "TOPIC_ANCHOR" } : undefined),
     pendingCodeContext: context.pendingCodeContext
   });
+  const answerability = decideSemanticAnswerability(normalized, {
+    speechAct: speech.speechAct,
+    currentTopic: contextTopic,
+    latestQuestionText: context.latestAnchor?.text,
+    hasRecentQuestion: Boolean(context.latestAnchor || context.memory?.pendingQuestion || context.memory?.turns?.length || context.recentTranscript?.length),
+    localClassifierConfidence: localClassifierScore
+  });
   const classification = { ...classifier.classify(normalized, contextText, final) };
   const nonQuestionAct = classifyNonQuestionSpeechAct(normalized);
   if (nonQuestionAct && speech.speechAct !== "ANSWER_REQUEST" && speech.speechAct !== "CODE_REQUEST" && speech.speechAct !== "QUESTION" && speech.speechAct !== "FOLLOW_UP") {
@@ -235,6 +243,7 @@ function buildAnalysisWithClassifier(
       legacyCategory: nonQuestionClassification.category,
       shouldAnswer: false,
       semanticFrame: classifyQuestionSemanticFrame(normalized, "not_question"),
+      answerabilityState: answerability.state,
       ...(speech.codeContext ? { codeContext: true } : {})
     };
   }
@@ -256,12 +265,34 @@ function buildAnalysisWithClassifier(
       legacyCategory: nonQuestionClassification.category,
       shouldAnswer: false,
       semanticFrame: classifyQuestionSemanticFrame(normalized, "not_question"),
+      answerabilityState: answerability.state,
       topicAnchor: speech.speechAct === "TOPIC_ANCHOR",
       ...(speech.codeContext ? { codeContext: true } : {})
     };
   }
+  if (!answerability.shouldAnswer) {
+    const nonQuestionClassification = { ...classification, isQuestion: false, confidence: 0, reason: answerability.reason };
+    const shortUnresolvedSpeech = !context.latestAnchor && !context.recentTranscript?.length && normalized.replace(/[\s，。！？、,.!?；;:：]/g, "").length <= 8;
+    return {
+      text: normalized,
+      isQuestion: false,
+      type: "not_question",
+      speechAct: answerability.state === "STYLE_ONLY" ? "INSTRUCTION_MODIFIER" : shortUnresolvedSpeech ? "STATEMENT" : speech.speechAct,
+      confidence: 0,
+      normalizedQuestion: normalized,
+      reason: answerability.reason,
+      score: { ruleScore: ruleScoreFor(normalized, final), semanticScore: 0, ...(localClassifierScore !== undefined ? { localClassifierScore } : {}), llmScore: 0, finalScore: 0 },
+      llmUsed: Boolean(llm),
+      classification: nonQuestionClassification,
+      legacyCategory: nonQuestionClassification.category,
+      shouldAnswer: false,
+      semanticFrame: classifyQuestionSemanticFrame(normalized, "not_question"),
+      answerabilityState: answerability.state,
+      ...(speech.codeContext ? { codeContext: true } : {})
+    };
+  }
   if (classification.isQuestion && RULE_KEYWORDS.test(normalized) && normalized.length >= 6) classification.confidence = Math.max(classification.confidence, 0.9);
-  const contextualFollowUp = isFollowUp(normalized, contextText, context.memory);
+  const contextualFollowUp = answerability.state === "CONTEXT_DEPENDENT" || isFollowUp(normalized, contextText, context.memory);
   const shortFollowUpQuestion = contextualFollowUp && (SHORT_FOLLOW_UP_FORM.test(normalized) || (normalized.length <= 12 && /[？?]/.test(normalized)));
   const standaloneCompleteForm = /(?:在哪|哪里|是什么|哪些|哪种|哪个|多少|几个|几路|上限|容量)/.test(normalized);
   const effectiveSpeechAct: QuestionSpeechAct = speech.speechAct === "QUESTION" && contextualFollowUp && !standaloneCompleteForm ? "FOLLOW_UP" : speech.speechAct;
@@ -282,7 +313,7 @@ function buildAnalysisWithClassifier(
   // signal instead of requiring a second interrogative form.
   const explicitQuestionLabel = /(?:问题|题目)\s*[:：]/.test(normalized);
   const labeledQuestionRescue = classification.isQuestion && explicitQuestionLabel && classification.confidence >= 0.72;
-  const followUpRescue = shortFollowUpQuestion;
+  const followUpRescue = shortFollowUpQuestion || answerability.state === "CONTEXT_DEPENDENT";
   const finalScore = robustRuleQuestion || labeledQuestionRescue || followUpRescue ? Math.max(rawFinalScore, 0.86) : rawFinalScore;
   const candidateQuestion = !FILLER_ONLY.test(normalized) && !SMALL_TALK.test(normalized) && !META_PROMPT_ONLY.test(normalized);
   const llmRescue = Boolean(llm?.isQuestion && llm.confidence >= 0.82 && (ruleScore >= 0.35 || contextualFollowUp));
@@ -328,6 +359,7 @@ function buildAnalysisWithClassifier(
     legacyCategory: classification.category,
     shouldAnswer: decision.shouldAnswer,
     semanticFrame: classifyQuestionSemanticFrame(normalized, isQuestion ? type : "not_question"),
+    answerabilityState: answerability.state,
     ...(speech.codeContext ? { codeContext: true } : {})
   };
 }

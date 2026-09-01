@@ -80,7 +80,10 @@ export class ContextAnchorStore {
   }
 
   recordConfirmedQuestion(input: { id: string; text: string; confidence?: number; topic?: string; entities?: string[]; createdAt?: number }): ContextAnchor {
-    const anchor = this.addAnchor({ ...input, speechAct: "QUESTION", ttlMs: 8_000 });
+    // Keep the confirmed-question context longer than the late modifier
+    // window. This covers a natural 2–8s follow-up without turning the topic
+    // anchor into a session-wide implicit context.
+    const anchor = this.addAnchor({ ...input, speechAct: "QUESTION", ttlMs: 11_000 });
     const confirmed = { ...anchor, id: input.id };
     this.lastConfirmedQuestion = confirmed;
     this.latest = confirmed;

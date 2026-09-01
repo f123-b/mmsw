@@ -8,7 +8,7 @@ function segment(id: string, text: string, startMs: number, endMs = startMs + 30
 describe("PendingQuestionDraftAssembler", () => {
   it("keeps setup/output constraints long enough to assemble the nucleus", () => {
     const assembler = new PendingQuestionDraftAssembler();
-    expect(assembler.waitMs).toBe(1_400);
+    expect(assembler.waitMs).toBe(800);
     expect(classifySegmentRole("简单比较速率、布线和可靠性", { hasNucleus: true })).toBe("OUTPUT_REQUIREMENT");
   });
   it("classifies semantic roles without waiting for a remote model", () => {
@@ -63,5 +63,33 @@ describe("PendingQuestionDraftAssembler", () => {
     const update = assembler.add(segment("f", "另外，说说看", 0), 5_000);
     expect(update.accepted).toBe(false);
     expect(assembler.current).toBeUndefined();
+  });
+
+  it("retains an orphan setup across separated ASR finals and reopens it for the nucleus", () => {
+    const assembler = new PendingQuestionDraftAssembler();
+    assembler.add(segment("setup", "如果系统间歇性卡死", 0), 0);
+    expect(assembler.shouldFinalize(800)).toBe(true);
+    assembler.finalize(800);
+    const supporting = assembler.add(segment("support", "日志也没刷出来", 1_900), 2_000);
+    expect(supporting.reason).toBe("orphan-setup-reopened");
+    assembler.finalize(2_800);
+    const nucleus = assembler.add(segment("nucleus", "你会怎么定位和解决？", 7_900), 8_000);
+    expect(nucleus.reason).toBe("orphan-setup-reopened");
+    expect(nucleus.draft?.setup).toContain("如果系统间歇性卡死");
+    expect(nucleus.draft?.supportingFragments).toContain("日志也没刷出来");
+    expect(nucleus.draft?.nucleus).toContain("你会怎么定位和解决？");
+    expect(assembler.canonicalText(nucleus.draft!)).toContain("日志也没刷出来");
+  });
+
+  it("holds a dangling question until a contextual short follow-up arrives", () => {
+    const assembler = new PendingQuestionDraftAssembler();
+    assembler.add(segment("dangling", "你说说 UART 和 SPI 的主要区别，以及什么时候。", 0), 0);
+    expect(assembler.waitMs).toBe(760);
+    assembler.finalize(760);
+    const followUp = assembler.add(segment("follow-up", "你会更倾向于用哪一个？", 1_000), 1_100, { contextualFollowUp: true });
+    expect(followUp.late).toBe(false);
+    expect(followUp.reason).toBe("context-follow-up-reopened-recent-question");
+    expect(followUp.draft?.subQuestions).toContain("你会更倾向于用哪一个？");
+    expect(assembler.canonicalText(followUp.draft!)).toContain("UART 和 SPI");
   });
 });

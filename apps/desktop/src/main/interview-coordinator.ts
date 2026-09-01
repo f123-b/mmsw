@@ -36,6 +36,7 @@ import {
   type PendingQuestionDraft,
   type PendingQuestionDraftUpdate,
   TurnCompletionGate,
+  SemanticAnswerabilityGate,
   UnresolvedAsrGate,
   type AnswerContextInput,
   type AnswerTelemetry,
@@ -214,6 +215,7 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly now: () => number;
   private readonly speechActClassifier = new SpeechActClassifier();
   private readonly turnCompletionGate = new TurnCompletionGate();
+  private readonly semanticAnswerabilityGate = new SemanticAnswerabilityGate();
   private readonly unresolvedAsrGate = new UnresolvedAsrGate();
   private readonly anchorResolver = new ContextAnchorResolver();
   private readonly anchorStore: ContextAnchorStore;
@@ -1254,7 +1256,25 @@ export class InterviewCoordinator extends EventEmitter {
       // A provider final only freezes this ASR fragment. It is not a semantic
       // end-of-turn signal. Keep a local draft so setup, constraints and
       // several question nuclei reach the detector as one canonical prompt.
-      const draftUpdate = this.pendingQuestionDraft.add(segment, receivedAt);
+      const draftContext = this.anchorStore.snapshot(receivedAt);
+      const segmentAnswerability = this.semanticAnswerabilityGate.decide(segment.text, {
+        currentTopic: draftContext.currentTopic,
+        latestQuestionText: draftContext.lastConfirmedQuestion?.text,
+        hasRecentQuestion: Boolean(this.currentQuestion?.groupId || draftContext.lastConfirmedQuestion)
+      });
+      // A style-only fragment belongs to the visible question when there is
+      // no still-open draft. It must never start a provider request of its own.
+      if (segmentAnswerability.state === "STYLE_ONLY" && !this.pendingQuestionDraft.current && this.currentQuestion) {
+        const styleSegmentId = segment.id ?? `style-${receivedAt}`;
+        const styleUtterance: TranscriptUtterance = { id: styleSegmentId, source: segment.source, text: segment.text, rawText: segment.text, segmentIds: [styleSegmentId], startMs: segment.startMs, endMs: segment.endMs, final: true, firstSegmentReceivedAt: receivedAt, lastFinalReceivedAt: receivedAt };
+        const styleTurn = this.turnBuilder.build(styleUtterance);
+        this.stageQuestionContext(styleUtterance, styleTurn, segment.text, "INSTRUCTION_MODIFIER");
+        this.recordRuntimeTrace("QUESTION_DRAFT_UPDATED", { role: "STYLE_ONLY", accepted: true, late: true, segmentId: segment.id, segmentLength: segment.text.length }, { reasonCode: "style-only-attached-to-current-group", questionId: this.currentQuestion.id });
+        return;
+      }
+      const draftUpdate = this.pendingQuestionDraft.add(segment, receivedAt, {
+        contextualFollowUp: segmentAnswerability.state === "CONTEXT_DEPENDENT" && segmentAnswerability.shouldAttachToPrevious
+      });
       this.recordRuntimeTrace("QUESTION_DRAFT_UPDATED", {
         role: draftUpdate.role,
         accepted: draftUpdate.accepted,
@@ -1562,7 +1582,7 @@ export class InterviewCoordinator extends EventEmitter {
     const effectiveEvent = this.emitQuestion(event);
     if ((effectiveEvent.type === "question_confirmed" || effectiveEvent.type === "question_superseded") && this.activeOptions?.automationMode === "AUTO") {
       const question = effectiveEvent.question;
-      if (question.answerable !== false) {
+      if (question.answerable === true && question.shouldAnswer !== false) {
         this.scheduleAnswer(question);
       } else if (question.groupId && question.threadItemType !== "TOPIC_FRAGMENT" && question.threadItemType !== "ASR_REVISION" && (this.answerScheduler.active?.groupId === question.groupId || this.visibleAnswerGroups.has(question.groupId))) {
         // Constraints/examples are not standalone questions. They update the
@@ -1730,6 +1750,17 @@ export class InterviewCoordinator extends EventEmitter {
       reason: `${speech.reason}+${resolved.reason}`,
       ...(speech.codeContext ? { codeContext: true } : {})
     };
+    // InterviewBrain retains a compatibility rescue for short implicit
+    // follow-ups. The local semantic gate is authoritative for live turns so
+    // a bare request/setup/dangling tail cannot be promoted back into an
+    // answerable question by that rescue.
+    if (analysis.answerabilityState && !["ANSWERABLE", "CONTEXT_DEPENDENT"].includes(analysis.answerabilityState)) {
+      trace.update({ finalScore: 0, decision: "reject", decisionReason: analysis.reason }).mark("questionDetected", this.now());
+      this.currentQuestionTrace = trace;
+      this.emitQuestionTrace();
+      if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
+      return;
+    }
     let decision = this.brain.analyze({ text: canonicalQuestion, analysis, memory: detectionContext.memory, recentTranscript: previousTranscript });
     this.recordRuntimeTrace("QUESTION_LOCAL_ANALYSIS_COMPLETED", { question: decision.isQuestion, score: analysis.score.finalScore }, { reasonCode: analysis.reason });
     trace.update({
@@ -1836,6 +1867,12 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private scheduleAnswer(question: QuestionCandidate): void {
+    if (question.answerable !== true || question.shouldAnswer !== true) return;
+    const isCoveredEllipticalFollowUp = /^(?:你会(?:更)?倾向于?用?哪(?:一个|个)|哪一个|这两个|前者|后者|其中|然后呢|还有(?:吗|呢)?|具体(?:呢)?)[？?。！!\s]*$/iu.test(question.text.trim());
+    if (question.answerabilityState === "CONTEXT_DEPENDENT" && isCoveredEllipticalFollowUp && question.groupId && (this.visibleAnswerGroups.has(question.groupId) || this.answerScheduler.active?.groupId === question.groupId)) {
+      this.recordRuntimeTrace("QUESTION_MERGED", { schedulerAction: "ignore", groupId: question.groupId, reason: "context-follow-up-already-covered" }, { questionId: question.id, reasonCode: "context-follow-up-already-covered" });
+      return;
+    }
     const sessionGeneration = this.sessionGeneration;
     // Completeness has already been established by the temporal detector.
     // Do not add another post-confirmation delay, especially for short but

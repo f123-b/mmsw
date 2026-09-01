@@ -3,6 +3,7 @@ import type { QuestionCategory, QuestionClassification } from "../question-class
 import type { InterviewSpeechAct, SpeechActAnchorContext } from "../interview/speech-act-classifier";
 import type { TerminologyCorrection } from "../terminology";
 import type { QuestionSemanticFrame } from "./semantic-frame";
+import type { AnswerabilityState } from "../interview/semantic-answerability";
 
 export type QuestionDetectionType = "technical" | "project" | "behavior" | "follow_up" | "clarification" | "not_question";
 export type QuestionSpeechAct = InterviewSpeechAct | "SMALL_TALK" | "INSTRUCTION";
@@ -70,4 +71,5 @@ export interface QuestionAnalysis extends QuestionDetectionResult {
   topic?: string;
   semanticFrame?: QuestionSemanticFrame;
   terminologyCorrections?: TerminologyCorrection[];
+  answerabilityState?: AnswerabilityState;
 }

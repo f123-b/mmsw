@@ -1,5 +1,6 @@
 import type { InterviewMemorySnapshot } from "../interview-memory";
 import { detectTopicBoundary, hasStandaloneTopicSubject } from "./topic-boundary-detector";
+import { isStyleOnly } from "./semantic-answerability";
 
 export type InterviewSpeechAct =
   | "QUESTION"
@@ -56,7 +57,7 @@ const TRAILING_ANSWER_REQUEST = /(?:^|[，,、\s])(?:好|好的|嗯+|明白了?)
 const QUESTION_FORM = /(?:什么是|什么|为什么|为何|怎么|如何|怎样|哪些|哪种|哪个|哪里|哪|谁|是否|有没有|能不能|可不可以|区别|原理|作用|原因|流程|优缺点|怎么解决|怎么验证|怎么设计|怎么实现|什么地方|用过哪些|最多|最少|最大|最小|上限|容量|数量|多少|几个|几路|几种|多大|多长|多快|频率|设计.*(?:系统|架构|方案|模块))/i;
 const QUESTION_PARTICLE = /(?:吗|呢)[。！？?！\s]*$/i;
 const FOLLOW_UP_PREFIX = /^(?:那|然后|还有|具体|如果|再|这个|它|这里|其中|继续|接着|接下来)/;
-const ELLIPTICAL_FOLLOW_UP = /^(?:为什么|为何|怎么|如何|具体(?:呢)?|还有(?:呢|吗)?|然后呢|用过哪些|用在什么地方|哪几个|哪种|那低速呢|再具体一点|能不能具体一点|你会关注哪些点|考虑哪些可能性|有哪些可能性|快速排查清单|给(?:个|一份)?(?:快速)?(?:排查|检查)(?:清单|步骤)|简单比较(?:一下)?|简单对比(?:一下)?|对比一下|具体细节)[？?。！!\s]*$/iu;
+const ELLIPTICAL_FOLLOW_UP = /^(?:为什么|为何|怎么|如何|具体(?:呢)?|还有(?:呢|吗)?|然后呢|用过哪些|用在什么地方|哪几个|哪种|哪一个|这两个|前者|后者|其中|那低速呢|再具体一点|能不能具体一点|你会关注哪些点|考虑哪些可能性|有哪些可能性|快速排查清单|给(?:个|一份)?(?:快速)?(?:排查|检查)(?:清单|步骤)|简单比较(?:一下)?|简单对比(?:一下)?|对比一下|具体细节|你会更倾向于?用?哪(?:一个|个))[？?。！!\s]*$/iu;
 const CONTEXTUAL_OUTPUT_FOLLOW_UP = /^(?:请)?(?:简单|重点|分别)?(?:比较|对比|讲|说|列出|给)(?:一下|一下子)?[^。！？?！]{0,18}[。！？?！\s]*$/iu;
 const ELLIPTICAL_ANSWER_REQUEST = /^(?:讲一下|讲讲|说一下|说说|展开讲一下|详细讲述|具体说)[？?。！!\s]*$/i;
 const STRONG_TOPIC = /(?:STL|TCP|UDP|HTTP|MQTT|CoAP|LwIP|IIC|I2C|SPI|UART|CAN(?: FD)?|LIN|FlexRay|Modbus|FOC|DMA|PWM|ADC|DAC|GPIO|NVIC|SysTick|MPU|MMU|FreeRTOS|RT-Thread|Zephyr|Linux|RTOS|C\+\+|C语言|RISC-V|Cortex-[MAR]|虚函数|堆和栈|进程间通信|进程线程|链表|字符串|排序|同步机制|三次握手|四次挥手|容器|上拉电阻|EEPROM|Flash|内存管理|低速抖动|系统架构|完整过程|实现过程)/i;
@@ -64,7 +65,7 @@ const ASSERTIVE_STATEMENT = /^(?:我|我们|系统|项目|这个项目|当前项
 const SMALL_TALK = /^(?:你好|您好|谢谢|辛苦了|哈哈|嗨)[。！？?！\s]*$/i;
 const CANDIDATE_SPEECH = /^(?:我|我们|本人|候选人).*(?:负责|做过|参与|实现|采用|使用|认为|觉得|已经|目前|先|会|可以).*[。！!]$/;
 const TOPIC_ANNOUNCEMENT = /^(?:(?:(?:下面聊(?:一下)?|接下来问一个|继续问一个|我们先聊(?:一下)?|先聊(?:一下)?|再聊(?:一下)?|我换个(?:更底层的)?|换个(?:话题|方向)?)(?:\s*(?:RTOS|FreeRTOS|C\+\+基础|底层驱动|通信协议|系统设计|项目经验|异常恢复|CAN|UART|DMA|FOC)(?:这个|相关)?(?:话题|部分|问题)?|(?:更?底层|技术|方向)?(?:的)?(?:话题|问题)?))|(?:RTOS|FreeRTOS|C\+\+基础|底层驱动|通信协议|系统设计|项目经验|异常恢复|CAN|UART|DMA|FOC)(?:这个|相关)?(?:话题|部分|问题)?)[。！？?！\s，,、]*$/iu;
-const INSTRUCTION_MODIFIER = /^(?!.*(?:什么|为什么|为何|怎么|如何|怎样|哪些|哪种|哪个|是否|有没有|吗|呢|[？?]))(?:请你|请)?(?:(?:重点|着重)(?:讲|说|说明|展开)(?:一下|一点)?(?:\s*[^\n。！？?！]{0,30})?|展开一点|具体一点|简单说|控制在\s*\d+\s*(?:秒|分钟)|结合项目(?:说|讲)|只讲|[^\n。！？?！]{1,32}角度(?:也)?(?:说|讲|考虑)(?:一下|一点)?)(?:[。！？?！\s，,、]*)$/iu;
+const INSTRUCTION_MODIFIER = /^(?!.*(?:什么|为什么|为何|怎么|如何|怎样|哪些|哪种|哪个|哪一个|是否|有没有|吗|呢|[？?]))(?:请你|请)?(?:(?:重点|着重)(?:讲|说|说明|展开)(?:一下|一点)?(?:\s*[^\n。！？?！]{0,30})?|展开一点|具体一点|(?:简单|大概)(?:说|讲)(?:说|一下|讲一下)?(?:思路)?(?:就行|即可)?|说重点|不用展开|简短(?:一点|说一下)?|控制在\s*\d+\s*(?:秒|分钟)|结合项目(?:说|讲)|只讲|[^\n。！？?！]{1,32}角度(?:也)?(?:说|讲|考虑)(?:一下|一点)?)(?:[。！？?！\s，,、]*)$/iu;
 const SELF_INTRODUCTION = /^(?:请你|请|能否|可以)?(?:先)?(?:做|进行|来)(?:一下)?(?:一分钟|一段|个)?自我介绍[。！？?！\s，,、]*$/iu;
 
 const KNOWN_ENTITIES = [
@@ -136,7 +137,7 @@ export class SpeechActClassifier {
     if (TOPIC_TRANSITION.test(normalizedText)) return { speechAct: "TOPIC_TRANSITION", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "topic-transition-marker", topic, entities };
     if (CONTROL.test(normalizedText)) return { speechAct: "CONTROL", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "interview-control", topic, entities };
     if (ACKNOWLEDGEMENT.test(normalizedText) || /^(?:那个)[。！？?！\s]*$/i.test(normalizedText)) return { speechAct: "ACKNOWLEDGEMENT", shouldAnswer: false, confidence: 0.99, normalizedText, reason: "acknowledgement", topic, entities };
-    if (INSTRUCTION_MODIFIER.test(normalizedText)) return { speechAct: "INSTRUCTION_MODIFIER", shouldAnswer: false, confidence: 0.97, normalizedText, reason: "instruction-modifier", topic, entities };
+    if (isStyleOnly(normalizedText) || INSTRUCTION_MODIFIER.test(normalizedText)) return { speechAct: "INSTRUCTION_MODIFIER", shouldAnswer: false, confidence: 0.97, normalizedText, reason: "instruction-modifier", topic, entities };
     if (TOPIC_ANNOUNCEMENT.test(normalizedText) && !QUESTION_FORM.test(normalizedText)) return { speechAct: "TOPIC_ANNOUNCEMENT", shouldAnswer: false, confidence: 0.96, normalizedText, reason: "topic-announcement", topic, entities };
     if (SELF_INTRODUCTION.test(normalizedText)) return { speechAct: "ANSWER_REQUEST", shouldAnswer: true, confidence: 0.98, normalizedText, reason: "self-introduction", topic, entities };
     if (CODE_CONTEXT.test(normalizedText) && !CODE_REQUEST.test(normalizedText)) return { speechAct: "TOPIC_ANCHOR", shouldAnswer: false, confidence: 0.98, normalizedText, reason: "code-context", topic: "代码题", entities, codeContext: true };
