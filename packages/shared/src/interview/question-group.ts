@@ -74,6 +74,18 @@ export interface QuestionGroup {
   slots: QuestionSlot[];
 }
 
+export type QuestionThreadStatus = "ACTIVE" | "PAUSED" | "CLOSED";
+
+export interface QuestionThread {
+  id: string;
+  rootQuestion: string;
+  activeProjectId?: string;
+  topic?: string;
+  questions: QuestionItem[];
+  status: QuestionThreadStatus;
+  lastUpdatedAt: number;
+}
+
 export interface AddQuestionInput {
   turn: InterviewTurn;
   question: QuestionCandidate;
@@ -251,6 +263,7 @@ export class QuestionGroupManager {
   private readonly turnBuilder: TurnBuilder;
   private readonly groups = new Map<string, QuestionGroup>();
   private readonly questionToGroup = new Map<string, string>();
+  private readonly threadStatuses = new Map<string, QuestionThreadStatus>();
   private pendingQuestionContextValue: PendingQuestionContext | undefined;
   private sequence = 0;
 
@@ -261,6 +274,7 @@ export class QuestionGroupManager {
   reset(): void {
     this.groups.clear();
     this.questionToGroup.clear();
+    this.threadStatuses.clear();
     this.pendingQuestionContextValue = undefined;
     this.sequence = 0;
   }
@@ -364,6 +378,51 @@ export class QuestionGroupManager {
     return group ? copyGroup(group) : undefined;
   }
 
+  getThread(groupId: string, activeProjectId?: string): QuestionThread | undefined {
+    const group = this.groups.get(groupId);
+    if (!group) return undefined;
+    const status = group.status === "closed" ? "CLOSED" : this.threadStatuses.get(groupId) ?? "ACTIVE";
+    return {
+      id: group.id,
+      rootQuestion: group.primaryQuestion ?? group.title,
+      ...(activeProjectId ? { activeProjectId } : {}),
+      ...(group.topic ? { topic: group.topic } : {}),
+      questions: group.items.map(copyItem),
+      status,
+      lastUpdatedAt: group.updatedAt
+    };
+  }
+
+  listThreads(activeProjectId?: string): QuestionThread[] {
+    return [...this.groups.values()].map((group) => this.getThread(group.id, activeProjectId)).filter((thread): thread is QuestionThread => Boolean(thread));
+  }
+
+  pause(groupId: string): QuestionThread | undefined {
+    const group = this.groups.get(groupId);
+    if (!group || group.status === "closed") return undefined;
+    this.threadStatuses.set(groupId, "PAUSED");
+    group.updatedAt = Date.now();
+    return this.getThread(groupId);
+  }
+
+  resume(groupId: string): QuestionThread | undefined {
+    const group = this.groups.get(groupId);
+    if (!group || group.status === "closed") return undefined;
+    this.threadStatuses.set(groupId, "ACTIVE");
+    group.updatedAt = Date.now();
+    return this.getThread(groupId);
+  }
+
+  closeThread(groupId: string): QuestionThread | undefined {
+    const group = this.groups.get(groupId);
+    if (!group) return undefined;
+    group.status = "closed";
+    group.endedAt = Date.now();
+    group.updatedAt = group.endedAt;
+    this.threadStatuses.set(groupId, "CLOSED");
+    return this.getThread(groupId);
+  }
+
   getGroupForQuestion(questionId: string): QuestionGroup | undefined {
     const groupId = this.questionToGroup.get(questionId);
     return groupId ? this.getGroup(groupId) : undefined;
@@ -417,7 +476,7 @@ export class QuestionGroupManager {
   }
 
   private currentGroup(): QuestionGroup | undefined {
-    return [...this.groups.values()].reverse().find((group) => group.displayable && group.status !== "closed");
+    return [...this.groups.values()].reverse().find((group) => group.displayable && group.status !== "closed" && this.threadStatuses.get(group.id) !== "PAUSED");
   }
 
   private rememberPendingContext(input: AddQuestionInput, type: QuestionThreadItemType, now: number): void {

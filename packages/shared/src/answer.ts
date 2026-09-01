@@ -19,6 +19,7 @@ import { classifyQuestionSemanticFrame } from "./question/semantic-frame";
 import { matchCoreTechnicalQa, type CoreTechnicalQaCard } from "./answer/core-technical-qa";
 import { TechnicalAccuracyGuard } from "./answer/technical-accuracy-guard";
 import { enforceHrProfilePolicy } from "./answer/hr-profile-policy";
+import { ProjectTruthGuard } from "./answer/project-truth-guard";
 
 export * from "./answer/claim-gate";
 export * from "./answer/evidence-context";
@@ -30,6 +31,8 @@ export * from "./answer/core-technical-qa";
 export * from "./answer/technical-accuracy-guard";
 export * from "./answer/chinese-technical-language-policy";
 export * from "./answer/hr-profile-policy";
+export * from "./answer/claim-extractor";
+export * from "./answer/project-truth-guard";
 
 export type AnswerMode = "FAST" | "NORMAL" | "DEEP";
 export { classifyAnswerQuestion } from "./answer/answer-strategy";
@@ -75,6 +78,17 @@ export interface AnswerTelemetry {
   projectAnchorAvailable?: boolean;
   projectQuestionRequested?: boolean;
   projectQuestionMode?: string;
+  utteranceCompleteness?: string;
+  activeProjectId?: string;
+  activeProjectConfidence?: number;
+  topic?: string;
+  questionRelation?: string;
+  projectQaMatch?: string;
+  projectFactCount?: number;
+  sessionEvidenceCount?: number;
+  firstTokenMs?: number;
+  answerTotalMs?: number;
+  questionDebounceMs?: number;
   projectAutoAnchorId?: string;
   projectAutoAnchorConfidence?: number;
   questionNucleusIntent?: string;
@@ -96,6 +110,8 @@ export interface AnswerTelemetry {
   technicalViolationCount?: number;
   claimGateDecision?: "allow" | "rewrite" | "partial" | "abstain";
   blockedPersonalClaimCount?: number;
+  blockedClaimCount?: number;
+  projectTruthDecision?: "ALLOW" | "REWRITE" | "BLOCK";
   blockedClaimTypes?: string[];
   unsupportedPastPersonalActionCount?: number;
   historyRevision?: number;
@@ -156,6 +172,10 @@ export interface AnswerContextInput {
   /** Evidence captured for this question; when present it is authoritative. */
   evidenceSnapshot?: EvidenceSnapshot;
   questionTelemetry?: Partial<AnswerTelemetry>;
+  /** Byte-stable context supplied for every answer in an interview. */
+  stableInterviewPrefix?: string;
+  /** Bounded rolling state; it is advisory and never replaces evidence. */
+  interviewMemo?: string;
 }
 
 export interface ContextPack {
@@ -188,6 +208,8 @@ export interface ContextPack {
   sessionEvidence: CandidateStatementEvidence[];
   candidateStatements: CandidateStatementEvidence[];
   questionTelemetry?: Partial<AnswerTelemetry>;
+  stableInterviewPrefix?: string;
+  interviewMemo?: string;
 }
 
 function answerTokenBudget(mode: AnswerMode, kind: AnswerQuestionKind): number {
@@ -250,6 +272,8 @@ export class ContextRouter {
       interviewMemory: snapshot?.interviewMemory ?? input.interviewMemory,
       followUpContext: input.followUpContext,
       evidenceSnapshot: snapshot,
+      ...(input.stableInterviewPrefix ? { stableInterviewPrefix: input.stableInterviewPrefix } : {}),
+      ...(input.interviewMemo ? { interviewMemo: input.interviewMemo } : {}),
       sessionEvidence: routedSessionEvidence.map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) })),
       candidateStatements: routedSessionEvidence.map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) }))
       ,...(input.questionTelemetry ? { questionTelemetry: { ...input.questionTelemetry } } : {})
@@ -258,7 +282,7 @@ export class ContextRouter {
 }
 
 export interface PromptSection {
-  name: "system/base" | "interview-style" | "project-qa-context" | "core-qa-context" | "profile-context" | "skill-context" | "experience-context" | "evidence-context" | "retrieval-context" | "question-bank-context" | "recent-transcript" | "interview-memory" | "follow-up-context" | "multi-slot-context" | "conversation-history" | "question" | "output-format";
+  name: "system/base" | "stable-prefix" | "rolling-memo" | "interview-style" | "project-qa-context" | "core-qa-context" | "profile-context" | "skill-context" | "experience-context" | "evidence-context" | "retrieval-context" | "question-bank-context" | "recent-transcript" | "interview-memory" | "follow-up-context" | "multi-slot-context" | "conversation-history" | "question" | "output-format";
   content: string;
 }
 
@@ -273,9 +297,11 @@ export class PromptBuilder {
     const projectContextRequested = intent.asksProjectImplementation || intent.allowsProjectEvidence;
     const sourceMode = context.answerSourcePlan?.mode;
     const sections: PromptSection[] = [
+      ...(context.stableInterviewPrefix ? [{ name: "stable-prefix" as const, content: context.stableInterviewPrefix }] : []),
       { name: "system/base", content: `你是实时面试辅助。先判断题型，再按题型回答。回答必须真实、直接、便于候选人马上口述；第一句必须回应面试官当前问题，不能输出“面试策略”或“面试官一般喜欢”。不要输出“题库参考答案”“Resume”“岗位要求”“结构化项目事实”等资料标签，也不要评价面试官。嵌入式问题要使用标准专业术语，并根据上下文区分 Cortex-M、ARM32、ARM64、RTOS、Embedded Linux 等语境，不能把不同平台的概念混为一谈。项目资料只能增强项目实现说明，不能决定通用技术题是否可回答；[PROJECT_SOURCE] 不能自动证明个人职责或指标，[GLOBAL_REFERENCE] 只能解释通用概念；第一人称个人事实只能来自已确认的个人或当前面试陈述。项目技术事实可以改写成“我这个项目里用的是 X”，但除非 Personal Ownership Evidence 明确支持，不能改写成“我设计了 X”“我负责 X”“我主导 X”“我独立完成 X”或“我决定使用 X”。${sourceMode ? `当前回答源模式：${sourceMode}。` : ""}${personalClaimRequested ? "当前需要个人经历表达：可以使用可追溯的个人素材；没有确认的身份、职责、指标或结果必须弱化或明确说明。" : intent.asksProjectImplementation ? "当前问题关注项目实现：可以讲项目技术事实和通用工程方法，但不要把项目实现自动说成候选人本人负责。" : "当前不是个人经历问题：直接回答技术问题，不要为了个性化而虚构候选人经历。"}` },
       { name: "interview-style", content: `题型：${plan?.questionType ?? kind}。回答模式：${mode}。回答策略：${selectedStrategy.openingGuidance}${selectedStrategy.spokenGuidance}${new SpokenAnswerFormatter().instructions(mode, kind, plan)}` }
     ];
+    if (context.interviewMemo?.trim()) sections.push({ name: "rolling-memo", content: `这是当前面试的滚动备忘，只用于保持上下文一致；它不是事实证据，个人事实仍必须以证据快照为准。\n${context.interviewMemo.trim()}` });
     const expressionInstruction = context.expressionLevel === "expert"
       ? "可以使用业内标准专业表达，但避免无意义堆砌术语。"
       : context.expressionLevel === "standard"
@@ -432,6 +458,7 @@ export interface AnswerGenerationOptions {
 class StreamingSentenceClaimGate {
   private pending = "";
   private elapsed = 0;
+  private readonly projectTruthGuard = new ProjectTruthGuard();
 
   constructor(private readonly input: { question: string; evidenceSnapshot: EvidenceSnapshot; intent: ReturnType<typeof analyzeAnswerIntent> }) {}
 
@@ -463,10 +490,15 @@ class StreamingSentenceClaimGate {
     // authoritative, while sentence-level checks make unsupported ownership
     // claims safe without blocking the rest of the stream.
     const sentenceResult = new ClaimGate().check({ ...this.input, answer: sentence });
-    this.elapsed += Math.max(0, performance.now() - startedAt);
-    if (sentenceResult.decision === "abstain") return "";
+    if (sentenceResult.decision === "abstain") {
+      this.elapsed += Math.max(0, performance.now() - startedAt);
+      return "";
+    }
     const candidate = sentenceResult.decision === "allow" ? sentence : sentenceResult.rewrittenAnswer ?? "";
-    return stripClaimGateAuditText(candidate);
+    const truthResult = this.projectTruthGuard.check({ answer: candidate, evidenceSnapshot: this.input.evidenceSnapshot });
+    this.elapsed += Math.max(0, performance.now() - startedAt);
+    if (truthResult.decision === "BLOCK") return "";
+    return stripClaimGateAuditText(truthResult.answer);
   }
 }
 
@@ -727,6 +759,17 @@ export class AnswerAgent {
         needsRepair: false
       };
     }
+    const projectTruth = new ProjectTruthGuard().check({ answer: formattedText, evidenceSnapshot });
+    if (projectTruth.decision !== "ALLOW") {
+      formattedText = stripClaimGateAuditText(projectTruth.answer);
+      quality = {
+        ...quality,
+        score: projectTruth.decision === "BLOCK" ? 0 : Math.min(quality.score, 0.75),
+        issues: [...new Set([...quality.issues, `project-truth-${projectTruth.decision.toLowerCase()}`, ...projectTruth.findings.filter((finding) => finding.status === "CONTRADICTED").map(() => "project-truth-contradicted")])],
+        suggestions: [...quality.suggestions, projectTruth.reason],
+        needsRepair: false
+      };
+    }
     formattedText = stripClaimGateAuditText(formattedText);
     quality = {
       ...quality,
@@ -749,8 +792,16 @@ export class AnswerAgent {
       blockedClaimTypes: [...new Set(claimGate.blockedClaims.map((claim) => claim.type))],
       unsupportedPastPersonalActionCount: claimGate.unsupportedPastPersonalActionCount,
       claimGateMs: streamingClaimGate?.elapsedMs,
+      projectFactCount: context.projectEvidence.length + context.projectQaEvidence.length + context.verifiedPersonalProjectFacts.length,
+      sessionEvidenceCount: context.sessionEvidence.length,
+      topic: context.currentTopic ?? context.interviewMemory?.currentTopic,
+      questionRelation: context.followUpContext ? "FOLLOW_UP" : "NEW_TOPIC",
+      projectQaMatch: context.answerSourcePlan?.qaMatchLevel,
       ...(context.answerSourcePlan?.qaMatch?.questionId ? { projectQaQuestionId: context.answerSourcePlan.qaMatch.questionId } : {})
     };
+    quality.projectTruthDecision = projectTruth.decision;
+    quality.blockedClaimCount = Math.max(claimGate.blockedClaims.length, projectTruth.blockedClaimCount);
+    quality.telemetry = { ...quality.telemetry, blockedClaimCount: projectTruth.blockedClaimCount, projectTruthDecision: projectTruth.decision };
     yield { type: "answer_end", answerId, text: formattedText, quality };
   }
 }

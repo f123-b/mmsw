@@ -11,6 +11,7 @@ export interface AnswerQualityResult {
   blockedClaimCount?: number;
   answerSourceMode?: string;
   qaMatchLevel?: string;
+  projectTruthDecision?: "ALLOW" | "REWRITE" | "BLOCK";
   telemetry?: AnswerTelemetry;
 }
 

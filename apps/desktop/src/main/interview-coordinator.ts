@@ -23,6 +23,18 @@ import {
   SessionEvidenceStore,
   requiresPersonalClaimEvidence,
   SpeechActClassifier,
+  SpeechActDetector,
+  UtteranceCompletenessGate,
+  ActiveProjectResolver,
+  AntecedentResolver,
+  InterviewMemo,
+  RuntimeInterviewTelemetry,
+  ProjectConsistencyGuard,
+  TranscriptAssembler,
+  QuestionDebounceController,
+  ProjectTruthGuard,
+  stripClaimGateAuditText,
+  WrittenProblemStateStore,
   shouldHardRejectSpeechAct,
   QuestionTrace,
   questionTraceTextMetadata,
@@ -31,6 +43,7 @@ import {
   SessionStateMachine,
   PendingQuestionDraftAssembler,
   TechnicalTerminologyNormalizer,
+  ContextAwareAsrNormalizer,
   buildSessionTerminologyContext,
   splitIntraSegmentQuestions,
   type PendingQuestionDraft,
@@ -59,9 +72,10 @@ import {
   type CandidateStatementEvidence,
   type FollowUpContext,
   type VisionInput,
-  type QuestionGroup
-  , type SessionTerminologyContext
-  , type TerminologyRolloutMode
+  type QuestionGroup,
+  type ProjectAliasCandidate,
+  type SessionTerminologyContext,
+  type TerminologyRolloutMode
 } from "@interview-copilot/shared";
 import type { AudioStartOptions } from "./audio-manager";
 import type { RealtimeConnectOptions, RealtimeConnectionState } from "./realtime-session";
@@ -116,6 +130,10 @@ export interface InterviewStartOptions extends Omit<RealtimeConnectOptions, "aut
   terminologyMode?: TerminologyRolloutMode;
   /** Optional per-interview direction selection; absent keeps the legacy route. */
   directionSelection?: InterviewDirectionSelection;
+  /** Candidate project index used by the sticky active-project resolver. */
+  projectCandidates?: readonly ProjectAliasCandidate[];
+  /** Precomputed low-churn context shared by every answer in this session. */
+  stableInterviewPrefix?: string;
 }
 
 export interface InterviewContextSelection {
@@ -215,6 +233,8 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly history: InterviewHistoryPort;
   private readonly now: () => number;
   private readonly speechActClassifier = new SpeechActClassifier();
+  private readonly speechActDetector = new SpeechActDetector(this.speechActClassifier);
+  private readonly completenessGate = new UtteranceCompletenessGate();
   private readonly turnCompletionGate = new TurnCompletionGate();
   private readonly semanticAnswerabilityGate = new SemanticAnswerabilityGate();
   private readonly unresolvedAsrGate = new UnresolvedAsrGate();
@@ -222,9 +242,19 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly anchorStore: ContextAnchorStore;
   private sessionTerminologyLexicon: DynamicTechnicalLexicon = buildDynamicTechnicalLexicon();
   private readonly sessionTerminologyNormalizer = new TechnicalTerminologyNormalizer({ mode: "high_confidence" });
+  private readonly contextAwareAsrNormalizer = new ContextAwareAsrNormalizer();
+  private sessionTerminologyContext: SessionTerminologyContext | undefined;
   private readonly turnBuilder = new TurnBuilder();
   private readonly questionGroups = new QuestionGroupManager(this.turnBuilder);
   private readonly answerScheduler = new AnswerScheduler();
+  private readonly transcriptAssembler = new TranscriptAssembler({ maxGapMs: 2_000 });
+  private readonly questionDebounceController = new QuestionDebounceController<PendingQuestionDraft>({ minDelayMs: 0, maxDelayMs: 1_200 });
+  private readonly activeProjectResolver = new ActiveProjectResolver();
+  private readonly antecedentResolver = new AntecedentResolver();
+  private readonly projectConsistencyGuard = new ProjectConsistencyGuard();
+  private readonly interviewMemo = new InterviewMemo();
+  private readonly interviewTelemetry = new RuntimeInterviewTelemetry();
+  private readonly writtenProblemState = new WrittenProblemStateStore();
   private readonly contextLock = new ContextLock();
   private readonly sessionEvidence = new SessionEvidenceStore();
   private readonly turns = new Map<string, InterviewTurn>();
@@ -254,7 +284,6 @@ export class InterviewCoordinator extends EventEmitter {
   private answerGeneration = 0;
   private answerTriggerTimer: NodeJS.Timeout | undefined;
   private pendingAnswerQuestion: QuestionCandidate | undefined;
-  private readonly answerQueue: QuestionCandidate[] = [];
   private readonly visibleAnswerGroups = new Set<string>();
   private readonly answerContextSnapshots = new Map<string, {
     recentTranscript: string[];
@@ -308,6 +337,27 @@ export class InterviewCoordinator extends EventEmitter {
   get running(): boolean { return Boolean(this.activeInterviewId) && this.runtimeSessionState === "running"; }
   get automationMode(): "MANUAL" | "AUTO" { return this.activeOptions?.automationMode ?? this.defaultAutomationMode; }
   get runtimeState(): RuntimeSessionState { return this.runtimeSessionState; }
+  get activeProject() { return this.activeProjectResolver.state.activeProject; }
+  getWrittenProblemContext(): string { return this.writtenProblemState.promptContext(); }
+  getRuntimeInterviewTelemetry() { return this.interviewTelemetry.snapshot(); }
+
+  private get activeProjectId(): string | undefined {
+    return this.activeProjectResolver.state.activeProject?.projectId ?? this.activeOptions?.projectId;
+  }
+
+  private observeProjectContext(text: string, speaker: "interviewer" | "candidate", now: number, entities: readonly string[] = [], topics: readonly string[] = []): void {
+    const current = this.activeProjectResolver.state.activeProject;
+    const consistency = this.projectConsistencyGuard.evaluate(text, current);
+    if (consistency.decision === "PROJECT_ENTITY_CONFLICT") {
+      this.interviewMemo.recordContradiction(`${consistency.conflictingEntities.join("、")}：${consistency.reason}`);
+      this.recordRuntimeTrace("PROJECT_ENTITY_CONFLICT", { confidence: consistency.confidence, entities: consistency.conflictingEntities.join("、"), correctionCandidate: consistency.correctionCandidate }, { reasonCode: consistency.reason });
+    }
+    const resolution = this.activeProjectResolver.observe({ text, speaker, projects: this.activeOptions?.projectCandidates, now, entities, topics });
+    if (resolution.activeProject) {
+      this.interviewMemo.setProject(resolution.activeProject.projectName);
+      if (resolution.changed) this.recordRuntimeTrace("PROJECT_RESOLVED", { projectId: resolution.activeProject.projectId, confidence: resolution.activeProject.confidence, source: resolution.activeProject.source }, { reasonCode: resolution.reason });
+    }
+  }
 
   getRuntimeDiagnostics(): InterviewRuntimeDiagnostics {
     const pendingQuestions = [...this.runtimeQuestions.values()].filter((item) => ["detected", "confirmed", "queued"].includes(item.state)).length;
@@ -321,7 +371,7 @@ export class InterviewCoordinator extends EventEmitter {
       activeAnswers,
       activeStreams,
       transcriptQueueDepth: (this.pendingQuestionDraft.current ? 1 : 0) + this.questionTasks.size,
-      answerQueueDepth: this.answerQueue.length,
+      answerQueueDepth: this.answerScheduler.queueDepth,
       activeAbortControllers: this.runtimeAbortControllers.size,
       activeTimers: this.runtimeTimers.size,
       activeProviderRequests,
@@ -514,6 +564,7 @@ export class InterviewCoordinator extends EventEmitter {
       if (providedTerminologyContext && typeof (providedTerminologyContext as PromiseLike<SessionTerminologyContext>).then === "function") terminologyContext = await (providedTerminologyContext as Promise<SessionTerminologyContext>);
       else terminologyContext = providedTerminologyContext as SessionTerminologyContext | undefined ?? buildSessionTerminologyContext({ recentTopics: [startOptions.projectId].filter((value): value is string => Boolean(value)) });
       this.sessionTerminologyNormalizer.setContext(terminologyContext);
+      this.sessionTerminologyContext = terminologyContext;
       this.sessionTerminologyNormalizer.setMode(startOptions.terminologyMode ?? this.options.terminologyModeProvider?.(startOptions.profileId) ?? "high_confidence");
       this.detector.reset();
       this.questionGroups.reset();
@@ -521,11 +572,25 @@ export class InterviewCoordinator extends EventEmitter {
       this.visibleAnswerGroups.clear();
       this.contextLock.clear();
       this.sessionEvidence.reset();
+      this.transcriptAssembler.clear();
+      this.activeProjectResolver.reset(startedAt);
+      this.interviewMemo.reset();
+      this.interviewTelemetry.reset();
+      this.writtenProblemState.reset();
+      if (startOptions.projectId) {
+        const selectedProject = startOptions.projectCandidates?.find((project) => project.id === startOptions.projectId);
+        this.activeProjectResolver.setManual({
+          projectId: startOptions.projectId,
+          projectName: selectedProject?.name ?? startOptions.projectId,
+          entities: selectedProject?.entities ? [...selectedProject.entities] : undefined,
+          topics: selectedProject?.aliases ? [...selectedProject.aliases] : undefined
+        }, startedAt);
+        this.interviewMemo.setProject(selectedProject?.name ?? startOptions.projectId);
+      }
       this.turns.clear();
       this.anchorStore.reset();
       this.memory.reset();
       this.clearAnswerTrigger();
-      this.answerQueue.length = 0;
       this.answerContextSnapshots.clear();
       this.activeAnswerQuestion = undefined;
       this.activeModelSnapshot = this.options.answerAgent.getModelSnapshot();
@@ -597,7 +662,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.clearQuestionFlushTimer();
     this.clearRemoteAssemblyTimer();
     this.clearAnswerTrigger();
-    for (const question of this.answerQueue.splice(0)) {
+    for (const question of this.answerScheduler.queue) {
       this.markQuestionStateById(question.id, "cancelled");
       this.recordRuntimeTrace("QUESTION_CANCELLED", {}, { questionId: question.id, reasonCode: "session-stop" });
     }
@@ -766,16 +831,14 @@ export class InterviewCoordinator extends EventEmitter {
       if (schedulerDecision.action === "merge") {
         this.markQuestionState(question, "queued");
         this.markQuestionGroup(question.id, "queued");
-        this.recordRuntimeTrace("QUESTION_MERGED", { schedulerAction: schedulerDecision.action, groupId: question.groupId, relationType: question.relationType }, { questionId: question.id, reasonCode: schedulerDecision.reason });
+        this.recordRuntimeTrace("QUESTION_MERGED", { schedulerAction: schedulerDecision.action, planPatch: schedulerDecision.planPatch, groupId: question.groupId, relationType: question.relationType }, { questionId: question.id, reasonCode: schedulerDecision.reason });
         return;
       }
-      const alreadyQueued = this.answerQueue.some((queued) => queued.id === question.id);
-      if (!alreadyQueued && schedulerDecision.action !== "ignore" && this.activeAnswerQuestion?.id !== question.id) {
-        this.answerQueue.push(question);
+      if (schedulerDecision.action !== "ignore" && this.activeAnswerQuestion?.id !== question.id) {
         this.markQuestionState(question, "queued");
         this.markQuestionGroup(question.id, "queued");
         this.recordRuntimeTrace("QUESTION_QUEUED", { schedulerAction: schedulerDecision.action }, { questionId: question.id, reasonCode: schedulerDecision.reason });
-        this.emitDiagnostic(`ANSWER_QUEUED: ${question.id} (${this.answerQueue.length})`);
+        this.emitDiagnostic(`ANSWER_QUEUED: ${question.id} (${schedulerDecision.queueDepth})`);
       }
       return;
     }
@@ -821,7 +884,7 @@ export class InterviewCoordinator extends EventEmitter {
           { id: question.id, parentQuestionId: question.parentQuestionId, rootQuestionId: question.rootQuestionId, text: question.text },
           frozenContext.memory,
           {
-            relatedProject: /项目|简历|经历|负责|做过|成果|业绩/.test(question.text) ? this.activeOptions?.projectId : undefined,
+            relatedProject: /项目|简历|经历|负责|做过|成果|业绩/.test(question.text) ? this.activeProjectId : undefined,
             relatedTechnicalTopic: frozenContext.memory.currentTopic
           }
         )
@@ -832,7 +895,7 @@ export class InterviewCoordinator extends EventEmitter {
           if (!this.activeInterviewId || this.runtimeSessionId !== sessionId) return;
           this.recordRuntimeTrace(phase === "started" ? "RICH_CONTEXT_STARTED" : "RICH_CONTEXT_COMPLETED", {}, { questionId: question.id, providerRequestId, reasonCode: "background-rich-context" });
         },
-        projectId: this.activeOptions?.projectId,
+        projectId: this.activeProjectId,
         jobTargetId: this.activeOptions?.jobTargetId,
         ...(followUpContext ? { followUpContext } : {})
       });
@@ -879,7 +942,7 @@ export class InterviewCoordinator extends EventEmitter {
       const evidenceSnapshot: EvidenceSnapshot = this.contextLock.lock({
         questionId: question.id,
         profileId: this.activeProfileId,
-        projectId: this.activeOptions?.projectId,
+        projectId: this.activeProjectId,
         jobTargetId: this.activeOptions?.jobTargetId,
         profileSummary: providerContext.profileSummary,
         jobDescriptionSummary: providerContext.jobDescriptionSummary,
@@ -917,7 +980,9 @@ export class InterviewCoordinator extends EventEmitter {
         candidateStatements: evidenceSnapshot.candidateStatements,
         answerSourcePlan: evidenceSnapshot.answerSourcePlan,
         projectQaEvidence: evidenceSnapshot.projectQaEvidence,
-        evidenceSnapshot
+        evidenceSnapshot,
+        ...(this.activeOptions?.stableInterviewPrefix ? { stableInterviewPrefix: this.activeOptions.stableInterviewPrefix } : {}),
+        interviewMemo: this.interviewMemo.toText()
       };
       if (answerOperation) answerOperation.state = "provider_pending";
       if (answerOperation) answerOperation.state = "request_ready";
@@ -962,14 +1027,17 @@ export class InterviewCoordinator extends EventEmitter {
         this.answerFirstTokenAt = finishedAt;
         this.emitRealtimeMessage({ type: "answer_start", answerId, questionId: question.id, mode, model: directModel, ...(question.groupId ? { groupId: question.groupId, relation: answerRelationForQuestion(question) } : {}) });
         const preparedText = selfIntroDirect ? preparedAnswer.content : normalizeTechnicalTerms(preparedAnswer.content);
-        this.answerScheduler.markVisibleOutput(preparedText);
+        const projectTruth = new ProjectTruthGuard().check({ answer: preparedText, evidenceSnapshot });
+        const displayText = stripClaimGateAuditText(projectTruth.answer);
+        this.answerScheduler.markVisibleOutput(displayText);
         if (question.groupId) this.visibleAnswerGroups.add(question.groupId);
         const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
-        const telemetry = this.buildAnswerTelemetry(question, { answerSourceMode: projectQaMode ?? "question-bank", technicalGuardDecision: "allow", technicalViolationCount: 0, claimGateDecision: "allow", blockedPersonalClaimCount: 0 });
-        this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: preparedText, model: directModel, mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, telemetry, ...(question.groupId ? { groupId: question.groupId } : {}), relation: answerRelationForQuestion(question), answerRunId: operationId, createdAt: finishedAt });
+        const telemetry = this.buildAnswerTelemetry(question, { answerSourceMode: projectQaMode ?? "question-bank", technicalGuardDecision: "allow", technicalViolationCount: 0, claimGateDecision: "allow", blockedPersonalClaimCount: 0, projectTruthDecision: projectTruth.decision, blockedClaimCount: projectTruth.blockedClaimCount });
+        this.recordInterviewTelemetry(question, telemetry, finishedAt);
+        this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: displayText, model: directModel, mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, telemetry, ...(question.groupId ? { groupId: question.groupId } : {}), relation: answerRelationForQuestion(question), answerRunId: operationId, createdAt: finishedAt });
         if (answerOperation) answerOperation.state = "committed";
         this.recordRuntimeTrace("ANSWER_COMMITTED", {}, { questionId: question.id, answerId, providerRequestId, reasonCode: directModel });
-        this.emitRealtimeMessage({ type: "answer_end", answerId, text: preparedText });
+        this.emitRealtimeMessage({ type: "answer_end", answerId, text: displayText });
         this.recordRuntimeTrace("FIRST_VISIBLE_TOKEN", {}, { questionId: question.id, answerId, providerRequestId });
         this.markLatency(question.id, "firstVisibleTokenAt", finishedAt);
         this.recordRuntimeTrace("ANSWER_COMPLETED", {}, { questionId: question.id, answerId, providerRequestId });
@@ -990,7 +1058,7 @@ export class InterviewCoordinator extends EventEmitter {
         this.answerFirstTokenAt = undefined;
         return;
       }
-      const context = { ...lockedProviderContext, recentTranscript: lockedProviderContext.recentTranscript ?? [...frozenContext.recentTranscript], interviewMemory: lockedProviderContext.interviewMemory ?? memorySnapshot, questionTelemetry: this.buildAnswerTelemetry(question), ...(followUpContext ? { followUpContext } : {}) };
+      const context = { ...lockedProviderContext, recentTranscript: lockedProviderContext.recentTranscript ?? [...frozenContext.recentTranscript], interviewMemory: lockedProviderContext.interviewMemory ?? memorySnapshot, questionTelemetry: this.buildAnswerTelemetry(question), ...(this.activeOptions?.stableInterviewPrefix ? { stableInterviewPrefix: this.activeOptions.stableInterviewPrefix } : {}), interviewMemo: this.interviewMemo.toText(), ...(followUpContext ? { followUpContext } : {}) };
       const activePlan = this.answerScheduler.active?.id === question.id && !this.answerScheduler.active?.hasVisibleOutput ? this.answerScheduler.active.plan : undefined;
       const plannedQuestionText = activePlan
         ? [activePlan.question, ...activePlan.constraints, ...activePlan.examples, ...activePlan.subQuestions].filter(Boolean).join("\n")
@@ -1120,6 +1188,7 @@ export class InterviewCoordinator extends EventEmitter {
             claimGateDecision: event.quality?.claimGateDecision,
             blockedPersonalClaimCount: event.quality?.blockedClaimCount
           });
+          this.recordInterviewTelemetry(question, telemetry, finishedAt);
           this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: answerText, model: this.answerModel ?? "configured", mode: this.answerMode ?? mode, startedAt: this.answerStartedAt ?? startedAt, firstTokenAt: this.answerFirstTokenAt, finishedAt, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, telemetry, ...(question.groupId ? { groupId: question.groupId } : {}), relation: answerRelationForQuestion(question), answerRunId: operationId, createdAt: finishedAt });
           if (answerOperation) answerOperation.state = "committed";
           this.recordRuntimeTrace("ANSWER_COMMITTED", {}, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "provider-completed" });
@@ -1187,9 +1256,9 @@ export class InterviewCoordinator extends EventEmitter {
         if (this.activeAnswerQuestion?.id === question.id) this.activeAnswerQuestion = undefined;
         if (this.activeQuestionTrace === answerTrace) this.activeQuestionTrace = undefined;
         this.answerContextSnapshots.delete(question.id);
-        this.answerScheduler.complete(question.id, { activateNext: false });
-        const next = this.answerQueue.shift();
-        if (next && this.running) this.launchAnswer(next);
+        const next = this.answerScheduler.complete(question.id, { activateNext: false });
+        const nextQuestion = next ? this.runtimeQuestions.get(next.id)?.question : undefined;
+        if (nextQuestion && this.running) this.launchAnswer(nextQuestion);
       }
     }
   }
@@ -1214,16 +1283,31 @@ export class InterviewCoordinator extends EventEmitter {
     });
     this.asr.on("transcript", (snapshot: unknown, rawSegment: TranscriptSegment) => {
       const receivedAt = this.now();
+      const contextAwareAsr = this.contextAwareAsrNormalizer.normalize({
+        rawTranscript: rawSegment.text,
+        projectLexicon: this.sessionTerminologyLexicon,
+        recentContext: this.recentTranscript.slice(-6),
+        currentTopic: this.anchorStore.snapshot(receivedAt).currentTopic,
+        context: this.sessionTerminologyContext,
+        mode: this.activeOptions?.terminologyMode ?? "high_confidence"
+      });
       const segmentTerminology = this.sessionTerminologyNormalizer.normalizeTranscript(rawSegment.text, {
         contextText: this.memory.contextText(),
         currentTopic: this.anchorStore.snapshot(receivedAt).currentTopic,
         legacyLexicon: this.sessionTerminologyLexicon,
         partial: !rawSegment.final
       });
-      const segment: TranscriptSegment = { ...rawSegment, text: segmentTerminology.canonicalText };
+      const segment = { ...rawSegment, text: contextAwareAsr.canonicalTranscript, rawText: rawSegment.text } as TranscriptSegment & { rawText: string };
       if (!this.activeInterviewId || this.runtimeSessionState !== "running") {
         this.recordRuntimeTrace("STALE_RUNTIME_EVENT_DROPPED", { event: "transcript", source: segment.source, final: segment.final, textLength: segment.text.length }, { reasonCode: "inactive-session" });
         return;
+      }
+      this.observeProjectContext(rawSegment.text, rawSegment.source === "remote" ? "interviewer" : "candidate", receivedAt);
+      if (segment.final && segment.source === "remote") {
+        const assembled = this.transcriptAssembler.push(segment, receivedAt, rawSegment.text);
+        this.recordRuntimeTrace("TRANSCRIPT_ASSEMBLED", { merged: assembled.merged, reason: assembled.reason, fragmentCount: assembled.current?.fragments.length ?? 0, textLength: assembled.current?.text.length ?? 0 }, { reasonCode: assembled.reason });
+      } else if (!segment.final && segment.source === "remote") {
+        this.transcriptAssembler.push(segment, receivedAt, rawSegment.text);
       }
       this.recordRuntimeTrace("TRANSCRIPT_RECEIVED", { source: segment.source, final: segment.final, textLength: segment.text.length });
       if (segment.final) this.recordRuntimeTrace("ASR_FINAL_RECEIVED", { source: segment.source, textLength: segment.text.length }, { reasonCode: "asr-final" });
@@ -1365,7 +1449,7 @@ export class InterviewCoordinator extends EventEmitter {
       this.markQuestionState(event.question, "confirmed");
       this.recordRuntimeTrace("QUESTION_CONFIRMED", { textLength: event.question.text.length }, { questionId: event.question.id, reasonCode: event.type });
       if (groupResult.displayable && anchorEligibility.eligible) this.currentQuestion = event.question;
-      const trace = this.pendingQuestionTrace ?? new QuestionTrace({ questionTraceId: `question-trace-${event.question.id}`, questionScore: event.question.score, questionType: event.question.detectionType, followUp: event.question.speechAct === "FOLLOW_UP", projectId: this.activeOptions?.projectId, jobTargetId: this.activeOptions?.jobTargetId });
+      const trace = this.pendingQuestionTrace ?? new QuestionTrace({ questionTraceId: `question-trace-${event.question.id}`, questionScore: event.question.score, questionType: event.question.detectionType, followUp: event.question.speechAct === "FOLLOW_UP", projectId: this.activeProjectId, jobTargetId: this.activeOptions?.jobTargetId });
       const traceSnapshot = trace.snapshot();
       this.runtimeLatency.start(event.question.id, traceSnapshot.asrFinalReceivedAt ?? this.now());
       if (trace.snapshot().questionDetectedAt === undefined) trace.mark("questionDetected", this.now());
@@ -1377,6 +1461,10 @@ export class InterviewCoordinator extends EventEmitter {
       if (anchorEligibility.eligible) {
         this.memory.recordQuestion(event.question.text, { questionId: event.question.id, parentQuestionId: event.question.parentQuestionId, rootQuestionId: event.question.rootQuestionId, groupId: event.question.groupId, relationType: event.question.relationType, createdAt: event.question.detectedAt });
         this.anchorStore.recordConfirmedQuestion({ id: event.question.id, text: event.question.text, confidence: event.question.score, topic: event.question.topic, createdAt: event.question.detectedAt });
+        this.interviewMemo.recordQuestion(event.question.canonicalText ?? event.question.text);
+        this.interviewMemo.setTopic(event.question.topic ?? this.anchorStore.snapshot(this.now()).currentTopic);
+        this.writtenProblemState.setCurrentQuestion(event.question.canonicalText ?? event.question.text);
+        this.interviewTelemetry.record({ questionRelation: event.question.relationType ?? event.question.contextRelation, activeProjectId: this.activeProjectId, activeProjectConfidence: this.activeProject?.confidence, topic: event.question.topic }, confirmedAt);
       } else {
         this.recordRuntimeTrace("QUESTION_MERGED", { anchorEligibility: anchorEligibility.reason }, { questionId: event.question.id, reasonCode: "non-substantive-confirmed-question" });
       }
@@ -1513,7 +1601,10 @@ export class InterviewCoordinator extends EventEmitter {
     // question nucleus. Once a nucleus exists, keep the fast 220ms coalescing
     // window so the first answer still appears quickly.
     const delay = Math.max(this.pendingQuestionDraft.waitMs, completion.recommendedWaitMs);
+    const debounce = this.questionDebounceController.offer(draft, this.now(), delay);
+    this.interviewTelemetry.record({ questionDebounceMs: Math.max(0, debounce.dueAt - this.now()) }, this.now());
     this.runtimeTimers.set("remote-assembly", () => {
+      this.questionDebounceController.flush();
       this.remoteAssemblyTimer = undefined;
       this.remoteAssemblyStartedAt = undefined;
       this.recordRuntimeTrace("TURN_COMPLETION_COMPLETED", { state: completion.state, waitMs: delay }, { reasonCode: "pending-question-draft-ready" });
@@ -1590,6 +1681,7 @@ export class InterviewCoordinator extends EventEmitter {
 
   private clearRemoteAssemblyTimer(): void {
     this.runtimeTimers.clear("remote-assembly");
+    this.questionDebounceController.cancel();
     this.remoteAssemblyTimer = undefined;
     this.remoteAssemblyStartedAt = undefined;
   }
@@ -1625,7 +1717,7 @@ export class InterviewCoordinator extends EventEmitter {
       questionTraceId: `question-trace-${utterance.id}`,
       asrFinalReceivedAt: utterance.lastFinalReceivedAt ?? detectionStartedAt,
       utteranceFinalizedAt: utterance.finalizedAt ?? detectionStartedAt,
-      projectId: this.activeOptions?.projectId,
+      projectId: this.activeProjectId,
       jobTargetId: this.activeOptions?.jobTargetId
     }).mark("questionDetectionStarted", detectionStartedAt);
     this.pendingQuestionTrace = trace;
@@ -1644,10 +1736,23 @@ export class InterviewCoordinator extends EventEmitter {
       currentTopic: anchorSnapshot.currentTopic,
       legacyLexicon: this.sessionTerminologyLexicon
     });
-    const correctedText = terminology.canonicalText;
-    const completion = this.turnCompletionGate.decide(correctedText, { currentTopic: anchorSnapshot.currentTopic });
-    trace.update({
-      turnCompletionState: completion.state,
+      const correctedText = terminology.canonicalText;
+      const completion = this.turnCompletionGate.decide(correctedText, { currentTopic: anchorSnapshot.currentTopic });
+      const completeness = this.completenessGate.assess(correctedText, { currentTopic: anchorSnapshot.currentTopic });
+      const speechDetection = this.speechActDetector.detect(correctedText, {
+        memory: this.memory.snapshot(),
+        recentTranscript: previousTranscript,
+        currentTopic: anchorSnapshot.currentTopic,
+        latestAnchor: anchorSnapshot.latestAnchor,
+        pendingCodeContext: Boolean(anchorSnapshot.pendingCodeContext),
+        now: detectionStartedAt
+      });
+      this.writtenProblemState.addSpokenProblem(correctedText);
+      this.interviewTelemetry.record({ speechAct: speechDetection.speechAct, utteranceCompleteness: completeness.completeness, activeProjectId: this.activeProjectId, activeProjectConfidence: this.activeProject?.confidence, topic: anchorSnapshot.currentTopic }, detectionStartedAt);
+      trace.update({
+        speechAct: speechDetection.speechAct,
+        speechActReason: speechDetection.reason,
+        turnCompletionState: completion.state,
       turnCompletionConfidence: completion.confidence,
       turnCompletionReason: completion.reason,
       terminologyCorrectionCount: terminology.corrections.length,
@@ -1657,6 +1762,17 @@ export class InterviewCoordinator extends EventEmitter {
     });
     this.recordRuntimeTrace("QUESTION_LOCAL_ANALYSIS_STARTED", { textLength: correctedText.length }, { reasonCode: "final-utterance" });
     this.emitTelemetry("TERMINOLOGY_METRICS", { mode: terminology.mode, durationMs: terminology.normalizationMs, correctionsApplied: terminology.metrics.correctionsApplied, highConfidenceCorrections: terminology.metrics.highConfidenceCorrections, mediumCandidates: terminology.metrics.mediumCandidates, correctionRejected: terminology.metrics.correctionRejected });
+    if (["BACKCHANNEL", "ASR_NOISE", "INCOMPLETE", "COMMAND"].includes(speechDetection.speechAct)) {
+      if (speechDetection.speechAct === "COMMAND") {
+        if (speechDetection.sourceSpeechAct === "TOPIC_TRANSITION") this.pendingTopicTransition = true;
+        if (speechDetection.sourceSpeechAct === "TOPIC_ANNOUNCEMENT") this.stageQuestionContext(utterance, turn, correctedText, "TOPIC_ANNOUNCEMENT");
+      }
+      trace.update({ finalScore: 0, decision: "reject", decisionReason: speechDetection.reason }).mark("questionDetected", this.now());
+      this.currentQuestionTrace = trace;
+      if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
+      this.emitQuestionTrace();
+      return;
+    }
     if (["incomplete", "topic_announcement", "instruction_modifier", "filler"].includes(completion.state)) {
       if (completion.state === "topic_announcement" || completion.state === "instruction_modifier") {
         this.stageQuestionContext(utterance, turn, correctedText, completion.state === "topic_announcement" ? "TOPIC_ANNOUNCEMENT" : "INSTRUCTION_MODIFIER");
@@ -1682,7 +1798,7 @@ export class InterviewCoordinator extends EventEmitter {
       this.emitQuestionTrace();
       return;
     }
-    const speech = this.speechActClassifier.classify(correctedText, {
+      const speech = this.speechActClassifier.classify(correctedText, {
       memory: this.memory.snapshot(),
       recentTranscript: previousTranscript,
       currentTopic: anchorSnapshot.currentTopic,
@@ -1698,7 +1814,7 @@ export class InterviewCoordinator extends EventEmitter {
       contextTopic: anchorSnapshot.currentTopic,
       terminologyCorrectionCount: terminology.corrections.length,
       terminologyConfidence: terminology.confidence,
-      projectAnchorAvailable: Boolean(this.activeOptions?.projectId),
+      projectAnchorAvailable: Boolean(this.activeProjectId),
       isFollowUp: speech.speechAct === "FOLLOW_UP"
     });
     const promotesStatement = speech.speechAct === "STATEMENT" && Boolean(speech.topic || speech.entities.length);
@@ -1712,9 +1828,10 @@ export class InterviewCoordinator extends EventEmitter {
         createdAt: detectionStartedAt,
         ttlMs: speech.codeContext ? 12_000 : 7_000
       });
+    this.observeProjectContext(correctedText, "interviewer", detectionStartedAt, speech.entities, speech.topic ? [speech.topic] : []);
       this.memory.recordQuestion(anchor.text, { questionId: anchor.id, topic: anchor.topic, createdAt: anchor.createdAt });
     }
-    if (shouldHardRejectSpeechAct(speech)) {
+    if (speechDetection.speechAct !== "QUESTION" || shouldHardRejectSpeechAct(speech)) {
       if (speech.speechAct === "TOPIC_TRANSITION") {
         // Keep the boundary as coordinator state. The marker must not enter
         // QuestionGroupManager, otherwise the overlay gets a fake answerable
@@ -1729,7 +1846,19 @@ export class InterviewCoordinator extends EventEmitter {
       this.emitQuestionTrace();
       return;
     }
+    const antecedent = this.antecedentResolver.resolve({
+      text: correctedText,
+      activeProject: this.activeProject,
+      currentModule: anchorSnapshot.currentTopic,
+      currentTopic: anchorSnapshot.currentTopic,
+      previousQuestion: anchorSnapshot.lastConfirmedQuestion?.text,
+      previousAnswer: this.memory.snapshot().recentAnswers.at(-1),
+      spokenProblem: this.writtenProblemState.promptContext()
+    });
     const resolvedBase = this.anchorResolver.resolve({ text: correctedText, speechAct: speech.speechAct, anchors: anchorSnapshot });
+    const inheritedAntecedent = resolvedBase.contextRelation === "standalone"
+      && antecedent.relation === "FOLLOW_UP"
+      && Boolean(anchorSnapshot.lastConfirmedQuestion);
     const resolved = this.pendingTopicTransition
       ? {
         ...resolvedBase,
@@ -1741,6 +1870,18 @@ export class InterviewCoordinator extends EventEmitter {
         anchorUsed: undefined,
         reason: "pending-topic-transition"
       }
+      : inheritedAntecedent
+        ? {
+          ...resolvedBase,
+          contextRelation: "follow_up" as const,
+          parentQuestionId: anchorSnapshot.lastConfirmedQuestion?.id,
+          rootQuestionId: anchorSnapshot.lastConfirmedQuestion?.id,
+          parentQuestion: anchorSnapshot.lastConfirmedQuestion?.text,
+          rootQuestion: anchorSnapshot.lastConfirmedQuestion?.text,
+          topic: resolvedBase.topic ?? anchorSnapshot.currentTopic,
+          inheritedTopic: resolvedBase.inheritedTopic ?? anchorSnapshot.currentTopic,
+          reason: `antecedent-${antecedent.reason}`
+        }
       : resolvedBase;
     const canonicalQuestion = resolved.canonicalQuestion;
     const detectionContext = {
@@ -2109,9 +2250,12 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private buildAnswerTelemetry(question: QuestionCandidate, extra: Partial<AnswerTelemetry> = {}): AnswerTelemetry {
-    const projectQuestionRequested = /项目|简历|经历|负责|做过|成果|业绩|个人|你的实现|你的方案/.test(question.text);
+    const projectQuestionRequested = /项目|简历|经历|负责|做过|成果|业绩|个人|你的实现|你的方案/.test(question.text)
+      && !/^(?:那)?(?:volatile|c\+\+|c语言|c\/c\+\+|rtos|freertos|can|adc|dma|pwm|tcp|udp|mqtt|虚函数|优先级反转|三次握手|系统设计|数据结构|操作系统|网络协议)/i.test(question.text.trim());
     const trace = this.activeQuestionTrace?.snapshot();
     const latency = this.runtimeLatency.snapshot().find((sample) => sample.id === question.id);
+    const activeProject = this.activeProject;
+    const runtimeTelemetry = this.interviewTelemetry.snapshot();
     const elapsed = (end?: number, start?: number): number | undefined => end === undefined || start === undefined ? undefined : Math.max(0, end - start);
     const nucleus = analyzeQuestionNucleus(question.canonicalText ?? question.text);
     return {
@@ -2134,8 +2278,19 @@ export class InterviewCoordinator extends EventEmitter {
       topicRelation: question.relationType,
       parentQuestionId: question.parentQuestionId,
       rootQuestionId: question.rootQuestionId,
-      projectAnchorAvailable: Boolean(this.activeOptions?.projectId),
+      projectAnchorAvailable: Boolean(this.activeProjectId),
       projectQuestionRequested,
+      utteranceCompleteness: runtimeTelemetry.utteranceCompleteness,
+      activeProjectId: activeProject?.projectId,
+      activeProjectConfidence: activeProject?.confidence,
+      topic: question.topic ?? runtimeTelemetry.topic,
+      questionRelation: question.relationType ?? question.contextRelation,
+      projectQaMatch: extra.projectQaMatch ?? runtimeTelemetry.projectQaMatch,
+      projectFactCount: extra.projectFactCount ?? runtimeTelemetry.projectFactCount,
+      sessionEvidenceCount: extra.sessionEvidenceCount ?? this.sessionEvidence.snapshot().length,
+      firstTokenMs: extra.firstTokenMs ?? elapsed(latency?.providerFirstTokenAt, latency?.questionConfirmedAt),
+      answerTotalMs: extra.answerTotalMs ?? elapsed(this.now(), latency?.questionConfirmedAt),
+      questionDebounceMs: extra.questionDebounceMs ?? runtimeTelemetry.questionDebounceMs,
       historyRevision: this.activeInterviewId ? this.history.getRevision?.(this.activeInterviewId) : undefined,
       asrFinalToQuestionConfirmedMs: elapsed(latency?.questionConfirmedAt, latency?.asrFinalReceivedAt),
       questionConfirmedToProviderRequestMs: elapsed(latency?.providerRequestStartedAt, latency?.questionConfirmedAt),
@@ -2160,6 +2315,27 @@ export class InterviewCoordinator extends EventEmitter {
       },
       ...extra
     };
+  }
+
+  private recordInterviewTelemetry(question: QuestionCandidate, telemetry: AnswerTelemetry, now: number): void {
+    this.interviewTelemetry.record({
+      speechAct: telemetry.speechAct,
+      utteranceCompleteness: telemetry.utteranceCompleteness,
+      activeProjectId: telemetry.activeProjectId,
+      activeProjectConfidence: telemetry.activeProjectConfidence,
+      topic: telemetry.topic,
+      questionRelation: telemetry.questionRelation,
+      answerSourceMode: telemetry.answerSourceMode,
+      projectQaMatch: telemetry.projectQaMatch,
+      projectFactCount: telemetry.projectFactCount,
+      sessionEvidenceCount: telemetry.sessionEvidenceCount,
+      claimGateDecision: telemetry.claimGateDecision,
+      blockedClaimCount: telemetry.blockedClaimCount ?? telemetry.blockedPersonalClaimCount,
+      firstTokenMs: telemetry.firstTokenMs,
+      answerTotalMs: telemetry.answerTotalMs,
+      questionDebounceMs: telemetry.questionDebounceMs
+    }, now);
+    this.emitTelemetry("RUNTIME_INTERVIEW_TELEMETRY", { questionId: question.id, ...this.interviewTelemetry.snapshot() });
   }
 
   private emitTelemetry(name: string, fields: Record<string, unknown>): void {

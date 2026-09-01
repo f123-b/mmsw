@@ -15,6 +15,8 @@ export type SegmentSemanticRole =
 
 export interface PendingQuestionRawSegment {
   segment: TranscriptSegment;
+  /** Raw provider text kept beside the normalized processing segment. */
+  rawText?: string;
   role: SegmentSemanticRole;
   receivedAt: number;
   answerabilityState?: AnswerabilityState;
@@ -199,7 +201,11 @@ function hasNucleus(draft: PendingQuestionDraft | undefined): boolean {
 }
 
 function hasAnswerableQuestion(draft: PendingQuestionDraft | undefined): boolean {
-  return Boolean(draft && (draft.nucleus.length > 0 || draft.subQuestions.length > 0));
+  // A short question nucleus can be classified as OPEN_NUCLEUS while it is
+  // being assembled (for example, “有什么区别？”). Once finalized by the
+  // coordinator it is still an answerable question and late constraints must
+  // be able to attach to it.
+  return Boolean(draft && (draft.nucleus.length > 0 || draft.subQuestions.length > 0 || draft.openNuclei.length > 0));
 }
 
 /**
@@ -252,11 +258,11 @@ export class PendingQuestionDraftAssembler {
 
     const recent = this.recentFinalizedDraft;
     const recentAge = recent ? receivedAt - (recent.finalizedAt ?? recent.lastReceivedAt) : Number.POSITIVE_INFINITY;
-    if (!this.activeDraft && recent && options.activeQuestionGroup && options.contextualFollowUp && hasNucleus(recent) && recentAge <= this.recentQuestionContextRetentionMs && role === "SUBQUESTION") {
+    if (!this.activeDraft && recent && options.activeQuestionGroup && options.contextualFollowUp && hasAnswerableQuestion(recent) && recentAge <= this.recentQuestionContextRetentionMs && role === "SUBQUESTION") {
       this.start(segment, role, receivedAt, options);
       return { role, draft: this.current, late: false, accepted: true, reason: "active-question-follow-up-new-draft" };
     }
-    if (!this.activeDraft && recent && options.activeQuestionGroup && !options.contextualFollowUp && hasNucleus(recent) && recentAge <= this.lateModifierWindowMs && ["CONSTRAINT", "OUTPUT_REQUIREMENT", "EXAMPLE", "SUBQUESTION", "OPEN_NUCLEUS", "SUPPORTING_FRAGMENT"].includes(role)) {
+    if (!this.activeDraft && recent && options.activeQuestionGroup && !options.contextualFollowUp && hasAnswerableQuestion(recent) && recentAge <= this.lateModifierWindowMs && ["CONSTRAINT", "OUTPUT_REQUIREMENT", "EXAMPLE", "SUBQUESTION", "OPEN_NUCLEUS", "SUPPORTING_FRAGMENT"].includes(role)) {
       this.append(recent, segment, role, receivedAt, options);
       return { role, draft: copyDraft(recent), late: true, accepted: true, reason: "late-context-attached-to-active-question" };
     }
@@ -273,7 +279,7 @@ export class PendingQuestionDraftAssembler {
       this.append(this.activeDraft, segment, role, receivedAt, options);
       return { role, draft: this.current, late: false, accepted: true, reason: "orphan-setup-reopened" };
     }
-    if (!this.activeDraft && recent && hasNucleus(recent) && recentAge <= this.lateModifierWindowMs && ["CONSTRAINT", "OUTPUT_REQUIREMENT", "EXAMPLE", "SUBQUESTION", "OPEN_NUCLEUS", "SUPPORTING_FRAGMENT"].includes(role)) {
+    if (!this.activeDraft && recent && !options.contextualFollowUp && hasAnswerableQuestion(recent) && recentAge <= this.lateModifierWindowMs && ["CONSTRAINT", "OUTPUT_REQUIREMENT", "EXAMPLE", "SUBQUESTION", "OPEN_NUCLEUS", "SUPPORTING_FRAGMENT"].includes(role)) {
       this.append(recent, segment, role, receivedAt, options);
       return { role, draft: copyDraft(recent), late: true, accepted: true, reason: "late-context-attached-to-recent-question" };
     }
@@ -320,7 +326,7 @@ export class PendingQuestionDraftAssembler {
     finalizedAt: number;
     confidence?: number;
   } {
-    const rawText = joinFragments(draft.rawSegments.map((item) => item.segment.text));
+    const rawText = joinFragments(draft.rawSegments.map((item) => item.rawText ?? item.segment.text));
     const confidenceValues = draft.rawSegments.map((item) => item.segment.confidence).filter((value): value is number => value !== undefined);
     return {
       id: `utterance-${draft.id}`,
@@ -372,7 +378,7 @@ export class PendingQuestionDraftAssembler {
       return;
     }
     draft.segmentIds.push(id);
-    draft.rawSegments.push({ segment: { ...segment, id }, role, receivedAt, ...(semantic?.answerabilityState ? { answerabilityState: semantic.answerabilityState } : {}), ...(semantic?.semanticReason ? { semanticReason: semantic.semanticReason } : {}) });
+    draft.rawSegments.push({ segment: { ...segment, id }, ...(typeof (segment as TranscriptSegment & { rawText?: string }).rawText === "string" ? { rawText: (segment as TranscriptSegment & { rawText?: string }).rawText } : {}), role, receivedAt, ...(semantic?.answerabilityState ? { answerabilityState: semantic.answerabilityState } : {}), ...(semantic?.semanticReason ? { semanticReason: semantic.semanticReason } : {}) });
     draft.lastReceivedAt = receivedAt;
     const value = clean(segment.text);
     if (role === "SETUP") uniquePush(draft.setup, value);

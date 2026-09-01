@@ -9,7 +9,8 @@ export type AnswerSourceMode =
   | "self_intro_rewrite"
   | "general_technical"
   | "general_core_qa"
-  | "personal_experience";
+  | "personal_experience"
+  | "project_context_unresolved";
 
 export interface AnswerSourcePlan {
   mode: AnswerSourceMode;
@@ -75,6 +76,22 @@ export function planAnswerSource(input: AnswerSourcePlannerInput): AnswerSourceP
   const card = selectedAnswerCard(qa);
   const verifiedQa = Boolean(qa && card?.verified && qa.question.verified && !qa.question.stale);
   const qaMatch = qa && card ? qaMatchFor(qa, card) : undefined;
+
+  // Project intent and project resolution are independent. Never silently
+  // turn an unresolved project question into a free-form personal answer.
+  if (projectQuestionRequested && !input.projectId) {
+    return {
+      mode: "project_context_unresolved",
+      projectAnchorAvailable,
+      projectQuestionRequested,
+      qaMatchLevel: level,
+      preserveStoredAnswerFacts: false,
+      allowProjectKnowledge: false,
+      allowGeneralKnowledge: true,
+      allowSessionEvidence: true,
+      answerRewriteUsed: false
+    };
+  }
 
   if (input.projectId && projectQuestionRequested && verifiedQa && (level === "exact" || level === "strong")) {
     return {

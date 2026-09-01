@@ -42,6 +42,8 @@ export interface AnswerSchedulerDecision {
   reason: string;
   queueDepth: number;
   active?: AnswerSchedulerActive;
+  /** Explicit marker for telemetry/UI; this is a plan patch, not a second answer. */
+  planPatch?: "PATCH_ACTIVE_PLAN";
 }
 
 export interface AnswerSchedulerMetrics {
@@ -175,7 +177,7 @@ export class AnswerScheduler {
     if (mergeableRelation(enriched.relationType) && this.canMergeBeforeRequest && enriched.groupId === this.activeAnswer.groupId) {
       this.activeAnswer.plan = mergePlan(this.activeAnswer.plan, enriched);
       this.mergeCount += 1;
-      return { action: "merge", question: cloneQuestion(enriched), reason: "augmentation-merged-before-request", queueDepth: this.queueDepth, active: this.active };
+      return { action: "merge", question: cloneQuestion(enriched), reason: "augmentation-merged-before-request", queueDepth: this.queueDepth, active: this.active, planPatch: "PATCH_ACTIVE_PLAN" };
     }
     const action: AnswerSchedulerAction = "queue";
     this.queuedAnswers.push(enriched);

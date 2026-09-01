@@ -11,7 +11,7 @@ import { createScreenshotFixtureResult, ScreenshotManager, type ScreenshotRegion
 import { createScreenshotRequestId, SCREENSHOT_PROMPT, ScreenshotOperationRegistry, ScreenshotTraceBuffer, withScreenshotTimeout, type ScreenshotTraceEvent, type ScreenshotTraceEventName } from "./screenshot-pipeline";
 import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
-import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, analyzeQuestionNucleus, analyzeSelfIntroductionIntent, createSelfIntroductionAnswerPlan, AnswerAgent, AgentToolRegistry, buildDynamicTechnicalLexicon, buildSessionTerminologyContext, buildProjectQaGenerationPrompt, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeInterviewDirectionSelection, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectAliasResolver, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, resolveInterviewDomainContext, retrieveProfileExperience, routeKnowledge, SessionStateMachine, TechnicalTerminologyNormalizer, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type InterviewDirectionSelection, type InterviewTerminologyPreview, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TerminologyRolloutMode, type TranscriptSnapshot } from "@interview-copilot/shared";
+import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, analyzeQuestionNucleus, analyzeSelfIntroductionIntent, createSelfIntroductionAnswerPlan, AnswerAgent, AgentToolRegistry, buildDynamicTechnicalLexicon, buildSessionTerminologyContext, buildProjectQaGenerationPrompt, buildStableInterviewPrefix, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeInterviewDirectionSelection, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectAliasResolver, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, resolveInterviewDomainContext, retrieveProfileExperience, routeKnowledge, SessionStateMachine, TechnicalTerminologyNormalizer, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type InterviewDirectionSelection, type InterviewTerminologyPreview, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TerminologyRolloutMode, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteResumeAnalysisRepository, SqliteResumeProjectLinkRepository, SqliteProfileSelfIntroductionRepository, SqliteRetrievalRepository, SqliteSkillSuggestionRepository, SqliteTerminologyRepository, type SqliteDatabase } from "./database";
@@ -801,7 +801,9 @@ async function answerCapturedScreenshot(mode: "interview" | "written-test" = "in
     recordScreenshotTrace("SCREENSHOT_IMAGE_NORMALIZED", screenshotRequestId, { imageMimeType: image.mimeType, imageBytes: image.bytes.byteLength, imageWidth: image.width, imageHeight: image.height });
     screenshotOperations.transition(screenshotRequestId, "building_request");
     recordScreenshotTrace("VISION_REQUEST_BUILD_STARTED", screenshotRequestId, { imageMimeType: image.mimeType, imageBytes: image.bytes.byteLength, imageWidth: image.width, imageHeight: image.height });
-    const visionInput = buildVisionInput(image, SCREENSHOT_PROMPT);
+    const spokenProblemContext = mode === "interview" ? coordinator().getWrittenProblemContext() : "";
+    const visionPrompt = [SCREENSHOT_PROMPT, spokenProblemContext ? `最近语音题目与上下文（用于消歧，不得覆盖截图事实）：\n${spokenProblemContext}` : ""].filter(Boolean).join("\n\n");
+    const visionInput = buildVisionInput(image, visionPrompt);
     recordScreenshotTrace("VISION_REQUEST_BUILT", screenshotRequestId, { imageMimeType: visionInput.image.mimeType, imageBytes: visionInput.image.bytes, imageWidth: visionInput.image.width, imageHeight: visionInput.image.height, messageShape: "multimodal", fields: { promptLength: visionInput.prompt.length } });
     screenshotOperations.transition(screenshotRequestId, "provider_pending");
     if (mode === "written-test") await writtenTestController?.answerScreenshot(`data:${visionInput.image.mimeType};base64,${visionInput.image.base64}`);
@@ -1880,6 +1882,14 @@ function prepareInterviewContextCache(key: InterviewContextCacheKey): void {
     ...(decisions.length ? [`TECHNICAL_DECISIONS（已有选择与取舍）：${decisions.join("\n")}`] : []),
     ...(problemChains.length ? [`PROBLEM_CHAINS（已有问题链）：${problemChains.join("\n")}`] : [])
   ];
+  const stableInterviewPrefix = buildStableInterviewPrefix({
+    persona: "你是候选人的实时面试口述助手，回答直接、自然、可立即念出。",
+    resume: profile?.resume?.rawContent,
+    jobDescription: [interviewProfile?.target?.description, interviewProfile?.candidate.companyContext].filter(Boolean).join("\n"),
+    candidateProfile: interviewProfile?.candidate.resumeSummary,
+    projectIndex: projectSnapshot.projects.map((item, index) => `项目 ${index + 1}：${item.name}`).join("\n"),
+    answerStyle: "技术题先结论再给 2~3 个关键点；项目题只使用有证据的事实；禁止编造个人职责、指标和结果。"
+  });
   interviewContextCache.prepare(key, {
     contextMode: "fast",
     profileSummary: interviewProfile?.candidate.resumeSummary,
@@ -1898,6 +1908,7 @@ function prepareInterviewContextCache(key: InterviewContextCacheKey): void {
     ...(interviewProfile?.candidate.companyContext ? { companyContext: interviewProfile.candidate.companyContext } : {}),
     ...(interviewProfile?.candidate.salaryExpectation ? { salaryExpectation: interviewProfile.candidate.salaryExpectation } : {}),
     ...(project ? { currentProject: project.name } : {}),
+    stableInterviewPrefix,
     ...(cachedSelfIntroduction?.status === "current" && cachedSelfIntroduction.approved ? { selfIntroduction: { id: cachedSelfIntroduction.id, text: cachedSelfIntroduction.text, approved: true, language: cachedSelfIntroduction.language, ...(cachedSelfIntroduction.targetDurationSeconds ? { targetDurationSeconds: cachedSelfIntroduction.targetDurationSeconds } : {}) } } : {})
   });
   const resumeProjects = resumeAnalysisRepository?.get(key.profileId, resumeHash)?.artifact?.projects ?? [];
@@ -2475,7 +2486,11 @@ function registerIpc(): void {
       if (!preflight.llm.reachable) throw new Error(`LLM_CONNECT_FAILED: ${preflight.llm.message ?? preflight.llm.status}`);
       if (!preflight.asr.reachable) throw new Error(`ASR_CONNECT_FAILED: ${preflight.asr.message ?? preflight.asr.status}`);
       markInterviewStartup("COORDINATOR_START_BEGIN");
-      const interviewId = await coordinator().start(options);
+      const snapshot = projectMemoryService?.get(options.profileId) ?? { projects: [] };
+      const projectCandidates = snapshot.projects.map((project) => ({ id: project.id, name: project.name, aliases: [project.description], entities: [...project.hardware, ...project.software, ...project.technologyStack] }));
+      const cachedStartContext = interviewContextCache.get({ profileId: options.profileId, projectId: options.projectId, jobTargetId: options.jobTargetId });
+      const interviewStartOptions: InterviewStartOptions = { ...options, projectCandidates, ...(cachedStartContext?.stableInterviewPrefix ? { stableInterviewPrefix: cachedStartContext.stableInterviewPrefix } : {}) };
+      const interviewId = await coordinator().start(interviewStartOptions);
       coordinatorStarted = true;
       markInterviewStartup("INTERVIEW_READY");
       finishInterviewStartupTrace();
@@ -3282,7 +3297,7 @@ if (hasSingleInstanceLock) {
       const resolvedProjectId = fastResolution.projectId;
       const fastProjectQa = resolvedProjectId ? projectInterviewCache.routeProjectQuestion(fastNormalizedQuestion, resolvedProjectId) : undefined;
       const fastOverviewHits = resolvedProjectId && fastProjectIntent.projectQuestionRequested ? projectInterviewCache.searchOverview(fastNormalizedQuestion, resolvedProjectId, 4) : [];
-      const fastRoute = fastProjectQa ? undefined : questionBankRepository?.routeQuestion(fastNormalizedQuestion, {
+      const fastRoute = fastProjectQa || (fastProjectIntent.projectQuestionRequested && !resolvedProjectId) ? undefined : questionBankRepository?.routeQuestion(fastNormalizedQuestion, {
         ...(fastProjectIntent.projectQuestionRequested ? {} : { scope: "global" as const }),
         profileId,
         ...(fastProjectIntent.projectQuestionRequested && resolvedProjectId ? { projectId: resolvedProjectId } : {}),
@@ -3373,7 +3388,7 @@ if (hasSingleInstanceLock) {
       .map((skill) => skill.id);
     const profileSkillIds = (profile?.skills ?? []).map((skill) => skill.id).filter((skillId) => questionBankSkillIds.has(skillId));
     const questionBankRouteStartedAt = performance.now();
-    const questionBankRoute = questionBankRepository?.routeQuestion(normalizedQuestion, {
+    const questionBankRoute = projectQuestionRequested && !targetProjectId ? undefined : questionBankRepository?.routeQuestion(normalizedQuestion, {
       ...(projectQuestionRequested ? {} : { scope: "global" as const }),
       profileId,
       ...(projectQuestionRequested && targetProjectId ? { projectId: targetProjectId } : {}),

@@ -56,8 +56,7 @@ export function analyzeProjectQuestionIntent(input: ProjectQuestionIntentInput):
     && (followUpShape || hasThreadTopicOverlap(input.question, followUp))
   );
   const projectQuestionRequested = Boolean(
-    projectAnchorAvailable
-    && (
+    (
       !input.answerIntent.requiresPersonalIdentity
       && !input.answerIntent.technicalNucleusWithProjectAnchor
       && !genericStandalone
