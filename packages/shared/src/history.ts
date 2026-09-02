@@ -97,6 +97,7 @@ export class InterviewHistoryStore {
   private readonly transcripts: TranscriptRecord[] = [];
   private readonly questions: QuestionRecord[] = [];
   private readonly answers: AnswerRecord[] = [];
+  private readonly runtimeContexts = new Map<string, { context: unknown; updatedAt: number }>();
   private readonly revisions = new Map<string, number>();
   private readonly listeners = new Set<(event: HistoryChangedEvent) => void>();
 
@@ -152,6 +153,15 @@ export class InterviewHistoryStore {
     const interviewId = this.questions.find((question) => question.id === record.questionId)?.interviewId;
     if (interviewId) this.emitChanged(interviewId, "answer");
     return { ...record };
+  }
+
+  saveRuntimeContext(interviewId: string, context: unknown, now = Date.now()): void {
+    this.runtimeContexts.set(interviewId, { context, updatedAt: now });
+    this.emitChanged(interviewId, "state");
+  }
+
+  getRuntimeContext<T = unknown>(interviewId: string): T | undefined {
+    return this.runtimeContexts.get(interviewId)?.context as T | undefined;
   }
 
   snapshot(interviewId: string): InterviewSnapshot {

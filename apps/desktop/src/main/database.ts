@@ -936,6 +936,14 @@ export class SqliteDatabase {
         CREATE INDEX IF NOT EXISTS written_test_questions_session_idx ON written_test_questions(session_id, sequence);
         CREATE INDEX IF NOT EXISTS written_test_screenshots_session_idx ON written_test_screenshots(session_id, captured_at);
       `],
+      [39, `
+        CREATE TABLE IF NOT EXISTS interview_runtime_context (
+          interview_id TEXT PRIMARY KEY REFERENCES interviews(id) ON DELETE CASCADE,
+          context_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS interview_runtime_context_updated_idx ON interview_runtime_context(updated_at DESC);
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -2405,6 +2413,17 @@ export class SqliteInterviewHistoryRepository {
     const interviewId = this.database.first<{ interviewId: string }>("SELECT q.interview_id AS interviewId FROM questions q WHERE q.id = ?", [record.questionId])?.interviewId;
     if (interviewId) this.emitChanged(interviewId, "answer");
     return record;
+  }
+
+  saveRuntimeContext(interviewId: string, context: unknown, now = Date.now()): void {
+    this.database.run("INSERT INTO interview_runtime_context(interview_id, context_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(interview_id) DO UPDATE SET context_json=excluded.context_json, updated_at=excluded.updated_at", [interviewId, JSON.stringify(context), now]);
+    this.database.flush();
+    this.emitChanged(interviewId, "state");
+  }
+
+  getRuntimeContext<T = unknown>(interviewId: string): T | undefined {
+    const row = this.database.first<{ contextJson: string }>("SELECT context_json AS contextJson FROM interview_runtime_context WHERE interview_id = ?", [interviewId]);
+    return row ? safeJson<T>(row.contextJson) : undefined;
   }
 
   listInterviews(): InterviewRecord[] {

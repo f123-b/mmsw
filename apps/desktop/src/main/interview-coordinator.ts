@@ -163,6 +163,8 @@ export interface InterviewHistoryPort {
   addQuestion(input: Omit<QuestionRecord, "id">): QuestionRecord;
   updateQuestionStatus?(questionId: string, status: QuestionRecord["status"]): QuestionRecord | undefined;
   addAnswer(input: Omit<AnswerRecord, "id">): AnswerRecord;
+  saveRuntimeContext?(interviewId: string, context: unknown, now?: number): void;
+  getRuntimeContext?<T = unknown>(interviewId: string): T | undefined;
   getRevision?(interviewId: string): number;
 }
 
@@ -186,6 +188,8 @@ export interface InterviewCoordinatorOptions {
   initialAutomationMode?: "MANUAL" | "AUTO";
   /** Live interview confirmation debounce. Kept configurable for ASR providers with slower finalization. */
   questionSilenceMs?: number;
+  /** Bounded fallback for complete V3 frames held only by a confidence gate. */
+  understandingStabilizationTimeoutMs?: number;
   /** Upper bound for one answer so a stalled provider cannot block queued questions. */
   answerTimeoutMs?: number;
   /** Upper bound between provider start and its first visible token. */
@@ -249,6 +253,7 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly ambiguousSemanticResolver: AmbiguousSemanticResolver;
   private readonly unresolvedAsrGate = new UnresolvedAsrGate();
   private readonly anchorStore: ContextAnchorStore;
+  private readonly understandingStabilizationTimeoutMs: number;
   private sessionTerminologyLexicon: DynamicTechnicalLexicon = buildDynamicTechnicalLexicon();
   private readonly sessionTerminologyNormalizer = new TechnicalTerminologyNormalizer({ mode: "high_confidence" });
   private readonly contextAwareAsrNormalizer = new ContextAwareAsrNormalizer();
@@ -330,6 +335,7 @@ export class InterviewCoordinator extends EventEmitter {
     // The semantic completion gate owns the adaptive wait. This value is only
     // the temporal detector fallback for partial/revision handling.
     this.questionSilenceMs = Math.max(80, options.questionSilenceMs ?? 160);
+    this.understandingStabilizationTimeoutMs = Math.max(400, Math.min(4_000, options.understandingStabilizationTimeoutMs ?? 1_400));
     this.detector = options.detector ?? new QuestionDetector({ silenceMs: this.questionSilenceMs });
     this.detector2 = options.questionDetector2 ?? new QuestionDetector2();
     this.brain = options.interviewBrain ?? new InterviewBrain();
@@ -401,6 +407,7 @@ export class InterviewCoordinator extends EventEmitter {
       if (resolution.changed && current?.projectId && resolution.activeProject.projectId !== current.projectId) this.recordRuntimeTrace("PROJECT_SWITCH_COMMITTED", { previousProjectId: current.projectId, projectId: resolution.activeProject.projectId, evidenceLevel: resolution.evidenceLevel }, { reasonCode: resolution.reason });
       if (resolution.changed) this.recordRuntimeTrace("PROJECT_RESOLVED", { projectId: resolution.activeProject.projectId, confidence: resolution.activeProject.confidence, source: resolution.activeProject.source }, { reasonCode: resolution.reason });
     }
+    this.scheduleRuntimeContextPersist();
   }
 
   getRuntimeDiagnostics(): InterviewRuntimeDiagnostics {
@@ -529,6 +536,34 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private clearRuntimeTimers(): void { this.runtimeTimers.clearAll(); }
+
+  private scheduleRuntimeContextPersist(): void {
+    if (!this.activeInterviewId || !this.history.saveRuntimeContext) return;
+    const sessionGeneration = this.sessionGeneration;
+    this.runtimeTimers.set("runtime-context-persist", () => {
+      if (sessionGeneration !== this.sessionGeneration || !this.activeInterviewId) return;
+      this.persistRuntimeContext();
+    }, 250);
+  }
+
+  private persistRuntimeContext(): void {
+    const interviewId = this.activeInterviewId;
+    if (!interviewId || !this.history.saveRuntimeContext) return;
+    const now = this.now();
+    this.history.saveRuntimeContext(interviewId, {
+      schemaVersion: 1,
+      interviewId,
+      runtimeMode: this.activeRuntimeMode,
+      activeProjectResolver: this.activeProjectResolver.state,
+      understanding: this.understandingV3.state,
+      memory: this.memory.snapshot(),
+      anchors: this.anchorStore.snapshot(now),
+      interviewMemo: this.interviewMemo.snapshot(),
+      sessionEvidence: this.sessionEvidence.snapshot(),
+      recentTranscript: [...this.recentTranscript],
+      updatedAt: now
+    }, now);
+  }
 
   private clearRuntimeRegistries(): void {
     this.runtimeAbortControllers.clear();
@@ -659,6 +694,7 @@ export class InterviewCoordinator extends EventEmitter {
       this.recentTranscript.length = 0;
       this.clearRemoteAssemblyTimer();
       this.recordRuntimeTrace("INTERVIEW_SESSION_STARTED", {}, { reasonCode: "session-created" });
+      this.persistRuntimeContext();
       const warmup = this.options.questionClassifierWarmup
         ? (async () => {
           this.recordRuntimeTrace("QUESTION_CLASSIFIER_WARMUP_STARTED", {}, { reasonCode: "session-start" });
@@ -746,6 +782,9 @@ export class InterviewCoordinator extends EventEmitter {
       if (this.asr.finalize) await withRuntimeTimeout(this.asr.finalize(1_000), stopTimeoutMs, () => this.emitDiagnostic("RUNTIME_CLEANUP_TIMEOUT: ASR finalize did not settle"));
     } catch (error) { this.emitDiagnostic(`ASR finalize failed: ${String(error)}`); }
     try { this.asr.disconnect(); } catch (error) { this.emitDiagnostic(`ASR disconnect failed: ${String(error)}`); }
+
+    this.runtimeTimers.clear("runtime-context-persist");
+    this.persistRuntimeContext();
 
     if (!this.options.session.canTransition("ENDING") && this.options.session.canTransition("ERROR")) this.transition("ERROR");
     if (this.options.session.canTransition("ENDING")) this.transition("ENDING");
@@ -931,6 +970,11 @@ export class InterviewCoordinator extends EventEmitter {
       this.markLatency(question.id, "fastContextStartedAt");
       this.recordRuntimeTrace("PROJECT_CONTEXT_STARTED", {}, { questionId: question.id, providerRequestId });
       const isFollowUp = question.speechAct === "FOLLOW_UP" || question.detectionType === "follow_up" || question.category === "followup";
+      const likelyAnswerKind = classifyAnswerQuestion(question.text, question.detectionType);
+      const likelyGroundedQuestion = isFollowUp
+        || ["project", "behavioral"].includes(likelyAnswerKind)
+        || /项目|简历|经历|负责|做过|成果|业绩|你做的|你的实现|你的方案|你们的系统|这套方案/iu.test(question.text);
+      const requestedContextMode = this.accurateInterview && likelyGroundedQuestion ? "rich" as const : "fast" as const;
       const followUpContext = isFollowUp
         ? this.followUpContextResolver.resolve(
           { id: question.id, parentQuestionId: question.parentQuestionId, rootQuestionId: question.rootQuestionId, text: question.text },
@@ -942,10 +986,10 @@ export class InterviewCoordinator extends EventEmitter {
         )
         : undefined;
       const providerContextResult = this.contextProvider(question, this.activeProfileId ?? "", [...frozenContext.recentTranscript], {
-        contextMode: "fast",
+        contextMode: requestedContextMode,
         onRichContext: (phase) => {
           if (!this.activeInterviewId || this.runtimeSessionId !== sessionId) return;
-          this.recordRuntimeTrace(phase === "started" ? "RICH_CONTEXT_STARTED" : "RICH_CONTEXT_COMPLETED", {}, { questionId: question.id, providerRequestId, reasonCode: "background-rich-context" });
+          this.recordRuntimeTrace(phase === "started" ? "RICH_CONTEXT_STARTED" : "RICH_CONTEXT_COMPLETED", {}, { questionId: question.id, providerRequestId, reasonCode: requestedContextMode === "rich" ? "grounded-context-contract" : "background-rich-context" });
         },
         projectId: answerProjectId,
         jobTargetId: this.activeOptions?.jobTargetId,
@@ -985,7 +1029,17 @@ export class InterviewCoordinator extends EventEmitter {
         || routeIntent.asksProjectImplementation
         || routeIntent.allowsProjectEvidence
         || /(?:这个|该|当前)?项目|简历里|你们的系统|这套方案|实际实现|项目中|项目里/iu.test(question.text);
-      if (projectQuestionRequested && !this.activeProjectId) {
+      // A V3 frame may carry a strong question-scoped project candidate even
+      // while the sticky resolver is still waiting for a session-wide lock.
+      // Prefer that scoped identity for retrieval; only hold the answer when
+      // neither the session nor the committed question can identify a project.
+      const questionScopedProject = Boolean(answerProjectId && (
+        frozenContext.projectId === answerProjectId
+        || question.projectId === answerProjectId
+        || question.contextSnapshot?.project?.id === answerProjectId
+      ));
+      const projectContextAvailable = Boolean(answerProjectId && (this.activeProjectId === answerProjectId || questionScopedProject));
+      if (projectQuestionRequested && !projectContextAvailable) {
         const unresolvedPlan = planAnswerSource({ projectQuestion: true, projectAnchorAvailable: false });
         providerContext = {
           ...providerContext,
@@ -1044,7 +1098,7 @@ export class InterviewCoordinator extends EventEmitter {
       const evidenceSnapshot: EvidenceSnapshot = this.contextLock.lock({
         questionId: question.id,
         profileId: this.activeProfileId,
-        projectId: this.activeProjectId,
+        projectId: answerProjectId,
         jobTargetId: this.activeOptions?.jobTargetId,
         profileSummary: providerContext.profileSummary,
         jobDescriptionSummary: providerContext.jobDescriptionSummary,
@@ -1146,6 +1200,8 @@ export class InterviewCoordinator extends EventEmitter {
       answerTrace?.update({ answerSource: selfIntroDirect ? "project-qa" : projectQaDirect ? "project-qa" : "question-bank" }).mark("answerLookupStarted", startedAt).mark("answerVisible", finishedAt).mark("answerEnded", finishedAt);
         this.emitQuestionTrace(answerTrace);
         this.memory.recordAnswer(preparedText, { question: question.text, questionId: question.id, groupId: question.groupId, createdAt: finishedAt });
+        if (this.accurateInterview) this.understandingV3.recordAnswer({ id: answerId, questionId: question.id, text: preparedText, createdAt: finishedAt });
+        this.scheduleRuntimeContextPersist();
         this.detector.markAnswered(question.id);
         this.markQuestionGroup(question.id, "answered");
         this.markQuestionStateById(question.id, "answered");
@@ -1357,6 +1413,7 @@ export class InterviewCoordinator extends EventEmitter {
           this.emitQuestionTrace(answerTrace);
           this.memory.recordAnswer(answerText, { question: question.text, questionId: question.id, groupId: question.groupId, createdAt: finishedAt });
           if (this.accurateInterview) this.understandingV3.recordAnswer({ id: event.answerId, questionId: question.id, text: answerText, createdAt: finishedAt });
+          this.scheduleRuntimeContextPersist();
           this.detector.markAnswered(question.id);
           this.markQuestionGroup(question.id, "answered");
           this.markQuestionStateById(question.id, "answered");
@@ -1874,9 +1931,32 @@ export class InterviewCoordinator extends EventEmitter {
     };
   }
 
+  private scheduleUnderstandingFallback(frame: import("@interview-copilot/shared").QuestionFrame, trace: QuestionTrace, utterance: TranscriptUtterance, turn: InterviewTurn): void {
+    if (!this.accurateInterview || frame.completion !== "COMPLETE" || !["QUESTION", "FOLLOW_UP", "CLARIFICATION"].includes(frame.speechAct)) return;
+    if (frame.speechAct === "FOLLOW_UP" && frame.references.some((reference) => !reference.resolved)) return;
+    const sessionGeneration = this.sessionGeneration;
+    const frameId = frame.id;
+    this.runtimeTimers.set("understanding-stabilization", () => {
+      if (sessionGeneration !== this.sessionGeneration || !this.running) return;
+      const pending = this.understandingV3.state.pendingQuestion;
+      if (!pending || pending.id !== frameId) return;
+      const fallback = this.understandingV3.commitPending("FAST_PRACTICE");
+      if (!fallback || fallback.type !== "QUESTION_COMMITTED") {
+        this.recordRuntimeTrace("QUESTION_STABILIZATION_EXTENDED", { canonicalQuestion: pending.canonicalQuestion, unresolvedSlots: pending.unresolvedSlots.join(",") }, { reasonCode: "stability-timeout-no-safe-degrade" });
+        this.scheduleRuntimeContextPersist();
+        return;
+      }
+      this.recordRuntimeTrace("QUESTION_COMMIT_DECISION", { authority: "understanding-v3", fallback: true, confidence: fallback.frame.confidence.overall, canonicalQuestion: fallback.frame.canonicalQuestion }, { reasonCode: "stability-timeout-degraded-commit" });
+      this.handleUnderstandingV3Event(fallback, trace, utterance, turn);
+    }, this.understandingStabilizationTimeoutMs);
+  }
+
   private handleUnderstandingV3Event(event: UnderstandingEvent, trace: QuestionTrace, utterance: TranscriptUtterance, turn: InterviewTurn): boolean {
     const frame = event.frame;
     const decision = event.gate.decision;
+    if (event.type === "QUESTION_WAITING") this.scheduleUnderstandingFallback(frame, trace, utterance, turn);
+    else this.runtimeTimers.clear("understanding-stabilization");
+    this.scheduleRuntimeContextPersist();
     trace.update({
       assembledTurn: frame.canonicalQuestion.slice(0, 640),
       speechAct: frame.speechAct,
@@ -2583,6 +2663,8 @@ export class InterviewCoordinator extends EventEmitter {
     this.answerStartedAt = undefined;
     this.answerFirstTokenAt = undefined;
     this.accumulatedAnswerText = "";
+    this.runtimeTimers.clear("runtime-context-persist");
+    this.persistRuntimeContext();
   }
 
   private emitAnswerCancelled(answerId: string, reason: "user" | "superseded" | "timeout"): void {
@@ -2599,6 +2681,8 @@ export class InterviewCoordinator extends EventEmitter {
 
   private failInterview(message: string): void {
     this.emitDiagnostic(message);
+    this.runtimeTimers.clear("runtime-context-persist");
+    this.persistRuntimeContext();
     if (this.activeInterviewId) this.history.endInterview(this.activeInterviewId, "error", this.now());
     if (this.options.session.canTransition("ERROR")) this.transition("ERROR");
     this.activeInterviewId = undefined;

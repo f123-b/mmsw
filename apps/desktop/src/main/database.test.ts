@@ -51,6 +51,20 @@ describe("SQLite persistence", () => {
     }
   });
 
+  it("persists the live interview context snapshot independently of transcript rows", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const history = new SqliteInterviewHistoryRepository(database);
+      const interview = history.createInterview({ profileId: "profile-context", startedAt: 3_000, status: "running", language: "zh-CN", automationMode: "AUTO" }, 3_000);
+      const context = { schemaVersion: 1, runtimeMode: "ACCURATE_INTERVIEW", activeProjectResolver: { status: "LOCKED", projectId: "project-1" }, recentTranscript: ["面试官：项目里 DMA 怎么用？"] };
+      history.saveRuntimeContext(interview.id, context, 3_100);
+
+      expect(history.getRuntimeContext(interview.id)).toEqual(context);
+    } finally {
+      database.close();
+    }
+  });
+
   it("persists only user terminology and explicit correction learning", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
@@ -254,7 +268,7 @@ describe("SQLite persistence", () => {
   it("applies migration 23 ownership and technical memory semantics", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(38);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(39);
       expect(database.all<{ name: string }>("PRAGMA table_info(projects)").map((row) => row.name)).toEqual(expect.arrayContaining(["ownership_mode", "ownership_note"]));
       expect(database.all<{ name: string }>("PRAGMA table_info(project_facts)").map((row) => row.name)).toEqual(expect.arrayContaining(["experience_relation", "value_json"]));
       new SqliteProfileRepository(database).save({ id: "profile-v4", name: "V4", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
@@ -516,7 +530,7 @@ describe("SQLite persistence", () => {
       first.close();
       const second = await SqliteDatabase.open(filePath);
       try {
-      expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(38);
+      expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(39);
         const repaired = new SqliteProjectMemoryRepository(second);
         repaired.repairProjectTechnicalSemantics("project-migration");
         expect(repaired.listFacts(profile.id, "project-migration", { includeStale: true, includeRejected: true })).toHaveLength(2);
@@ -555,7 +569,7 @@ describe("SQLite persistence", () => {
       expect(memory.getUnderstandingSnapshot(project.id, "hash-a")?.understanding.summary).toContain("可缓存");
       expect(memory.getSnapshot(profile.id).understandings?.[0]?.projectId).toBe(project.id);
       expect(memory.getUnderstandingSnapshot(project.id, "different-hash")).toBeUndefined();
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(38);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(39);
     } finally { database.close(); }
   });
 

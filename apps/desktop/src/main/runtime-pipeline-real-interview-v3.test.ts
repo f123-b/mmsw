@@ -57,6 +57,38 @@ async function replayCase(item: typeof fixture[number]): Promise<{ confirmed: Qu
 }
 
 describe("accurate interview V3 runtime replay", () => {
+  it("degrades a complete low-confidence question after the bounded stability window", async () => {
+    vi.useFakeTimers();
+    try {
+      const audio = new ReplayAudio();
+      const realtime = new ReplayRealtime();
+      const confirmed: QuestionCandidate[] = [];
+      const coordinator = new InterviewCoordinator({
+        audio,
+        realtime,
+        session: new SessionStateMachine(),
+        answerAgent: new AnswerAgent({ "low-latency": { stream: async function* () { yield "DMA 回答"; } } }, new ModelRouter({ "low-latency": "v3-stability-test" })),
+        initialAutomationMode: "MANUAL",
+        understandingStabilizationTimeoutMs: 500
+      });
+      coordinator.on("event", (event: { type: string; event?: { type?: string; question?: QuestionCandidate } }) => {
+        if (event.type === "question" && event.event?.type === "question_confirmed" && event.event.question) confirmed.push(event.event.question);
+      });
+      await coordinator.start({ profileId: "v3-stability", url: "wss://v3-stability.test", automationMode: "MANUAL", answerMode: "NORMAL", runtimeMode: "ACCURATE_INTERVIEW" });
+      realtime.emit("transcript", {}, { id: "low-confidence-complete", source: "remote", text: "DMA 的原理是什么？", rawText: "DMA 的原理是什么？", startMs: 0, endMs: 500, final: true, confidence: 0.7, endpoint: true, speechFinal: true, utteranceEnd: true });
+      await settle();
+      expect(confirmed).toHaveLength(0);
+
+      vi.advanceTimersByTime(800);
+      await settle();
+      expect(confirmed).toHaveLength(1);
+      expect(coordinator.getRuntimeTrace(500).some((event) => event.reasonCode === "stability-timeout-degraded-commit")).toBe(true);
+      await coordinator.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("uses V3 as the only commit authority across real ASR fragments", async () => {
     vi.useFakeTimers();
     const selected = fixture.filter((item) => [

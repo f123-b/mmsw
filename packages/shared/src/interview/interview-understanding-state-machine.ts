@@ -169,6 +169,29 @@ export class InterviewUnderstandingStateMachine {
   setActiveProject(project?: ActiveProjectContext): void { this.activeProject = project; this.anchors.updateProject(project); }
   recordAnswer(answer: AnswerFrame): void { this.lastAnsweredQuestion = this.lastCommittedQuestion ? cloneFrame(this.lastCommittedQuestion) : undefined; this.recentAnswers.push({ ...answer }); while (this.recentAnswers.length > 12) this.recentAnswers.shift(); this.anchors.updateAnswer(answer); }
 
+  /**
+   * Commits a structurally complete pending question after its stability
+   * window has elapsed. Accurate mode still refuses unresolved ASR,
+   * unresolved references, and incomplete frames; only the confidence
+   * threshold is allowed to degrade to the fast-mode floor. This prevents a
+   * valid question from remaining in WAIT forever when no additional ASR
+   * fragment arrives after the interviewer stops speaking.
+   */
+  commitPending(mode: "ACCURATE_INTERVIEW" | "FAST_PRACTICE" = "FAST_PRACTICE"): UnderstandingEvent | undefined {
+    const pending = this.pendingQuestion;
+    if (!pending) return undefined;
+    if (pending.completion !== "COMPLETE") return undefined;
+    if (!["QUESTION", "FOLLOW_UP", "CLARIFICATION"].includes(pending.speechAct)) return undefined;
+    if (pending.speechAct === "FOLLOW_UP" && pending.references.some((reference) => !reference.resolved)) return undefined;
+    const gate = this.gate.evaluate(pending, mode);
+    if (gate.decision === "WAIT") return { type: "QUESTION_WAITING", frame: cloneFrame(pending), gate };
+    const stabilizedGate: QuestionCommitGateResult = {
+      ...gate,
+      reason: `stability-timeout-${gate.reason}`
+    };
+    return this.commitFrame({ ...cloneFrame(pending), updatedAt: this.now() }, stabilizedGate);
+  }
+
   process(input: UnderstandingSegmentInput, projectCandidates: readonly ProjectAliasCandidate[] = []): UnderstandingEvent {
     const now = input.timestamp ?? this.now();
     const speaker = input.speaker ?? "interviewer";
@@ -210,6 +233,10 @@ export class InterviewUnderstandingStateMachine {
       else this.ledger.upsert(frame, now, status);
       return { type: "QUESTION_WAITING", frame: cloneFrame(frame), gate };
     }
+    return this.commitFrame(frame, gate, now);
+  }
+
+  private commitFrame(frame: QuestionFrame, gate: QuestionCommitGateResult, now = this.now()): UnderstandingEvent {
     this.pendingQuestion = undefined;
     this.ledger.remove(frame.id);
     if (gate.decision === "REJECT") {
