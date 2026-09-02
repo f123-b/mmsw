@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, screen } from "electron";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { join, relative } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { version as osVersion } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
@@ -15,6 +15,8 @@ import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, an
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
 import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteResumeAnalysisRepository, SqliteResumeProjectLinkRepository, SqliteProfileSelfIntroductionRepository, SqliteRetrievalRepository, SqliteSkillSuggestionRepository, SqliteTerminologyRepository, type SqliteDatabase } from "./database";
+import { SqliteWrittenTestHistoryRepository } from "./written-test-history-repository";
+import { WrittenTestArchiveService } from "./written-test-archive";
 import { createSecretStore, MemorySecretStore, OverlaySettingsStore, ProviderConfigStore, type LlmModelProfileInput, type OverlayPreferences, type OverlayPreferencesPatch, type ProviderSection } from "./settings-store";
 import { ProviderPreflightCache, runProviderPreflight, testCachedProviderConnection } from "./provider-preflight";
 import { INTERVIEW_STARTUP_EVENTS, InterviewStartupTiming, type InterviewStartupEvent } from "./interview-startup-timing";
@@ -222,6 +224,8 @@ let jobTargetRepository: SqliteJobTargetRepository | undefined;
 let knowledgeAnalysisRepository: SqliteKnowledgeAnalysisRepository | undefined;
 let projectAnalysisJobRepository: SqliteProjectAnalysisJobRepository | undefined;
 let historyRepository: SqliteInterviewHistoryRepository | undefined;
+let writtenTestHistoryRepository: SqliteWrittenTestHistoryRepository | undefined;
+let writtenTestArchive: WrittenTestArchiveService | undefined;
 let projectRepository: SqliteProjectRepository | undefined;
 let projectMemoryRepository: SqliteProjectMemoryRepository | undefined;
 let profileBuilderRepository: SqliteProfileBuilderRepository | undefined;
@@ -791,6 +795,7 @@ async function answerCapturedScreenshot(mode: "interview" | "written-test" = "in
     if (trigger !== "renderer-ipc") recordScreenshotTrace("SCREENSHOT_ACTION_REQUESTED", screenshotRequestId, { fields: { trigger, mode } });
   }
   recordScreenshotTrace("SCREENSHOT_IPC_RECEIVED", screenshotRequestId, { fields: { mode } });
+  if (mode === "written-test") writtenTestController?.markCapturing();
   let capturedResult: Awaited<ReturnType<ScreenshotManager["capturePrimaryDisplay"]>> | undefined;
   try {
     recordScreenshotTrace("SCREENSHOT_CAPTURE_STARTED", screenshotRequestId, { fields: { mode } });
@@ -807,7 +812,11 @@ async function answerCapturedScreenshot(mode: "interview" | "written-test" = "in
     const visionInput = buildVisionInput(image, visionPrompt);
     recordScreenshotTrace("VISION_REQUEST_BUILT", screenshotRequestId, { imageMimeType: visionInput.image.mimeType, imageBytes: visionInput.image.bytes, imageWidth: visionInput.image.width, imageHeight: visionInput.image.height, messageShape: "multimodal", fields: { promptLength: visionInput.prompt.length } });
     screenshotOperations.transition(screenshotRequestId, "provider_pending");
-    if (mode === "written-test") await writtenTestController?.answerScreenshot(`data:${visionInput.image.mimeType};base64,${visionInput.image.base64}`);
+    if (mode === "written-test") {
+      if (!writtenTestController?.sessionId || !writtenTestArchive || !writtenTestHistoryRepository) throw new Error("WRITTEN_TEST_NOT_READY: 笔试归档服务尚未准备好");
+      const archived = await writtenTestArchive.archiveScreenshot(writtenTestController.sessionId, capturedResult, writtenTestController.state.screenshotCount + 1);
+      await writtenTestController.answerScreenshot(`data:${visionInput.image.mimeType};base64,${visionInput.image.base64}`, { ...archived, dataUrl: `data:${visionInput.image.mimeType};base64,${visionInput.image.base64}` });
+    }
     else {
       const answer = await withScreenshotTimeout(runIndependentVisionAnswer(visionInput, screenshotRequestId, operation), 20_000, () => operation.controller.abort());
       const interviewId = coordinator().interviewId;
@@ -2538,7 +2547,8 @@ function registerIpc(): void {
     if (coordinator().running) throw new Error("INTERVIEW_RUNNING: 请先结束当前面试");
     const llm = providerConfigStore?.get("llm") ?? environmentLlmSettings;
     if (!llm.apiKey) throw new Error("LLM_NOT_CONFIGURED: 未配置 LLM API Key");
-    writtenTestController?.start({ profileId: options.profileId, answerMode: options.answerMode });
+    if (!writtenTestController) throw new Error("WRITTEN_TEST_NOT_READY: 笔试控制器尚未准备好");
+    writtenTestController.start({ profileId: options.profileId, answerMode: options.answerMode });
     mainWindow?.hide();
     overlayManager?.enterWrittenTestMode();
     setRuntimeOperationMode("WRITTEN_TEST");
@@ -2546,7 +2556,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("written-test:stop", () => { stopWrittenTest(); return true; });
   ipcMain.handle("written-test:answer-screenshot", (_event, input?: { screenshotRequestId?: string }) => appShuttingDown ? undefined : answerCapturedScreenshot("written-test", input?.screenshotRequestId, "renderer-ipc"));
-  ipcMain.handle("written-test:get-state", () => writtenTestController?.state ?? { running: false, answerMode: "NORMAL" as const });
+  ipcMain.handle("written-test:get-state", () => writtenTestController?.state ?? { running: false, answerMode: "NORMAL" as const, screenshotStatus: "IDLE" as const, questionCount: 0, screenshotCount: 0 });
   ipcMain.handle("written-test:set-answer-mode", (_event, mode: "FAST" | "NORMAL" | "DEEP") => { writtenTestController?.setAnswerMode(mode); return true; });
   ipcMain.handle("chat:create-conversation", (_event, input: { profileId?: string; projectId?: string; title?: string }) => {
     if (!conversationRepository) throw new Error("Chat database is still initializing");
@@ -2798,6 +2808,23 @@ function registerIpc(): void {
   ipcMain.handle("history:analyze", (_event, interviewId: string) => { const snapshot = historyRepository?.snapshot(interviewId); return snapshot ? analyzeInterview(snapshot) : undefined; });
   ipcMain.handle("history:get-analysis", (_event, interviewId: string) => historyRepository?.getAnalysis(interviewId));
   ipcMain.handle("history:delete", (_event, interviewId: string) => { historyRepository?.deleteInterview(interviewId); return true; });
+  ipcMain.handle("written-test-history:list", () => writtenTestHistoryRepository?.listSessions() ?? []);
+  ipcMain.handle("written-test-history:get", (_event, sessionId: string) => writtenTestHistoryRepository?.getSessionDetail(sessionId));
+  ipcMain.handle("written-test-history:image", async (_event, sessionId: string, screenshotId: string) => {
+    const detail = writtenTestHistoryRepository?.getSessionDetail(sessionId);
+    const screenshot = detail?.screenshots.find((item) => item.id === screenshotId);
+    if (!screenshot || !writtenTestArchive) return undefined;
+    const root = `${resolve(writtenTestArchive.rootDirectory)}${sep}`;
+    const path = resolve(screenshot.thumbnailPath ?? screenshot.filePath);
+    if (!path.startsWith(root)) throw new Error("WRITTEN_TEST_IMAGE_PATH_INVALID");
+    const bytes = await readFile(path);
+    return `data:${screenshot.mimeType};base64,${Buffer.from(bytes).toString("base64")}`;
+  });
+  ipcMain.handle("written-test-history:delete", async (_event, sessionId: string) => {
+    writtenTestHistoryRepository?.deleteSession(sessionId);
+    await writtenTestArchive?.deleteSession(sessionId);
+    return true;
+  });
   ipcMain.handle("history:export", async (_event, interviewId: string): Promise<InterviewExportResult> => {
     if (!historyRepository) throw new Error("History database is unavailable");
     const snapshot = historyRepository.snapshot(interviewId);
@@ -3202,6 +3229,10 @@ if (hasSingleInstanceLock) {
     database = undefined;
   }
   historyRepository = database ? new SqliteInterviewHistoryRepository(database, (event) => broadcast("history:changed", event)) : undefined;
+  writtenTestHistoryRepository = database ? new SqliteWrittenTestHistoryRepository(database) : undefined;
+  const recoveredWrittenTests = writtenTestHistoryRepository?.recoverRunningSessions() ?? 0;
+  if (recoveredWrittenTests > 0) appLogger?.info("WRITTEN_TEST_SESSIONS_RECOVERED", { count: recoveredWrittenTests });
+  writtenTestArchive = new WrittenTestArchiveService(appDataPath);
   if (profileRepository && projectRepository && knowledgeRepository && historyRepository && profileBuilderRepository) {
     profileBuilderService = new ProfileBuilderService(
       profileRepository,
@@ -3682,11 +3713,12 @@ if (hasSingleInstanceLock) {
       return ["legacy", "shadow", "high_confidence", "dynamic"].includes(stored ?? "") ? stored as TerminologyRolloutMode : "high_confidence";
     }
   });
-  writtenTestController = new WrittenTestController({
+  writtenTestController = writtenTestHistoryRepository ? new WrittenTestController({
     answerAgent,
+    repository: writtenTestHistoryRepository,
     initialAnswerMode: "NORMAL",
     contextProvider: (question, profileId) => answerContextProvider(question, profileId, [])
-  });
+  }) : undefined;
   const middleMouseHelper = firstExistingLocalPath(middleMouseHelperCandidates(process.resourcesPath, app.getAppPath()));
   if (middleMouseHelper) {
     middleMouseShortcutManager = new MiddleMouseShortcutManager(middleMouseHelper, () => {
@@ -3825,6 +3857,7 @@ if (hasSingleInstanceLock) {
   });
   writtenTestController?.on("event", (event: { type: string; [key: string]: unknown }) => {
     if (event.type === "state") broadcast("written-test:state", event.state);
+    if (event.type === "document") broadcast("written-test:document", { question: event.question, problem: event.problem });
     if (event.type === "realtime_message") broadcast("realtime:message", event.message);
     if (event.type === "answer_mode") broadcast("interview:answer-mode", event.mode);
     if (event.type === "diagnostic") { realtimeLogger?.warn(String(event.message)); broadcast("realtime:diagnostic", event.message); }

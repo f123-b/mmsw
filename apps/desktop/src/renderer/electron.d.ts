@@ -7,7 +7,7 @@ import type { RealtimeConnectOptions } from "../main/realtime-session";
 import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
-import type { HistoryChangedEvent, InterviewDirectionSelection, InterviewTerminologyPreview, TechnicalDomain, TechnicalTerm, TerminologyRolloutMode, TranscriptSnapshot } from "@interview-copilot/shared";
+import type { HistoryChangedEvent, InterviewDirectionSelection, InterviewTerminologyPreview, TechnicalDomain, TechnicalTerm, TerminologyRolloutMode, TranscriptSnapshot, WrittenTestSession, WrittenTestSessionDetail, WrittenTestQuestion, WrittenProblemFrame } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayDisplayInfo, OverlayMode, OverlayNativeBounds } from "../main/overlay-manager";
 import type { SessionState } from "@interview-copilot/shared";
@@ -264,6 +264,12 @@ declare global {
         delete(interviewId: string): Promise<boolean>;
         export(interviewId: string): Promise<InterviewExportResult>;
       };
+      writtenTestHistory: {
+        list(): Promise<WrittenTestSession[]>;
+        get(sessionId: string): Promise<WrittenTestSessionDetail | undefined>;
+        getImage(sessionId: string, screenshotId: string): Promise<string | undefined>;
+        delete(sessionId: string): Promise<boolean>;
+      };
       preparation: {
         start(goal: string): Promise<boolean>;
         approve(requestId: string): Promise<boolean>;
@@ -300,6 +306,7 @@ declare global {
         onAutomationMode(listener: (mode: "MANUAL" | "AUTO") => void): () => void;
         onAnswerMode(listener: (mode: "FAST" | "NORMAL" | "DEEP") => void): () => void;
         onWrittenTestState(listener: (state: WrittenTestState) => void): () => void;
+        onWrittenTestDocument(listener: (payload: { question: WrittenTestQuestion; problem: WrittenProblemFrame }) => void): () => void;
         onPreparationEvent(listener: (event: unknown) => void): () => void;
         onChatMessageStart(listener: (event: unknown) => void): () => void;
         onChatMessageDelta(listener: (event: unknown) => void): () => void;

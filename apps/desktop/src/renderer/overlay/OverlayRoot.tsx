@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type JSX, type RefObject } from "react";
-import type { AnswerThread, TranscriptSnapshot } from "@interview-copilot/shared";
+import { renderDiagramSvg, type AnswerThread, type TranscriptSnapshot } from "@interview-copilot/shared";
+import type { WrittenTestState } from "../../main/written-test-controller";
 import type { HUDLayout, HUDState, OverlayMode } from "../../main/overlay-manager";
 import { DEFAULT_OVERLAY_PREFERENCES, type OverlayAppearancePreferences, type OverlayPreferences, type OverlayWindowPreferences } from "../../shared/overlay-preferences";
 import { resolveOverlayPersistedGeometry, toRelativeOverlayBounds } from "../../shared/overlay-layout";
@@ -62,9 +63,11 @@ export interface OverlayRootProps {
   runtimePhases: RuntimePhaseState;
   automationMode: "MANUAL" | "AUTO";
   answerMode: "FAST" | "NORMAL" | "DEEP";
+  writtenTest: WrittenTestState;
   question?: { text: string };
   answerText: string;
   answerStreaming: boolean;
+  screenshot?: { dataUrl: string };
   questionGroups: Array<{ id: string; title: string; primaryQuestion?: string; displayable?: boolean; hasAnswerableQuestion?: boolean; status?: "collecting" | "answering" | "active" | "closed"; items: Array<{ id: string; questionId: string; text: string; type: string; answerable: boolean; state: string }>; slots: Array<{ id: string; text: string; status: string }>; updatedAt: number }>;
   activeQuestionGroupId?: string;
   activeAnswerGroupId?: string;
@@ -347,24 +350,44 @@ function DialogueOverlayContent({ blocks, autoFollow }: { blocks: DialogueSpeaki
   </section>;
 }
 
-function WrittenQuestionContent({ viewModel }: { viewModel: AnswerOverlayViewModel }): JSX.Element {
+function WrittenQuestionContent({ viewModel, writtenTest }: { viewModel: AnswerOverlayViewModel; writtenTest: WrittenTestState }): JSX.Element {
   return <section className="overlay-panel-card written-question-card written-question-content" data-overlay-content="written-question" aria-label="截图识别的问题">
-    <div className="overlay-content-status"><span className="content-status-dot" />笔试 · 识别题目</div>
-    <p className="current-question-text">{compactText(viewModel.question, 600)}</p>
+    <div className="overlay-content-status"><span className={`content-status-dot written-status-${writtenTest.screenshotStatus.toLowerCase()}`} />笔试 · {writtenTest.screenshotStatus === "ERROR" ? "识别失败" : writtenTest.screenshotStatus === "SUCCESS" ? "题目已保存" : writtenTest.screenshotStatus === "IDLE" ? "等待截图" : "正在识别"}</div>
+    <p className="written-question-type">{writtenTest.currentProblem?.questionType ?? "UNKNOWN"}</p>
+    <p className="current-question-text">{compactText(writtenTest.currentProblem?.canonicalQuestion || viewModel.question, 600)}</p>
+    {writtenTest.currentProblem?.requirements.length ? <div className="written-requirements"><strong>要求</strong>{writtenTest.currentProblem.requirements.slice(0, 4).map((item) => <span key={item}>{item}</span>)}</div> : null}
+    {writtenTest.lastError && <p className="written-test-error">{writtenTest.lastError}</p>}
   </section>;
 }
 
-function WrittenTestReaderContent({ viewModel, autoFollow }: { viewModel: AnswerOverlayViewModel; autoFollow: boolean }): JSX.Element {
+function WrittenStructuredAnswerContent({ viewModel, writtenTest, screenshot }: { viewModel: AnswerOverlayViewModel; writtenTest: WrittenTestState; screenshot?: { dataUrl: string } }): JSX.Element {
+  const [tab, setTab] = useState<"answer" | "code" | "diagram" | "steps" | "original">("answer");
+  const answer = writtenTest.currentAnswer;
+  const availableTabs = ["answer", ...(answer?.code ? ["code"] : []), ...(answer?.diagram ? ["diagram"] : []), ...(answer?.steps.length ? ["steps"] : []), ...(screenshot ? ["original"] : [])] as typeof tab[];
+  useEffect(() => { if (!availableTabs.includes(tab)) setTab(availableTabs[0] ?? "answer"); }, [answer?.code, answer?.diagram, answer?.steps.length, screenshot]);
+  return <section className="written-structured-answer" aria-label="结构化笔试答案">
+    <div className="written-answer-tabs">{availableTabs.map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{({ answer: "结论", code: "代码", diagram: "图示", steps: "步骤", original: "原图" } as Record<string, string>)[item]}</button>)}</div>
+    <div className="written-answer-tab-content">
+      {tab === "answer" && <><strong>{writtenTest.currentProblem?.questionType ?? "笔试题"}</strong><div className="answer-core">{answer ? <AnswerCore text={answer.finalAnswer} /> : viewModel.answer ? <AnswerCore text={viewModel.answer} /> : <p className="overlay-empty">按 Ctrl + Alt + S 截图识别并回答</p>}</div>{answer?.explanation && <p className="written-explanation">{answer.explanation}</p>}{answer?.warnings.map((warning) => <small className="written-warning" key={warning}>⚠ {warning}</small>)}</>}
+      {tab === "code" && <pre className="written-code-block"><code>{answer?.code?.content ?? "暂无完整代码"}</code></pre>}
+      {tab === "diagram" && answer?.diagram && <img className="written-diagram" src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(renderDiagramSvg(answer.diagram))}`} alt={answer.diagram.title ?? "题目关系图"} />}
+      {tab === "steps" && <ol className="written-step-list">{answer?.steps.map((step) => <li key={`${step.title}-${step.content}`}><strong>{step.title}</strong><span>{step.content}</span></li>)}</ol>}
+      {tab === "original" && screenshot && <img className="written-original-image" src={screenshot.dataUrl} alt="笔试原始截图" />}
+    </div>
+  </section>;
+}
+
+function WrittenTestReaderContent({ viewModel, writtenTest, screenshot, autoFollow }: { viewModel: AnswerOverlayViewModel; writtenTest: WrittenTestState; screenshot?: { dataUrl: string }; autoFollow: boolean }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
   const follow = useScrollFollow(scrollRef, `${viewModel.question}:${viewModel.streaming ? "streaming" : "idle"}`, autoFollow);
   return <section className="overlay-panel-card written-reader-card written-reader-content" data-overlay-content="written-test" aria-label="笔试阅读器">
     <div ref={scrollRef} className="overlay-scroll-region" onScroll={follow.onScroll} tabIndex={0}>
-      <div className="overlay-content-status"><span className="content-status-dot" />笔试 · {viewModel.answer ? "回答" : "等待截图"}</div>
+      <div className="overlay-content-status"><span className="content-status-dot" />笔试 · {writtenTest.currentAnswer ? "结构化回答" : viewModel.answer ? "回答" : "等待截图"}</div>
       <h2>截图识别的问题</h2>
-      <p className="written-reader-question">{compactText(viewModel.question, 600)}</p>
+      <p className="written-reader-question">{compactText(writtenTest.currentProblem?.canonicalQuestion || viewModel.question, 600)}</p>
       <div className="written-reader-divider" />
       <h2>AI 回答</h2>
-      <div className="answer-core">{viewModel.answer ? <AnswerCore text={viewModel.answer} /> : <p className="overlay-empty">按 Ctrl + Alt + S 截图识别并回答</p>}{viewModel.streaming && <span className="answer-cursor">▌</span>}</div>
+      <WrittenStructuredAnswerContent viewModel={viewModel} writtenTest={writtenTest} screenshot={screenshot} />
     </div>
     <LatestButton visible={!follow.following} onClick={follow.follow} />
   </section>;
@@ -430,11 +453,11 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   return <main className="overlay-root" data-overlay-surface={nativeSurface ?? "designer"} data-hud-mode={props.hudState.mode} data-share-mode={props.hudState.shareMode ? "on" : "off"} data-overlay-mode={props.overlayMode} data-layout-edit-mode={layoutEditMode ? "on" : "off"} data-appearance-mode={preferences.appearance.mode} data-operation-mode={props.operationMode}>
     {props.captureTest && !visualHidden && <div className="capture-test-marker">CAPTURE_PROTECTION_TEST_MARKER_7F32</div>}
     {transcriptVisible && (nativeSurface === "question" && !layoutEditMode
-      ? <div ref={nativeContentRef} className="native-content-window native-window-shell question-panel" style={overlayWindowStyle(questionPreferences, preferences.appearance)}>{singleWrittenReader ? <WrittenTestReaderContent viewModel={answerViewModel} autoFollow={autoFollowAnswer} /> : writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} autoFollow={autoFollowQuestion} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} autoFollow={autoFollowQuestion} />}</div>
-      : <DraggableResizablePanel panel="transcript" nativePanel={nativeSurface === "question" ? "question" : undefined} geometryMode={writtenTestMode ? "writtenTest" : "interview"} geometryPreset={writtenTestMode ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={{ ...layout.transcript, visible: true, locked: !layoutEditMode && (layout.transcript.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="question-panel" windowPreferences={questionPreferences} appearance={preferences.appearance}>{writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} autoFollow={autoFollowQuestion} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} autoFollow={autoFollowQuestion} />}</DraggableResizablePanel>)}
+      ? <div ref={nativeContentRef} className="native-content-window native-window-shell question-panel" style={overlayWindowStyle(questionPreferences, preferences.appearance)}>{singleWrittenReader ? <WrittenTestReaderContent viewModel={answerViewModel} writtenTest={props.writtenTest} screenshot={props.screenshot} autoFollow={autoFollowAnswer} /> : writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} writtenTest={props.writtenTest} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} autoFollow={autoFollowQuestion} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} autoFollow={autoFollowQuestion} />}</div>
+      : <DraggableResizablePanel panel="transcript" nativePanel={nativeSurface === "question" ? "question" : undefined} geometryMode={writtenTestMode ? "writtenTest" : "interview"} geometryPreset={writtenTestMode ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={{ ...layout.transcript, visible: true, locked: !layoutEditMode && (layout.transcript.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="question-panel" windowPreferences={questionPreferences} appearance={preferences.appearance}>{writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} writtenTest={props.writtenTest} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} autoFollow={autoFollowQuestion} /> : <QuestionOverlayContent groups={displayedGroups} viewModel={questionViewModel} autoFollow={autoFollowQuestion} />}</DraggableResizablePanel>)}
     {answerVisible && !singleWrittenReader && (nativeSurface === "answer" && !layoutEditMode
-      ? <div ref={nativeContentRef} className="native-content-window native-window-shell answer-panel" style={overlayWindowStyle(answerPreferences, preferences.appearance)}><AnswerOverlayContent viewModel={answerViewModel} autoFollow={autoFollowAnswer} /></div>
-      : <DraggableResizablePanel panel="answer" nativePanel={nativeSurface === "answer" ? "answer" : undefined} geometryMode={writtenTestMode ? "writtenTest" : "interview"} geometryPreset={writtenTestMode ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={{ ...layout.answer, visible: true, locked: !layoutEditMode && (layout.answer.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="answer-panel" windowPreferences={answerPreferences} appearance={preferences.appearance}><AnswerOverlayContent viewModel={answerViewModel} autoFollow={autoFollowAnswer} /></DraggableResizablePanel>)}
+      ? <div ref={nativeContentRef} className="native-content-window native-window-shell answer-panel" style={overlayWindowStyle(answerPreferences, preferences.appearance)}>{writtenTestMode ? <WrittenStructuredAnswerContent viewModel={answerViewModel} writtenTest={props.writtenTest} screenshot={props.screenshot} /> : <AnswerOverlayContent viewModel={answerViewModel} autoFollow={autoFollowAnswer} />}</div>
+      : <DraggableResizablePanel panel="answer" nativePanel={nativeSurface === "answer" ? "answer" : undefined} geometryMode={writtenTestMode ? "writtenTest" : "interview"} geometryPreset={writtenTestMode ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={{ ...layout.answer, visible: true, locked: !layoutEditMode && (layout.answer.locked || preferences.behavior.lockLayout) }} onChange={updateLayout} onCommit={persistLayout} editMode={layoutEditMode} className="answer-panel" windowPreferences={answerPreferences} appearance={answerPreferences ? preferences.appearance : preferences.appearance}>{writtenTestMode ? <WrittenStructuredAnswerContent viewModel={answerViewModel} writtenTest={props.writtenTest} screenshot={props.screenshot} /> : <AnswerOverlayContent viewModel={answerViewModel} autoFollow={autoFollowAnswer} />}</DraggableResizablePanel>)}
     {layoutEditMode && !visualHidden && <div className="layout-edit-toolbar hud-interactive-region"><span>布局编辑模式</span><button onClick={() => void window.interviewCopilot.overlay.finishLayoutEditMode()}>完成布局</button></div>}
     {!visualHidden && <div className={`hud-protection-indicator ${protectionTone}`} aria-hidden="true">{effectiveProtectionEnabled ? "◈" : "·"}</div>}
   </main>;

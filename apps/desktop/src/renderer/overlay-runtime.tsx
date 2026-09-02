@@ -8,6 +8,7 @@ import type { RuntimeOperationMode } from "../shared/runtime-operation-mode";
 import { OverlayWindowRoot } from "./overlay/OverlayWindowRoot";
 import { answerScreenshotForMode } from "./overlay-runtime-actions";
 import type { OverlayRootProps, OverlaySurface } from "./overlay/OverlayRoot";
+import type { WrittenTestState } from "../main/written-test-controller";
 import { RootErrorBoundary } from "./components/ErrorBoundary";
 import { initialRuntimePhaseState, isCommittedQuestionGroup, isDisplayableQuestionGroup, reduceRuntimeMessage, reduceRuntimeQuestion, reduceRuntimeTranscript, sessionPhaseFor, type RuntimePhaseState } from "./overlay/runtime-state";
 
@@ -68,6 +69,8 @@ interface RuntimeState {
   runtimePhases: RuntimePhaseState;
   automationMode: "MANUAL" | "AUTO";
   answerMode: "FAST" | "NORMAL" | "DEEP";
+  writtenTest: WrittenTestState;
+  screenshot?: { dataUrl: string };
   question?: QuestionCandidate;
   answerText: string;
   answerStreaming: boolean;
@@ -84,7 +87,7 @@ interface RuntimeState {
   notice?: string;
 }
 
-const initialRuntimeState: RuntimeState = { mic: 0, system: 0, state: "STOPPED", sessionState: "IDLE", realtimeState: "disconnected", operationMode: "IDLE", overlayMode: "passive", hudState: initialHUDState, runtimePhases: initialRuntimePhaseState, automationMode: "AUTO", answerMode: "NORMAL", answerText: "", answerStreaming: false, questionGroups: [], answerThreads: [], remoteTranscript: { source: "remote", final: [] }, micTranscript: { source: "mic", final: [] }, layoutEditMode: false };
+const initialRuntimeState: RuntimeState = { mic: 0, system: 0, state: "STOPPED", sessionState: "IDLE", realtimeState: "disconnected", operationMode: "IDLE", overlayMode: "passive", hudState: initialHUDState, runtimePhases: initialRuntimePhaseState, automationMode: "AUTO", answerMode: "NORMAL", writtenTest: { running: false, answerMode: "NORMAL", screenshotStatus: "IDLE", questionCount: 0, screenshotCount: 0 }, answerText: "", answerStreaming: false, questionGroups: [], answerThreads: [], remoteTranscript: { source: "remote", final: [] }, micTranscript: { source: "mic", final: [] }, layoutEditMode: false };
 
 function useOverlayRuntime(surface: OverlaySurface): RuntimeState {
   const [state, setState] = useState<RuntimeState>(() => ({ ...initialRuntimeState, preferences: initialPreferences() }));
@@ -93,7 +96,7 @@ function useOverlayRuntime(surface: OverlaySurface): RuntimeState {
     let disposed = false;
     let observedOverlayState = false;
     const update = (patch: Partial<RuntimeState>) => { if (!disposed) setState((current) => ({ ...current, ...patch })); };
-    void Promise.all([window.interviewCopilot.overlay.getState(), window.interviewCopilot.overlay.getPreferences(), window.interviewCopilot.overlay.getCaptureProtection()]).then(([hudState, preferences, captureProtection]) => update({ ...(observedOverlayState ? {} : { hudState: hudState ?? initialHUDState }), preferences, captureProtection })).catch(() => undefined);
+    void Promise.all([window.interviewCopilot.overlay.getState(), window.interviewCopilot.overlay.getPreferences(), window.interviewCopilot.overlay.getCaptureProtection(), window.interviewCopilot.writtenTest.getState()]).then(([hudState, preferences, captureProtection, writtenTest]) => update({ ...(observedOverlayState ? {} : { hudState: hudState ?? initialHUDState }), preferences, captureProtection, writtenTest })).catch(() => undefined);
     const cleanups = [
       window.interviewCopilot.events.onAudio((event) => { if (event.type === "meter") update({ mic: Math.max(0, Math.min(1, event.mic)), system: Math.max(0, Math.min(1, event.system)) }); else if (event.type === "audio_state") setState((current) => ({ ...current, state: event.state, runtimePhases: { ...current.runtimePhases, sessionPhase: sessionPhaseFor(current.sessionState, event.state, current.realtimeState) } })); }),
       window.interviewCopilot.events.onSessionState((sessionState: SessionState) => {
@@ -119,6 +122,8 @@ function useOverlayRuntime(surface: OverlaySurface): RuntimeState {
       window.interviewCopilot.events.onOverlayLayoutEditMode((layoutEditMode) => update({ layoutEditMode })),
       window.interviewCopilot.events.onAutomationMode((automationMode) => setState((current) => ({ ...current, automationMode, runtimePhases: { ...current.runtimePhases, automationMode } }))),
       window.interviewCopilot.events.onAnswerMode((answerMode) => update({ answerMode })),
+      window.interviewCopilot.events.onWrittenTestState((writtenTest) => update({ writtenTest })),
+      window.interviewCopilot.events.onScreenshot((screenshot) => update({ screenshot })),
       window.interviewCopilot.events.onRealtimeTranscript((snapshot) => setState((current) => ({ ...current, ...(snapshot.source === "remote" ? { remoteTranscript: snapshot } : { micTranscript: snapshot }), runtimePhases: reduceRuntimeTranscript(current.runtimePhases, snapshot.source, snapshot.final.length > 0) }))),
       window.interviewCopilot.events.onQuestion((event: QuestionEvent) => {
         if (event.type !== "question_confirmed" && event.type !== "question_superseded") return;
@@ -154,6 +159,8 @@ function OverlayRuntimeApp({ surface }: { surface: OverlaySurface }): JSX.Elemen
     runtimePhases: state.runtimePhases,
     automationMode: state.automationMode,
     answerMode: state.answerMode,
+    writtenTest: state.writtenTest,
+    screenshot: state.screenshot,
     question: state.question,
     answerText: state.answerText,
     answerStreaming: state.answerStreaming,

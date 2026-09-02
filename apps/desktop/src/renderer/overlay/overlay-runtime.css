@@ -46,3 +46,22 @@ button:focus-visible { outline: 2px solid #9bd2ff; outline-offset: 2px; }
 .overlay-panel-drag-handle { display: none; height: 24px; align-items: center; padding: 0 12px; border-bottom: 1px solid rgba(133, 160, 198, .22); color: rgba(174, 196, 224, .88); font: 600 10px/1 "Segoe UI", sans-serif; letter-spacing: .08em; text-transform: uppercase; cursor: grab; pointer-events: auto; }
 .overlay-panel-drag-handle:active { cursor: grabbing; }
 .overlay-root[data-layout-edit-mode="on"] .overlay-panel-drag-handle { display: flex; }
+
+.written-question-type { margin: 6px 0; color: #67e8f9; font-size: 11px; letter-spacing: .08em; }
+.written-requirements { display: grid; gap: 5px; margin-top: 12px; color: #cbd5e1; font-size: 12px; }
+.written-requirements strong { color: #f8fafc; }
+.written-requirements span { padding-left: 10px; border-left: 2px solid #38bdf8; }
+.written-test-error { color: #fda4af; font-size: 12px; }
+.written-structured-answer { display: grid; gap: 10px; min-width: 0; }
+.written-answer-tabs { display: flex; gap: 5px; flex-wrap: wrap; }
+.written-answer-tabs button { border: 1px solid rgba(148, 163, 184, .3); border-radius: 8px; padding: 4px 9px; background: rgba(15, 23, 42, .7); color: #94a3b8; cursor: pointer; }
+.written-answer-tabs button.active { border-color: #67e8f9; color: #ecfeff; background: rgba(14, 116, 144, .4); }
+.written-answer-tab-content { min-width: 0; }
+.written-code-block { max-height: 420px; overflow: auto; padding: 12px; border-radius: 9px; background: #020617; color: #dbeafe; white-space: pre-wrap; }
+.written-diagram, .written-original-image { display: block; max-width: 100%; max-height: 480px; object-fit: contain; border-radius: 10px; }
+.written-step-list { display: grid; gap: 10px; padding-left: 22px; }
+.written-step-list li { display: grid; gap: 3px; }
+.written-step-list span, .written-explanation { color: #cbd5e1; }
+.written-warning { display: block; margin-top: 5px; color: #fcd34d; }
+.written-status-error { background: #fb7185 !important; }
+.written-status-success { background: #34d399 !important; }

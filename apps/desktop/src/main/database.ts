@@ -889,6 +889,53 @@ export class SqliteDatabase {
         );
         CREATE INDEX IF NOT EXISTS profile_self_introductions_lookup_idx ON profile_self_introductions(profile_id, resume_hash, approved, updated_at DESC);
       `],
+      [38, `
+        CREATE TABLE IF NOT EXISTS written_test_sessions (
+          id TEXT PRIMARY KEY,
+          profile_id TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '笔试练习',
+          started_at INTEGER NOT NULL,
+          ended_at INTEGER,
+          status TEXT NOT NULL,
+          answer_mode TEXT NOT NULL,
+          question_count INTEGER NOT NULL DEFAULT 0,
+          screenshot_count INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS written_test_questions (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES written_test_sessions(id) ON DELETE CASCADE,
+          sequence INTEGER NOT NULL,
+          raw_question TEXT NOT NULL DEFAULT '',
+          normalized_question TEXT NOT NULL DEFAULT '',
+          question_type TEXT NOT NULL DEFAULT 'UNKNOWN',
+          requirements_json TEXT NOT NULL DEFAULT '[]',
+          screenshot_ids_json TEXT NOT NULL DEFAULT '[]',
+          answer_json TEXT,
+          answer_text TEXT,
+          confidence REAL NOT NULL DEFAULT 0,
+          model TEXT,
+          latency_ms INTEGER,
+          created_at INTEGER NOT NULL,
+          finished_at INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS written_test_screenshots (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES written_test_sessions(id) ON DELETE CASCADE,
+          question_id TEXT REFERENCES written_test_questions(id) ON DELETE SET NULL,
+          file_path TEXT NOT NULL,
+          thumbnail_path TEXT,
+          mime_type TEXT NOT NULL,
+          sha256 TEXT NOT NULL,
+          width INTEGER,
+          height INTEGER,
+          captured_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS written_test_sessions_started_idx ON written_test_sessions(started_at DESC);
+        CREATE INDEX IF NOT EXISTS written_test_questions_session_idx ON written_test_questions(session_id, sequence);
+        CREATE INDEX IF NOT EXISTS written_test_screenshots_session_idx ON written_test_screenshots(session_id, captured_at);
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;

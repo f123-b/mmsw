@@ -78,6 +78,33 @@
   background: #f5f9fd;
   box-shadow: 0 0 0 2px rgba(76, 133, 181, .1);
 }
+
+.written-question-type { margin: 6px 0; color: #67e8f9; font-size: 11px; letter-spacing: .08em; }
+.written-requirements { display: grid; gap: 5px; margin-top: 12px; color: #cbd5e1; font-size: 12px; }
+.written-requirements strong { color: #f8fafc; }
+.written-requirements span { padding-left: 10px; border-left: 2px solid #38bdf8; }
+.written-test-error { color: #fda4af; font-size: 12px; }
+.written-structured-answer { display: grid; gap: 10px; min-width: 0; }
+.written-answer-tabs { display: flex; gap: 5px; flex-wrap: wrap; }
+.written-answer-tabs button { border: 1px solid rgba(148, 163, 184, .3); border-radius: 8px; padding: 4px 9px; background: rgba(15, 23, 42, .7); color: #94a3b8; cursor: pointer; }
+.written-answer-tabs button.active { border-color: #67e8f9; color: #ecfeff; background: rgba(14, 116, 144, .4); }
+.written-answer-tab-content { min-width: 0; }
+.written-code-block { max-height: 420px; overflow: auto; padding: 12px; border-radius: 9px; background: #020617; color: #dbeafe; white-space: pre-wrap; }
+.written-diagram, .written-original-image { display: block; max-width: 100%; max-height: 480px; object-fit: contain; border-radius: 10px; }
+.written-step-list { display: grid; gap: 10px; padding-left: 22px; }
+.written-step-list li { display: grid; gap: 3px; }
+.written-step-list span, .written-explanation { color: #cbd5e1; }
+.written-warning { display: block; margin-top: 5px; color: #fcd34d; }
+.written-status-error { background: #fb7185 !important; }
+.written-status-success { background: #34d399 !important; }
+
+.written-history-gallery { display: flex; gap: 10px; flex-wrap: wrap; padding: 14px 0; }
+.written-history-thumb { position: relative; width: 118px; height: 78px; overflow: hidden; border: 1px solid #d9e3ec; border-radius: 10px; padding: 0; background: #f6f9fb; cursor: pointer; }
+.written-history-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.written-history-thumb small { position: absolute; right: 5px; bottom: 4px; padding: 1px 4px; border-radius: 4px; background: rgba(7, 22, 38, .72); color: #fff; }
+.written-lightbox { position: fixed; z-index: 20; inset: 0; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 36px; background: rgba(2, 8, 23, .88); }
+.written-lightbox img { max-width: calc(100vw - 180px); max-height: calc(100vh - 72px); object-fit: contain; }
+.written-lightbox button { min-width: 42px; min-height: 42px; border: 0; border-radius: 50%; background: rgba(255, 255, 255, .16); color: #fff; font-size: 28px; cursor: pointer; }
 .designer-preset-card strong { font-size: 11px; color: #3d536b; }
 .designer-preset-card small { min-height: 28px; color: #8a98a8; font-size: 10px; line-height: 1.35; }
 .preset-thumb {

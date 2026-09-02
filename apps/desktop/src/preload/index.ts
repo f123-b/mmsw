@@ -9,7 +9,7 @@ import type { AsrRuntimeDiagnostics } from "../main/realtime-session";
 import type { InterviewStartOptions } from "../main/interview-coordinator";
 import type { InterviewRuntimeDiagnostics, RuntimeTraceEvent } from "../main/runtime-diagnostics";
 import type { WrittenTestStartOptions, WrittenTestState } from "../main/written-test-controller";
-import type { HistoryChangedEvent, InterviewDirectionSelection, InterviewTerminologyPreview, TechnicalDomain, TechnicalTerm, TerminologyRolloutMode, TranscriptSnapshot } from "@interview-copilot/shared";
+import type { HistoryChangedEvent, InterviewDirectionSelection, InterviewTerminologyPreview, TechnicalDomain, TechnicalTerm, TerminologyRolloutMode, TranscriptSnapshot, WrittenTestSession, WrittenTestSessionDetail, WrittenTestQuestion, WrittenProblemFrame } from "@interview-copilot/shared";
 import type { QuestionEvent } from "@interview-copilot/shared";
 import type { CaptureProtectionCapabilities, CaptureProtectionState, HUDLayout, HUDState, OverlayDisplayInfo, OverlayMode, OverlayNativeBounds } from "../main/overlay-manager";
 import type { OverlayPreferences, OverlayPreferencesPatch, TencentValidationState, TencentValidationStatus } from "../main/settings-store";
@@ -294,6 +294,12 @@ const api = {
     delete: (interviewId: string) => ipcRenderer.invoke("history:delete", interviewId) as Promise<boolean>,
     export: (interviewId: string) => ipcRenderer.invoke("history:export", interviewId) as Promise<InterviewExportResult>
   },
+  writtenTestHistory: {
+    list: (): Promise<WrittenTestSession[]> => ipcRenderer.invoke("written-test-history:list"),
+    get: (sessionId: string): Promise<WrittenTestSessionDetail | undefined> => ipcRenderer.invoke("written-test-history:get", sessionId),
+    getImage: (sessionId: string, screenshotId: string): Promise<string | undefined> => ipcRenderer.invoke("written-test-history:image", sessionId, screenshotId),
+    delete: (sessionId: string): Promise<boolean> => ipcRenderer.invoke("written-test-history:delete", sessionId)
+  },
   preparation: {
     start: (goal: string) => ipcRenderer.invoke("preparation:start", goal),
     approve: (requestId: string) => ipcRenderer.invoke("preparation:approve", requestId),
@@ -448,6 +454,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, state: WrittenTestState) => listener(state);
       ipcRenderer.on("written-test:state", handler);
       return () => ipcRenderer.removeListener("written-test:state", handler);
+    },
+    onWrittenTestDocument: (listener: (payload: { question: WrittenTestQuestion; problem: WrittenProblemFrame }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: { question: WrittenTestQuestion; problem: WrittenProblemFrame }) => listener(payload);
+      ipcRenderer.on("written-test:document", handler);
+      return () => ipcRenderer.removeListener("written-test:document", handler);
     },
     onPreparationEvent: (listener: (event: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
