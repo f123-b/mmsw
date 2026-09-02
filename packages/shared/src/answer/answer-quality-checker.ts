@@ -5,6 +5,16 @@ import type { AnswerCoverageResult } from "./answer-plan-coverage-checker";
 
 export interface AnswerQualityResult {
   score: number;
+  overallScore: number;
+  relevanceScore: number;
+  coverageScore: number;
+  depthScore: number;
+  groundingScore: number;
+  spokenScore: number;
+  factualConsistencyScore: number;
+  missingSlots: string[];
+  unsupportedClaims: string[];
+  contradictions: string[];
   issues: string[];
   suggestions: string[];
   needsRepair: boolean;
@@ -74,7 +84,9 @@ export class AnswerQualityChecker {
       score -= 0.12;
     }
     const questionTerms = input.question.toLowerCase().match(/[a-z0-9\u4e00-\u9fff]{2,}/gi) ?? [];
-    if (questionTerms.length > 0 && !questionTerms.some((term) => answer.toLowerCase().includes(term))) {
+    const coveredQuestionTerms = questionTerms.filter((term) => answer.toLowerCase().includes(term));
+    const relevanceScore = questionTerms.length === 0 ? 1 : coveredQuestionTerms.length / questionTerms.length;
+    if (questionTerms.length > 0 && coveredQuestionTerms.length === 0) {
       issues.push("question-mismatch");
       suggestions.push("第一句先明确回答面试官的问题");
       score -= 0.18;
@@ -84,6 +96,14 @@ export class AnswerQualityChecker {
       suggestions.push("只使用简历或知识库中能被证实的项目经历");
       score -= 0.25;
     }
+    const coverageScore = input.coverage ? input.coverage.coveredFacets.length / Math.max(1, input.coverage.requiredFacets.length) : 1;
+    const depthScore = input.coverage ? (input.coverage.depthPass ? 1 : coverageScore) : answer.length >= policy.minCharacters ? 1 : 0.65;
+    const groundingScore = input.groundingText?.trim() ? 1 : kind === "project" || kind === "behavioral" ? 0.45 : 0.82;
+    const unsupportedClaims = issues.filter((issue) => issue === "possibly-invented-experience");
+    const contradictions = issues.filter((issue) => issue === "project-context-conflict");
+    const factualConsistencyScore = contradictions.length > 0 ? 0.2 : unsupportedClaims.length > 0 ? 0.55 : 1;
+    const missingSlots = input.coverage?.missingFacets ?? [];
+    const spokenScore = issues.includes("too-formal") ? 0.82 : 1;
     const normalizedScore = Math.max(0, Math.min(1, Number(score.toFixed(2))));
     const hardFailure = tooShort
       || issues.includes("missing-core-facets")
@@ -91,6 +111,21 @@ export class AnswerQualityChecker {
       || issues.includes("possibly-invented-experience")
       || issues.includes("unresolved-question")
       || issues.includes("project-context-conflict");
-    return { score: normalizedScore, issues, suggestions, needsRepair: hardFailure || normalizedScore < 0.65 };
+    return {
+      score: normalizedScore,
+      overallScore: normalizedScore,
+      relevanceScore: Number(relevanceScore.toFixed(2)),
+      coverageScore: Number(coverageScore.toFixed(2)),
+      depthScore: Number(depthScore.toFixed(2)),
+      groundingScore: Number(groundingScore.toFixed(2)),
+      spokenScore: Number(spokenScore.toFixed(2)),
+      factualConsistencyScore: Number(factualConsistencyScore.toFixed(2)),
+      missingSlots,
+      unsupportedClaims,
+      contradictions,
+      issues,
+      suggestions,
+      needsRepair: hardFailure || normalizedScore < 0.65
+    };
   }
 }

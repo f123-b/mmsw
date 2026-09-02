@@ -1,0 +1,162 @@
+[
+  {
+    "id": "case-1-incomplete-introduction",
+    "segments": [
+      { "timestamp": 0, "speaker": "interviewer", "rawAsrText": "你能给我介绍一下，首先比如说", "final": true, "interim": false, "segmentOrder": 1, "pauseMsAfter": 900 }
+    ],
+    "expected": {
+      "expectedSpeechAct": "QUESTION",
+      "expectedQuestionAction": "WAIT",
+      "expectedQuestionId": null,
+      "expectedCanonicalQuestion": null,
+      "expectedProject": null,
+      "expectedEntities": [],
+      "expectedAsrRepair": null,
+      "expectedShouldAnswer": false,
+      "reason": "open-predicate-and-continuation-cue"
+    }
+  },
+  {
+    "id": "case-2-f405-selection",
+    "segments": [
+      { "timestamp": 0, "speaker": "interviewer", "rawAsrText": "第一个问题，你构建这个平台为什么要选？", "final": true, "interim": false, "segmentOrder": 1, "pauseMsAfter": 350 },
+      { "timestamp": 350, "speaker": "interviewer", "rawAsrText": "F四零五。", "final": true, "interim": false, "segmentOrder": 2, "pauseMsAfter": 350 },
+      { "timestamp": 700, "speaker": "interviewer", "rawAsrText": "什么样的原因要选它？", "final": true, "interim": false, "segmentOrder": 3, "pauseMsAfter": 1200 }
+    ],
+    "expected": {
+      "expectedSpeechAct": "QUESTION",
+      "expectedQuestionAction": "COMMIT",
+      "expectedQuestionId": "case-2-f405-selection",
+      "expectedCanonicalQuestion": "为什么在 FOC / 电机控制项目中选择 STM32F405？选型时主要考虑了哪些因素？",
+      "expectedProject": "foc-motor-control",
+      "expectedEntities": ["STM32F405"],
+      "expectedAsrRepair": { "raw": "F四零五", "canonical": "STM32F405", "confidence": 0.99 },
+      "expectedShouldAnswer": true,
+      "reason": "late-object-completes-selection-question"
+    }
+  },
+  {
+    "id": "case-3-confirmation-check",
+    "segments": [
+      { "timestamp": 0, "speaker": "interviewer", "rawAsrText": "懂我意思吗？", "final": true, "interim": false, "segmentOrder": 1, "pauseMsAfter": 800 }
+    ],
+    "expected": {
+      "expectedSpeechAct": "CONFIRMATION_CHECK",
+      "expectedQuestionAction": "REJECT",
+      "expectedQuestionId": null,
+      "expectedCanonicalQuestion": null,
+      "expectedProject": null,
+      "expectedEntities": [],
+      "expectedAsrRepair": null,
+      "expectedShouldAnswer": false,
+      "reason": "confirmation-is-not-answer-request"
+    }
+  },
+  {
+    "id": "case-4-asr-unresolved",
+    "segments": [
+      { "timestamp": 0, "speaker": "interviewer", "rawAsrText": "嗯，然后我最近也是。那什么事？我后来遇到的话。", "final": true, "interim": false, "segmentOrder": 1, "pauseMsAfter": 1200 }
+    ],
+    "expected": {
+      "expectedSpeechAct": "ASR_UNRESOLVED",
+      "expectedQuestionAction": "WAIT",
+      "expectedQuestionId": null,
+      "expectedCanonicalQuestion": null,
+      "expectedProject": null,
+      "expectedEntities": [],
+      "expectedAsrRepair": null,
+      "expectedShouldAnswer": false,
+      "reason": "cannot-invent-question-from-garbled-speech"
+    }
+  },
+  {
+    "id": "case-5-dma-eel",
+    "segments": [
+      { "timestamp": 0, "speaker": "interviewer", "rawAsrText": "DMA 在项目里怎么用？用的什么模式？", "final": true, "interim": false, "segmentOrder": 1, "pauseMsAfter": 500 },
+      { "timestamp": 500, "speaker": "interviewer", "rawAsrText": "电鳗是怎么工作的？", "final": true, "interim": false, "segmentOrder": 2, "pauseMsAfter": 1200 }
+    ],
+    "expected": {
+      "expectedSpeechAct": "QUESTION",
+      "expectedQuestionAction": "COMMIT",
+      "expectedQuestionId": "case-5-dma-eel",
+      "expectedCanonicalQuestion": "DMA 是怎么工作的？",
+      "expectedProject": null,
+      "expectedEntities": ["DMA"],
+      "expectedAsrRepair": { "raw": "电鳗", "canonical": "DMA", "confidence": 0.91 },
+      "expectedShouldAnswer": true,
+      "reason": "technical-context-and-phonetic-repair"
+    }
+  },
+  {
+    "id": "case-6-stack-asr",
+    "segments": [
+      { "timestamp": 0, "speaker": "interviewer", "rawAsrText": "interrupt、exception、stack、nesting、hardware stacking。", "final": true, "interim": false, "segmentOrder": 1, "pauseMsAfter": 300 },
+      { "timestamp": 300, "speaker": "interviewer", "rawAsrText": "哪个站？", "final": true, "interim": false, "segmentOrder": 2, "pauseMsAfter": 1200 }
+    ],
+    "expected": {
+      "expectedSpeechAct": "QUESTION",
+      "expectedQuestionAction": "COMMIT",
+      "expectedQuestionId": "case-6-stack-asr",
+      "expectedCanonicalQuestion": "哪个栈？",
+      "expectedProject": null,
+      "expectedEntities": ["stack"],
+      "expectedAsrRepair": { "raw": "哪个站", "canonical": "哪个栈", "confidence": 0.9 },
+      "expectedShouldAnswer": true,
+      "reason": "stack-context-disambiguates-asr"
+    }
+  },
+  {
+    "id": "case-7-advice",
+    "segments": [
+      { "timestamp": 0, "speaker": "interviewer", "rawAsrText": "自己去写吧。其实我觉得也没什么特别之处吧，反正就是准备好。", "final": true, "interim": false, "segmentOrder": 1, "pauseMsAfter": 1000 }
+    ],
+    "expected": {
+      "expectedSpeechAct": "ADVICE",
+      "expectedQuestionAction": "REJECT",
+      "expectedQuestionId": null,
+      "expectedCanonicalQuestion": null,
+      "expectedProject": null,
+      "expectedEntities": [],
+      "expectedAsrRepair": null,
+      "expectedShouldAnswer": false,
+      "reason": "advice-feedback-is-not-question"
+    }
+  },
+  {
+    "id": "case-8-dma-multi-slot",
+    "segments": [
+      { "timestamp": 0, "speaker": "interviewer", "rawAsrText": "那你讲一下 DMA 嘛，你这个项目里面 DMA 是怎么用的？用的什么模式？", "final": true, "interim": false, "segmentOrder": 1, "pauseMsAfter": 1200 }
+    ],
+    "expected": {
+      "expectedSpeechAct": "QUESTION",
+      "expectedQuestionAction": "COMMIT",
+      "expectedQuestionId": "case-8-dma-multi-slot",
+      "expectedCanonicalQuestion": "那你讲一下 DMA 嘛，你这个项目里面 DMA 是怎么用的？用的什么模式？",
+      "expectedProject": "foc-motor-control",
+      "expectedEntities": ["DMA"],
+      "expectedAsrRepair": null,
+      "expectedShouldAnswer": true,
+      "expectedMultiSlot": true,
+      "expectedSlots": ["DMA 在项目哪里使用", "数据流是什么", "DMA 模式是什么"],
+      "reason": "one-project-question-with-explicit-multiple-slots"
+    }
+  },
+  {
+    "id": "case-9-retrospective-reference",
+    "segments": [
+      { "timestamp": 0, "speaker": "interviewer", "rawAsrText": "多久触发一次？", "final": true, "interim": false, "segmentOrder": 1, "pauseMsAfter": 400 },
+      { "timestamp": 400, "speaker": "interviewer", "rawAsrText": "就是你刚才说的 ADC 那个。", "final": true, "interim": false, "segmentOrder": 2, "pauseMsAfter": 1200 }
+    ],
+    "expected": {
+      "expectedSpeechAct": "QUESTION",
+      "expectedQuestionAction": "COMMIT",
+      "expectedQuestionId": "case-9-retrospective-reference",
+      "expectedCanonicalQuestion": "ADC 采样多久触发一次？",
+      "expectedProject": null,
+      "expectedEntities": ["ADC"],
+      "expectedAsrRepair": null,
+      "expectedShouldAnswer": true,
+      "reason": "pending-reference-retrospective-recovery"
+    }
+  }
+]

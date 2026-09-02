@@ -1,5 +1,6 @@
 export type ActiveProjectSource = "explicit_interviewer" | "explicit_candidate" | "resume_match" | "context_inheritance" | "manual";
 export type ProjectContextStatus = "UNRESOLVED" | "ACTIVE" | "AMBIGUOUS" | "CONFLICT";
+export type ProjectLockState = "UNRESOLVED" | "CANDIDATE" | "LOCKED" | "SWITCH_PENDING" | "CONFLICT";
 
 export interface ActiveProjectState {
   projectId?: string;
@@ -13,6 +14,8 @@ export interface ActiveProjectState {
 
 export interface ProjectContextState {
   status: ProjectContextStatus;
+  /** Fine-grained lock state used by the V3 accurate interview gate. */
+  lockState?: ProjectLockState;
   activeProject?: ActiveProjectState;
   candidates: string[];
   lastReason?: string;

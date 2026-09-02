@@ -119,9 +119,10 @@ const api = {
     answerLatest: () => ipcRenderer.invoke("interview:answer-latest") as Promise<void>,
     answerQuestion: (text: string) => ipcRenderer.invoke("interview:answer-question", { text }) as Promise<void>,
     answerScreenshot: () => requestScreenshotAnalysis("interview:answer-screenshot"),
-    getState: () => ipcRenderer.invoke("interview:get-state") as Promise<{ running: boolean; interviewId?: string; automationMode: "MANUAL" | "AUTO" }>,
+    getState: () => ipcRenderer.invoke("interview:get-state") as Promise<{ running: boolean; interviewId?: string; automationMode: "MANUAL" | "AUTO"; runtimeMode: "ACCURATE_INTERVIEW" | "FAST_PRACTICE" }>,
     getRuntimeDiagnostics: () => ipcRenderer.invoke("interview:get-runtime-diagnostics") as Promise<InterviewRuntimeDiagnostics>,
     getRuntimeTrace: (limit?: number) => ipcRenderer.invoke("interview:get-runtime-trace", limit) as Promise<RuntimeTraceEvent[]>,
+    getUnderstandingState: () => ipcRenderer.invoke("interview:get-understanding-state") as Promise<Record<string, unknown>>,
     setAutomationMode: (mode: "MANUAL" | "AUTO") => ipcRenderer.invoke("interview:set-automation-mode", mode) as Promise<boolean>,
     setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => ipcRenderer.invoke("interview:set-answer-mode", mode) as Promise<boolean>
   },

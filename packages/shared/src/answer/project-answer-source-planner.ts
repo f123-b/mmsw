@@ -4,6 +4,7 @@ import type { CoreTechnicalQaCard } from "./core-technical-qa";
 export type AnswerSourceMode =
   | "project_qa_direct"
   | "project_qa_augmented"
+  | "project_qa_no_match"
   | "project_knowledge_generated"
   | "self_intro_direct"
   | "self_intro_rewrite"
@@ -30,6 +31,8 @@ export interface AnswerSourcePlan {
   allowGeneralKnowledge: boolean;
   allowSessionEvidence: boolean;
   answerRewriteUsed: boolean;
+  strictProjectQa?: boolean;
+  projectQaMargin?: number;
 }
 
 export interface AnswerSourcePlannerInput {
@@ -47,6 +50,9 @@ export interface AnswerSourcePlannerInput {
     questionId?: string;
   };
   coreTechnicalQa?: CoreTechnicalQaCard;
+  /** Accurate mode refuses generated/global answers for project questions. */
+  strictProjectQa?: boolean;
+  projectQaMargin?: number;
 }
 
 function selectedAnswerCard(hit?: QuestionBankRouteHit): { id: string; verified: boolean; content: string } | undefined {
@@ -76,6 +82,14 @@ export function planAnswerSource(input: AnswerSourcePlannerInput): AnswerSourceP
   const card = selectedAnswerCard(qa);
   const verifiedQa = Boolean(qa && card?.verified && qa.question.verified && !qa.question.stale);
   const qaMatch = qa && card ? qaMatchFor(qa, card) : undefined;
+  const projectQaMargin = input.projectQa?.hits.length && qa
+    ? Math.max(0, qa.score - (input.projectQa.hits[1]?.score ?? 0))
+    : undefined;
+  const strictAccepted = Boolean(
+    verifiedQa
+    && Boolean(qa)
+    && (level === "exact" || (level === "strong" && (qa?.score ?? 0) >= 0.7 && (projectQaMargin ?? 0) >= 0.1))
+  );
 
   // Project intent and project resolution are independent. Never silently
   // turn an unresolved project question into a free-form personal answer.
@@ -93,7 +107,24 @@ export function planAnswerSource(input: AnswerSourcePlannerInput): AnswerSourceP
     };
   }
 
-  if (input.projectId && projectQuestionRequested && verifiedQa && (level === "exact" || level === "strong")) {
+  if (input.projectId && projectQuestionRequested && input.strictProjectQa && !strictAccepted) {
+    return {
+      mode: "project_qa_no_match",
+      projectAnchorAvailable,
+      projectQuestionRequested,
+      projectId: input.projectId,
+      qaMatchLevel: level,
+      preserveStoredAnswerFacts: false,
+      allowProjectKnowledge: false,
+      allowGeneralKnowledge: false,
+      allowSessionEvidence: false,
+      answerRewriteUsed: false,
+      strictProjectQa: true,
+      projectQaMargin: input.projectQaMargin ?? projectQaMargin
+    };
+  }
+
+  if (input.projectId && projectQuestionRequested && verifiedQa && (level === "exact" || (level === "strong" && (!input.strictProjectQa || strictAccepted)))) {
     return {
       mode: "project_qa_direct",
       projectAnchorAvailable,
@@ -105,7 +136,9 @@ export function planAnswerSource(input: AnswerSourcePlannerInput): AnswerSourceP
       allowProjectKnowledge: false,
       allowGeneralKnowledge: false,
       allowSessionEvidence: true,
-      answerRewriteUsed: true
+      answerRewriteUsed: true,
+      strictProjectQa: input.strictProjectQa,
+      projectQaMargin: input.projectQaMargin ?? projectQaMargin
     };
   }
 
@@ -121,7 +154,9 @@ export function planAnswerSource(input: AnswerSourcePlannerInput): AnswerSourceP
       allowProjectKnowledge: true,
       allowGeneralKnowledge: true,
       allowSessionEvidence: true,
-      answerRewriteUsed: true
+      answerRewriteUsed: true,
+      strictProjectQa: input.strictProjectQa,
+      projectQaMargin: input.projectQaMargin ?? projectQaMargin
     };
   }
 
@@ -136,7 +171,9 @@ export function planAnswerSource(input: AnswerSourcePlannerInput): AnswerSourceP
       allowProjectKnowledge: true,
       allowGeneralKnowledge: true,
       allowSessionEvidence: true,
-      answerRewriteUsed: false
+      answerRewriteUsed: false,
+      strictProjectQa: input.strictProjectQa,
+      projectQaMargin: input.projectQaMargin ?? projectQaMargin
     };
   }
 

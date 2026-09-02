@@ -72,4 +72,21 @@ describe("Project QA answer source planner", () => {
     route.top = route.hits[0];
     expect(planAnswerSource({ projectId: "foc", projectQuestion: true, projectQa: route }).mode).toBe("project_knowledge_generated");
   });
+
+  it("holds a project question when accurate mode has no verified project match", () => {
+    const route = projectQa("partial");
+    route.top = route.hits[0];
+    expect(planAnswerSource({ projectId: "foc", projectQuestion: true, projectQa: route, strictProjectQa: true })).toMatchObject({
+      mode: "project_qa_no_match",
+      allowProjectKnowledge: false,
+      allowGeneralKnowledge: false,
+      allowSessionEvidence: false
+    });
+  });
+
+  it("accepts an exact verified project QA match in accurate mode", () => {
+    const route = projectQa("exact");
+    route.top = route.hits[0];
+    expect(planAnswerSource({ projectId: "foc", projectQuestion: true, projectQa: route, strictProjectQa: true }).mode).toBe("project_qa_direct");
+  });
 });

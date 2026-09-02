@@ -36,10 +36,10 @@ export class ActiveProjectResolver {
 
   get state(): ProjectContextState { return copyProjectContextState(this.stateValue); }
 
-  reset(now = 0): void { this.stateValue = { status: "UNRESOLVED", candidates: [], updatedAt: now }; }
+  reset(now = 0): void { this.stateValue = { status: "UNRESOLVED", lockState: "UNRESOLVED", candidates: [], updatedAt: now }; }
 
   setManual(project: Pick<ActiveProjectState, "projectId" | "projectName"> & Partial<Pick<ActiveProjectState, "entities" | "topics">>, now = Date.now()): ActiveProjectResolution {
-    this.stateValue = { status: "ACTIVE", activeProject: { projectId: project.projectId, projectName: project.projectName, confidence: 1, source: "manual", activatedAt: now, entities: [...(project.entities ?? [])], topics: [...(project.topics ?? [])] }, candidates: project.projectId ? [project.projectId] : [], updatedAt: now, lastReason: "manual-selection" };
+    this.stateValue = { status: "ACTIVE", lockState: "LOCKED", activeProject: { projectId: project.projectId, projectName: project.projectName, confidence: 1, source: "manual", activatedAt: now, entities: [...(project.entities ?? [])], topics: [...(project.topics ?? [])] }, candidates: project.projectId ? [project.projectId] : [], updatedAt: now, lastReason: "manual-selection" };
     return { changed: true, status: "ACTIVE", reason: "manual-selection", activeProject: copyActiveProject(this.stateValue.activeProject), candidates: [...this.stateValue.candidates] };
   }
 
@@ -53,19 +53,19 @@ export class ActiveProjectResolver {
       : this.aliases.resolve(text, projects);
     const explicitCue = Boolean(input.explicitProjectId || PROJECT_SWITCH_CUE.test(text) || EXPLICIT_PROJECT_CUE.test(text) && (input.speaker === "candidate" || /(?:你这个|你们的|哪个项目|什么项目)/iu.test(text)));
     if (resolution.ambiguous) {
-      this.stateValue = { ...this.stateValue, status: "AMBIGUOUS", candidates: [...resolution.candidates], updatedAt: now, lastReason: "ambiguous-project-reference" };
+      this.stateValue = { ...this.stateValue, status: "AMBIGUOUS", lockState: "CONFLICT", candidates: [...resolution.candidates], updatedAt: now, lastReason: "ambiguous-project-reference" };
       return copy({ changed: false, status: "AMBIGUOUS", reason: "ambiguous-project-reference", activeProject: this.stateValue.activeProject, candidates: resolution.candidates });
     }
     const resolvedProjectId = resolution.projectId;
     if (!resolvedProjectId) {
       const conflict = Boolean(this.stateValue.activeProject && GENERIC_ASR_CONFLICT.test(text) && this.stateValue.activeProject.entities.some((entity) => /FOC|电机|机器人|关节/i.test(entity)));
-      this.stateValue = { ...this.stateValue, status: conflict ? "CONFLICT" : this.stateValue.activeProject ? "ACTIVE" : "UNRESOLVED", updatedAt: now, lastReason: conflict ? "single-asr-entity-conflict" : "no-project-evidence" };
+      this.stateValue = { ...this.stateValue, status: conflict ? "CONFLICT" : this.stateValue.activeProject ? "ACTIVE" : "UNRESOLVED", lockState: conflict ? "CONFLICT" : this.stateValue.activeProject ? this.stateValue.lockState ?? "LOCKED" : "UNRESOLVED", updatedAt: now, lastReason: conflict ? "single-asr-entity-conflict" : "no-project-evidence" };
       return copy({ changed: false, status: this.stateValue.status, reason: this.stateValue.lastReason ?? "no-project-evidence", activeProject: this.stateValue.activeProject, candidates: [...this.stateValue.candidates] });
     }
     const isSame = this.stateValue.activeProject?.projectId === resolvedProjectId;
     const maySwitch = !this.stateValue.activeProject || isSame || explicitCue || resolution.confidence >= 0.98;
     if (!maySwitch) {
-      this.stateValue = { ...this.stateValue, status: "ACTIVE", updatedAt: now, lastReason: "sticky-project-preserved" };
+      this.stateValue = { ...this.stateValue, status: "ACTIVE", lockState: "SWITCH_PENDING", updatedAt: now, lastReason: "sticky-project-preserved" };
       return copy({ changed: false, status: "ACTIVE", reason: "sticky-project-preserved", activeProject: this.stateValue.activeProject, candidates: [...this.stateValue.candidates] });
     }
     const source: ActiveProjectSource = input.explicitProjectId || input.speaker === "candidate" ? "explicit_candidate" : explicitCue ? "explicit_interviewer" : isSame ? this.stateValue.activeProject?.source ?? "context_inheritance" : "resume_match";
@@ -79,7 +79,9 @@ export class ActiveProjectResolver {
       topics: [...new Set([...(this.stateValue.activeProject?.projectId === resolvedProjectId ? this.stateValue.activeProject.topics : []), ...(input.topics ?? [])])]
     };
     const reason = isSame ? "project-context-inherited" : "explicit-project-activation";
-    this.stateValue = { status: "ACTIVE", activeProject, candidates: [resolvedProjectId], updatedAt: now, lastReason: reason };
+    const previousLock = this.stateValue.lockState;
+    const lockState = isSame && previousLock === "LOCKED" || explicitCue || resolution.confidence >= 0.98 ? "LOCKED" : "CANDIDATE";
+    this.stateValue = { status: "ACTIVE", lockState, activeProject, candidates: [resolvedProjectId], updatedAt: now, lastReason: reason };
     return copy({ changed: !isSame, status: "ACTIVE", reason, activeProject, candidates: [resolvedProjectId] });
   }
 }

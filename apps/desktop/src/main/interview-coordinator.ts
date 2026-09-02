@@ -26,6 +26,13 @@ import {
   QuestionUnderstanding,
   CanonicalRemoteTurnAssembler,
   AmbiguousSemanticResolver,
+  InterviewUnderstandingStateMachine,
+  resolveInterviewFeatureFlags,
+  type ActiveProjectContext,
+  type InterviewRuntimeMode,
+  type InterviewFeatureFlags,
+  type UnderstandingEvent,
+  decomposeQuestion,
   type CanonicalRemoteTurn,
   ActiveProjectResolver,
   InterviewMemo,
@@ -124,6 +131,10 @@ export interface InterviewStartOptions extends Omit<RealtimeConnectOptions, "aut
   terminologyLexicon?: DynamicTechnicalLexicon;
   terminologyContext?: SessionTerminologyContext;
   terminologyMode?: TerminologyRolloutMode;
+  /** Accurate interview is opt-in at the coordinator boundary for legacy integrations; the desktop app supplies it by default. */
+  runtimeMode?: InterviewRuntimeMode;
+  /** Individual V3 gates may be overridden for diagnostics or controlled rollout. */
+  features?: Partial<InterviewFeatureFlags>;
   /** Optional per-interview direction selection; absent keeps the legacy route. */
   directionSelection?: InterviewDirectionSelection;
   /** Candidate project index used by the sticky active-project resolver. */
@@ -140,6 +151,8 @@ export interface InterviewContextSelection {
   projectId?: string;
   jobTargetId?: string;
   followUpContext?: FollowUpContext;
+  runtimeMode?: InterviewRuntimeMode;
+  strictProjectQa?: boolean;
 }
 
 export interface InterviewHistoryPort {
@@ -243,6 +256,7 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly questionGroups = new QuestionGroupManager(this.turnBuilder);
   private readonly answerScheduler = new AnswerScheduler();
   private readonly canonicalRemoteTurnAssembler = new CanonicalRemoteTurnAssembler({ maxGapMs: 2_000, semanticGate: this.semanticTurnGate });
+  private readonly understandingV3 = new InterviewUnderstandingStateMachine({ mode: "ACCURATE_INTERVIEW" });
   private readonly activeProjectResolver = new ActiveProjectResolver();
   private readonly projectConsistencyGuard = new ProjectConsistencyGuard();
   private readonly interviewMemo = new InterviewMemo();
@@ -255,6 +269,8 @@ export class InterviewCoordinator extends EventEmitter {
   private defaultAutomationMode: "MANUAL" | "AUTO";
   private activeInterviewId: string | undefined;
   private activeOptions: InterviewStartOptions | undefined;
+  private activeRuntimeMode: InterviewRuntimeMode = "FAST_PRACTICE";
+  private activeFeatures: InterviewFeatureFlags = resolveInterviewFeatureFlags("FAST_PRACTICE");
   private activeProfileId: string | undefined;
   private currentQuestion: QuestionCandidate | undefined;
   private answerController: AbortController | undefined;
@@ -327,18 +343,44 @@ export class InterviewCoordinator extends EventEmitter {
   get interviewId(): string | undefined { return this.activeInterviewId; }
   get running(): boolean { return Boolean(this.activeInterviewId) && this.runtimeSessionState === "running"; }
   get automationMode(): "MANUAL" | "AUTO" { return this.activeOptions?.automationMode ?? this.defaultAutomationMode; }
+  get runtimeMode(): InterviewRuntimeMode { return this.activeRuntimeMode; }
   get runtimeState(): RuntimeSessionState { return this.runtimeSessionState; }
   get activeProject() { return this.activeProjectResolver.state.activeProject; }
   getWrittenProblemContext(): string { return this.writtenProblemState.promptContext(); }
   getRuntimeInterviewTelemetry() { return this.interviewTelemetry.snapshot(); }
+  getInterviewUnderstandingState() { return this.understandingV3.state; }
+
+  private get accurateInterview(): boolean {
+    return this.activeRuntimeMode === "ACCURATE_INTERVIEW" && this.activeFeatures.understandingV3 && this.activeFeatures.questionCommitGateV3;
+  }
+
+  private understandingProject(): ActiveProjectContext | undefined {
+    const state = this.activeProjectResolver.state;
+    const project = state.activeProject;
+    if (!project?.projectId || !project.projectName) return undefined;
+    return {
+      id: project.projectId,
+      name: project.projectName,
+      lockState: state.lockState ?? (project.source === "manual" || project.confidence >= 0.96 ? "LOCKED" : state.status === "CONFLICT" ? "CONFLICT" : "CANDIDATE"),
+      confidence: project.confidence,
+      entities: [...project.entities],
+      topics: [...project.topics],
+      lockedAt: project.source === "manual" || project.confidence >= 0.96 ? project.activatedAt : undefined,
+      source: project.source === "explicit_candidate" ? "candidate" : project.source === "manual" ? "manual" : "interviewer"
+    };
+  }
 
   private get activeProjectId(): string | undefined {
     // The resolver is the single source of truth. A start-option project is
     // applied through setManual during start(); falling back to the option
-    // here would bypass AMBIGUOUS/CONFLICT/UNRESOLVED hard gates.
-    return this.activeProjectResolver.state.status === "ACTIVE"
-      ? this.activeProjectResolver.state.activeProject?.projectId
-      : undefined;
+    // here would bypass AMBIGUOUS/CONFLICT/UNRESOLVED hard gates. Accurate
+    // mode additionally requires the resolver's explicit LOCKED state; a
+    // candidate or pending switch may remain visible for diagnostics but is
+    // not eligible to authorize project retrieval or an answer.
+    const state = this.activeProjectResolver.state;
+    if (state.status !== "ACTIVE") return undefined;
+    if (this.accurateInterview && state.lockState !== "LOCKED") return undefined;
+    return state.activeProject?.projectId;
   }
 
   private observeProjectContext(text: string, speaker: "interviewer" | "candidate", now: number, entities: readonly string[] = [], topics: readonly string[] = []): void {
@@ -351,6 +393,7 @@ export class InterviewCoordinator extends EventEmitter {
     const resolution = this.activeProjectResolver.observe({ text, speaker, projects: this.activeOptions?.projectCandidates, now, entities, topics });
     if (resolution.activeProject) {
       this.interviewMemo.setProject(resolution.activeProject.projectName);
+      if (this.accurateInterview) this.understandingV3.setActiveProject(this.understandingProject());
       if (resolution.changed) this.recordRuntimeTrace("PROJECT_RESOLVED", { projectId: resolution.activeProject.projectId, confidence: resolution.activeProject.confidence, source: resolution.activeProject.source }, { reasonCode: resolution.reason });
     }
   }
@@ -535,6 +578,9 @@ export class InterviewCoordinator extends EventEmitter {
       await this.options.audio.waitForIdle?.();
       if (this.options.audio.isRunning) throw new Error("AUDIO_BUSY: audio sidecar is still running");
       const automationMode = startOptions.automationMode ?? this.defaultAutomationMode;
+      const runtimeMode = startOptions.runtimeMode ?? "FAST_PRACTICE";
+      this.activeRuntimeMode = runtimeMode;
+      this.activeFeatures = resolveInterviewFeatureFlags(runtimeMode, startOptions.features);
       this.transition("CREATING");
       const startedAt = this.now();
       const record = this.history.createInterview({
@@ -550,7 +596,7 @@ export class InterviewCoordinator extends EventEmitter {
       this.activeInterviewId = record.id;
       this.runtimeSessionId = record.id;
       this.runtimeSessionStartedAt = startedAt;
-      this.activeOptions = { ...startOptions, automationMode };
+      this.activeOptions = { ...startOptions, automationMode, runtimeMode, features: this.activeFeatures };
       this.activeProfileId = startOptions.profileId;
       const providedLexicon = startOptions.terminologyLexicon ?? this.options.terminologyLexiconProvider?.(startOptions.profileId, startOptions.projectId, startOptions.jobTargetId);
       if (providedLexicon && typeof (providedLexicon as PromiseLike<DynamicTechnicalLexicon>).then === "function") this.sessionTerminologyLexicon = await (providedLexicon as Promise<DynamicTechnicalLexicon>);
@@ -583,6 +629,7 @@ export class InterviewCoordinator extends EventEmitter {
         }, startedAt);
         this.interviewMemo.setProject(selectedProject?.name ?? startOptions.projectId);
       }
+      this.understandingV3.reset({ sessionId: record.id, mode: "ACCURATE_INTERVIEW", activeProject: this.understandingProject() });
       this.turns.clear();
       this.anchorStore.reset();
       this.memory.reset();
@@ -705,6 +752,8 @@ export class InterviewCoordinator extends EventEmitter {
     this.activeInterviewId = undefined;
     this.activeOptions = undefined;
     this.activeProfileId = undefined;
+    this.activeRuntimeMode = "FAST_PRACTICE";
+    this.activeFeatures = resolveInterviewFeatureFlags("FAST_PRACTICE");
     this.currentQuestion = undefined;
     this.pendingTopicTransition = false;
     this.questionConfirmedAt.clear();
@@ -721,6 +770,7 @@ export class InterviewCoordinator extends EventEmitter {
     this.turns.clear();
     this.anchorStore.reset();
     this.memory.reset();
+    this.understandingV3.reset({ mode: "ACCURATE_INTERVIEW" });
     this.historyQuestionIds.clear();
     this.activeModelSnapshot = undefined;
     this.pendingQuestionTrace = undefined;
@@ -891,6 +941,8 @@ export class InterviewCoordinator extends EventEmitter {
         },
         projectId: this.activeProjectId,
         jobTargetId: this.activeOptions?.jobTargetId,
+        runtimeMode: this.activeRuntimeMode,
+        strictProjectQa: this.activeFeatures.strictProjectQa,
         ...(followUpContext ? { followUpContext } : {})
       });
       // Keep the default synchronous context path truly synchronous. This
@@ -937,6 +989,19 @@ export class InterviewCoordinator extends EventEmitter {
           resolverStatus: this.activeProjectResolver.state.status,
           sourceMode: unresolvedPlan.mode
         }, { questionId: question.id, providerRequestId, reasonCode: "project-hard-gate" });
+      }
+      const blockedProjectRoute = providerContext.answerSourcePlan?.mode === "project_context_unresolved" || providerContext.answerSourcePlan?.mode === "project_qa_no_match";
+      if (this.accurateInterview && blockedProjectRoute) {
+        const reasonCode = providerContext.answerSourcePlan?.mode === "project_qa_no_match" ? "strict-project-qa-no-match" : "project-context-unresolved";
+        this.recordRuntimeTrace(providerContext.answerSourcePlan?.mode === "project_qa_no_match" ? "PROJECT_QA_HOLD" : "PROJECT_CONTEXT_UNRESOLVED", {
+          sourceMode: providerContext.answerSourcePlan?.mode,
+          qaMatchLevel: providerContext.answerSourcePlan?.qaMatchLevel,
+          qaMargin: providerContext.answerSourcePlan?.projectQaMargin
+        }, { questionId: question.id, providerRequestId, reasonCode });
+        this.emitDiagnostic(reasonCode === "strict-project-qa-no-match" ? "项目问题未命中已验证项目题库，暂不生成答案" : "项目尚未锁定，暂不生成答案");
+        this.markQuestionStateById(question.id, "cancelled");
+        this.recordRuntimeTrace("QUESTION_CANCELLED", {}, { questionId: question.id, providerRequestId, reasonCode });
+        return;
       }
       const memorySnapshot = frozenContext.memory;
       const contextFinishedAt = this.now();
@@ -1108,7 +1173,7 @@ export class InterviewCoordinator extends EventEmitter {
         // the plan -> coverage -> depth-repair -> final quality chain before
         // answer_end. Repair is bounded to missing facets and max length.
         directDisplay: false,
-        emitDeltas: true,
+        emitDeltas: this.accurateInterview ? false : true,
         allowQualityRepair: true,
         formatAnswer: true,
         maxRetries: 1,
@@ -1246,9 +1311,25 @@ export class InterviewCoordinator extends EventEmitter {
           this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: answerText, model: this.answerModel ?? "configured", mode: this.answerMode ?? mode, startedAt: this.answerStartedAt ?? startedAt, firstTokenAt: this.answerFirstTokenAt, finishedAt, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, telemetry, ...(question.groupId ? { groupId: question.groupId } : {}), relation: answerRelationForQuestion(question), answerRunId: operationId, createdAt: finishedAt });
           if (answerOperation) answerOperation.state = "committed";
           this.recordRuntimeTrace("ANSWER_COMMITTED", {}, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "provider-completed" });
+          if (event.quality) {
+            this.recordRuntimeTrace("ANSWER_QUALITY_GATE", {
+              overallScore: event.quality.overallScore,
+              score: event.quality.score,
+              coverageScore: event.quality.coverageScore,
+              depthScore: event.quality.depthScore,
+              groundingScore: event.quality.groundingScore,
+              spokenScore: event.quality.spokenScore,
+              factualConsistencyScore: event.quality.factualConsistencyScore,
+              needsRepair: event.quality.needsRepair,
+              missingSlotCount: event.quality.missingSlots.length,
+              unsupportedClaimCount: event.quality.unsupportedClaims.length,
+              contradictionCount: event.quality.contradictions.length
+            }, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "final-answer-quality-gate" });
+          }
           this.emitRealtimeMessage({ type: "answer_end", answerId: event.answerId, text: answerText, quality: event.quality });
           this.emitQuestionTrace(answerTrace);
           this.memory.recordAnswer(answerText, { question: question.text, questionId: question.id, groupId: question.groupId, createdAt: finishedAt });
+          if (this.accurateInterview) this.understandingV3.recordAnswer({ id: event.answerId, questionId: question.id, text: answerText, createdAt: finishedAt });
           this.detector.markAnswered(question.id);
           this.markQuestionGroup(question.id, "answered");
           this.markQuestionStateById(question.id, "answered");
@@ -1387,6 +1468,20 @@ export class InterviewCoordinator extends EventEmitter {
       // CanonicalRemoteTurnAssembler is the only ASR-to-turn state owner.
       // Neither partial nor provider-final fragments enter QuestionDetector.
       if (!segment.final) {
+        if (this.accurateInterview) {
+          const draft = this.understandingV3.process({
+            id: segment.id,
+            text: segment.text,
+            rawText: rawSegment.text,
+            rawSegments: [rawSegment.text],
+            segmentIds: [segment.id],
+            final: false,
+            speaker: "interviewer",
+            timestamp: receivedAt,
+            asrConfidence: segment.confidence
+          }, this.activeOptions?.projectCandidates ?? []);
+          this.recordRuntimeTrace("QUESTION_DRAFT_UPDATED", { authority: "understanding-v3", textLength: segment.text.length, previewOnly: true, speechAct: draft.frame.speechAct, completion: draft.frame.completion }, { reasonCode: "v3-interim-buffer" });
+        }
         // The renderer may still show a non-actionable draft for feedback, but
         // this preview is deliberately emitted without passing through the
         // question detector or creating a schedulable runtime question.
@@ -1667,7 +1762,8 @@ export class InterviewCoordinator extends EventEmitter {
     const effectiveEvent = this.emitQuestion(event);
     if ((effectiveEvent.type === "question_confirmed" || effectiveEvent.type === "question_superseded") && this.activeOptions?.automationMode === "AUTO") {
       const question = effectiveEvent.question;
-      if (question.answerable === true && question.shouldAnswer !== false) {
+      const v3AuthoritySatisfied = !this.accurateInterview || question.commitAuthority === "understanding-v3";
+      if (question.answerable === true && question.shouldAnswer !== false && v3AuthoritySatisfied) {
         this.scheduleAnswer(question);
       } else if (question.groupId && question.threadItemType !== "TOPIC_FRAGMENT" && question.threadItemType !== "ASR_REVISION" && (this.answerScheduler.active?.groupId === question.groupId || this.visibleAnswerGroups.has(question.groupId))) {
         // Constraints/examples are not standalone questions. They update the
@@ -1680,13 +1776,109 @@ export class InterviewCoordinator extends EventEmitter {
     }
   }
 
+  private questionCandidateFromFrame(frame: import("@interview-copilot/shared").QuestionFrame, utterance: TranscriptUtterance, turn: InterviewTurn): QuestionCandidate {
+    const detectionType: QuestionCandidate["detectionType"] = frame.questionType === "PROJECT"
+      ? "project"
+      : frame.questionType === "BEHAVIORAL"
+        ? "behavior"
+        : frame.speechAct === "FOLLOW_UP"
+          ? "follow_up"
+          : frame.speechAct === "CLARIFICATION" ? "clarification" : "technical";
+    const speechAct: QuestionCandidate["speechAct"] = frame.speechAct === "FOLLOW_UP" ? "FOLLOW_UP" : "QUESTION";
+    const contextRelation: QuestionCandidate["contextRelation"] = frame.relation === "FOLLOW_UP"
+      ? "follow_up"
+      : frame.relation === "CLARIFICATION" ? "repair" : "standalone";
+    const relationType: QuestionCandidate["relationType"] = frame.relation === "FOLLOW_UP"
+      ? "FOLLOW_UP"
+      : frame.relation === "CLARIFICATION" ? "SAME_QUESTION_AUGMENTATION" : "NEW_TOPIC";
+    const decomposition = decomposeQuestion(frame.canonicalQuestion);
+    return {
+      id: `v3-question-${frame.id}`,
+      text: frame.canonicalQuestion,
+      rawText: utterance.rawText ?? utterance.text,
+      normalizedText: frame.normalizedText,
+      canonicalText: frame.canonicalQuestion,
+      confidence: frame.confidence.overall >= 0.9 ? "high" : frame.confidence.overall >= 0.78 ? "medium" : "low",
+      score: frame.confidence.overall,
+      source: "extractor",
+      detectedAt: frame.updatedAt,
+      status: "confirmed",
+      category: frame.questionType === "PROJECT" ? "project" : frame.questionType === "BEHAVIORAL" ? "behavioral" : frame.speechAct === "FOLLOW_UP" ? "followup" : "technical",
+      detectionType,
+      speechAct,
+      scoreBreakdown: { ruleScore: frame.confidence.speechAct, semanticScore: frame.confidence.completion, llmScore: frame.confidence.reference, finalScore: frame.confidence.overall },
+      asrConfidence: frame.confidence.asr,
+      final: true,
+      triggerReason: frame.reason,
+      shouldAnswer: true,
+      answerable: true,
+      canonicalQuestion: frame.canonicalQuestion,
+      contextRelation,
+      relationType,
+      primaryQuestion: frame.canonicalQuestion,
+      groupTitle: frame.canonicalQuestion,
+      subQuestions: frame.subQuestions.map((slot) => slot.question),
+      nuclei: frame.subQuestions.map((slot) => ({ ...slot })),
+      questionDecomposition: decomposition,
+      topic: frame.entities.technologies[0] ?? frame.entities.concepts[0],
+      segmentIds: [...frame.segmentIds],
+      utteranceId: utterance.id,
+      turnId: turn.id,
+      ...(frame.projectId ? { explicitTopic: frame.projectId } : {}),
+      ...(frame.references.find((reference) => reference.resolved)?.resolved ? { anchorId: frame.references.find((reference) => reference.resolved)?.resolved } : {}),
+      understandingFrameId: frame.id,
+      commitAuthority: "understanding-v3"
+    };
+  }
+
+  private handleUnderstandingV3Event(event: UnderstandingEvent, trace: QuestionTrace, utterance: TranscriptUtterance, turn: InterviewTurn): boolean {
+    const frame = event.frame;
+    const decision = event.gate.decision;
+    trace.update({
+      assembledTurn: frame.canonicalQuestion.slice(0, 640),
+      speechAct: frame.speechAct,
+      speechActReason: frame.reason,
+      turnCompletionState: frame.completion,
+      turnCompletionConfidence: frame.confidence.completion,
+      turnCompletionReason: event.gate.reason,
+      finalScore: frame.confidence.overall,
+      decision: decision === "COMMIT" ? "answer" : "reject",
+      decisionReason: event.gate.reason,
+      contextRelation: frame.relation,
+      projectId: frame.projectId,
+      projectResolutionStatus: this.activeProjectResolver.state.status,
+      projectResolutionReason: this.activeProjectResolver.state.lastReason,
+      subQuestions: frame.subQuestions.map((slot) => slot.question),
+      primaryQuestion: frame.canonicalQuestion,
+      isFollowUp: frame.relation === "FOLLOW_UP"
+    }).mark("questionDetected", this.now());
+    this.recordRuntimeTrace("UNDERSTANDING_V3_DECISION", { decision, status: event.gate.status, completion: frame.completion, speechAct: frame.speechAct, confidence: frame.confidence.overall, projectId: frame.projectId }, { reasonCode: event.gate.reason });
+    if (event.type === "QUESTION_COMMITTED") {
+      const question = this.questionCandidateFromFrame(frame, utterance, turn);
+      trace.mark("questionConfirmed", this.now());
+      this.currentQuestionTrace = trace;
+      if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
+      this.recordRuntimeTrace("QUESTION_COMMIT_DECISION", { authority: "understanding-v3", decision, completion: frame.completion, speechAct: frame.speechAct, confidence: frame.confidence.overall, projectId: frame.projectId }, { questionId: question.id, reasonCode: event.gate.reason });
+      if (this.activeFeatures.decisionTrace) this.emitTelemetry("INTERVIEW_DECISION_TRACE", event.decisionTrace);
+      this.handleQuestionEvent({ type: "question_confirmed", question });
+      this.emitQuestionTrace();
+      return true;
+    }
+    this.currentQuestionTrace = trace;
+    if (this.pendingQuestionTrace === trace) this.pendingQuestionTrace = undefined;
+    this.recordRuntimeTrace(event.type === "QUESTION_WAITING" ? "QUESTION_DRAFT_UPDATED" : "QUESTION_COMMIT_DECISION", { authority: "understanding-v3", decision, completion: frame.completion, speechAct: frame.speechAct, confidence: frame.confidence.overall, unresolvedSlots: frame.unresolvedSlots.length, projectId: frame.projectId }, { reasonCode: event.gate.reason });
+    if (this.activeFeatures.decisionTrace) this.emitTelemetry("INTERVIEW_DECISION_TRACE", { frameId: frame.id, decision, status: event.gate.status, reason: event.gate.reason, unresolvedSlots: frame.unresolvedSlots, canonicalQuestion: frame.canonicalQuestion });
+    this.emitQuestionTrace();
+    return true;
+  }
+
   private async observeFinalQuestion(utterance: TranscriptUtterance, sessionGeneration = this.sessionGeneration): Promise<void> {
     if (sessionGeneration !== this.sessionGeneration || !this.activeInterviewId) return;
     const turn = this.turnBuilder.build(utterance);
     this.turns.set(turn.id, turn);
     const detectionStartedAt = this.now();
     const canonicalTurn = utterance as Partial<CanonicalRemoteTurn>;
-    const rawSegments = canonicalTurn.rawSegments?.map((fragment) => fragment.text.slice(0, 240)).slice(0, 32) ?? [utterance.rawText ?? utterance.text].map((text) => text.slice(0, 240));
+    const rawSegments = canonicalTurn.rawSegments?.map((fragment) => (fragment.rawText ?? fragment.text).slice(0, 240)).slice(0, 32) ?? [utterance.rawText ?? utterance.text].map((text) => text.slice(0, 240));
     const trace = new QuestionTrace({
       questionTraceId: `question-trace-${utterance.id}`,
       asrFinalReceivedAt: utterance.lastFinalReceivedAt ?? detectionStartedAt,
@@ -1719,6 +1911,21 @@ export class InterviewCoordinator extends EventEmitter {
       const correctedText = terminology.canonicalText;
       const rawAsrText = utterance.rawText ?? correctedText;
       const forceUnresolvedRaw = /(?:非二G|二G的时里)/iu.test(rawAsrText);
+      if (this.accurateInterview) {
+        const v3Event = this.understandingV3.process({
+          id: utterance.id,
+          text: correctedText,
+          rawText: rawAsrText,
+          rawSegments,
+          segmentIds: utterance.segmentIds,
+          final: true,
+          speaker: "interviewer",
+          timestamp: detectionStartedAt,
+          asrConfidence: utterance.confidence
+        }, this.activeOptions?.projectCandidates ?? []);
+        this.handleUnderstandingV3Event(v3Event, trace, utterance, turn);
+        return;
+      }
       const assembledSemantic = canonicalTurn.semantic;
       let semanticTurn = assembledSemantic ?? this.semanticTurnGate.decide(correctedText, {
         memory: this.memory.snapshot(),
@@ -2349,6 +2556,9 @@ export class InterviewCoordinator extends EventEmitter {
     this.questionTasks.clear();
     this.anchorStore.reset();
     this.memory.reset();
+    this.understandingV3.reset({ mode: "ACCURATE_INTERVIEW" });
+    this.activeRuntimeMode = "FAST_PRACTICE";
+    this.activeFeatures = resolveInterviewFeatureFlags("FAST_PRACTICE");
     this.recordRuntimeTrace("RUNTIME_CLEANUP_COMPLETED", {}, { reasonCode: "start-failed" });
     if (this.isRuntimeIdle()) this.recordRuntimeTrace("RUNTIME_IDLE", {}, { reasonCode: "start-failed" });
   }
@@ -2500,6 +2710,7 @@ export class InterviewCoordinator extends EventEmitter {
       sessionEvidenceCount: extra.sessionEvidenceCount ?? this.sessionEvidence.snapshot().length,
       firstTokenMs: extra.firstTokenMs ?? elapsed(latency?.providerFirstTokenAt, latency?.questionConfirmedAt),
       answerTotalMs: extra.answerTotalMs ?? elapsed(this.now(), latency?.questionConfirmedAt),
+      postCompletionLatencyMs: extra.postCompletionLatencyMs ?? elapsed(this.now(), latency?.questionConfirmedAt),
       questionDebounceMs: extra.questionDebounceMs ?? runtimeTelemetry.questionDebounceMs,
       historyRevision: this.activeInterviewId ? this.history.getRevision?.(this.activeInterviewId) : undefined,
       asrFinalToQuestionConfirmedMs: elapsed(latency?.questionConfirmedAt, latency?.asrFinalReceivedAt),
@@ -2521,6 +2732,7 @@ export class InterviewCoordinator extends EventEmitter {
         retrievalMs: this.activeQuestionTrace?.snapshot().metrics.retrievalMs,
         firstTokenMs: this.activeQuestionTrace?.snapshot().metrics.llmFirstTokenMs,
         answerTotalMs: this.activeQuestionTrace?.snapshot().metrics.answerTotalMs,
+        postCompletionLatencyMs: this.activeQuestionTrace?.snapshot().metrics.answerTotalMs,
         totalAnswerMs: this.activeQuestionTrace?.snapshot().metrics.answerTotalMs
       },
       ...extra

@@ -24,4 +24,8 @@ describe("intra-segment question splitter", () => {
     expect(splitIntraSegmentQuestions("上电自检有哪些项目？失败后的降级策略是什么？")).toHaveLength(1);
     expect(splitIntraSegmentQuestions("优先级反转是什么？在 RTOS 里怎么避免？")).toHaveLength(1);
   });
+
+  it("splits an explicitly introduced independent project question", () => {
+    expect(splitIntraSegmentQuestions("CAN 和 UART 有什么区别？另外你项目为什么选择 CAN？")).toHaveLength(2);
+  });
 });

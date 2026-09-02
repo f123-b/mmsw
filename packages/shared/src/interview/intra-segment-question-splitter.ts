@@ -30,7 +30,7 @@ interface BoundaryMatch {
   reason: ExplicitSplitReason;
 }
 
-const EXPLICIT_BOUNDARY = /(?:^|[。！？?！]\s*|[，,、]\s*)(第二个问题|第三个问题|另外一个问题|换个问题|换一个问题|再问一个完全不同的(?:问题)?|接下来问另一个(?:问题)?|下一个问题|下个问题|下一题|说到另一个)/giu;
+const EXPLICIT_BOUNDARY = /(?:^|[。！？?！]\s*|[，,、]\s*)(第二个问题|第三个问题|另外(?:一个问题)?|换个问题|换一个问题|再问一个完全不同的(?:问题)?|接下来问另一个(?:问题)?|下一个问题|下个问题|下一题|说到另一个)/giu;
 const TRANSITION_CLOSE = /(?:这个(?:问题)?先到这里|这个(?:问题)?到这里)(?:[。！？?！\s，,、]*(?:下一题|换个问题|另一个问题))?/iu;
 
 function clean(value: string): string {
@@ -53,7 +53,7 @@ function explicitBoundaryMatches(text: string): BoundaryMatch[] {
 }
 
 function stripBoundaryPrefix(text: string): string {
-  return clean(text).replace(/^(?:第二个问题|第三个问题|另外一个问题|换个问题|换一个问题|再问一个完全不同的(?:问题)?|接下来问另一个(?:问题)?|下一个问题|下个问题|下一题|说到另一个)[，,、:：\s]*/iu, "");
+  return clean(text).replace(/^(?:第二个问题|第三个问题|另外(?:一个问题)?|换个问题|换一个问题|再问一个完全不同的(?:问题)?|接下来问另一个(?:问题)?|下一个问题|下个问题|下一题|说到另一个)[，,、:：\s]*/iu, "");
 }
 
 function independentNucleusAfterBoundary(text: string): boolean {

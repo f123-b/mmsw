@@ -25,6 +25,8 @@ import { AnswerDepthRepair } from "./answer/answer-depth-repair";
 
 export { planAnswerSource } from "./answer/project-answer-source-planner";
 export type { AnswerSourcePlan, AnswerSourceMode } from "./answer/project-answer-source-planner";
+export { StrictProjectQaRouter } from "./answer/strict-project-qa-router";
+export type { StrictProjectQaMatchLevel, StrictProjectQaOptions, StrictProjectQaResult } from "./answer/strict-project-qa-router";
 
 export * from "./answer/claim-gate";
 export * from "./answer/evidence-context";
@@ -93,6 +95,7 @@ export interface AnswerTelemetry {
   sessionEvidenceCount?: number;
   firstTokenMs?: number;
   answerTotalMs?: number;
+  postCompletionLatencyMs?: number;
   questionDebounceMs?: number;
   projectAutoAnchorId?: string;
   projectAutoAnchorConfidence?: number;
@@ -139,6 +142,16 @@ export interface AnswerTelemetry {
   answerEstimatedDurationSec?: number;
   answerDepthPass?: boolean;
   answerRepairApplied?: boolean;
+  answerQualityScore?: number;
+  answerRelevanceScore?: number;
+  answerCoverageScore?: number;
+  answerDepthScore?: number;
+  answerGroundingScore?: number;
+  answerSpokenScore?: number;
+  answerFactualConsistencyScore?: number;
+  answerMissingSlots?: string[];
+  answerUnsupportedClaims?: string[];
+  answerContradictions?: string[];
   answerRuntimeTrace?: AnswerRuntimeTrace;
 }
 
@@ -579,6 +592,10 @@ export class AnswerAgent {
     if (context.coreTechnicalQa && (!context.answerSourcePlan || context.answerSourcePlan.mode === "general_technical") && !context.answerSourcePlan?.projectQuestionRequested) {
       context.answerSourcePlan = planAnswerSource({ coreTechnicalQa: context.coreTechnicalQa });
     }
+    // The coordinator normally stops before entering the agent. Keep the
+    // guard here too so any direct caller cannot turn a strict project miss
+    // into a generic provider answer.
+    if (context.answerSourcePlan?.mode === "project_qa_no_match") return;
     const kind = classifyAnswerQuestion(routedQuestion.text, routedQuestion.kind);
     const plan = this.answerPlanner.plan({
       question: routedQuestion.text,
@@ -696,6 +713,8 @@ export class AnswerAgent {
       result = {
         ...result,
         score: Math.min(result.score, spoken.score),
+        overallScore: Math.min(result.overallScore, spoken.score),
+        spokenScore: spoken.score,
         issues: [...new Set([...result.issues, ...spoken.issues])],
         suggestions: [...new Set([...result.suggestions, ...spoken.suggestions])],
         needsRepair: result.needsRepair || spoken.needsRepair,
@@ -914,6 +933,25 @@ export class AnswerAgent {
        }
      };
     quality.blockedClaimCount = Math.max(claimGate.blockedClaims.length, projectTruth.blockedClaimCount);
+    quality.overallScore = quality.score;
+    quality.coverageScore = quality.coverage.requiredFacets.length === 0 ? 1 : quality.coverage.coveredFacets.length / quality.coverage.requiredFacets.length;
+    quality.depthScore = quality.coverage.depthPass ? 1 : quality.coverage.coveredFacets.length / Math.max(1, quality.coverage.requiredFacets.length);
+    quality.missingSlots = [...quality.coverage.missingFacets];
+    quality.factualConsistencyScore = projectTruth.decision === "BLOCK" ? 0 : projectTruth.decision === "REWRITE" ? Math.min(quality.factualConsistencyScore, 0.75) : quality.factualConsistencyScore;
+    quality.needsRepair = quality.needsRepair && quality.factualConsistencyScore >= 0.65;
+    quality.telemetry = {
+      ...quality.telemetry,
+      answerQualityScore: quality.overallScore,
+      answerRelevanceScore: quality.relevanceScore,
+      answerCoverageScore: quality.coverageScore,
+      answerDepthScore: quality.depthScore,
+      answerGroundingScore: quality.groundingScore,
+      answerSpokenScore: quality.spokenScore,
+      answerFactualConsistencyScore: quality.factualConsistencyScore,
+      answerMissingSlots: quality.missingSlots,
+      answerUnsupportedClaims: quality.unsupportedClaims,
+      answerContradictions: quality.contradictions
+    };
     quality.telemetry = { ...quality.telemetry, blockedClaimCount: projectTruth.blockedClaimCount, projectTruthDecision: projectTruth.decision };
     yield { type: "answer_end", answerId, text: formattedText, quality };
   }
