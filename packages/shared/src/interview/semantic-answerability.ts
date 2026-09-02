@@ -45,6 +45,7 @@ const EXPLICIT_TOPIC = /(?:STL|TCP|UDP|HTTP|MQTT|CoAP|LwIP|IIC|I2C|SPI|UART|CAN(
 const MEANINGFUL_OBJECT = /(?:项目|系统|模块|方案|协议|接口|链路|问题|场景|情况|原因|区别|原理|作用|设计|实现|定位|排查|验证|风险|计划|步骤|清单|方法|数值|示例|代码|任务|线程|内存|硬件|日志|网络|电机|看门狗|UART|SPI|I2C|CAN|RTOS|HardFault|故障|性能|索引|词|意思|结果|负责|经历|ACID|数据库|微服务|缓存|寄存器|复杂度|带宽)/iu;
 const GENERIC_OBJECT_ONLY = /(?:问题|场景|情况|原因|区别|原理|作用|定位|排查|验证|风险|步骤|方法|结果|影响|哪些点|哪些方面|什么时候|什么情况)/iu;
 const OPEN_PREDICATE = /(?:能不能|可不可以|要不要|是否可以)\s*(?:用|开|启用|配|配置|设置|选择|调用|处理|接|放|加|改)(?:[。！？?！\s，,、]*$)/iu;
+const OPEN_SELECTION = /(?:为什么|为何)(?:要)?(?:选|选择)\s*[？?。！!\s，,、]*$/iu;
 const OPEN_CONFIG_PREDICATE = /(?:这里|那个|这个|这种情况|这种场景|中断里|中断中)\s*(?:怎么|如何|怎样)\s*(?:用|开|启用|配|配置|设置|选择|调用|处理)(?:[。！？?！\s，,、]*$)/iu;
 const SHORT_OBJECT_COMPOSITION = /(?:怎么|如何|怎样)\s*(?:避免|防止|解决|降低|判断|保证|处理|定位|排查|修复)\s*[\u4e00-\u9fff](?:[？?。！？!])$/iu;
 const CONTEXTUAL_REPLACEMENT_QUESTION = /^(?:那|然后|如果|假设|若|再)?[^。！？?！]*?(?:换成|换为|改成|改为|迁到|切到)[^。！？?！]*[？?]$/iu;
@@ -71,7 +72,7 @@ export function hasContextReference(text: string): boolean {
 
 export function isOpenPredicate(text: string): boolean {
   const normalized = clean(text);
-  return OPEN_PREDICATE.test(normalized) || OPEN_CONFIG_PREDICATE.test(normalized);
+  return OPEN_PREDICATE.test(normalized) || OPEN_CONFIG_PREDICATE.test(normalized) || OPEN_SELECTION.test(normalized);
 }
 
 function isShortObjectComposition(text: string): boolean {
@@ -174,6 +175,9 @@ export function decideSemanticAnswerability(text: string, context: SemanticAnswe
   }
   if (isOpenPredicate(normalized)) {
     return negative("OPEN_PREDICATE", "predicate-missing-object", 0.97, { shouldBuffer: true, hasIndependentSubject: concreteSubject, isDangling: true });
+  }
+  if (OPEN_SELECTION.test(normalized)) {
+    return negative("OPEN_PREDICATE", "selection-object-missing", 0.97, { shouldBuffer: true, hasIndependentSubject: concreteSubject, isDangling: true });
   }
   if (isShortObjectComposition(normalized)) {
     return negative("INCOMPLETE", "short-object-composition-open", 0.93, { shouldBuffer: true, hasIndependentSubject: concreteSubject, isDangling: true });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_OVERLAY_PREFERENCES } from "./overlay-preferences";
-import { resolveOverlayGeometryConstraints, resolveOverlayPersistedGeometry, resolveOverlayPresetGeometry } from "./overlay-layout";
+import { resolveOverlayGeometryConstraints, resolveOverlayPersistedGeometry, resolveOverlayPresetGeometry, resolveWrittenTestCameraBounds } from "./overlay-layout";
 
 const controlBar = DEFAULT_OVERLAY_PREFERENCES.interview.controlBar;
 
@@ -68,5 +68,15 @@ describe("shared overlay geometry resolver", () => {
     });
     expect(geometry.question).toMatchObject({ x: -1800, y: 80, width: 420, height: 500 });
     expect(geometry.answer).toMatchObject({ x: -1300, y: 80, width: 680, height: 500 });
+  });
+
+  it("anchors the written-test camera to the answer upper-right corner", () => {
+    const camera = resolveWrittenTestCameraBounds({ x: 900, y: 120, width: 700, height: 520 }, { x: 0, y: 0, width: 1920, height: 1040 });
+    expect(camera).toEqual({ x: 1548, y: 128, width: 44, height: 44 });
+  });
+
+  it("keeps the camera inside a secondary monitor work area", () => {
+    const camera = resolveWrittenTestCameraBounds({ x: 3100, y: -200, width: 400, height: 300 }, { x: 1920, y: -100, width: 1280, height: 900 });
+    expect(camera).toEqual({ x: 3156, y: -100, width: 44, height: 44 });
   });
 });

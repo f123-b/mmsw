@@ -209,3 +209,18 @@ export function resolveOverlayPersistedGeometry(options: OverlayPersistedGeometr
 export function toRelativeOverlayBounds(bounds: OverlayLayoutBounds, workArea: OverlayLayoutWorkArea): OverlayLayoutBounds {
   return { ...bounds, x: Math.round(bounds.x - workArea.x), y: Math.round(bounds.y - workArea.y) };
 }
+
+/**
+ * Written-test camera control: a small native interactive window anchored to
+ * the AnswerWindow's upper-right corner. The answer surface remains passive;
+ * only this returned rectangle is reserved for pointer interaction.
+ */
+export function resolveWrittenTestCameraBounds(answer: OverlayLayoutBounds, workArea: OverlayLayoutWorkArea, gap = 8): OverlayLayoutBounds {
+  const size = 44;
+  return {
+    width: size,
+    height: size,
+    x: clamp(answer.x + answer.width - size - gap, workArea.x, workArea.x + Math.max(0, workArea.width - size)),
+    y: clamp(answer.y + gap, workArea.y, workArea.y + Math.max(0, workArea.height - size))
+  };
+}

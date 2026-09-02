@@ -22,6 +22,7 @@ import { enforceHrProfilePolicy } from "./answer/hr-profile-policy";
 import { ProjectTruthGuard } from "./answer/project-truth-guard";
 import { AnswerPlanCoverageChecker, type AnswerCoverageResult } from "./answer/answer-plan-coverage-checker";
 import { AnswerDepthRepair } from "./answer/answer-depth-repair";
+import type { QuestionContextSnapshot, QuestionRequirement } from "./interview/question-frame";
 
 export { planAnswerSource } from "./answer/project-answer-source-planner";
 export type { AnswerSourcePlan, AnswerSourceMode } from "./answer/project-answer-source-planner";
@@ -142,6 +143,11 @@ export interface AnswerTelemetry {
   answerEstimatedDurationSec?: number;
   answerDepthPass?: boolean;
   answerRepairApplied?: boolean;
+  answerSlotCoverage?: number;
+  requiredAnswerSlotCount?: number;
+  coveredAnswerSlotCount?: number;
+  missingAnswerSlotIds?: string[];
+  contextSnapshotId?: string;
   answerQualityScore?: number;
   answerRelevanceScore?: number;
   answerCoverageScore?: number;
@@ -219,6 +225,9 @@ export interface AnswerContextInput {
   stableInterviewPrefix?: string;
   /** Bounded rolling state; it is advisory and never replaces evidence. */
   interviewMemo?: string;
+  /** Requirements and frozen context emitted by Understanding V3. */
+  questionRequirements?: QuestionRequirement[];
+  contextSnapshot?: QuestionContextSnapshot;
 }
 
 export interface ContextPack {
@@ -253,6 +262,8 @@ export interface ContextPack {
   questionTelemetry?: Partial<AnswerTelemetry>;
   stableInterviewPrefix?: string;
   interviewMemo?: string;
+  questionRequirements: QuestionRequirement[];
+  contextSnapshot?: QuestionContextSnapshot;
 }
 
 function answerTokenBudget(mode: AnswerMode, kind: AnswerQuestionKind, plan?: AnswerPlan): number {
@@ -319,6 +330,8 @@ export class ContextRouter {
       evidenceSnapshot: snapshot,
       ...(input.stableInterviewPrefix ? { stableInterviewPrefix: input.stableInterviewPrefix } : {}),
       ...(input.interviewMemo ? { interviewMemo: input.interviewMemo } : {}),
+      questionRequirements: (input.questionRequirements ?? []).map((item) => ({ ...item })),
+      ...(input.contextSnapshot ? { contextSnapshot: { ...input.contextSnapshot, activeEntities: { ...input.contextSnapshot.activeEntities }, references: input.contextSnapshot.references.map((item) => ({ ...item })) } } : {}),
       sessionEvidence: routedSessionEvidence.map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) })),
       candidateStatements: routedSessionEvidence.map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) }))
       ,...(input.questionTelemetry ? { questionTelemetry: { ...input.questionTelemetry } } : {})
@@ -400,6 +413,7 @@ export class PromptBuilder {
     }
     sections.push({ name: "question", content: question.text });
     if (plan?.questionDecomposition?.isMultiSlot) sections.push({ name: "multi-slot-context", content: multiSlotPrompt(plan.questionDecomposition) });
+    if (plan?.questionRequirements?.length) sections.push({ name: "multi-slot-context", content: `回答槽位契约（每一项都必须覆盖，不能用泛泛一句话代替）：\n${plan.questionRequirements.filter((item) => item.required).map((item) => `- ${item.id}：${item.description}`).join("\n")}` });
     const length = plan
       ? `${plan.length.minCharacters}~${plan.length.maxCharacters} 字，目标 ${plan.targetDurationSec} 秒`
       : kind === "code"
@@ -609,6 +623,7 @@ export class AnswerAgent {
       retrievedKnowledge: context.retrievedKnowledge,
       preparedAnswer: context.preparedAnswer,
       questionBankContext: context.questionBankMatches,
+      questionRequirements: context.questionRequirements,
       interviewMode: mode
     });
     const intent = plan.intent;
@@ -891,7 +906,8 @@ export class AnswerAgent {
     };
      quality.projectTruthDecision = projectTruth.decision;
      quality.coverage = this.coverageChecker.check(plan, formattedText);
-     quality.coverage = { ...quality.coverage };
+     const finalCoverage = { ...quality.coverage };
+     quality.coverage = finalCoverage;
      if (repairApplied) quality.issues = [...new Set([...quality.issues, "answer-depth-repair-applied"])];
       // Keep the final coverage verdict truthful. A repair attempt may be
       // rejected by the max-length or grounding guards, so it must not turn
@@ -905,29 +921,36 @@ export class AnswerAgent {
        && projectTruth.decision === "ALLOW";
      quality.telemetry = {
        ...quality.telemetry,
-       coveredFacets: quality.coverage.coveredFacets,
-       missingFacets: quality.coverage.missingFacets,
-       answerCharacterCount: quality.coverage.characterCount,
-       requiredFacets: quality.coverage.requiredFacets,
-       answerEstimatedDurationSec: quality.coverage.estimatedDurationSec,
-       answerDepthPass: quality.coverage.depthPass,
-       answerRepairApplied: repairApplied
+       coveredFacets: finalCoverage.coveredFacets,
+       missingFacets: finalCoverage.missingFacets,
+       answerCharacterCount: finalCoverage.characterCount,
+       requiredFacets: finalCoverage.requiredFacets,
+       answerEstimatedDurationSec: finalCoverage.estimatedDurationSec,
+       answerDepthPass: finalCoverage.depthPass,
+       answerRepairApplied: repairApplied,
+       requiredAnswerSlotCount: plan.questionRequirements.filter((item) => item.required).length,
+       coveredAnswerSlotCount: plan.questionRequirements.filter((item) => item.required && finalCoverage.coveredFacets.includes(item.id)).length,
+       missingAnswerSlotIds: plan.questionRequirements.filter((item) => item.required && !finalCoverage.coveredFacets.includes(item.id)).map((item) => item.id),
+       answerSlotCoverage: plan.questionRequirements.filter((item) => item.required).length === 0
+         ? 1
+         : plan.questionRequirements.filter((item) => item.required && finalCoverage.coveredFacets.includes(item.id)).length / plan.questionRequirements.filter((item) => item.required).length,
+       contextSnapshotId: context.contextSnapshot?.id
      };
      quality.telemetry = {
        ...quality.telemetry,
        initialAnswerCharacterCount,
-       finalAnswerCharacterCount: quality.coverage.characterCount,
+       finalAnswerCharacterCount: finalCoverage.characterCount,
        answerRuntimeTrace: {
          questionId: routedQuestion.id,
          answerId,
          sourceMode: context.answerSourcePlan?.mode,
-         requiredFacets: quality.coverage.requiredFacets,
-         coveredFacets: quality.coverage.coveredFacets,
-         missingFacets: quality.coverage.missingFacets,
+         requiredFacets: finalCoverage.requiredFacets,
+         coveredFacets: finalCoverage.coveredFacets,
+         missingFacets: finalCoverage.missingFacets,
          initialCharacterCount: initialAnswerCharacterCount,
          finalCharacterCount: quality.coverage.characterCount,
-         estimatedDurationSec: quality.coverage.estimatedDurationSec,
-         depthPass: quality.coverage.depthPass,
+         estimatedDurationSec: finalCoverage.estimatedDurationSec,
+         depthPass: finalCoverage.depthPass,
          needsRepair: quality.needsRepair,
          repairApplied
        }

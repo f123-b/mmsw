@@ -78,7 +78,8 @@ import {
   type ProjectAliasCandidate,
   type SessionTerminologyContext,
   type TerminologyRolloutMode,
-  type AmbiguousSemanticClient
+  type AmbiguousSemanticClient,
+  type QuestionContextSnapshot
 } from "@interview-copilot/shared";
 import type { AudioStartOptions } from "./audio-manager";
 import type { RealtimeConnectOptions, RealtimeConnectionState } from "./realtime-session";
@@ -292,6 +293,8 @@ export class InterviewCoordinator extends EventEmitter {
   private pendingAnswerQuestion: QuestionCandidate | undefined;
   private readonly visibleAnswerGroups = new Set<string>();
   private readonly answerContextSnapshots = new Map<string, {
+    projectId?: string;
+    contextSnapshot?: QuestionContextSnapshot;
     recentTranscript: string[];
     memory: ReturnType<InterviewMemory["snapshot"]>;
     sessionEvidence: CandidateStatementEvidence[];
@@ -394,6 +397,8 @@ export class InterviewCoordinator extends EventEmitter {
     if (resolution.activeProject) {
       this.interviewMemo.setProject(resolution.activeProject.projectName);
       if (this.accurateInterview) this.understandingV3.setActiveProject(this.understandingProject());
+      if (resolution.reason === "project-switch-candidate") this.recordRuntimeTrace("PROJECT_SWITCH_CANDIDATE", { candidateProjectId: resolution.candidates[0], evidenceLevel: resolution.evidenceLevel, activeProjectId: current?.projectId }, { reasonCode: resolution.reason });
+      if (resolution.changed && current?.projectId && resolution.activeProject.projectId !== current.projectId) this.recordRuntimeTrace("PROJECT_SWITCH_COMMITTED", { previousProjectId: current.projectId, projectId: resolution.activeProject.projectId, evidenceLevel: resolution.evidenceLevel }, { reasonCode: resolution.reason });
       if (resolution.changed) this.recordRuntimeTrace("PROJECT_RESOLVED", { projectId: resolution.activeProject.projectId, confidence: resolution.activeProject.confidence, source: resolution.activeProject.source }, { reasonCode: resolution.reason });
     }
   }
@@ -855,6 +860,8 @@ export class InterviewCoordinator extends EventEmitter {
       return;
     }
     const frozenContext = this.answerContextSnapshots.get(question.id) ?? {
+      ...(question.projectId ? { projectId: question.projectId } : this.activeProjectId ? { projectId: this.activeProjectId } : {}),
+      ...(question.contextSnapshot ? { contextSnapshot: question.contextSnapshot } : {}),
       recentTranscript: [...this.recentTranscript],
       memory: this.memory.snapshot(),
       sessionEvidence: this.sessionEvidence.snapshot(),
@@ -915,6 +922,7 @@ export class InterviewCoordinator extends EventEmitter {
     answerTrace?.mark("retrievalStarted", startedAt);
     this.accumulatedAnswerText = "";
     try {
+      const answerProjectId = frozenContext.projectId ?? question.projectId ?? this.activeProjectId;
       const answerOperation = this.runtimeAnswers.get(operationId);
       if (answerOperation) answerOperation.state = "context_loading";
       this.answerScheduler.markContextBuilding(question.id);
@@ -928,7 +936,7 @@ export class InterviewCoordinator extends EventEmitter {
           { id: question.id, parentQuestionId: question.parentQuestionId, rootQuestionId: question.rootQuestionId, text: question.text },
           frozenContext.memory,
           {
-            relatedProject: /项目|简历|经历|负责|做过|成果|业绩/.test(question.text) ? this.activeProjectId : undefined,
+            relatedProject: /项目|简历|经历|负责|做过|成果|业绩/.test(question.text) ? answerProjectId : undefined,
             relatedTechnicalTopic: frozenContext.memory.currentTopic
           }
         )
@@ -939,7 +947,7 @@ export class InterviewCoordinator extends EventEmitter {
           if (!this.activeInterviewId || this.runtimeSessionId !== sessionId) return;
           this.recordRuntimeTrace(phase === "started" ? "RICH_CONTEXT_STARTED" : "RICH_CONTEXT_COMPLETED", {}, { questionId: question.id, providerRequestId, reasonCode: "background-rich-context" });
         },
-        projectId: this.activeProjectId,
+        projectId: answerProjectId,
         jobTargetId: this.activeOptions?.jobTargetId,
         runtimeMode: this.activeRuntimeMode,
         strictProjectQa: this.activeFeatures.strictProjectQa,
@@ -963,6 +971,14 @@ export class InterviewCoordinator extends EventEmitter {
         if (streamOptions.screenshotRequestId) throw Object.assign(new Error("Screenshot vision request cancelled"), { name: "AbortError" });
         return;
       }
+      const routedProjectId = providerContext.questionTelemetry?.projectAutoAnchorId;
+      if (this.accurateInterview && answerProjectId && routedProjectId && routedProjectId !== answerProjectId) {
+        this.recordRuntimeTrace("PROJECT_CONTEXT_MISMATCH", { expectedProjectId: answerProjectId, routedProjectId }, { questionId: question.id, providerRequestId, reasonCode: "frozen-question-project-mismatch" });
+        this.emitDiagnostic("PROJECT_CONTEXT_MISMATCH: 已阻止跨项目回答");
+        this.markQuestionStateById(question.id, "cancelled");
+        return;
+      }
+      providerContext = { ...providerContext, questionTelemetry: { ...(providerContext.questionTelemetry ?? {}), ...(answerProjectId ? { activeProjectId: answerProjectId } : {}) } };
       const routeKind = classifyAnswerQuestion(question.text, question.detectionType);
       const routeIntent = analyzeAnswerIntent({ question: question.text, kind: routeKind });
       const projectQuestionRequested = routeKind === "project"
@@ -1144,7 +1160,7 @@ export class InterviewCoordinator extends EventEmitter {
         this.answerFirstTokenAt = undefined;
         return;
       }
-      const context = { ...lockedProviderContext, recentTranscript: lockedProviderContext.recentTranscript ?? [...frozenContext.recentTranscript], interviewMemory: lockedProviderContext.interviewMemory ?? memorySnapshot, questionTelemetry: this.buildAnswerTelemetry(question), ...(this.activeOptions?.stableInterviewPrefix ? { stableInterviewPrefix: this.activeOptions.stableInterviewPrefix } : {}), interviewMemo: this.interviewMemo.toText(), ...(followUpContext ? { followUpContext } : {}) };
+      const context = { ...lockedProviderContext, recentTranscript: lockedProviderContext.recentTranscript ?? [...frozenContext.recentTranscript], interviewMemory: lockedProviderContext.interviewMemory ?? memorySnapshot, questionTelemetry: this.buildAnswerTelemetry(question), ...(question.requirements ? { questionRequirements: question.requirements } : {}), ...(question.contextSnapshot ? { contextSnapshot: question.contextSnapshot } : {}), ...(this.activeOptions?.stableInterviewPrefix ? { stableInterviewPrefix: this.activeOptions.stableInterviewPrefix } : {}), interviewMemo: this.interviewMemo.toText(), ...(followUpContext ? { followUpContext } : {}) };
       const activePlan = this.answerScheduler.active?.id === question.id && !this.answerScheduler.active?.hasVisibleOutput ? this.answerScheduler.active.plan : undefined;
       const plannedQuestionText = activePlan
         ? [activePlan.question, ...activePlan.constraints, ...activePlan.examples, ...activePlan.subQuestions].filter(Boolean).join("\n")
@@ -1243,11 +1259,22 @@ export class InterviewCoordinator extends EventEmitter {
               depthPass: event.quality.coverage.depthPass,
               needsRepair: event.quality.coverage.needsRepair
             }, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "answer-plan-coverage" });
+            if (event.quality.telemetry?.requiredAnswerSlotCount !== undefined) {
+              this.recordRuntimeTrace("ANSWER_SLOT_COVERAGE", {
+                requiredSlotCount: event.quality.telemetry.requiredAnswerSlotCount,
+                coveredSlotCount: event.quality.telemetry.coveredAnswerSlotCount,
+                coverage: event.quality.telemetry.answerSlotCoverage,
+                missingSlotIds: event.quality.telemetry.missingAnswerSlotIds?.join(",")
+              }, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "question-requirement-contract" });
+            }
             if (event.quality.telemetry?.answerRepairApplied) {
               this.recordRuntimeTrace("ANSWER_DEPTH_REPAIR", {
                 missingFacets: event.quality.telemetry.missingFacets?.join(","),
                 characterCount: event.quality.telemetry.answerCharacterCount,
                 estimatedDurationSec: event.quality.telemetry.answerEstimatedDurationSec
+              }, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "bounded-facet-supplement" });
+              this.recordRuntimeTrace("ANSWER_SLOT_REPAIR", {
+                missingSlotIds: event.quality.telemetry.missingAnswerSlotIds?.join(",")
               }, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "bounded-facet-supplement" });
             }
             const answerRuntimeTrace = event.quality.telemetry?.answerRuntimeTrace;
@@ -1535,6 +1562,7 @@ export class InterviewCoordinator extends EventEmitter {
         shouldAnswer: semantic?.shouldAnswer,
         canonicalReady: Boolean(segment.final && assembled.current)
       }, { reasonCode: assembled.reason });
+      if (assembled.merged || (assembled.current?.fragments.length ?? 0) > 1) this.recordRuntimeTrace("QUESTION_FRAGMENT_APPENDED", { fragmentCount: assembled.current?.fragments.length ?? 0, merged: assembled.merged, rawTextLength: assembled.current?.rawText?.length ?? 0 }, { reasonCode: assembled.reason });
       for (const completed of assembled.completed) {
         this.clearRemoteAssemblyTimer();
         this.enqueueFinalUtterance(completed);
@@ -1680,24 +1708,29 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   private enqueueFinalUtterance(utterance: TranscriptUtterance): void {
-    const parts = splitIntraSegmentQuestions(utterance.rawText ?? utterance.text);
-    if (parts.length > 1) {
-      const duration = Math.max(1, utterance.endMs - utterance.startMs);
-      parts.forEach((part, index) => {
-        const startRatio = part.startOffset / Math.max(1, (utterance.rawText ?? utterance.text).length);
-        const endRatio = part.endOffset / Math.max(1, (utterance.rawText ?? utterance.text).length);
-        this.enqueueFinalUtterance({
-          ...utterance,
-          id: `${utterance.id}:part-${index + 1}`,
-          text: part.text,
-          rawText: part.text,
-          segmentIds: [...utterance.segmentIds, `${utterance.id}:part-${index + 1}`],
-          startMs: utterance.startMs + Math.round(duration * startRatio),
-          endMs: utterance.startMs + Math.round(duration * endRatio)
+    // Accurate Interview keeps the complete assembled turn intact. V3 owns
+    // the question boundary; the legacy splitter remains available only for
+    // FAST_PRACTICE where low latency is an explicit trade-off.
+    if (!this.accurateInterview) {
+      const parts = splitIntraSegmentQuestions(utterance.rawText ?? utterance.text);
+      if (parts.length > 1) {
+        const duration = Math.max(1, utterance.endMs - utterance.startMs);
+        parts.forEach((part, index) => {
+          const startRatio = part.startOffset / Math.max(1, (utterance.rawText ?? utterance.text).length);
+          const endRatio = part.endOffset / Math.max(1, (utterance.rawText ?? utterance.text).length);
+          this.enqueueFinalUtterance({
+            ...utterance,
+            id: `${utterance.id}:part-${index + 1}`,
+            text: part.text,
+            rawText: part.text,
+            segmentIds: [...utterance.segmentIds, `${utterance.id}:part-${index + 1}`],
+            startMs: utterance.startMs + Math.round(duration * startRatio),
+            endMs: utterance.startMs + Math.round(duration * endRatio)
+          });
         });
-      });
-      this.recordRuntimeTrace("QUESTION_DRAFT_UPDATED", { splitParts: parts.length, segmentLength: utterance.text.length }, { reasonCode: "intra-segment-question-split" });
-      return;
+        this.recordRuntimeTrace("QUESTION_DRAFT_UPDATED", { splitParts: parts.length, segmentLength: utterance.text.length }, { reasonCode: "fast-practice-intra-segment-split" });
+        return;
+      }
     }
     const sessionGeneration = this.sessionGeneration;
     // Keep final utterances serialized when the local classifier is enabled.
@@ -1727,7 +1760,14 @@ export class InterviewCoordinator extends EventEmitter {
     const text = turn.text.trim();
     const semantic = turn.semantic;
     const endpointSignaled = Boolean(_latest.endpoint || _latest.speechFinal || _latest.utteranceEnd || _latest.endOfTurn);
-    const delay = endpointSignaled ? Math.min(120, Math.max(0, turn.commitDelayMs)) : Math.max(0, Math.min(2_500, turn.commitDelayMs));
+    // Provider endpoint is fragment finality, not semantic question finality.
+    // Keep an adaptive stability window after endpoint so a paused setup such
+    // as “为什么要选……F405……什么原因” stays one V3 frame.
+    const completeIndependent = semantic.completeness === "COMPLETE" && semantic.dependency === "INDEPENDENT";
+    const delay = completeIndependent
+      ? Math.max(80, Math.min(180, turn.commitDelayMs))
+      : Math.max(320, Math.min(2_500, turn.commitDelayMs));
+    if (endpointSignaled) this.recordRuntimeTrace("QUESTION_STABILIZATION_STARTED", { waitMs: delay, semanticCompleteness: semantic.completeness, dependency: semantic.dependency }, { reasonCode: "asr-endpoint-is-fragment-final" });
     this.recordRuntimeTrace("TURN_COMPLETION_STARTED", { textLength: text.length, dependency: semantic.dependency, completeness: semantic.completeness, speechAct: semantic.speechAct, recommendedWaitMs: delay, asrFinalIsTurnFinal: false }, { reasonCode: "canonical-turn-assembly" });
     this.interviewTelemetry.record({ questionDebounceMs: delay }, this.now());
     this.runtimeTimers.set("remote-assembly", () => {
@@ -1820,6 +1860,9 @@ export class InterviewCoordinator extends EventEmitter {
       subQuestions: frame.subQuestions.map((slot) => slot.question),
       nuclei: frame.subQuestions.map((slot) => ({ ...slot })),
       questionDecomposition: decomposition,
+      requirements: frame.requirements.map((item) => ({ ...item })),
+      contextSnapshot: frame.contextSnapshot,
+      ...(frame.projectId ? { projectId: frame.projectId } : {}),
       topic: frame.entities.technologies[0] ?? frame.entities.concepts[0],
       segmentIds: [...frame.segmentIds],
       utteranceId: utterance.id,
@@ -1850,8 +1893,19 @@ export class InterviewCoordinator extends EventEmitter {
       projectResolutionReason: this.activeProjectResolver.state.lastReason,
       subQuestions: frame.subQuestions.map((slot) => slot.question),
       primaryQuestion: frame.canonicalQuestion,
+      questionRequirements: frame.requirements.map((item) => item.description),
+      contextSnapshotId: frame.contextSnapshot.id,
+      ...(frame.asrRepair ? { asrCorrections: [`${frame.asrRepair.raw}→${frame.asrRepair.canonical}`] } : {}),
+      resolvedReferences: frame.contextSnapshot.references.filter((reference) => reference.confidence >= 0.8).map((reference) => `${reference.raw}→${reference.resolved}`),
+      unresolvedAsr: frame.speechAct === "ASR_UNRESOLVED" || frame.completion === "ASR_UNCERTAIN",
       isFollowUp: frame.relation === "FOLLOW_UP"
     }).mark("questionDetected", this.now());
+    if (frame.completion === "COMPLETE") this.recordRuntimeTrace("QUESTION_SEMANTIC_COMPLETE", { canonicalQuestion: frame.canonicalQuestion, stabilityState: frame.stabilityState, requirementCount: frame.requirements.length }, { reasonCode: "semantic-complete-before-commit" });
+    if (decision === "COMMIT") this.recordRuntimeTrace("QUESTION_READY_TO_COMMIT", { canonicalQuestion: frame.canonicalQuestion, stabilityState: frame.stabilityState, requirementCount: frame.requirements.length }, { reasonCode: event.gate.reason });
+    if (event.type === "QUESTION_WAITING" && frame.stabilityState === "STABILIZING") this.recordRuntimeTrace("QUESTION_STABILIZATION_EXTENDED", { canonicalQuestion: frame.canonicalQuestion, unresolvedSlots: frame.unresolvedSlots.join(",") }, { reasonCode: event.gate.reason });
+    if (frame.asrRepair) this.recordRuntimeTrace("CONTEXTUAL_ASR_REPAIR", { raw: frame.asrRepair.raw, canonical: frame.asrRepair.canonical, confidence: frame.asrRepair.confidence }, { reasonCode: frame.asrRepair.reason });
+    if (frame.speechAct === "ASR_UNRESOLVED" || frame.completion === "ASR_UNCERTAIN") this.recordRuntimeTrace("CONTEXTUAL_ASR_HOLD", { raw: frame.rawCombinedText, unresolvedSlots: frame.unresolvedSlots.join(",") }, { reasonCode: frame.reason });
+    for (const reference of frame.contextSnapshot.references) this.recordRuntimeTrace(reference.confidence >= 0.8 ? "REFERENCE_RESOLVED" : "REFERENCE_UNRESOLVED", { raw: reference.raw, resolved: reference.resolved, confidence: reference.confidence }, { reasonCode: reference.confidence >= 0.8 ? "context-snapshot" : "low-confidence-reference" });
     this.recordRuntimeTrace("UNDERSTANDING_V3_DECISION", { decision, status: event.gate.status, completion: frame.completion, speechAct: frame.speechAct, confidence: frame.confidence.overall, projectId: frame.projectId }, { reasonCode: event.gate.reason });
     if (event.type === "QUESTION_COMMITTED") {
       const question = this.questionCandidateFromFrame(frame, utterance, turn);

@@ -49,13 +49,34 @@ function unique(values: string[]): string[] { return [...new Set(values)]; }
 
 function requiredFacets(plan: AnswerPlan): string[] {
   const structure = plan.structure.length ? plan.structure : ["conclusion", "mechanism"];
-  if (plan.kind === "concept") return unique(["definition", "mechanism", "key_characteristics", "practical_consideration"]);
-  if (plan.kind === "comparison") return unique(["definition", "key_differences", "common_causes", "consequences", "embedded_example"]);
-  if (plan.kind === "project") return unique(["architecture", "responsibility", "implementation", "challenge", "result", ...structure]);
-  if (plan.kind === "system-design") return unique(["conclusion", "architecture", "implementation", "practical_consideration", "verification"]);
-  if (plan.kind === "embedded-debugging" || plan.kind === "troubleshooting") return unique(["conclusion", "diagnosis_order", "root_cause", "fix", "verification"]);
-  if (plan.kind === "code") return unique(["code", "complexity_and_edges", ...structure]);
-  return unique(structure);
+  let base: string[];
+  if (plan.kind === "concept") base = ["definition", "mechanism", "key_characteristics", "practical_consideration"];
+  else if (plan.kind === "comparison") base = ["definition", "key_differences", "common_causes", "consequences", "embedded_example"];
+  else if (plan.kind === "project") base = ["architecture", "responsibility", "implementation", "challenge", "result", ...structure];
+  else if (plan.kind === "system-design") base = ["conclusion", "architecture", "implementation", "practical_consideration", "verification"];
+  else if (plan.kind === "embedded-debugging" || plan.kind === "troubleshooting") base = ["conclusion", "diagnosis_order", "root_cause", "fix", "verification"];
+  else if (plan.kind === "code") base = ["code", "complexity_and_edges", ...structure];
+  else base = structure;
+  return unique([...base, ...(plan.questionRequirements ?? []).filter((item) => item.required).map((item) => item.id)]);
+}
+
+function requirementPattern(plan: AnswerPlan, facet: string): RegExp | undefined {
+  const requirement = plan.questionRequirements?.find((item) => item.id === facet);
+  if (!requirement) return undefined;
+  if (facet === "vector-definition") return /向量中断|中断向量|向量表/iu;
+  if (facet === "non-vector-definition") return /非向量中断|非向量/iu;
+  if (facet === "dispatch-mechanism") return /硬件分发|软件分发|查询|分发机制|判断来源/iu;
+  if (facet === "vector-table") return /向量表|入口地址|跳转表/iu;
+  if (facet === "software-hardware-difference") return /硬件.*软件|软件.*硬件|差异|区别|对比/iu;
+  if (facet === "nvic") return /NVIC|Cortex-?M|中断控制器/iu;
+  if (facet === "latency") return /延迟|时延|响应速度|实时性|取舍/iu;
+  if (facet === "stm32-example") return /STM32|中断服务函数|ISR|例子|例如/iu;
+  if (facet === "project-context") return /项目|工程|系统|模块|链路/iu;
+  if (requirement.type === "definition") return FACET_PATTERNS.definition;
+  if (requirement.type === "principle" || requirement.type === "reason") return FACET_PATTERNS.mechanism;
+  if (requirement.type === "difference" || requirement.type === "tradeoff") return FACET_PATTERNS.key_differences;
+  if (requirement.type === "example") return FACET_PATTERNS.short_example;
+  return FACET_PATTERNS[requirement.type] ?? FACET_PATTERNS.implementation;
 }
 
 /** Checks answer depth against the already selected AnswerPlan. */
@@ -64,13 +85,15 @@ export class AnswerPlanCoverageChecker {
 
   check(plan: AnswerPlan, answer: string): AnswerCoverageResult {
     const required = requiredFacets(plan);
-    const covered = required.filter((facet) => FACET_PATTERNS[facet]?.test(answer) ?? (answer.length > 0 && answer.includes(facet)));
+    const covered = required.filter((facet) => (requirementPattern(plan, facet) ?? FACET_PATTERNS[facet])?.test(answer) ?? (answer.length > 0 && answer.includes(facet)));
     const missing = required.filter((facet) => !covered.includes(facet));
     const characterCount = answer.replace(/\s/g, "").length;
     const estimatedDurationSec = this.lengthController.estimateDurationSec(answer);
     const lengthPass = characterCount >= plan.length.minCharacters && characterCount <= plan.length.maxCharacters;
-    const structurePass = required.length === 0 || covered.length / required.length >= (required.length <= 3 ? 0.67 : 0.75);
-    const depthPass = missing.length === 0 || covered.length / required.length >= 0.75;
+    const hasExplicitContract = (plan.questionRequirements?.length ?? 0) > 0;
+    const target = hasExplicitContract ? 0.9 : required.length <= 3 ? 0.67 : 0.75;
+    const structurePass = required.length === 0 || covered.length / required.length >= target;
+    const depthPass = missing.length === 0 || covered.length / required.length >= target;
     return { requiredFacets: required, coveredFacets: covered, missingFacets: missing, characterCount, estimatedDurationSec, lengthPass, structurePass, depthPass, needsRepair: !lengthPass || !structurePass || !depthPass };
   }
 }

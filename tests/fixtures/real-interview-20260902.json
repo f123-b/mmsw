@@ -151,12 +151,67 @@
       "expectedSpeechAct": "QUESTION",
       "expectedQuestionAction": "COMMIT",
       "expectedQuestionId": "case-9-retrospective-reference",
-      "expectedCanonicalQuestion": "ADC 采样多久触发一次？",
+      "expectedCanonicalQuestion": "这个项目的 ADC/DMA 数据采集链路多久触发一次？",
       "expectedProject": null,
       "expectedEntities": ["ADC"],
       "expectedAsrRepair": null,
       "expectedShouldAnswer": true,
       "reason": "pending-reference-retrospective-recovery"
+    }
+  },
+  {
+    "id": "case-10-f4-core-asr",
+    "segments": [
+      { "timestamp": 0, "speaker": "interviewer", "rawAsrText": "F四是哪个河吗？", "final": true, "interim": false, "segmentOrder": 1, "pauseMsAfter": 1200 }
+    ],
+    "expected": {
+      "expectedSpeechAct": "QUESTION",
+      "expectedQuestionAction": "COMMIT",
+      "expectedQuestionId": "case-10-f4-core-asr",
+      "expectedCanonicalQuestion": "STM32F4 是什么 Cortex 内核？",
+      "expectedAsrRepair": { "raw": "F四是哪个河吗", "canonical": "STM32F4 是什么 Cortex 内核", "confidence": 0.94 },
+      "expectedShouldAnswer": true,
+      "reason": "stm32-context-repairs-core-homophone"
+    }
+  },
+  {
+    "id": "case-11-vector-interrupt-context",
+    "segments": [
+      { "timestamp": 0, "speaker": "interviewer", "rawAsrText": "向量终端和非向量终端的区别是什么？", "final": true, "interim": false, "segmentOrder": 1, "pauseMsAfter": 1200 }
+    ],
+    "expected": {
+      "expectedSpeechAct": "QUESTION",
+      "expectedQuestionAction": "COMMIT",
+      "expectedCanonicalQuestion": "向量中断和非向量中断的区别是什么？",
+      "expectedAsrRepair": { "raw": "向量终端", "canonical": "向量中断", "confidence": 0.96 },
+      "expectedShouldAnswer": true,
+      "expectedRequirementIds": ["vector-definition", "non-vector-definition", "dispatch-mechanism", "vector-table", "software-hardware-difference", "nvic", "latency", "stm32-example"],
+      "reason": "interrupt-context-repairs-vector-terminology"
+    }
+  },
+  {
+    "id": "case-12-low-confidence-core-future",
+    "segments": [
+      { "timestamp": 0, "speaker": "interviewer", "rawAsrText": "核心future是什么？", "final": true, "interim": false, "segmentOrder": 1, "pauseMsAfter": 1200 }
+    ],
+    "expected": {
+      "expectedSpeechAct": "ASR_UNRESOLVED",
+      "expectedQuestionAction": "WAIT",
+      "expectedCanonicalQuestion": "核心future是什么？",
+      "expectedShouldAnswer": false,
+      "reason": "low-confidence-asr-must-hold"
+    }
+  },
+  {
+    "id": "case-13-f4-core-without-context",
+    "segments": [
+      { "timestamp": 0, "speaker": "interviewer", "rawAsrText": "F四是哪个河吗？", "final": true, "interim": false, "segmentOrder": 1, "pauseMsAfter": 1200 }
+    ],
+    "expected": {
+      "expectedSpeechAct": "ASR_UNRESOLVED",
+      "expectedQuestionAction": "WAIT",
+      "expectedShouldAnswer": false,
+      "reason": "ambiguous-core-homophone-without-context"
     }
   }
 ]

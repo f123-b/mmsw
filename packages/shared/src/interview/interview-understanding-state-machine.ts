@@ -3,7 +3,7 @@ import { ConversationAnchorState } from "./conversation-anchor-state";
 import { QuestionCommitGate, type QuestionCommitGateResult } from "./question-commit-gate";
 import { QuestionFrameBuilder } from "./question-frame-builder";
 import { QuestionPendingLedger } from "./question-pending-ledger";
-import type { ActiveProjectContext, AnswerFrame, InterviewUnderstandingState, QuestionFrame, ReferenceCandidate } from "./question-frame";
+import type { ActiveProjectContext, AnswerFrame, InterviewUnderstandingState, QuestionFrame, ReferenceCandidate, QuestionThreadState } from "./question-frame";
 
 export type { ActiveProjectContext } from "./question-frame";
 
@@ -33,7 +33,7 @@ export type UnderstandingEvent =
   | { type: "QUESTION_COMMITTED"; frame: QuestionFrame; gate: QuestionCommitGateResult; decisionTrace: Record<string, unknown> }
   | { type: "NON_ACTIONABLE"; frame: QuestionFrame; gate: QuestionCommitGateResult };
 
-function cloneFrame(frame: QuestionFrame): QuestionFrame { return { ...frame, segmentIds: [...frame.segmentIds], rawSegments: [...frame.rawSegments], subQuestions: frame.subQuestions.map((slot) => ({ ...slot })), entities: { ...frame.entities, projects: [...frame.entities.projects], components: [...frame.entities.components], technologies: [...frame.entities.technologies], concepts: [...frame.entities.concepts] }, references: frame.references.map((reference) => ({ ...reference, evidence: [...reference.evidence] })), confidence: { ...frame.confidence }, unresolvedSlots: [...frame.unresolvedSlots] };
+function cloneFrame(frame: QuestionFrame): QuestionFrame { return { ...frame, segmentIds: [...frame.segmentIds], rawSegments: [...frame.rawSegments], subQuestions: frame.subQuestions.map((slot) => ({ ...slot })), requirements: frame.requirements.map((item) => ({ ...item })), entities: { ...frame.entities, projects: [...frame.entities.projects], components: [...frame.entities.components], technologies: [...frame.entities.technologies], concepts: [...frame.entities.concepts] }, references: frame.references.map((reference) => ({ ...reference, evidence: [...reference.evidence] })), contextSnapshot: { ...frame.contextSnapshot, activeEntities: frame.contextSnapshot.activeEntities.map((item) => ({ ...item })), recentRelevantTurns: [...frame.contextSnapshot.recentRelevantTurns], references: frame.contextSnapshot.references.map((item) => ({ ...item })), inherited: { ...frame.contextSnapshot.inherited }, ...(frame.contextSnapshot.project ? { project: { ...frame.contextSnapshot.project, entities: [...frame.contextSnapshot.project.entities], topics: [...frame.contextSnapshot.project.topics] } } : {}) }, confidence: { ...frame.confidence }, unresolvedSlots: [...frame.unresolvedSlots] };
 }
 
 function activeProjectFrom(input: UnderstandingMachineOptions, current?: ActiveProjectContext): ActiveProjectContext | undefined {
@@ -41,17 +41,33 @@ function activeProjectFrom(input: UnderstandingMachineOptions, current?: ActiveP
 }
 
 function shouldAppend(frame: QuestionFrame, text: string): boolean {
-  if (frame.completion === "COMPLETE") return false;
-  return Boolean(text.trim()) && (frame.completion !== "ASR_UNCERTAIN" || /(?:ADC|DMA|PWM|SPI|CAN|F405|STM32|栈|stack)/iu.test(text));
+  if (!text.trim()) return false;
+  if (frame.completion === "ASR_UNCERTAIN") return /(?:ADC|DMA|PWM|SPI|CAN|F405|STM32|栈|stack|中断|向量|内核)/iu.test(text);
+  if (frame.completion !== "COMPLETE") return true;
+  const next = text.trim();
+  const previous = frame.canonicalQuestion;
+  // SEMANTIC_COMPLETE is not a hard boundary. A short follow-up, a
+  // dangling selection object, or an explicit continuation can still be
+  // appended while the frame is in its adaptive stability window.
+  return next.length <= 22
+    || /^(?:什么样的原因|为什么这样|为什么这么做|用的什么|多久|哪个|哪一个|具体|还有|以及|包括|然后|并且|而且|F[四4]|F405|STM32)/iu.test(next)
+    || /(?:为什么(?:要)?选|为什么(?:要)?选择|包括|分别|以及|并且|而且|比如|例如)[？?。！!，,、\s]*$/iu.test(previous);
 }
 
 function mergeFrame(previous: QuestionFrame, next: QuestionFrame, now: number): QuestionFrame {
+  const rawSegments = previous.rawSegments.every((value, index) => next.rawSegments[index] === value)
+    ? [...next.rawSegments]
+    : [...previous.rawSegments, ...next.rawSegments];
   const merged: QuestionFrame = {
     ...next,
     id: previous.id,
     segmentIds: [...new Set([...previous.segmentIds, ...next.segmentIds])],
-    rawSegments: [...previous.rawSegments, ...next.rawSegments],
-    rawCombinedText: [...previous.rawSegments, ...next.rawSegments].join(" "),
+    rawSegments,
+    rawCombinedText: rawSegments.join(" "),
+    stabilityState: next.stabilityState,
+    requirements: [...new Map([...previous.requirements, ...next.requirements].map((item) => [item.id, item])).values()],
+    contextSnapshot: next.contextSnapshot,
+    ...(next.asrRepair ?? previous.asrRepair ? { asrRepair: next.asrRepair ?? previous.asrRepair } : {}),
     createdAt: previous.createdAt,
     updatedAt: now
   };
@@ -106,6 +122,8 @@ export class InterviewUnderstandingStateMachine {
 
   get state(): InterviewUnderstandingState {
     const anchor = this.anchors.snapshot();
+    const threads: QuestionThreadState[] = [...this.threads.values()].map((thread) => ({ ...thread, questionIds: [...thread.questionIds], updatedAt: this.lastCommittedQuestion?.updatedAt ?? this.now() }));
+    const currentThread = this.lastCommittedQuestion ? threads.find((thread) => thread.questionIds.includes(this.lastCommittedQuestion?.id ?? "")) : undefined;
     return {
       sessionId: this.sessionId,
       ...(this.currentSpeaker ? { currentSpeaker: this.currentSpeaker } : {}),
@@ -123,6 +141,28 @@ export class InterviewUnderstandingStateMachine {
       unresolvedReferences: anchor.unresolvedReferences.map((item) => ({ ...item, evidence: [...item.evidence] })),
       unresolvedAsr: this.unresolvedAsr.map((item) => ({ ...item, candidates: [...item.candidates] })),
       pendingLedger: this.ledger.list(this.now())
+      ,context: {
+        sessionId: this.sessionId,
+        ...(this.activeProject ? { activeProject: { ...this.activeProject, entities: [...this.activeProject.entities], topics: [...this.activeProject.topics] } } : {}),
+        ...(anchor.currentTopic ? { currentTopic: { name: anchor.currentTopic.name, confidence: anchor.currentTopic.confidence, updatedAt: anchor.currentTopic.createdAt } } : {}),
+        activeEntities: anchor.entities.map((item) => ({ ...item })),
+        ...(this.pendingQuestion ? { pendingQuestion: cloneFrame(this.pendingQuestion) } : {}),
+        pendingFragments: this.pendingTurn ? [{ ...this.pendingTurn, segmentIds: [...this.pendingTurn.segmentIds], rawSegments: [...this.pendingTurn.rawSegments] }] : [],
+        ...(this.lastCommittedQuestion ? { lastCommittedQuestion: cloneFrame(this.lastCommittedQuestion) } : {}),
+        ...(this.lastAnsweredQuestion ? { lastAnsweredQuestion: cloneFrame(this.lastAnsweredQuestion) } : {}),
+        recentQuestions: this.recentQuestions.map(cloneFrame),
+        recentAnswers: this.recentAnswers.map((item) => ({ ...item })),
+        unresolvedReferences: anchor.unresolvedReferences.map((item) => ({ ...item, evidence: [...item.evidence] })),
+        unresolvedAsr: this.unresolvedAsr.map((item) => ({ ...item, candidates: [...item.candidates] })),
+        ...(currentThread ? { currentThread: { ...currentThread, questionIds: [...currentThread.questionIds] } } : {}),
+        threads,
+        sessionMemo: {
+          projectsDiscussed: this.activeProject ? [this.activeProject.name] : [],
+          topicsDiscussed: anchor.currentTopic ? [anchor.currentTopic.name] : [],
+          interviewerFocus: this.recentQuestions.slice(-8).map((item) => item.canonicalQuestion),
+          verifiedCandidateClaims: this.recentAnswers.slice(-8).map((item) => item.text)
+        }
+      }
     };
   }
 
@@ -140,7 +180,7 @@ export class InterviewUnderstandingStateMachine {
       const segmentIds = [...new Set([...(previous?.segmentIds ?? []), ...(input.segmentIds ?? [input.id])])];
       const rawSegments = [...(previous?.rawSegments ?? []), rawText];
       this.pendingTurn = { segmentIds, rawSegments, rawCombinedText: rawSegments.join(" "), speaker, firstSeenAt: previous?.firstSeenAt ?? now, lastUpdatedAt: now };
-      const built = this.builder.build({ id: input.id, rawText, rawSegments: [rawText], segmentIds: input.segmentIds, final: false, speaker, timestamp: now, asrConfidence: input.asrConfidence, anchors: this.anchors.snapshot(), activeProject: activeProjectFrom({}, this.activeProject), projectCandidates, now });
+      const built = this.builder.build({ id: input.id, sessionId: this.sessionId, rawText, rawSegments: [rawText], segmentIds: input.segmentIds, final: false, speaker, timestamp: now, asrConfidence: input.asrConfidence, anchors: this.anchors.snapshot(), activeProject: activeProjectFrom({}, this.activeProject), projectCandidates, now });
       return { type: "QUESTION_DRAFT_UPDATED", frame: built.frame, gate: { decision: "WAIT", status: "BUFFERING", reason: "interim-transcript", postCompletionReady: false } };
     }
 
@@ -148,9 +188,17 @@ export class InterviewUnderstandingStateMachine {
     const pendingTurn = this.pendingTurn?.speaker === speaker ? this.pendingTurn : undefined;
     const rawSegments = input.rawSegments?.length ? input.rawSegments : pendingTurn ? [...pendingTurn.rawSegments, rawText] : [rawText];
     const segmentIds = input.segmentIds?.length ? input.segmentIds : pendingTurn ? [...new Set([...pendingTurn.segmentIds, input.id])] : [input.id];
-    const built = this.builder.build({ id: input.id, rawText, rawSegments: existingPending ? [...existingPending.rawSegments, ...rawSegments] : rawSegments, segmentIds, final: true, speaker, timestamp: now, asrConfidence: input.asrConfidence, anchors: this.anchors.snapshot(), activeProject: activeProjectFrom({}, this.activeProject), projectCandidates, now });
-    const frame = existingPending ? mergeFrame(existingPending, built.frame, now) : built.frame;
+    const built = this.builder.build({ id: input.id, sessionId: this.sessionId, rawText, rawSegments: existingPending ? [...existingPending.rawSegments, ...rawSegments] : rawSegments, segmentIds, final: true, speaker, timestamp: now, asrConfidence: input.asrConfidence, anchors: this.anchors.snapshot(), activeProject: activeProjectFrom({}, this.activeProject), previousAnswer: this.lastAnsweredQuestion ? this.recentAnswers.at(-1)?.text : undefined, projectCandidates, now });
+    const mergedFrame = existingPending ? mergeFrame(existingPending, built.frame, now) : built.frame;
+    const isAnswerConstraintFragment = Boolean(existingPending && /^(?:F[四4]零五|F405|STM32F405|DMA|ADC|PWM|向量终端|非向量终端)[。！？?！\s]*$/iu.test(input.text.trim()));
+    const frame: QuestionFrame = isAnswerConstraintFragment
+      ? { ...mergedFrame, completion: "WAITING_CONSTRAINT", stabilityState: "STABILIZING", commitStatus: "WAITING", unresolvedSlots: [...new Set([...mergedFrame.unresolvedSlots, "follow-up-constraint"])], reason: `${mergedFrame.reason}+fragment-needs-constraint` }
+      : mergedFrame;
     this.pendingTurn = undefined;
+    if (frame.contextSnapshot?.project?.lockState === "LOCKED" && frame.projectId && frame.projectId !== this.activeProject?.id) {
+      this.activeProject = frame.contextSnapshot.project;
+      this.anchors.updateProject(this.activeProject);
+    }
     this.activeProject = this.activeProject ?? (frame.projectId ? { id: frame.projectId, name: frame.projectId, lockState: "CANDIDATE", confidence: frame.confidence.project, entities: frame.entities.technologies, topics: frame.entities.concepts, source: "interviewer" } : undefined);
     if (frame.references.some((reference) => !reference.resolved)) frame.references.forEach((reference) => this.anchors.addReference(reference));
     if (frame.speechAct === "ASR_UNRESOLVED" || frame.completion === "ASR_UNCERTAIN") this.unresolvedAsr.push({ raw: frame.rawCombinedText, candidates: built.rewrite.unresolved.flatMap((item) => item.candidates), confidence: frame.confidence.asr, reason: frame.reason });
@@ -168,7 +216,7 @@ export class InterviewUnderstandingStateMachine {
       if (frame.entities.technologies[0] || frame.entities.concepts[0]) this.anchors.updateTopic(frame.entities.technologies[0] ?? frame.entities.concepts[0], frame.confidence.speechAct, now);
       return { type: "NON_ACTIONABLE", frame: { ...cloneFrame(frame), commitStatus: "REJECTED" }, gate };
     }
-    const committed: QuestionFrame = { ...cloneFrame(frame), commitStatus: "COMMITTED", updatedAt: now };
+    const committed: QuestionFrame = { ...cloneFrame(frame), commitStatus: "COMMITTED", stabilityState: "STABLE", updatedAt: now };
     this.lastCommittedQuestion = committed;
     this.recentQuestions.push(cloneFrame(committed));
     while (this.recentQuestions.length > 20) this.recentQuestions.shift();
@@ -184,6 +232,6 @@ export class InterviewUnderstandingStateMachine {
     const thread = this.threads.get(threadId) ?? { id: `question-thread-${threadId}`, rootQuestionId: committed.id, questionIds: [], ...(topic ? { topic } : {}), ...(committed.projectId ? { projectId: committed.projectId } : {}) };
     thread.questionIds.push(committed.id);
     this.threads.set(threadId, thread);
-    return { type: "QUESTION_COMMITTED", frame: committed, gate, decisionTrace: { rawSegments: committed.rawSegments, normalizedSegments: [committed.normalizedText], canonicalQuestion: committed.canonicalQuestion, speechAct: committed.speechAct, completion: committed.completion, references: committed.references, activeProject: this.activeProject, questionType: committed.questionType, questionIntent: committed.intent, unresolvedSlots: committed.unresolvedSlots, decision: gate.decision, reason: gate.reason } };
+    return { type: "QUESTION_COMMITTED", frame: committed, gate, decisionTrace: { rawSegments: committed.rawSegments, normalizedSegments: [committed.normalizedText], canonicalQuestion: committed.canonicalQuestion, speechAct: committed.speechAct, completion: committed.completion, stabilityState: committed.stabilityState, requirements: committed.requirements, contextSnapshotId: committed.contextSnapshot.id, references: committed.references, activeProject: this.activeProject, questionType: committed.questionType, questionIntent: committed.intent, unresolvedSlots: committed.unresolvedSlots, decision: gate.decision, reason: gate.reason } };
   }
 }

@@ -13,7 +13,7 @@ const foc: ActiveProjectContext = {
 };
 
 function runCase(item: typeof fixture[number]): UnderstandingEvent[] {
-  const machine = new InterviewUnderstandingStateMachine({ activeProject: item.id === "case-2-f405-selection" || item.id === "case-8-dma-multi-slot" ? foc : undefined, now: () => 1_000 });
+  const machine = new InterviewUnderstandingStateMachine({ activeProject: ["case-2-f405-selection", "case-8-dma-multi-slot", "case-10-f4-core-asr", "case-11-vector-interrupt-context"].includes(item.id) ? foc : undefined, now: () => 1_000 });
   return item.segments.map((segment) => machine.process({ id: `${item.id}-${segment.segmentOrder}`, text: segment.rawAsrText, rawText: segment.rawAsrText, final: segment.final, speaker: segment.speaker as "interviewer", timestamp: segment.timestamp }, []));
 }
 
@@ -36,6 +36,19 @@ describe("real interview V3 gold regression", () => {
     const stack = byId.get("case-6-stack-asr")?.at(-1);
     expect(stack).toMatchObject({ type: "QUESTION_COMMITTED", frame: { canonicalQuestion: "哪个栈？", asrRepair: { canonical: "哪个栈" } } });
     const retrospective = byId.get("case-9-retrospective-reference")?.at(-1);
-    expect(retrospective).toMatchObject({ type: "QUESTION_COMMITTED", frame: { canonicalQuestion: "ADC 采样多久触发一次？" } });
+    expect(retrospective).toMatchObject({ type: "QUESTION_COMMITTED", frame: { canonicalQuestion: "这个项目的 ADC/DMA 数据采集链路多久触发一次？" } });
+
+    const f4Core = byId.get("case-10-f4-core-asr")?.at(-1);
+    expect(f4Core).toMatchObject({ type: "QUESTION_COMMITTED", frame: { speechAct: "QUESTION", canonicalQuestion: "STM32F4 是什么 Cortex 内核？", asrRepair: { canonical: "STM32F4 是什么 Cortex 内核" } } });
+    const vector = byId.get("case-11-vector-interrupt-context")?.at(-1);
+    expect(vector).toMatchObject({ type: "QUESTION_COMMITTED", frame: { canonicalQuestion: "向量中断和非向量中断的区别是什么？", requirements: expect.arrayContaining([expect.objectContaining({ id: "vector-definition" }), expect.objectContaining({ id: "nvic" }), expect.objectContaining({ id: "stm32-example" })]) } });
+    const lowConfidence = byId.get("case-12-low-confidence-core-future")?.at(-1);
+    expect(lowConfidence).toMatchObject({ type: "QUESTION_WAITING", frame: { speechAct: "ASR_UNRESOLVED", completion: "ASR_UNCERTAIN", commitStatus: "WAITING" } });
+    const noContext = byId.get("case-13-f4-core-without-context")?.at(-1);
+    expect(noContext).toMatchObject({ type: "QUESTION_WAITING", frame: { speechAct: "ASR_UNRESOLVED", completion: "ASR_UNCERTAIN" } });
+    for (const item of fixture) {
+      const frames = (byId.get(item.id) ?? []).map((event) => event.frame);
+      for (const segment of item.segments) expect(frames.some((frame) => frame.rawSegments.includes(segment.rawAsrText))).toBe(true);
+    }
   });
 });

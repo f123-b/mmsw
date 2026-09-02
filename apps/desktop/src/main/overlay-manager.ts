@@ -10,6 +10,7 @@ import { clampOverlayPanelBounds, contentDrivenHeight, resolveOverlayNativeBound
 import { OverlayZOrderController, type OverlayZOrderDiagnosticEvent, type OverlayZOrderDiagnostics } from "./overlay-z-order-controller";
 import type { InterviewStartupEvent } from "./interview-startup-timing";
 import { isInsideOverlayContent } from "./native-screen-coordinates";
+import { resolveWrittenTestCameraBounds } from "../shared/overlay-layout";
 
 export { applyOverlayMode, nextOverlayMode } from "./overlay-mode";
 export type { OverlayMode, OverlayWindowLike } from "./overlay-mode";
@@ -250,6 +251,16 @@ export class OverlayManager {
   get currentInteractionMode(): MouseInteractionMode { return this.interactionMode; }
   get currentWheelRouting(): WheelRoutingMode { return this.wheelRouting; }
   get isLayoutEditMode(): boolean { return isOverlayLayoutEditing(this.lifecycleState); }
+  /** Repositions only the written-test camera control against AnswerWindow. */
+  syncWrittenTestCameraAnchor(): void {
+    if (this.runtimeLayoutMode !== "written_test") return;
+    const control = this.currentControlWindow;
+    const answer = this.currentAnswerWindow;
+    if (!control || !answer) return;
+    const bounds = resolveWrittenTestCameraBounds(answer.getBounds(), this.targetDisplay().workArea);
+    const current = control.getBounds();
+    if (current.x !== bounds.x || current.y !== bounds.y || current.width !== bounds.width || current.height !== bounds.height) control.setBounds(bounds, false);
+  }
   setTemporaryInteraction(modifier: "ctrl" | "alt" | "shift", pressed: boolean): void {
     const matches = this.temporaryInteractionModifier === modifier || (this.temporaryInteractionModifier === "ctrl_shift" && (modifier === "ctrl" || modifier === "shift"));
     if (!matches || this.hudStateValue.shareMode || this.isLayoutEditMode) return;
@@ -330,7 +341,7 @@ export class OverlayManager {
       if (leftPanel !== "hidden") visible.add("question");
       if (this.runtimeLayoutMode === "interview" ? (layoutEditing || this.hudStateValue.answerVisible) && this.layoutPreferences.interview.showAnswer : (layoutEditing || this.hudStateValue.answerVisible) && this.layoutPreferences.writtenTest.showAnswer && this.layoutPreferences.writtenTest.layoutPreset === "split") visible.add("answer");
     }
-    if (!this.hudStateValue.shareMode && (layoutEditing || (this.hudStateValue.running && this.hudStateValue.topBarVisible)) && this.layoutPreferences.showToolbar) visible.add("control");
+    if (!this.hudStateValue.shareMode && (layoutEditing || (this.hudStateValue.running && this.hudStateValue.topBarVisible)) && (this.runtimeLayoutMode === "written_test" || this.layoutPreferences.showToolbar)) visible.add("control");
     for (const panel of ["question", "answer", "control"] as const) {
       const window = this.getWindow(panel);
       if (!window) continue;
@@ -429,6 +440,7 @@ export class OverlayManager {
     this.currentQuestionWindow?.webContents.send("overlay:layout", this.hudLayoutValue);
     this.currentAnswerWindow?.webContents.send("overlay:layout", this.hudLayoutValue);
     const controlWindow = this.currentControlWindow;
+    this.syncWrittenTestCameraAnchor();
     if (controlWindow) controlWindow.webContents.send("overlay:layout", { ...this.hudLayoutValue, toolbar: { x: 0, y: 0, width: controlWindow.getBounds().width, height: controlWindow.getBounds().height }, shortcuts: { x: 0, y: 0, width: 0, height: 0 } });
     this.syncTransientWindow();
   }
@@ -550,7 +562,10 @@ export class OverlayManager {
     const workArea = display.workArea;
     const defaults = calculateHUDLayout(workArea);
     const resolved = resolveOverlayNativeBounds(this.layoutPreferences, { display, defaults: { question: defaults.transcript, answer: defaults.answer, control: defaults.toolbar } }, this.runtimeLayoutMode);
-    return panel ? resolved[panel] : resolved;
+    const normalized = this.runtimeLayoutMode === "written_test"
+      ? { ...resolved, control: resolveWrittenTestCameraBounds(resolved.answer, workArea) }
+      : resolved;
+    return panel ? normalized[panel] : normalized;
   }
 
   private targetDisplay(): OverlayDisplayInfo {

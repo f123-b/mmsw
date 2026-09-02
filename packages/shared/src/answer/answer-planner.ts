@@ -5,6 +5,8 @@ import { answerStrategyFor, classifyAnswerQuestion, type AnswerEvidenceRequireme
 import type { QuestionBankRouteHit } from "../question-bank-router";
 import { analyzeAnswerIntent, requiresPersonalClaimEvidence, type AnswerIntent } from "./answer-intent";
 import { decomposeQuestion, type QuestionDecomposition } from "../question/question-decomposer";
+import { buildQuestionRequirements } from "../interview/question-requirements";
+import type { QuestionFrameType, QuestionRequirement } from "../interview/question-frame";
 
 export interface AnswerPlannerInput {
   question: string;
@@ -19,6 +21,7 @@ export interface AnswerPlannerInput {
   preparedAnswer?: { content: string; score: number; verified: boolean; source?: string };
   questionBankContext?: QuestionBankRouteHit[];
   questionDecomposition?: QuestionDecomposition;
+  questionRequirements?: QuestionRequirement[];
   interviewMode?: AnswerMode;
 }
 export interface AnswerPlan {
@@ -38,6 +41,7 @@ export interface AnswerPlan {
   length: AnswerLengthPolicy;
   questionBankContext: QuestionBankRouteHit[];
   questionDecomposition: QuestionDecomposition;
+  questionRequirements: QuestionRequirement[];
   reason: string;
 }
 
@@ -66,6 +70,17 @@ export class AnswerPlanner {
     const question = input.question.trim();
     const questionDecomposition = input.questionDecomposition ?? decomposeQuestion(question);
     const kind = input.questionType ?? classifyAnswerQuestion(question);
+    const technicalKinds = new Set<string>(["technical", "concept", "comparison", "code", "embedded-debugging", "troubleshooting", "system-design"]);
+    const frameType: QuestionFrameType = kind === "project"
+      ? "PROJECT"
+      : kind === "behavioral"
+        ? "BEHAVIORAL"
+        : technicalKinds.has(kind)
+          ? "TECHNICAL"
+          : "GENERAL";
+    const questionRequirements = input.questionRequirements?.length
+      ? input.questionRequirements.map((requirement) => ({ ...requirement }))
+      : buildQuestionRequirements(question, questionDecomposition.slots, frameType, input.currentProject);
     const hasProjectEvidence = (input.projectEvidence?.length ?? 0) > 0;
     const intent = analyzeAnswerIntent({ question, kind });
     const baseStrategy = answerStrategyFor(kind, question, hasProjectEvidence);
@@ -78,7 +93,10 @@ export class AnswerPlanner {
         spokenGuidance: "可以结合项目技术事实，但不要把项目实现说成候选人本人负责。"
       }
       : baseStrategy;
-    const complexity = complexityFor(question, kind, input.followUpContext, questionDecomposition.slots.length);
+    const complexity = complexityFor(question, kind, input.followUpContext, Math.max(
+      questionDecomposition.slots.length,
+      questionRequirements.filter((requirement) => requirement.required).length
+    ));
     const answerMode = input.interviewMode ?? "NORMAL";
     const length = this.lengthController.policy(answerMode, kind, complexity);
     const useCurrentProject = strategy.useCurrentProject && intent.allowsProjectEvidence && Boolean(input.currentProject || input.followUpContext?.relatedProject || hasProjectEvidence);
@@ -90,6 +108,7 @@ export class AnswerPlanner {
       `personal-claim=${requiresPersonalClaimEvidence(intent) ? "required" : "not-required"}`,
       useCurrentProject ? "project-context=enabled" : "project-context=disabled",
       hasProjectEvidence ? "evidence=available" : "evidence=missing",
+      `requirements=${questionRequirements.filter((requirement) => requirement.required).length}`,
       input.questionBankContext?.length ? `question-bank=${input.questionBankContext.length}` : "question-bank=none"
     ].join(";");
     return {
@@ -109,6 +128,7 @@ export class AnswerPlanner {
       length,
       questionBankContext: (input.questionBankContext ?? []).slice(0, 5),
       questionDecomposition,
+      questionRequirements,
       reason
     };
   }

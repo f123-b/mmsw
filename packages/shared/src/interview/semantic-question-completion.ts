@@ -19,7 +19,7 @@ export interface SemanticQuestionCompletionResult {
   reason: string;
 }
 
-const OPEN_SETUP = /(?:你能给我介绍一下|你这个项目为什么|为什么(?:要)?选|为什么(?:要)?选择|如果发生|如果让你|假设现在|首先比如说|比如说)[^？?。！？!]*$/iu;
+const OPEN_SETUP = /(?:你能给我介绍一下|你这个项目为什么|为什么(?:要)?选|为什么(?:要)?选择|如果发生|如果让你|假设现在|首先比如说|比如说)[^？?。！？!]*[？?。！？!]?$/iu;
 const MISSING_OBJECT = /^(?:怎么衡量|如何衡量|为什么选|为什么选择|怎么做|如何做|怎么验证|如何验证)[？?。！？!\s]*$/iu;
 const MISSING_SUBJECT = /^(?:为什么|为何|怎么|如何|怎样|什么时候|多久|哪个|哪一个)[？?。！？!\s]*$/iu;
 
@@ -30,8 +30,10 @@ export class SemanticQuestionCompletion {
     if (input.unresolvedAsr) return { state: "ASR_UNCERTAIN", confidence: 0.98, unresolvedSlots: ["asr"], reason: "asr-unresolved" };
     if (["CONFIRMATION_CHECK", "BACKCHANNEL", "ADVICE", "EXPLANATION", "FEEDBACK", "TOPIC_TRANSITION", "CONTROL", "FILLER"].includes(input.speechAct)) return { state: "COMPLETE", confidence: 0.99, unresolvedSlots: [], reason: "non-answer-speech-act" };
     if (!text) return { state: "OPEN", confidence: 0, unresolvedSlots: ["question"], reason: "empty-question" };
+    const selectionWithoutObject = /(?:为什么|为何)(?:要)?(?:选|选择)\s*[？?。！!\s，,、]*$/iu.test(text)
+      && !/(?:STM\d+|F\d{3,4}|芯片|MCU|方案|组件|Cortex|DMA|ADC|PWM|CAN|SPI)/iu.test(text);
+    if (selectionWithoutObject) return { state: "WAITING_OBJECT", confidence: 0.96, unresolvedSlots: ["selected-object"], reason: "selection-object-missing" };
     if (OPEN_SETUP.test(text) || isOpenPredicate(text) || isDanglingQuestionTail(text)) {
-      const selectionWithoutObject = /(?:为什么(?:要)?选|为什么(?:要)?选择)/iu.test(text) && !/(?:STM\d+|F\d{3,4}|芯片|MCU|方案|平台|组件|项目)/iu.test(text);
       return selectionWithoutObject
         ? { state: "WAITING_OBJECT", confidence: 0.96, unresolvedSlots: ["selected-object"], reason: "selection-object-missing" }
         : { state: "OPEN", confidence: 0.96, unresolvedSlots: ["predicate-or-constraint"], reason: "open-predicate-or-continuation" };

@@ -38,6 +38,10 @@ export interface QuestionTraceInput {
   projectResolutionStatus?: string;
   projectResolutionReason?: string;
   subQuestions?: string[];
+  questionRequirements?: string[];
+  contextSnapshotId?: string;
+  asrCorrections?: string[];
+  resolvedReferences?: string[];
   primaryQuestion?: string;
   sourceRoute?: string;
   finalScore?: number;

@@ -26,6 +26,15 @@ export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
   const statusLabel = interviewMode ? primaryRuntimeStatus(props.runtimePhases) : props.writtenTest.screenshotStatus === "CAPTURING" ? "正在截图" : props.writtenTest.screenshotStatus === "ANALYZING" ? "正在识别题目" : props.writtenTest.screenshotStatus === "SOLVING" ? "正在生成答案" : props.writtenTest.screenshotStatus === "SUCCESS" ? "已保存答案" : props.writtenTest.screenshotStatus === "ERROR" ? "识别失败" : "等待截图";
   const answerReady = props.runtimePhases.answerPhase === "READY";
   const controlPreferences = interviewMode ? interviewPreferences.controlBar : writtenPreferences.controlBar;
+  if (!interviewMode) {
+    const busy = ["CAPTURING", "ANALYZING", "SOLVING"].includes(props.writtenTest.screenshotStatus);
+    const retry = props.writtenTest.screenshotStatus === "ERROR";
+    return <main className="overlay-root control-overlay-root written-camera-root" data-overlay-surface="control" data-hud-state={statusLabel} data-operation-mode={props.operationMode} style={overlayWindowStyle(controlPreferences, preferences.appearance)}>
+      <button className="written-camera-control hud-interactive-region" type="button" disabled={busy} onClick={() => void props.onAnswerScreenshot()} title={retry ? "重试截图识别" : busy ? statusLabel : "截图识别并回答"} aria-label={retry ? "重试截图识别" : "截图识别并回答"}>
+        <span aria-hidden="true">{retry ? "↻" : "📷"}</span>
+      </button>
+    </main>;
+  }
   return <main className="overlay-root control-overlay-root" data-overlay-surface="control" data-hud-state={statusLabel} data-operation-mode={props.operationMode} style={overlayWindowStyle(controlPreferences, preferences.appearance)}>
     {preferences.showToolbar && <DraggableResizablePanel panel="toolbar" nativePanel="control" geometryMode={props.operationMode === "WRITTEN_TEST" ? "writtenTest" : "interview"} geometryPreset={props.operationMode === "WRITTEN_TEST" ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={layout} onChange={(_panel, patch) => setLayout((current) => ({ ...current, ...patch }))} onCommit={() => undefined} editMode={layoutEditMode} className="toolbar-panel" windowPreferences={controlPreferences}>
       <div className="floating-toolbar hud-interactive-region" role="toolbar" aria-label={`${modeLabel}控制栏`}>

@@ -27,6 +27,29 @@ export type QuestionFrameCompletion =
 export type QuestionFrameRelation = "NEW_TOPIC" | "SAME_TOPIC" | "FOLLOW_UP" | "CLARIFICATION";
 export type QuestionFrameType = "PROJECT" | "TECHNICAL" | "BEHAVIORAL" | "RESUME" | "GENERAL";
 export type QuestionFrameCommitStatus = "BUFFERING" | "WAITING" | "READY" | "COMMITTED" | "REJECTED";
+export type QuestionFrameStabilityState = "BUFFERING" | "STABILIZING" | "STABLE" | "UNRESOLVED";
+
+export type QuestionRequirementType =
+  | "definition"
+  | "principle"
+  | "difference"
+  | "reason"
+  | "implementation"
+  | "architecture"
+  | "process"
+  | "example"
+  | "tradeoff"
+  | "verification"
+  | "debugging"
+  | "complexity"
+  | "project_fact";
+
+export interface QuestionRequirement {
+  id: string;
+  type: QuestionRequirementType;
+  description: string;
+  required: boolean;
+}
 
 export interface ActiveProjectContext {
   id: string;
@@ -77,6 +100,80 @@ export interface QuestionThread {
   projectId?: string;
 }
 
+export interface QuestionThreadState {
+  id: string;
+  rootQuestionId?: string;
+  questionIds: string[];
+  projectId?: string;
+  topic?: string;
+  component?: string;
+  technology?: string;
+  lastQuestionId?: string;
+  lastAnswerId?: string;
+  updatedAt: number;
+}
+
+export interface QuestionContextReference {
+  raw: string;
+  resolved: string;
+  type: string;
+  confidence: number;
+}
+
+export interface QuestionContextSnapshot {
+  id: string;
+  sessionId: string;
+  capturedAt: number;
+  project?: ActiveProjectContext;
+  topic?: string;
+  activeEntities: EntityAnchor[];
+  parentQuestion?: { id?: string; text: string };
+  rootQuestion?: { id?: string; text: string };
+  recentRelevantTurns: string[];
+  references: QuestionContextReference[];
+  inherited: { project?: string; topic?: string; component?: string; technology?: string };
+}
+
+export interface InterviewContextState {
+  sessionId: string;
+  activeProject?: ActiveProjectContext;
+  currentTopic?: { name: string; confidence: number; updatedAt: number };
+  activeEntities: EntityAnchor[];
+  pendingQuestion?: QuestionFrame;
+  pendingFragments: PendingInterviewerTurn[];
+  lastCommittedQuestion?: QuestionFrame;
+  lastAnsweredQuestion?: QuestionFrame;
+  recentQuestions: QuestionFrame[];
+  recentAnswers: AnswerFrame[];
+  unresolvedReferences: ReferenceCandidate[];
+  unresolvedAsr: AsrAmbiguity[];
+  currentThread?: QuestionThreadState;
+  threads: QuestionThreadState[];
+  sessionMemo: {
+    projectsDiscussed: string[];
+    topicsDiscussed: string[];
+    interviewerFocus: string[];
+    verifiedCandidateClaims: string[];
+  };
+}
+
+export interface ContextResolution {
+  rawText: string;
+  references: QuestionContextReference[];
+  inherited: { project?: string; topic?: string; component?: string; technology?: string };
+  canonicalQuestion: string;
+  confidence: number;
+  unresolved: string[];
+}
+
+export interface AsrCandidateResolution {
+  canonicalText: string;
+  corrections: Array<{ raw: string; canonical: string; confidence: number; reason: string }>;
+  candidates: Array<{ raw: string; candidate: string; confidence: number; reason: string }>;
+  confidence: number;
+  unresolved: string[];
+}
+
 export interface PendingInterviewerTurn {
   segmentIds: string[];
   rawSegments: string[];
@@ -111,12 +208,15 @@ export interface QuestionFrame {
   canonicalQuestion: string;
   speechAct: QuestionFrameSpeechAct;
   completion: QuestionFrameCompletion;
+  stabilityState: QuestionFrameStabilityState;
   relation: QuestionFrameRelation;
   questionType: QuestionFrameType;
   intent: string;
   subQuestions: QuestionSlot[];
+  requirements: QuestionRequirement[];
   entities: QuestionFrameEntities;
   references: ReferenceCandidate[];
+  contextSnapshot: QuestionContextSnapshot;
   projectId?: string;
   confidence: QuestionFrameConfidence;
   commitStatus: QuestionFrameCommitStatus;
@@ -153,5 +253,6 @@ export interface InterviewUnderstandingState {
   unresolvedReferences: ReferenceCandidate[];
   unresolvedAsr: AsrAmbiguity[];
   pendingLedger: PendingQuestionLedgerItem[];
+  /** Unified structured context consumed by diagnostics and answer routing. */
+  context: InterviewContextState;
 }
-

@@ -41,6 +41,10 @@ button:focus-visible { outline: 2px solid #9bd2ff; outline-offset: 2px; }
 .resize-handle-nw { top: -8px; left: -8px; cursor: nwse-resize; }
 .overlay-root[data-layout-edit-mode="on"] .floating-panel { outline: 1px solid rgba(112, 181, 232, .72); outline-offset: 3px; }
 .hud-interactive-region { pointer-events: auto; }
+.written-camera-root { display: grid; width: 100%; height: 100%; place-items: center; }
+.written-camera-control { display: grid; width: 40px; height: 40px; place-items: center; border: 1px solid rgba(125, 211, 252, .78); border-radius: 50%; background: rgba(8, 47, 73, .92); box-shadow: 0 4px 18px rgba(2, 132, 199, .28); color: #e0f2fe; font-size: 18px; line-height: 1; }
+.written-camera-control:hover:not(:disabled) { background: rgba(14, 116, 144, .96); }
+.written-camera-control:disabled { cursor: wait; opacity: .55; }
 .capture-test-marker { position: fixed; z-index: 50; left: 50px; top: 50px; display: grid; width: 200px; height: 120px; place-items: center; background: #ff00ff; color: #000; font: 700 10px/1.1 "Segoe UI", sans-serif; text-align: center; }
 .hud-protection-indicator { position: fixed; right: 12px; bottom: 10px; color: #8b97a8; font-size: 12px; pointer-events: none; }
 .overlay-panel-drag-handle { display: none; height: 24px; align-items: center; padding: 0 12px; border-bottom: 1px solid rgba(133, 160, 198, .22); color: rgba(174, 196, 224, .88); font: 600 10px/1 "Segoe UI", sans-serif; letter-spacing: .08em; text-transform: uppercase; cursor: grab; pointer-events: auto; }

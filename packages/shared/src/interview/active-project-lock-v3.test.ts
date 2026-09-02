@@ -22,4 +22,17 @@ describe("V3 active project lock", () => {
     resolver.observe({ text: "这个项目", speaker: "interviewer", projects: [{ ...projects[0], aliases: ["这个项目"] }, { ...projects[1], aliases: ["这个项目"] }], now: 2 });
     expect(resolver.state.lockState).toBe("CONFLICT");
   });
+
+  it("accumulates two medium current-turn signals before switching", () => {
+    const evidenceProjects = [
+      { id: "foc", name: "FOC 电机控制", entities: ["FOC", "电机"] },
+      { id: "robot", name: "机器人控制平台", entities: [] }
+    ];
+    const resolver = new ActiveProjectResolver();
+    resolver.setManual({ projectId: "foc", projectName: "FOC 电机控制" }, 1);
+    const first = resolver.observe({ text: "机器 平台", speaker: "interviewer", projects: evidenceProjects, now: 2 });
+    expect(first).toMatchObject({ changed: false, reason: "project-switch-candidate", evidenceLevel: "medium", activeProject: { projectId: "foc" } });
+    const second = resolver.observe({ text: "机器 平台", speaker: "interviewer", projects: evidenceProjects, now: 3 });
+    expect(second).toMatchObject({ changed: true, activeProject: { projectId: "robot" }, evidenceLevel: "medium" });
+  });
 });

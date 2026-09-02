@@ -135,13 +135,16 @@ export { TurnCompletionGate, decideTurnCompletion, type TurnCompletionContext, t
 export { SemanticAnswerabilityGate, decideSemanticAnswerability, hasContextReference, hasIndependentQuestionNucleus, isDanglingQuestionTail, isOpenPredicate, isStyleOnly, type AnswerabilityDecision, type AnswerabilityState, type SemanticAnswerabilityContext } from "./interview/semantic-answerability";
 export { ConversationAnchorState, type ConversationAnchorSnapshot } from "./interview/conversation-anchor-state";
 export { ContextualQuestionRewriter, type ContextualQuestionRewriteInput, type ContextualQuestionRewriteResult } from "./interview/contextual-question-rewriter";
+export { ContextualAsrCandidateResolver } from "./interview/contextual-question-rewriter";
+export { resolveContextualQuestion, contextResolutionReferences, type ContextualQuestionResolutionInput } from "./interview/contextual-question-resolution";
+export { buildQuestionRequirements } from "./interview/question-requirements";
 export { SemanticQuestionCompletion, evaluateSemanticQuestionCompletion, type SemanticQuestionCompletionInput, type SemanticQuestionCompletionResult } from "./interview/semantic-question-completion";
 export { QuestionCommitGate, type QuestionCommitDecision, type QuestionCommitGateResult } from "./interview/question-commit-gate";
 export { QuestionFrameBuilder, type QuestionFrameBuildInput, type QuestionFrameBuildResult } from "./interview/question-frame-builder";
 export { QuestionPendingLedger } from "./interview/question-pending-ledger";
 export { InterviewUnderstandingStateMachine, type UnderstandingMachineOptions, type UnderstandingSegmentInput, type UnderstandingEvent } from "./interview/interview-understanding-state-machine";
 export { classifySpeechActV3, type SpeechActV3Result } from "./interview/speech-act-v3";
-export type { ActiveProjectContext, AnswerFrame, AsrAmbiguity, EntityAnchor, InterviewUnderstandingState, PendingInterviewerTurn, PendingQuestionLedgerItem, QuestionFrame, QuestionFrameCommitStatus, QuestionFrameCompletion, QuestionFrameConfidence, QuestionFrameEntities, QuestionFrameRelation, QuestionFrameSpeechAct, QuestionFrameType, ReferenceCandidate } from "./interview/question-frame";
+export type { ActiveProjectContext, AnswerFrame, AsrAmbiguity, AsrCandidateResolution, ContextResolution, EntityAnchor, InterviewContextState, InterviewUnderstandingState, PendingInterviewerTurn, PendingQuestionLedgerItem, QuestionContextReference, QuestionContextSnapshot, QuestionFrame, QuestionFrameCommitStatus, QuestionFrameCompletion, QuestionFrameConfidence, QuestionFrameEntities, QuestionFrameRelation, QuestionFrameSpeechAct, QuestionFrameStabilityState, QuestionFrameType, QuestionRequirement, QuestionRequirementType, QuestionThreadState, ReferenceCandidate } from "./interview/question-frame";
 export { PendingQuestionDraftAssembler, classifySegmentRole, type PendingQuestionDraft, type PendingQuestionDraftOptions, type PendingQuestionRawSegment, type PendingQuestionDraftSemanticContext, type PendingQuestionDraftUpdate, type SegmentSemanticRole } from "./interview/pending-question-draft";
 export { splitIntraSegmentQuestions, detectExplicitQuestionBoundary, type ExplicitSplitDecision, type ExplicitSplitReason, type IntraSegmentQuestionPart, type IntraSegmentQuestionSplitOptions } from "./interview/intra-segment-question-splitter";
 export { evaluateSubstantiveAnchorEligibility, isSubstantiveAnchorEligible, type SubstantiveAnchorEligibilityDecision, type SubstantiveAnchorEligibilityInput } from "./interview/substantive-anchor-eligibility";
@@ -341,6 +344,12 @@ export interface QuestionCandidate {
   nuclei?: import("./question/question-decomposer").QuestionSlot[];
   questionDecomposition?: import("./question/question-decomposer").QuestionDecomposition;
   explicitTopic?: string;
+  /** Resolved project scope frozen with the question frame. */
+  projectId?: string;
+  /** Structured answer-slot contract produced by Understanding V3. */
+  requirements?: import("./interview/question-frame").QuestionRequirement[];
+  /** Immutable context snapshot used by answer generation and follow-ups. */
+  contextSnapshot?: import("./interview/question-frame").QuestionContextSnapshot;
   /** V3 provenance: only this authority may auto-answer in accurate mode. */
   understandingFrameId?: string;
   commitAuthority?: "understanding-v3" | "legacy-detector";
