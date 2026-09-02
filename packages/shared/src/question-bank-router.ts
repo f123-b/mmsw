@@ -1,4 +1,5 @@
 import { normalizeQuestionBankText, questionBankSimilarity, type QuestionBankBankType, type QuestionBankMatch, type QuestionBankQuestionRecord } from "./question-bank";
+import { projectOverviewIntent } from "./answer/project-overview-intent";
 
 export type ProjectQaMatchLevel = "exact" | "strong" | "partial" | "none";
 
@@ -187,6 +188,10 @@ export class QuestionBankRouter {
       ...options.policy
     };
     const projectCandidates = candidates.filter((candidate) => candidate.scope === "project" && candidate.projectId === projectId);
+    const overviewIntent = projectOverviewIntent(questionText);
+    const overviewMatches = overviewIntent ? projectCandidates.filter((candidate) => candidate.status === "active" && !candidate.stale && candidate.verified && questionBankAnswerIsReady(candidate)
+      && [candidate.canonicalText, ...candidate.variants].some((text) => projectOverviewIntent(text) === overviewIntent)) : [];
+    const overviewMatchId = overviewMatches.length === 1 ? overviewMatches[0].id : undefined;
     const routed = this.route(questionText, projectCandidates, {
       ...options,
       // Keep the candidate window broad enough for a follow-up that shares a
@@ -199,7 +204,8 @@ export class QuestionBankRouter {
     });
     const hits = routed.hits.map((hit) => {
       const readyAnswer = questionBankAnswerIsReady(hit.question);
-      const exact = hit.exact;
+      const overviewMatch = hit.question.id === overviewMatchId;
+      const exact = hit.exact || overviewMatch;
       const evidenceScore = projectQaEvidenceScore(questionText, hit.question);
       const effectiveSemanticScore = Math.max(hit.semanticScore, evidenceScore.score);
       const matchLevel: ProjectQaMatchLevel = exact
@@ -209,7 +215,7 @@ export class QuestionBankRouter {
           : effectiveSemanticScore >= policy.partialThreshold && (evidenceScore.baseScore >= MIN_PARTIAL_BASE_SCORE || evidenceScore.anchorBoost > 0)
             ? "partial"
             : "none";
-      return { ...hit, baseScore: evidenceScore.baseScore, answerSupportScore: evidenceScore.answerSupportScore, anchorBoost: evidenceScore.anchorBoost, technicalAnchorMatched: evidenceScore.technicalAnchorMatched, intentMatched: evidenceScore.intentMatched, matchLevel };
+      return { ...hit, ...(overviewMatch ? { exact: true, score: 1, semanticScore: 1, rankScore: 1, reasons: [...hit.reasons, "unambiguous-project-overview-intent"] } : {}), baseScore: evidenceScore.baseScore, answerSupportScore: evidenceScore.answerSupportScore, anchorBoost: evidenceScore.anchorBoost, technicalAnchorMatched: evidenceScore.technicalAnchorMatched, intentMatched: evidenceScore.intentMatched, matchLevel };
     }).filter((hit) => hit.matchLevel !== "none")
       .sort((left, right) => {
         const levelWeight = (level?: ProjectQaMatchLevel): number => level === "exact" ? 4 : level === "strong" ? 3 : level === "partial" ? 2 : 0;

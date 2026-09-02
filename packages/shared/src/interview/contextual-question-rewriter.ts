@@ -1,5 +1,6 @@
 import { normalizeTechnicalTerms } from "../terminology";
 import type { ActiveProjectContext, AsrAmbiguity, EntityAnchor } from "./question-frame";
+import { cleanQuestionDiscourse } from "./question-subject";
 
 export interface ContextualQuestionRewriteInput {
   rawText: string;
@@ -29,11 +30,16 @@ function contextText(input: ContextualQuestionRewriteInput): string {
 export class ContextualQuestionRewriter {
   rewrite(input: ContextualQuestionRewriteInput): ContextualQuestionRewriteResult {
     const rawText = input.rawText.replace(/\s+/g, " ").trim();
-    let normalizedText = normalizeTechnicalTerms(rawText).replace(/\s+/g, " ").trim();
+    let normalizedText = cleanQuestionDiscourse(normalizeTechnicalTerms(rawText).replace(/\bIIC\b/giu, "I2C").replace(/\s+/g, " "));
     const corrections: ContextualQuestionRewriteResult["corrections"] = [];
     const candidates: ContextualQuestionRewriteResult["candidates"] = [];
     const unresolved: AsrAmbiguity[] = [];
     const context = contextText(input);
+    // Repeated comparison operands carry no usable distinction. Do not let
+    // a fluent model invent fieldbus/Ethernet or NFC from corrupt ASR.
+    if (/(现场)和\1|正常和近场/iu.test(normalizedText)) {
+      unresolved.push({ raw: normalizedText, candidates: [], confidence: 0.25, reason: "ambiguous-comparison-operands" });
+    }
 
     if (F405.test(normalizedText) && /(?:FOC|电机|矢量|控制器|MCU|选|平台)/iu.test(context)) {
       normalizedText = normalizedText.replace(F405, "STM32F405");

@@ -79,11 +79,18 @@ export function reduceRuntimeMessage(state: RuntimePhaseState, message: Realtime
 
 export function reduceRuntimeQuestion(state: RuntimePhaseState, event: QuestionEvent): RuntimePhaseState {
   if (event.type === "question_candidate") return { ...state, questionPhase: "ASSEMBLING" };
-  if (event.type === "question_diagnostic") return { ...state, questionPhase: event.confirmed ? "DETECTED" : state.questionPhase };
+  if (event.type === "question_diagnostic") return { ...state, questionPhase: questionWaitingNotice(event) ? "ASSEMBLING" : event.confirmed ? "DETECTED" : state.questionPhase };
   if (event.type === "question_confirmed" || event.type === "question_superseded") {
     return event.question.answerable === false ? { ...state, questionPhase: "DETECTED" } : { ...state, questionPhase: "COMMITTED" };
   }
   return state;
+}
+
+export function questionWaitingNotice(event: QuestionEvent): string | undefined {
+  if (event.type !== "question_diagnostic") return undefined;
+  if (event.reason === "understanding-wait-asr") return `识别内容不确定，等待补充：${event.text}`;
+  if (event.reason === "understanding-wait-completion") return `正在等待问题说完整：${event.text}`;
+  return undefined;
 }
 
 export function reduceRuntimeTranscript(state: RuntimePhaseState, source: "mic" | "remote", final: boolean): RuntimePhaseState {

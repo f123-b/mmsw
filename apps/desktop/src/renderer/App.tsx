@@ -30,7 +30,7 @@ import { PageErrorBoundary } from "./components/ErrorBoundary";
 import { ProjectLibraryPage } from "./project-library/ProjectLibraryPage";
 import { ProfileWorkspacePage } from "./profile/ProfileWorkspacePage";
 import { KNOWLEDGE_DOCUMENT_TYPES, KNOWLEDGE_DOCUMENT_TYPE_LABELS, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption } from "@interview-copilot/shared";
-import { initialRuntimePhaseState, isCommittedQuestionGroup, isDisplayableQuestionGroup, reduceRuntimeMessage, reduceRuntimeQuestion, reduceRuntimeTranscript, sessionPhaseFor, type RuntimePhaseState } from "./overlay/runtime-state";
+import { initialRuntimePhaseState, isCommittedQuestionGroup, isDisplayableQuestionGroup, questionWaitingNotice, reduceRuntimeMessage, reduceRuntimeQuestion, reduceRuntimeTranscript, sessionPhaseFor, type RuntimePhaseState } from "./overlay/runtime-state";
 import { answerScreenshotForMode } from "./overlay-runtime-actions";
 import { SettingsPage, type SettingsSection } from "./settings/SettingsPage";
 import { HelpPage, OnboardingModal } from "./help/HelpPage";
@@ -575,14 +575,17 @@ const useAudioStore = create<AudioStore>((set) => ({
     ? { remoteTranscript: snapshot, runtimePhases: reduceRuntimeTranscript(current.runtimePhases, snapshot.source, snapshot.final.length > 0) }
     : { micTranscript: snapshot }),
   applyQuestion: (event) => set((current) => {
-    if (event.type === "question_diagnostic") return { questionDiagnostics: [...current.questionDiagnostics.slice(-19), event], runtimePhases: reduceRuntimeQuestion(current.runtimePhases, event) };
+    if (event.type === "question_diagnostic") {
+      const notice = questionWaitingNotice(event);
+      return { questionDiagnostics: [...current.questionDiagnostics.slice(-19), event], runtimePhases: reduceRuntimeQuestion(current.runtimePhases, event), ...(notice ? { notice: { kind: "info" as const, text: notice } } : {}) };
+    }
     if (event.type !== "question_confirmed" && event.type !== "question_superseded") return current;
     questionsById.set(event.question.id, event.question);
     // Keep the displayed question paired with the answer currently being
     // generated. A queued question becomes visible on its answer_start.
     return current.answerStreaming || event.question.answerable === false
       ? { runtimePhases: reduceRuntimeQuestion(current.runtimePhases, event) }
-      : { question: event.question, runtimePhases: reduceRuntimeQuestion(current.runtimePhases, event), notice: current.notice };
+      : { question: event.question, runtimePhases: reduceRuntimeQuestion(current.runtimePhases, event), notice: undefined };
   }),
   applyRealtimeMessage: (message) => {
     if (message.type === "question_group_updated") {
@@ -596,7 +599,7 @@ const useAudioStore = create<AudioStore>((set) => ({
       }));
       return;
     }
-    if (message.type === "runtime_error") { putNotice(set, { kind: message.recoverable ? "warning" : "error", text: `${message.code}: ${message.message}${message.recoverable ? " · 可重试" : ""}` }); set((current) => ({ runtimePhases: reduceRuntimeMessage(current.runtimePhases, message) })); return; }
+    if (message.type === "runtime_error") { putNotice(set, { kind: message.recoverable ? "warning" : "error", text: message.message }); set((current) => ({ runtimePhases: reduceRuntimeMessage(current.runtimePhases, message) })); return; }
     if (message.type === "answer_start") answerQuestionIds.set(message.answerId, message.questionId);
     const messageQuestionId = message.type === "answer_start" ? message.questionId : "answerId" in message ? answerQuestionIds.get(message.answerId) : undefined;
     const pairedQuestion = messageQuestionId ? questionsById.get(messageQuestionId) : undefined;
@@ -636,7 +639,7 @@ const useAudioStore = create<AudioStore>((set) => ({
         ...(committedAnswerGroupId ? { activeQuestionGroupId: committedAnswerGroupId, activeAnswerGroupId: committedAnswerGroupId } : {}),
         runtimePhases: reduceRuntimeMessage({ ...current.runtimePhases, ...(committedAnswerGroupId ? { activeQuestionGroupId: committedAnswerGroupId, activeAnswerGroupId: committedAnswerGroupId } : {}) }, message, committedAnswerGroupId),
         ...(pairedQuestion ? { question: pairedQuestion } : {}),
-        ...(message.type === "answer_start" ? { answerMode: message.mode } : {})
+        ...(message.type === "answer_start" ? { answerMode: message.mode, notice: undefined } : {})
       };
     });
   }
@@ -2092,7 +2095,7 @@ export function App(): JSX.Element {
  })();
 
   const pageTitle = page === "home" ? "工作台" : page === "interview" ? "实时面试" : page === "preparation" ? "面试准备" : page === "profiles" ? "面试档案" : page === "project-library" ? "项目详情" : page === "knowledge" ? "资料库" : page === "personal-memory" ? "项目知识审核" : page === "question-bank" ? "通用题库" : page === "job-targets" ? "岗位要求" : page === "history" ? "面试历史" : page === "help" ? "帮助与快速开始" : "设置";
-    if (isOverlay) return <OverlayRoot surface={overlaySurface} mic={store.mic} system={store.system} state={store.state} sessionState={store.sessionState} realtimeState={store.realtimeState} operationMode={store.operationMode} overlayMode={store.overlayMode} hudState={store.hudState} runtimePhases={store.runtimePhases} automationMode={store.automationMode} answerMode={store.answerMode} writtenTest={store.writtenTest} screenshot={store.screenshot} question={store.question} answerText={store.answerText} answerStreaming={store.answerStreaming} questionGroups={store.questionGroups} activeQuestionGroupId={store.activeQuestionGroupId} activeAnswerGroupId={store.activeAnswerGroupId} answerThreads={store.answerThreads} remoteTranscript={store.remoteTranscript} micTranscript={store.micTranscript} captureProtectionEnabled={captureProtection.requested} captureProtectionSupported={captureProtection.supported} captureProtectionOsFlagApplied={captureProtection.osFlagApplied} captureProtectionDisplayVerified={captureProtection.displayCaptureVerified} captureProtectionLastError={captureProtection.lastError} captureTest={captureTest} onToggleCaptureProtection={() => void toggleCaptureProtection(!captureProtection.requested)} onToggleMode={() => void window.interviewCopilot.overlay.setMode(store.overlayMode === "interactive" ? "passive" : "interactive")} onToggleAutomation={toggleAutomation} onAnswerLatest={() => window.interviewCopilot.interview.answerLatest().catch((error) => { store.setNotice(`回答最新问题失败：${userFacingError(error)}`); })} onAnswerScreenshot={async () => { try { await answerScreenshotForMode(store.operationMode); } catch (error) { store.setNotice(`截图失败：${userFacingError(error)}`); } }} onEndInterview={() => store.operationMode === "WRITTEN_TEST" ? window.interviewCopilot.writtenTest.stop().then(() => undefined) : window.interviewCopilot.interview.stop()} onHideAll={() => void window.interviewCopilot.overlay.hideAll()} onShowAll={() => void window.interviewCopilot.overlay.showAll()} onTogglePanels={() => void window.interviewCopilot.overlay.toggleAll()} onToggleTranscript={() => void window.interviewCopilot.overlay.toggleTranscript()} onToggleAnswer={() => void window.interviewCopilot.overlay.toggleAnswer()} onToggleShortcuts={() => void window.interviewCopilot.overlay.toggleShortcuts()} onRequestEndInterview={() => void window.interviewCopilot.overlay.requestEndInterview()} onToggleShare={() => void window.interviewCopilot.overlay.toggleShareMode()} />;
+    if (isOverlay) return <OverlayRoot surface={overlaySurface} mic={store.mic} system={store.system} state={store.state} sessionState={store.sessionState} realtimeState={store.realtimeState} operationMode={store.operationMode} overlayMode={store.overlayMode} hudState={store.hudState} runtimePhases={store.runtimePhases} runtimeNotice={store.notice?.text} automationMode={store.automationMode} answerMode={store.answerMode} writtenTest={store.writtenTest} screenshot={store.screenshot} question={store.question} answerText={store.answerText} answerStreaming={store.answerStreaming} questionGroups={store.questionGroups} activeQuestionGroupId={store.activeQuestionGroupId} activeAnswerGroupId={store.activeAnswerGroupId} answerThreads={store.answerThreads} remoteTranscript={store.remoteTranscript} micTranscript={store.micTranscript} captureProtectionEnabled={captureProtection.requested} captureProtectionSupported={captureProtection.supported} captureProtectionOsFlagApplied={captureProtection.osFlagApplied} captureProtectionDisplayVerified={captureProtection.displayCaptureVerified} captureProtectionLastError={captureProtection.lastError} captureTest={captureTest} onToggleCaptureProtection={() => void toggleCaptureProtection(!captureProtection.requested)} onToggleMode={() => void window.interviewCopilot.overlay.setMode(store.overlayMode === "interactive" ? "passive" : "interactive")} onToggleAutomation={toggleAutomation} onAnswerLatest={() => window.interviewCopilot.interview.answerLatest().catch((error) => { store.setNotice(`回答最新问题失败：${userFacingError(error)}`); })} onAnswerScreenshot={async () => { try { await answerScreenshotForMode(store.operationMode); } catch (error) { store.setNotice(`截图失败：${userFacingError(error)}`); } }} onEndInterview={() => store.operationMode === "WRITTEN_TEST" ? window.interviewCopilot.writtenTest.stop().then(() => undefined) : window.interviewCopilot.interview.stop()} onHideAll={() => void window.interviewCopilot.overlay.hideAll()} onShowAll={() => void window.interviewCopilot.overlay.showAll()} onTogglePanels={() => void window.interviewCopilot.overlay.toggleAll()} onToggleTranscript={() => void window.interviewCopilot.overlay.toggleTranscript()} onToggleAnswer={() => void window.interviewCopilot.overlay.toggleAnswer()} onToggleShortcuts={() => void window.interviewCopilot.overlay.toggleShortcuts()} onRequestEndInterview={() => void window.interviewCopilot.overlay.requestEndInterview()} onToggleShare={() => void window.interviewCopilot.overlay.toggleShareMode()} />;
 
   return (
     <main className="app-shell modern-shell">

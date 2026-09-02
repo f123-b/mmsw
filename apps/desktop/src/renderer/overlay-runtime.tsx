@@ -10,7 +10,7 @@ import { answerScreenshotForMode } from "./overlay-runtime-actions";
 import type { OverlayRootProps, OverlaySurface } from "./overlay/OverlayRoot";
 import type { WrittenTestState } from "../main/written-test-controller";
 import { RootErrorBoundary } from "./components/ErrorBoundary";
-import { initialRuntimePhaseState, isCommittedQuestionGroup, isDisplayableQuestionGroup, reduceRuntimeMessage, reduceRuntimeQuestion, reduceRuntimeTranscript, sessionPhaseFor, type RuntimePhaseState } from "./overlay/runtime-state";
+import { initialRuntimePhaseState, isCommittedQuestionGroup, isDisplayableQuestionGroup, questionWaitingNotice, reduceRuntimeMessage, reduceRuntimeQuestion, reduceRuntimeTranscript, sessionPhaseFor, type RuntimePhaseState } from "./overlay/runtime-state";
 
 type QuestionGroup = OverlayRootProps["questionGroups"][number];
 
@@ -34,13 +34,13 @@ function applyRealtimeMessage(message: RealtimeServerMessage, state: RuntimeStat
       ? { ...state, questionGroups: [...state.questionGroups.filter((item) => item.id !== group.id), group], activeQuestionGroupId: group.id, activeAnswerGroupId: group.id, runtimePhases: { ...state.runtimePhases, questionPhase: "COMMITTED", activeQuestionGroupId: group.id, activeAnswerGroupId: group.id } }
       : { ...state, questionGroups: [...state.questionGroups.filter((item) => item.id !== group.id), group] };
   }
-  if (message.type === "runtime_error") return { ...state, notice: `${message.code}: ${message.message}`, runtimePhases: reduceRuntimeMessage(state.runtimePhases, message) };
+  if (message.type === "runtime_error") return { ...state, notice: message.message, runtimePhases: reduceRuntimeMessage(state.runtimePhases, message) };
   if (message.type === "answer_start") {
     const question = state.question;
     const groupId = message.groupId ?? question?.groupId;
     answerStore.start({ answerId: message.answerId, questionId: message.questionId, ...(groupId ? { groupId } : {}), title: groupId ? state.questionGroups.find((group) => group.id === groupId)?.title : undefined, questionText: question?.text ?? "截图识别的问题", relation: message.relation ?? (question ? answerRelationForQuestion(question) : "PRIMARY") });
     const committedGroupId = groupId && isCommittedQuestionGroup(state.questionGroups.find((group) => group.id === groupId)) ? groupId : undefined;
-    return { ...state, answerText: "", answerStreaming: true, answerId: message.answerId, ...(committedGroupId ? { activeQuestionGroupId: committedGroupId, activeAnswerGroupId: committedGroupId } : {}), answerMode: message.mode, answerThreads: answerStore.list(), runtimePhases: reduceRuntimeMessage({ ...state.runtimePhases, ...(committedGroupId ? { activeQuestionGroupId: committedGroupId, activeAnswerGroupId: committedGroupId } : {}) }, message, committedGroupId) };
+    return { ...state, notice: undefined, answerText: "", answerStreaming: true, answerId: message.answerId, ...(committedGroupId ? { activeQuestionGroupId: committedGroupId, activeAnswerGroupId: committedGroupId } : {}), answerMode: message.mode, answerThreads: answerStore.list(), runtimePhases: reduceRuntimeMessage({ ...state.runtimePhases, ...(committedGroupId ? { activeQuestionGroupId: committedGroupId, activeAnswerGroupId: committedGroupId } : {}) }, message, committedGroupId) };
   }
   if (message.type === "answer_delta") {
     answerStore.delta(message.answerId, message.delta);
@@ -108,11 +108,11 @@ function useOverlayRuntime(surface: OverlaySurface): RuntimeState {
           runtimePhases: shouldReset
             ? { ...initialRuntimePhaseState, automationMode: current.automationMode, sessionPhase: sessionPhaseFor(sessionState, current.state, current.realtimeState) }
             : { ...current.runtimePhases, sessionPhase: sessionPhaseFor(sessionState, current.state, current.realtimeState) },
-          ...(shouldReset ? { question: undefined, answerText: "", answerStreaming: false, answerId: undefined, questionGroups: [], activeQuestionGroupId: undefined, activeAnswerGroupId: undefined, answerThreads: [] } : {})
+          ...(shouldReset ? { notice: undefined, question: undefined, answerText: "", answerStreaming: false, answerId: undefined, questionGroups: [], activeQuestionGroupId: undefined, activeAnswerGroupId: undefined, answerThreads: [] } : {})
         }));
       }),
       window.interviewCopilot.events.onOperationMode((operationMode) => setState((current) => operationMode === "IDLE"
-        ? { ...current, operationMode, sessionState: "IDLE", answerText: "", answerStreaming: false, answerThreads: [], questionGroups: [], question: undefined, remoteTranscript: { source: "remote", final: [] }, micTranscript: { source: "mic", final: [] }, runtimePhases: { ...initialRuntimePhaseState } }
+        ? { ...current, notice: undefined, operationMode, sessionState: "IDLE", answerText: "", answerStreaming: false, answerThreads: [], questionGroups: [], question: undefined, remoteTranscript: { source: "remote", final: [] }, micTranscript: { source: "mic", final: [] }, runtimePhases: { ...initialRuntimePhaseState } }
         : { ...current, operationMode, sessionState: "RUNNING", runtimePhases: operationMode === "WRITTEN_TEST" ? { ...initialRuntimePhaseState, sessionPhase: "LISTENING" } : current.runtimePhases })),
       window.interviewCopilot.events.onRealtimeState((realtimeState) => setState((current) => ({ ...current, realtimeState, runtimePhases: { ...current.runtimePhases, sessionPhase: sessionPhaseFor(current.sessionState, current.state, realtimeState) } }))),
       window.interviewCopilot.events.onOverlayMode((overlayMode) => update({ overlayMode })),
@@ -126,10 +126,15 @@ function useOverlayRuntime(surface: OverlaySurface): RuntimeState {
       window.interviewCopilot.events.onScreenshot((screenshot) => update({ screenshot })),
       window.interviewCopilot.events.onRealtimeTranscript((snapshot) => setState((current) => ({ ...current, ...(snapshot.source === "remote" ? { remoteTranscript: snapshot } : { micTranscript: snapshot }), runtimePhases: reduceRuntimeTranscript(current.runtimePhases, snapshot.source, snapshot.final.length > 0) }))),
       window.interviewCopilot.events.onQuestion((event: QuestionEvent) => {
+        const notice = questionWaitingNotice(event);
+        if (notice) {
+          setState((current) => ({ ...current, notice, runtimePhases: reduceRuntimeQuestion(current.runtimePhases, event) }));
+          return;
+        }
         if (event.type !== "question_confirmed" && event.type !== "question_superseded") return;
         setState((current) => event.question.answerable === false
           ? { ...current, runtimePhases: reduceRuntimeQuestion(current.runtimePhases, event) }
-          : { ...current, question: event.question, questionGroups: replaceQuestionGroup(current.questionGroups, event.question), runtimePhases: reduceRuntimeQuestion(current.runtimePhases, event) });
+          : { ...current, notice: undefined, question: event.question, questionGroups: replaceQuestionGroup(current.questionGroups, event.question), runtimePhases: reduceRuntimeQuestion(current.runtimePhases, event) });
       }),
       window.interviewCopilot.events.onRealtimeMessage((message) => setState((current) => applyRealtimeMessage(message, current, answerStore))),
       window.interviewCopilot.events.onOverlayGlobalWheel(({ deltaY }) => {
@@ -157,6 +162,7 @@ function OverlayRuntimeApp({ surface }: { surface: OverlaySurface }): JSX.Elemen
     overlayMode: state.overlayMode,
     hudState: state.hudState,
     runtimePhases: state.runtimePhases,
+    runtimeNotice: state.notice,
     automationMode: state.automationMode,
     answerMode: state.answerMode,
     writtenTest: state.writtenTest,

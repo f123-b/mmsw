@@ -52,7 +52,10 @@ function questionStatus(status: QuestionRecord["status"]): string {
     answering: "回答中",
     superseded: "已替换",
     answered: "已回答",
-    ignored: "已忽略"
+    ignored: "已忽略",
+    blocked: "资料不足，未生成",
+    failed: "生成失败",
+    cancelled: "已取消"
   };
   return labels[status];
 }
@@ -82,7 +85,9 @@ function telemetryLines(answer: AnswerRecord): string[] {
     `- 术语修正：${telemetry.terminologyCorrectionCount ?? 0}（置信度 ${telemetry.terminologyConfidence?.toFixed(2) ?? "—"}）`,
     `- Core QA：${inline(telemetry.coreQaQuestionId)}`,
     `- Project QA：${inline(telemetry.projectQaQuestionId)}`,
-    `- 历史 revision：${inline(telemetry.historyRevision)}`
+    `- 历史 revision：${inline(telemetry.historyRevision)}`,
+    `- 模型首 token：${telemetry.providerFirstTokenMs === undefined ? "—" : `${telemetry.providerFirstTokenMs} ms`}`,
+    `- 首次可见回答：${telemetry.firstVisibleAnswerMs === undefined ? "—" : `${telemetry.firstVisibleAnswerMs} ms`}`
   ];
 }
 
@@ -119,6 +124,7 @@ export function formatInterviewMarkdown(snapshot: InterviewSnapshot, metrics: In
     `- 回答率：${percent(metrics.answerRate)}`,
     `- 平均首 token：${metrics.averageFirstTokenMs === undefined ? "—" : `${Math.round(metrics.averageFirstTokenMs)} ms`}`,
     `- 平均回答耗时：${metrics.averageAnswerLatencyMs === undefined ? "—" : `${Math.round(metrics.averageAnswerLatencyMs)} ms`}`,
+    "- 统计说明：回答率仅表示非空答案生成完成率，不代表内容正确率。新版本耗时从本次回答启动计算，不含手动等待和排队；旧记录保留原有口径。",
     "",
     "## 对话记录",
     ""

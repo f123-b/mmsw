@@ -529,6 +529,9 @@ export class InterviewCoordinator extends EventEmitter {
   private markQuestionStateById(questionId: string, state: RuntimeQuestionState): void {
     const existing = this.runtimeQuestions.get(questionId);
     if (existing) this.runtimeQuestions.set(questionId, { ...existing, state });
+    if (state === "cancelled" || state === "failed" || state === "answered" || state === "answering") {
+      this.history.updateQuestionStatus?.(this.historyQuestionIds.get(questionId) ?? questionId, state);
+    }
   }
 
   private markLatency(questionId: string, stage: Parameters<RuntimeLatencyTelemetry["mark"]>[1], at = this.now()): void {
@@ -1020,6 +1023,9 @@ export class InterviewCoordinator extends EventEmitter {
         this.recordRuntimeTrace("PROJECT_CONTEXT_MISMATCH", { expectedProjectId: answerProjectId, routedProjectId }, { questionId: question.id, providerRequestId, reasonCode: "frozen-question-project-mismatch" });
         this.emitDiagnostic("PROJECT_CONTEXT_MISMATCH: 已阻止跨项目回答");
         this.markQuestionStateById(question.id, "cancelled");
+        this.markQuestionGroup(question.id, "cancelled");
+        this.history.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "blocked");
+        this.emitRealtimeMessage({ type: "runtime_error", code: "PROJECT_CONTEXT_MISMATCH", message: "项目资料与当前问题不一致，请确认项目后重新回答。", recoverable: true });
         return;
       }
       providerContext = { ...providerContext, questionTelemetry: { ...(providerContext.questionTelemetry ?? {}), ...(answerProjectId ? { activeProjectId: answerProjectId } : {}) } };
@@ -1070,6 +1076,9 @@ export class InterviewCoordinator extends EventEmitter {
         }, { questionId: question.id, providerRequestId, reasonCode });
         this.emitDiagnostic(reasonCode === "strict-project-qa-no-match" ? "项目问题未命中已验证项目题库，暂不生成答案" : "项目尚未锁定，暂不生成答案");
         this.markQuestionStateById(question.id, "cancelled");
+        this.markQuestionGroup(question.id, "cancelled");
+        this.history.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "blocked");
+        this.emitRealtimeMessage({ type: "runtime_error", code: "PROJECT_EVIDENCE_REQUIRED", message: reasonCode === "strict-project-qa-no-match" ? "当前项目没有匹配的已确认答案。请在项目题库补充并确认资料后重试。" : "当前项目尚未确定。请选择对应项目后重试。", recoverable: true });
         this.recordRuntimeTrace("QUESTION_CANCELLED", {}, { questionId: question.id, providerRequestId, reasonCode });
         return;
       }
@@ -1161,7 +1170,7 @@ export class InterviewCoordinator extends EventEmitter {
       const selfIntroDirect = projectQaMode === "self_intro_direct";
       const projectQaDirect = projectQaMode === "project_qa_direct";
       const ordinaryQuestionBankDirect = !isProjectQuestion && !answerIntent.requiresPersonalIdentity && !requiresClaimValidation;
-      if (preparedAnswer && preparedAnswer.verified && preparedAnswer.score >= 0.88 && !streamOptions.hasScreenshot && (ordinaryQuestionBankDirect || selfIntroDirect || projectQaDirect)) {
+      if (preparedAnswer && preparedAnswer.verified && !preparedAnswer.stale && preparedAnswer.score >= 0.88 && !streamOptions.hasScreenshot && (ordinaryQuestionBankDirect || selfIntroDirect || projectQaDirect)) {
         this.emitDiagnostic("QUESTION_BANK_DIRECT_HIT");
         if (selfIntroDirect) this.recordRuntimeTrace("SELF_INTRO_DIRECT", { cacheHit: true }, { questionId: question.id, providerRequestId });
         if (projectQaDirect) this.recordRuntimeTrace("PROJECT_QA_DIRECT", { cacheHit: true, qaMatchLevel: lockedProviderContext.answerSourcePlan?.qaMatchLevel }, { questionId: question.id, providerRequestId });
@@ -1190,7 +1199,7 @@ export class InterviewCoordinator extends EventEmitter {
         const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
         const telemetry = this.buildAnswerTelemetry(question, { answerSourceMode: projectQaMode ?? "question-bank", technicalGuardDecision: "allow", technicalViolationCount: 0, claimGateDecision: "allow", blockedPersonalClaimCount: 0, projectTruthDecision: projectTruth.decision, blockedClaimCount: projectTruth.blockedClaimCount });
         this.recordInterviewTelemetry(question, telemetry, finishedAt);
-        this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: displayText, model: directModel, mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, telemetry, ...(question.groupId ? { groupId: question.groupId } : {}), relation: answerRelationForQuestion(question), answerRunId: operationId, createdAt: finishedAt });
+        this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: displayText, model: directModel, mode, startedAt, firstTokenAt: finishedAt, finishedAt, latencyFirstToken: finishedAt - startedAt, latencyTotal: finishedAt - startedAt, telemetry, ...(question.groupId ? { groupId: question.groupId } : {}), relation: answerRelationForQuestion(question), answerRunId: operationId, createdAt: finishedAt });
         if (answerOperation) answerOperation.state = "committed";
         this.recordRuntimeTrace("ANSWER_COMMITTED", {}, { questionId: question.id, answerId, providerRequestId, reasonCode: directModel });
         this.emitRealtimeMessage({ type: "answer_end", answerId, text: displayText });
@@ -1238,6 +1247,7 @@ export class InterviewCoordinator extends EventEmitter {
       if (answerOperation) answerOperation.state = "request_sent";
       this.recordRuntimeTrace("PROVIDER_REQUEST_SENT", {}, { questionId: question.id, providerRequestId });
       this.markLatency(question.id, "providerRequestSentAt");
+      const providerRequestStartedAt = this.now();
       let claimGateFirstPassRecorded = false;
       for await (const event of this.options.answerAgent.stream({ id: question.id, text: plannedQuestionText, ...(isFollowUp ? { kind: "follow-up" as const } : {}) }, mode, context, controller.signal, {
         ...streamOptions,
@@ -1245,7 +1255,16 @@ export class InterviewCoordinator extends EventEmitter {
         // the plan -> coverage -> depth-repair -> final quality chain before
         // answer_end. Repair is bounded to missing facets and max length.
         directDisplay: false,
-        emitDeltas: this.accurateInterview ? false : true,
+        emitDeltas: !this.accurateInterview || (!requiresClaimValidation && !isProjectQuestion),
+        onProviderFirstToken: () => {
+          if (controller.signal.aborted || generation !== this.answerGeneration || sessionId !== this.runtimeSessionId) return;
+          const operation = this.runtimeAnswers.get(operationId);
+          if (!operation || operation.firstTokenAt !== undefined) return;
+          operation.firstTokenAt = this.now();
+          this.runtimeTimers.clear(`answer-first-token:${operationId}`);
+          this.markLatency(question.id, "providerFirstTokenAt", operation.firstTokenAt);
+          this.recordRuntimeTrace("PROVIDER_FIRST_TOKEN", {}, { questionId: question.id, answerId: operation.answerId, providerRequestId });
+        },
         allowQualityRepair: true,
         formatAnswer: true,
         maxRetries: 1,
@@ -1292,8 +1311,6 @@ export class InterviewCoordinator extends EventEmitter {
           }
           if (firstToken) {
             this.runtimeTimers.clear(`answer-first-token:${operationId}`);
-            this.markLatency(question.id, "providerFirstTokenAt", firstTokenAt);
-            this.recordRuntimeTrace("PROVIDER_FIRST_TOKEN", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
             if (streamOptions.screenshotRequestId) this.recordScreenshotTrace("VISION_FIRST_TOKEN", streamOptions.screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "streaming" });
           }
           answerTrace?.mark("firstToken", this.answerFirstTokenAt);
@@ -1364,8 +1381,6 @@ export class InterviewCoordinator extends EventEmitter {
           if (!hadFirstToken) {
             this.answerFirstTokenAt = finishedAt;
             if (answerOperation) answerOperation.firstTokenAt ??= finishedAt;
-            this.recordRuntimeTrace("PROVIDER_FIRST_TOKEN", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
-            this.markLatency(question.id, "providerFirstTokenAt", finishedAt);
             this.recordRuntimeTrace("FIRST_VISIBLE_TOKEN", {}, { questionId: question.id, answerId: event.answerId, providerRequestId });
             this.markLatency(question.id, "firstVisibleTokenAt", finishedAt);
             if (streamOptions.screenshotRequestId) this.recordScreenshotTrace("VISION_FIRST_TOKEN", streamOptions.screenshotRequestId, { providerRequestId, answerId: event.answerId, status: "completed" });
@@ -1384,6 +1399,8 @@ export class InterviewCoordinator extends EventEmitter {
           const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
           const telemetry = this.buildAnswerTelemetry(question, {
             ...(event.quality?.telemetry ?? {}),
+            providerFirstTokenMs: answerOperation?.firstTokenAt === undefined ? undefined : answerOperation.firstTokenAt - providerRequestStartedAt,
+            firstVisibleAnswerMs: this.answerFirstTokenAt - startedAt,
             answerSourceMode: event.quality?.answerSourceMode,
             technicalGuardDecision: "allow",
             technicalViolationCount: 0,
@@ -1391,7 +1408,7 @@ export class InterviewCoordinator extends EventEmitter {
             blockedPersonalClaimCount: event.quality?.blockedClaimCount
           });
           this.recordInterviewTelemetry(question, telemetry, finishedAt);
-          this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: answerText, model: this.answerModel ?? "configured", mode: this.answerMode ?? mode, startedAt: this.answerStartedAt ?? startedAt, firstTokenAt: this.answerFirstTokenAt, finishedAt, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - confirmedAt, latencyTotal: finishedAt - confirmedAt, telemetry, ...(question.groupId ? { groupId: question.groupId } : {}), relation: answerRelationForQuestion(question), answerRunId: operationId, createdAt: finishedAt });
+          this.history.addAnswer({ questionId: this.historyQuestionIds.get(question.id) ?? question.id, text: answerText, model: this.answerModel ?? "configured", mode: this.answerMode ?? mode, startedAt, firstTokenAt: this.answerFirstTokenAt, finishedAt, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - startedAt, latencyTotal: finishedAt - startedAt, telemetry, ...(question.groupId ? { groupId: question.groupId } : {}), relation: answerRelationForQuestion(question), answerRunId: operationId, createdAt: finishedAt });
           if (answerOperation) answerOperation.state = "committed";
           this.recordRuntimeTrace("ANSWER_COMMITTED", {}, { questionId: question.id, answerId: event.answerId, providerRequestId, reasonCode: "provider-completed" });
           if (event.quality) {
@@ -1954,7 +1971,10 @@ export class InterviewCoordinator extends EventEmitter {
   private handleUnderstandingV3Event(event: UnderstandingEvent, trace: QuestionTrace, utterance: TranscriptUtterance, turn: InterviewTurn): boolean {
     const frame = event.frame;
     const decision = event.gate.decision;
-    if (event.type === "QUESTION_WAITING") this.scheduleUnderstandingFallback(frame, trace, utterance, turn);
+    if (event.type === "QUESTION_WAITING") {
+      this.scheduleUnderstandingFallback(frame, trace, utterance, turn);
+      this.emitQuestion({ type: "question_diagnostic", text: frame.rawCombinedText.slice(0, 240), questionScore: frame.confidence.overall, confidence: frame.confidence.overall, candidate: true, confirmed: false, reason: frame.completion === "ASR_UNCERTAIN" || frame.speechAct === "ASR_UNRESOLVED" ? "understanding-wait-asr" : "understanding-wait-completion" });
+    }
     else this.runtimeTimers.clear("understanding-stabilization");
     this.scheduleRuntimeContextPersist();
     trace.update({
@@ -2655,7 +2675,7 @@ export class InterviewCoordinator extends EventEmitter {
     if (persistedQuestionId && inFlight) {
       this.activeQuestionTrace?.mark("answerEnded", now);
       this.emitQuestionTrace(this.activeQuestionTrace);
-          this.history.addAnswer({ questionId: this.historyQuestionIds.get(persistedQuestionId) ?? persistedQuestionId, text: this.accumulatedAnswerText, model: this.answerModel ?? "unknown", mode: this.answerMode, startedAt: this.answerStartedAt ?? now, firstTokenAt: this.answerFirstTokenAt, finishedAt: now, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - (this.questionConfirmedAt.get(persistedQuestionId) ?? now), latencyTotal: now - (this.questionConfirmedAt.get(persistedQuestionId) ?? now), cancelReason: reason, telemetry: this.buildAnswerTelemetry(this.currentQuestion?.id === persistedQuestionId ? this.currentQuestion : { id: persistedQuestionId, text: "" } as QuestionCandidate), ...(persistedQuestion?.groupId ? { groupId: persistedQuestion.groupId } : {}), ...(persistedQuestion ? { relation: answerRelationForQuestion(persistedQuestion) } : {}), answerRunId: activeOperation?.operationId, createdAt: now });
+          this.history.addAnswer({ questionId: this.historyQuestionIds.get(persistedQuestionId) ?? persistedQuestionId, text: this.accumulatedAnswerText, model: this.answerModel ?? "unknown", mode: this.answerMode, startedAt: this.answerStartedAt ?? now, firstTokenAt: this.answerFirstTokenAt, finishedAt: now, latencyFirstToken: this.answerFirstTokenAt === undefined ? undefined : this.answerFirstTokenAt - (this.answerStartedAt ?? now), latencyTotal: now - (this.answerStartedAt ?? now), cancelReason: reason, telemetry: this.buildAnswerTelemetry(this.currentQuestion?.id === persistedQuestionId ? this.currentQuestion : { id: persistedQuestionId, text: "" } as QuestionCandidate), ...(persistedQuestion?.groupId ? { groupId: persistedQuestion.groupId } : {}), ...(persistedQuestion ? { relation: answerRelationForQuestion(persistedQuestion) } : {}), answerRunId: activeOperation?.operationId, createdAt: now });
     }
     this.answerQuestionId = undefined;
     this.answerMode = undefined;

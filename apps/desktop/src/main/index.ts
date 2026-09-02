@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, screen } from "electron";
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain as nativeIpcMain, Menu, nativeImage, screen } from "electron";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, relative, resolve, sep } from "node:path";
@@ -26,6 +26,7 @@ import { SafeLogger } from "./logger";
 import { buildConversationHistory } from "./chat-context";
 import { chatFailureText, classifyChatError, PROJECT_AGENT_TIMEOUT_MS } from "../shared/chat-errors";
 import { ShutdownController } from "./shutdown-controller";
+import { shutdownAwareIpcHandle } from "./ipc-lifecycle";
 import { MiddleMouseShortcutManager, middleMouseHelperCandidates, shouldHandleMiddleMouseShortcut } from "./middle-mouse-shortcut";
 import { NativeModifierShortcutManager } from "./native-modifier-shortcut";
 import { normalizeNativeScreenPoint } from "./native-screen-coordinates";
@@ -320,9 +321,11 @@ const shutdownController = new ShutdownController([
   { name: "cancel-project-analysis", timeoutMs: 1_000, run: () => projectMemoryService?.cancelAllAnalysisJobs() },
   { name: "save-main-window-bounds", timeoutMs: 1_000, run: () => saveMainWindowBounds() },
   { name: "destroy-overlay", timeoutMs: 1_500, run: () => overlayManager?.destroy() },
+  // Stop renderers before disposing SQLite: final state broadcasts can make
+  // them issue history reads while the shutdown sequence is draining.
+  { name: "destroy-windows", timeoutMs: 1_000, run: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy(); } },
   { name: "flush-database", timeoutMs: 3_000, run: () => { database?.flushNow(); appLogger?.info("SHUTDOWN_DATABASE_FLUSHED", {}); } },
-  { name: "close-database", timeoutMs: 1_500, run: () => database?.close() },
-  { name: "destroy-windows", timeoutMs: 1_000, run: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy(); } }
+  { name: "close-database", timeoutMs: 1_500, run: () => database?.close() }
 ], {
   globalTimeoutMs: 9_000,
   onEvent: ({ event, fields }) => {
@@ -592,7 +595,7 @@ function rendererWindowName(window: BrowserWindow | null): "main" | "overlay-que
   return "unknown";
 }
 
-ipcMain.on("diagnostics:renderer-ready", (event) => {
+nativeIpcMain.on("diagnostics:renderer-ready", (event) => {
   const window = BrowserWindow.fromWebContents(event.sender);
   const webContentsId = event.sender.id;
   rendererAppReadyWindows.add(webContentsId);
@@ -602,7 +605,7 @@ ipcMain.on("diagnostics:renderer-ready", (event) => {
   waiters?.forEach((resolve) => resolve());
 });
 
-ipcMain.on("diagnostics:startup-mark", (_event, event: InterviewStartupEvent) => {
+nativeIpcMain.on("diagnostics:startup-mark", (_event, event: InterviewStartupEvent) => {
   if (!INTERVIEW_STARTUP_EVENTS.includes(event)) return;
   markInterviewStartup(event);
 });
@@ -1548,6 +1551,23 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
     const transientWindow = manager.currentTransientWindow;
     if (!questionWindow || !answerWindow || !controlWindow || !transientWindow) throw new Error("VISUAL_OVERLAY_WINDOWS_MISSING");
 
+    broadcast("question:event", { type: "question_diagnostic", text: "那 DMA。", questionScore: 0.5, confidence: 0.5, candidate: true, confirmed: false, reason: "understanding-wait-completion" });
+    await waitForRendererPaint(questionWindow);
+    const waitingNotice = await questionWindow.webContents.executeJavaScript("document.querySelector('.overlay-runtime-notice')?.textContent", true);
+    if (!String(waitingNotice).includes("正在等待问题说完整")) throw new Error("WAITING_NOTICE_NOT_VISIBLE");
+    snapshots["overlay-waiting-notice.png"] = join(visualArtifactDirectory, "overlay-waiting-notice.png");
+    await writeFile(snapshots["overlay-waiting-notice.png"], await captureVisibleWindow(questionWindow));
+    broadcast("realtime:message", { type: "runtime_error", code: "PROJECT_EVIDENCE_REQUIRED", message: "当前项目没有匹配的已确认答案。请在项目题库补充并确认资料后重试。", recoverable: true });
+    await waitForRendererPaint(answerWindow);
+    const blockedNotice = await answerWindow.webContents.executeJavaScript("document.querySelector('.overlay-runtime-notice')?.textContent", true);
+    if (!String(blockedNotice).includes("已确认答案")) throw new Error("BLOCKED_NOTICE_NOT_VISIBLE");
+    snapshots["overlay-blocked-notice.png"] = join(visualArtifactDirectory, "overlay-blocked-notice.png");
+    await writeFile(snapshots["overlay-blocked-notice.png"], await captureVisibleWindow(answerWindow));
+    broadcast("realtime:message", { type: "answer_start", answerId: "visual-notice-answer", questionId: "visual-notice-question", mode: "NORMAL", model: "visual-fixture" });
+    broadcast("realtime:message", { type: "answer_end", answerId: "visual-notice-answer", text: "SPI 是同步串行接口。" });
+    await waitForRendererPaint(answerWindow);
+    if (await answerWindow.webContents.executeJavaScript("Boolean(document.querySelector('.overlay-runtime-notice'))", true)) throw new Error("NOTICE_NOT_CLEARED_ON_NEW_ANSWER");
+
     // Render stable short/long fixtures in the already-mounted real renderer
     // windows. This keeps the visual suite deterministic while the native
     // BrowserWindow, ResizeObserver and IPC sizing path remain exercised.
@@ -2349,6 +2369,7 @@ async function readWorkspaceFile(root: string, requestedPath: string): Promise<s
 }
 
 function registerIpc(): void {
+  const ipcMain = { on: nativeIpcMain.on.bind(nativeIpcMain), handle: shutdownAwareIpcHandle(nativeIpcMain, () => appShuttingDown) };
   ipcMain.on("screenshot:trace", (_event, payload: { name?: string; screenshotRequestId?: string; fields?: Record<string, unknown> }) => {
     const allowed = new Set<ScreenshotTraceEventName>(["SCREENSHOT_ACTION_REQUESTED", "SCREENSHOT_RENDERER_HANDLER_ENTERED", "SCREENSHOT_IPC_SENT"]);
     if (!payload || typeof payload.screenshotRequestId !== "string" || !allowed.has(payload.name as ScreenshotTraceEventName)) return;
@@ -2497,7 +2518,7 @@ function registerIpc(): void {
       if (!preflight.asr.reachable) throw new Error(`ASR_CONNECT_FAILED: ${preflight.asr.message ?? preflight.asr.status}`);
       markInterviewStartup("COORDINATOR_START_BEGIN");
       const snapshot = projectMemoryService?.get(options.profileId) ?? { projects: [] };
-      const projectCandidates = snapshot.projects.map((project) => ({ id: project.id, name: project.name, aliases: [project.description], entities: [...project.hardware, ...project.software, ...project.technologyStack] }));
+      const projectCandidates = snapshot.projects.map((project) => ({ id: project.id, name: project.name, entities: [...project.hardware, ...project.software, ...project.technologyStack] }));
       const cachedStartContext = interviewContextCache.get({ profileId: options.profileId, projectId: options.projectId, jobTargetId: options.jobTargetId });
       const interviewStartOptions: InterviewStartOptions = { ...options, runtimeMode: options.runtimeMode ?? "ACCURATE_INTERVIEW", projectCandidates, ...(cachedStartContext?.stableInterviewPrefix ? { stableInterviewPrefix: cachedStartContext.stableInterviewPrefix } : {}) };
       const interviewId = await coordinator().start(interviewStartOptions);
@@ -3300,7 +3321,14 @@ if (hasSingleInstanceLock) {
       && !fastAnswerIntent.requiresPersonalMetric
       && !fastAnswerIntent.requiresPersonalResult
       && !fastAnswerIntent.asksBehavioralEpisode;
-    if (interviewContext?.contextMode === "fast") {
+    // Even an accurate personal/project request can use an already verified
+    // local answer. Do not reopen the full project snapshot on this path.
+    const cachedProjectRoute = fastProjectIntent.projectQuestionRequested && fastInitialResolution.projectId
+      ? projectInterviewCache.routeProjectQuestion(fastNormalizedQuestion, fastInitialResolution.projectId)
+      : undefined;
+    const cachedProjectDirect = cachedProjectRoute && planAnswerSource({ projectId: fastInitialResolution.projectId, projectQuestion: true, projectQa: cachedProjectRoute, strictProjectQa: interviewContext?.strictProjectQa === true }).mode === "project_qa_direct";
+    const cachedIntroduction = cached.selfIntroduction?.approved && analyzeSelfIntroductionIntent(question.text).matched;
+    if (interviewContext?.contextMode === "fast" || cachedProjectDirect || cachedIntroduction) {
       const selfIntroIntent = analyzeSelfIntroductionIntent(question.text);
       const cachedIntro = cached.selfIntroduction;
       if (selfIntroIntent.matched && cachedIntro?.approved) {
@@ -3354,7 +3382,7 @@ if (hasSingleInstanceLock) {
       // Project/personal turns get the same immediate cached answer lane. The
       // old full retrieval path is intentionally detached and can enrich a
       // later follow-up without holding the first provider request.
-      if (!fastTechnicalOnly) {
+      if (!fastTechnicalOnly && !cachedProjectDirect && interviewContext?.contextMode === "fast") {
         interviewContext?.onRichContext?.("started");
         void answerContextProvider(question, profileId, recentTranscript, { ...interviewContext, contextMode: "rich", onRichContext: undefined })
           .then(() => interviewContext?.onRichContext?.("completed"))

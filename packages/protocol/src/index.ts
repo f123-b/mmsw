@@ -294,6 +294,8 @@ export const runtimeErrorSchema = z.object({
     "ASR_FAILED",
     "QUESTION_EXTRACTOR_FAILED",
     "QUESTION_FAILED",
+    "PROJECT_CONTEXT_MISMATCH",
+    "PROJECT_EVIDENCE_REQUIRED",
     "LLM_FAILED",
     "RAG_FAILED",
     "DB_FAILED",

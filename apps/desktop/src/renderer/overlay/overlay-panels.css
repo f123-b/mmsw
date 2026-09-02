@@ -48,6 +48,7 @@
 .overlay-latest-button { position: absolute; right: 12px; bottom: 10px; z-index: 2; border: 1px solid rgba(255, 255, 255, .2); border-radius: 999px; padding: 4px 8px; background: rgba(17, 28, 44, .9); color: rgba(248, 251, 255, .82); font-size: 10px; }
 .overlay-latest-button:hover { background: rgba(55, 79, 108, .95); color: #fff; }
 .overlay-content-status, .answer-content-status { display: flex; align-items: center; gap: 6px; color: rgba(255, 255, 255, .62); font-size: 10px; }
+.overlay-runtime-notice { margin: 8px 0; padding: 8px 10px; border-left: 2px solid currentColor; background: rgba(127, 127, 127, .15); font-size: .9em; line-height: 1.5; overflow-wrap: anywhere; }
 .content-status-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #81d3a2; }
 .answer-content-status.generating .content-status-dot { background: #ffd27e; box-shadow: 0 0 0 3px rgba(255, 210, 126, .12); }
 .current-question-text { margin: 0; color: color-mix(in srgb, var(--overlay-text-color, #fff) calc(var(--overlay-text-opacity, .97) * 100%), transparent); font-size: var(--overlay-title-font-size, 16px); font-weight: var(--overlay-font-weight, 600); line-height: var(--overlay-line-height, 1.5); text-shadow: var(--overlay-text-shadow, none); -webkit-text-stroke: var(--overlay-text-outline, 0px) currentColor; white-space: pre-wrap; overflow-wrap: anywhere; }

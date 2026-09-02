@@ -7,6 +7,12 @@ const projects = [
 ];
 
 describe("V3 active project lock", () => {
+  it("does not switch from FOC to another project on a basic protocol question", () => {
+    const resolver = new ActiveProjectResolver();
+    resolver.setManual({ projectId: "foc", projectName: "FOC 电机控制" }, 1);
+    for (const text of ["什么是CAN？", "什么是SPI？", "DMA的原理是什么？"]) resolver.observe({ text, speaker: "interviewer", projects, now: 2 });
+    expect(resolver.state.activeProject?.projectId).toBe("foc");
+  });
   it("keeps a weak switch pending and only locks an explicit switch", () => {
     const resolver = new ActiveProjectResolver();
     resolver.setManual({ projectId: "foc", projectName: "FOC 电机控制" }, 1);

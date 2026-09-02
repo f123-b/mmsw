@@ -30,6 +30,7 @@ export class SemanticQuestionCompletion {
     if (input.unresolvedAsr) return { state: "ASR_UNCERTAIN", confidence: 0.98, unresolvedSlots: ["asr"], reason: "asr-unresolved" };
     if (["CONFIRMATION_CHECK", "BACKCHANNEL", "ADVICE", "EXPLANATION", "FEEDBACK", "TOPIC_TRANSITION", "CONTROL", "FILLER"].includes(input.speechAct)) return { state: "COMPLETE", confidence: 0.99, unresolvedSlots: [], reason: "non-answer-speech-act" };
     if (!text) return { state: "OPEN", confidence: 0, unresolvedSlots: ["question"], reason: "empty-question" };
+    if (/(?:里边|里面|的话|比方说在你的这个|用的是)[。！？?！\s]*$/u.test(text)) return { state: "OPEN", confidence: 0.97, unresolvedSlots: ["predicate"], reason: "unfinished-question-predicate" };
     const selectionWithoutObject = /(?:为什么|为何)(?:要)?(?:选|选择)\s*[？?。！!\s，,、]*$/iu.test(text)
       && !/(?:STM\d+|F\d{3,4}|芯片|MCU|方案|组件|Cortex|DMA|ADC|PWM|CAN|SPI)/iu.test(text);
     if (selectionWithoutObject) return { state: "WAITING_OBJECT", confidence: 0.96, unresolvedSlots: ["selected-object"], reason: "selection-object-missing" };

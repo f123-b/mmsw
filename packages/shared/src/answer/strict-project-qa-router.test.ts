@@ -30,6 +30,14 @@ function record(id: string, text: string, projectId = "p1"): QuestionBankQuestio
 }
 
 describe("StrictProjectQaRouter", () => {
+  it("matches spoken whole-project questions to numbered verified headings without broadening component queries", () => {
+    const router = new StrictProjectQaRouter();
+    const candidates = [record("role", "Q003｜你在项目里负责什么"), record("architecture", "Q004｜项目架构怎么设计的"), record("axis", "Q086：Axis 模块主要负责什么？")];
+    expect(router.match("你来讲一讲，你这个FOC项目，你主要负责了什么？", candidates, "p1")).toMatchObject({ level: "EXACT", route: { top: { question: { id: "role" } } } });
+    expect(router.match("那系统的架构是什么？", candidates, "p1")).toMatchObject({ level: "EXACT", route: { top: { question: { id: "architecture" } } } });
+    expect(router.match("项目里ADC模块负责什么？", candidates, "p1").level).not.toBe("EXACT");
+    expect(router.match("项目架构为什么这样设计？", candidates, "p1").level).not.toBe("EXACT");
+  });
   it("never searches another project", () => {
     const result = new StrictProjectQaRouter().match("DMA 在项目里怎么用？", [record("other", "DMA 在项目里怎么用？", "p2")], "p1");
     expect(result.level).toBe("NO_MATCH");

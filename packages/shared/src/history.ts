@@ -3,7 +3,7 @@ import type { TerminologyCorrection } from "./terminology";
 import type { QuestionSemanticFrame } from "./question/semantic-frame";
 
 export type InterviewStatus = "created" | "running" | "ended" | "error";
-export type HistoryQuestionStatus = "candidate" | "confirmed" | "answering" | "superseded" | "answered" | "ignored";
+export type HistoryQuestionStatus = "candidate" | "confirmed" | "answering" | "superseded" | "answered" | "ignored" | "blocked" | "failed" | "cancelled";
 
 export interface InterviewRecord {
   id: string;
@@ -207,9 +207,10 @@ function wordCount(text: string): number { return text.trim().split(/\s+|(?=[\u4
 export function analyzeInterview(snapshot: InterviewSnapshot): InterviewMetrics {
   const remote = snapshot.transcripts.filter((record) => record.source === "remote");
   const mic = snapshot.transcripts.filter((record) => record.source === "mic");
-  const answered = snapshot.questions.filter((question) => question.status === "answered" || snapshot.answers.some((answer) => answer.questionId === question.id));
-  const firstTokens = snapshot.answers.map((answer) => answer.latencyFirstToken).filter((value): value is number => value !== undefined);
-  const totalLatencies = snapshot.answers.map((answer) => answer.latencyTotal).filter((value): value is number => value !== undefined);
+  const completedAnswers = snapshot.answers.filter((answer) => !answer.cancelReason && answer.text.trim());
+  const answered = snapshot.questions.filter((question) => completedAnswers.some((answer) => answer.questionId === question.id));
+  const firstTokens = completedAnswers.map((answer) => answer.latencyFirstToken).filter((value): value is number => value !== undefined && Number.isFinite(value));
+  const totalLatencies = completedAnswers.map((answer) => answer.latencyTotal).filter((value): value is number => value !== undefined && Number.isFinite(value));
   return {
     durationMs: Math.max(0, (snapshot.interview.endedAt ?? Date.now()) - snapshot.interview.startedAt),
     remoteTranscriptCount: remote.length,

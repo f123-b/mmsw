@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { analyzeInterview, InterviewHistoryStore, isSafeUpdate, SessionRecovery } from "./history";
 
 describe("interview history and metrics", () => {
+  it("does not count a canceled partial answer as a completed answer", () => {
+    const store = new InterviewHistoryStore();
+    const interview = store.createInterview({ profileId: "p1", startedAt: 1_000, status: "running", language: "zh-CN", automationMode: "AUTO" });
+    const question = store.addQuestion({ interviewId: interview.id, text: "DMA的原理？", confidence: "high", source: "rules", detectedAt: 1_000, status: "failed" });
+    store.addAnswer({ questionId: question.id, text: "尚未讲完", model: "test", cancelReason: "timeout", latencyTotal: 20_000, createdAt: 21_000 });
+    expect(analyzeInterview(store.snapshot(interview.id))).toMatchObject({ answeredQuestionCount: 0, answerRate: 0, averageAnswerLatencyMs: undefined });
+  });
   it("does not persist partial transcripts and calculates answer metrics", () => {
     const store = new InterviewHistoryStore();
     const interview = store.createInterview({ profileId: "p1", startedAt: 1_000, status: "running", language: "zh-CN", automationMode: "AUTO" }, 1_000);

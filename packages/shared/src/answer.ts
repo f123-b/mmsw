@@ -95,6 +95,7 @@ export interface AnswerTelemetry {
   projectFactCount?: number;
   sessionEvidenceCount?: number;
   firstTokenMs?: number;
+  firstVisibleAnswerMs?: number;
   answerTotalMs?: number;
   postCompletionLatencyMs?: number;
   questionDebounceMs?: number;
@@ -408,8 +409,11 @@ export class PromptBuilder {
     }
     if (context.interviewMemory) {
       const memory = context.interviewMemory;
-      const turns = context.followUpContext ? "" : memory.turns.slice(-10).map((turn) => `问题：${turn.question}${turn.answer ? `\n回答：${turn.answer}` : ""}`).join("\n");
-      if (!context.followUpContext || memory.currentTopic) sections.push({ name: "interview-memory", content: [`当前主题：${memory.currentTopic || "未确定"}`, turns].filter(Boolean).join("\n") });
+      // Independent questions carry their own subject. Previous generated
+      // answers must not become examples that redirect this question.
+      const independent = context.questionTelemetry?.contextRelation === "standalone";
+      const turns = context.followUpContext || independent ? "" : memory.turns.slice(-10).map((turn) => `问题：${turn.question}${turn.answer ? `\n先前生成的参考回答（未经候选人确认）：${turn.answer}` : ""}`).join("\n");
+      if (!independent && (!context.followUpContext || memory.currentTopic)) sections.push({ name: "interview-memory", content: [`当前主题：${memory.currentTopic || "未确定"}`, turns].filter(Boolean).join("\n") });
     }
     sections.push({ name: "question", content: question.text });
     if (plan?.questionDecomposition?.isMultiSlot) sections.push({ name: "multi-slot-context", content: multiSlotPrompt(plan.questionDecomposition) });
@@ -502,6 +506,8 @@ export interface AnswerGenerationOptions {
   directDisplay?: boolean;
   /** Whether answer_delta events should be exposed to the UI. */
   emitDeltas?: boolean;
+  /** Provider timing only; does not expose unvalidated text. */
+  onProviderFirstToken?: () => void;
   /** Enables bounded coverage/depth repair when the answer is buffered. */
   allowQualityRepair?: boolean;
   /** Preserve the model's completed text instead of rewriting it after generation. */
@@ -664,9 +670,15 @@ export class AnswerAgent {
     };
     if (options.directDisplay && provider.complete) {
       text = await provider.complete(providerRequest, signal);
+      if (text.trim()) options.onProviderFirstToken?.();
     } else {
+      let providerTokenObserved = false;
       for await (const delta of provider.stream(providerRequest, signal)) {
         if (!delta) continue;
+        if (!providerTokenObserved && delta.trim()) {
+          providerTokenObserved = true;
+          options.onProviderFirstToken?.();
+        }
         text += delta;
         const safeDelta = sanitizer.push(delta);
         if (options.emitDeltas !== false && !options.directDisplay && safeDelta) {

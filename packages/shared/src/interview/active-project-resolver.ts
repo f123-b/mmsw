@@ -52,6 +52,10 @@ export class ActiveProjectResolver {
     const now = input.now ?? Date.now();
     const text = input.text.trim();
     const projects = input.projects ?? [];
+    if (!input.explicitProjectId && !/(?:项目|方案|架构|你们的系统|这个系统|下面看|接下来)/u.test(text)
+      && /(?:什么是|是什么|什么|区别|原理|作用)/u.test(text)) {
+      return copy({ changed: false, status: this.stateValue.status, reason: "standalone-question-keeps-project", activeProject: this.stateValue.activeProject, candidates: [], evidenceLevel: "weak" });
+    }
     const explicit = input.explicitProjectId ? projects.find((project) => project.id === input.explicitProjectId) : undefined;
     const resolution = explicit
       ? { projectId: explicit.id, projectName: explicit.name, confidence: 1, ambiguous: false, reason: "exact-id" as const, candidates: [explicit.id] }

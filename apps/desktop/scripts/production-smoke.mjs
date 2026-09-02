@@ -46,6 +46,7 @@ const exitCode = await new Promise((resolve) => {
     windowsHide: true
   });
   let output = "";
+  let stderr = "";
   let smokeResult;
   const timeout = setTimeout(() => {
     child.kill();
@@ -64,7 +65,7 @@ const exitCode = await new Promise((resolve) => {
       try { smokeResult = JSON.parse(match[1]); } catch { /* wait for the complete line */ }
     }
   });
-  child.stderr.on("data", (chunk) => process.stderr.write(String(chunk)));
+  child.stderr.on("data", (chunk) => { stderr += String(chunk); process.stderr.write(String(chunk)); });
   child.once("error", (error) => {
     clearTimeout(timeout);
     console.error(`Unable to start production Electron: ${String(error)}`);
@@ -77,7 +78,9 @@ const exitCode = await new Promise((resolve) => {
       resolve(1);
       return;
     }
-    resolve(smokeResult.ok === true && code === 0 ? 0 : 1);
+    const runtimeFailure = /Error occurred in handler|out of memory|Uncaught Exception/iu.test(`${output}\n${stderr}`);
+    if (runtimeFailure) console.error("Production smoke encountered a runtime error, including during shutdown");
+    resolve(smokeResult.ok === true && code === 0 && !runtimeFailure ? 0 : 1);
   });
 });
 

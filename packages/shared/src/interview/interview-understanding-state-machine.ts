@@ -3,7 +3,10 @@ import { ConversationAnchorState } from "./conversation-anchor-state";
 import { QuestionCommitGate, type QuestionCommitGateResult } from "./question-commit-gate";
 import { QuestionFrameBuilder } from "./question-frame-builder";
 import { QuestionPendingLedger } from "./question-pending-ledger";
-import type { ActiveProjectContext, AnswerFrame, InterviewUnderstandingState, QuestionFrame, ReferenceCandidate, QuestionThreadState } from "./question-frame";
+import type { ActiveProjectContext, AnswerFrame, InterviewUnderstandingState, QuestionFrame, QuestionThreadState } from "./question-frame";
+import { cleanQuestionDiscourse, spokenEntities } from "./question-subject";
+import { classifySpeechActV3 } from "./speech-act-v3";
+import { analyzeSelfIntroductionIntent } from "./self-introduction-intent";
 
 export type { ActiveProjectContext } from "./question-frame";
 
@@ -42,6 +45,10 @@ function activeProjectFrom(input: UnderstandingMachineOptions, current?: ActiveP
 
 function shouldAppend(frame: QuestionFrame, text: string): boolean {
   if (!text.trim()) return false;
+  const nextEntities = spokenEntities(text);
+  const currentEntities = spokenEntities(frame.normalizedText);
+  if (nextEntities.length && /(?:什么|怎么|如何|区别|原理|作用|为什么)/u.test(text)
+    && (frame.completion === "ASR_UNCERTAIN" || currentEntities.length && !nextEntities.some((entity) => currentEntities.includes(entity)))) return false;
   if (frame.completion === "ASR_UNCERTAIN") return /(?:ADC|DMA|PWM|SPI|CAN|F405|STM32|栈|stack|中断|向量|内核)/iu.test(text);
   if (frame.completion !== "COMPLETE") return true;
   const next = text.trim();
@@ -160,14 +167,20 @@ export class InterviewUnderstandingStateMachine {
           projectsDiscussed: this.activeProject ? [this.activeProject.name] : [],
           topicsDiscussed: anchor.currentTopic ? [anchor.currentTopic.name] : [],
           interviewerFocus: this.recentQuestions.slice(-8).map((item) => item.canonicalQuestion),
-          verifiedCandidateClaims: this.recentAnswers.slice(-8).map((item) => item.text)
+          verifiedCandidateClaims: []
         }
       }
     };
   }
 
   setActiveProject(project?: ActiveProjectContext): void { this.activeProject = project; this.anchors.updateProject(project); }
-  recordAnswer(answer: AnswerFrame): void { this.lastAnsweredQuestion = this.lastCommittedQuestion ? cloneFrame(this.lastCommittedQuestion) : undefined; this.recentAnswers.push({ ...answer }); while (this.recentAnswers.length > 12) this.recentAnswers.shift(); this.anchors.updateAnswer(answer); }
+  recordAnswer(answer: AnswerFrame): void {
+    const question = this.recentQuestions.find((item) => item.id === answer.questionId || `v3-question-${item.id}` === answer.questionId);
+    this.lastAnsweredQuestion = question ? cloneFrame(question) : undefined;
+    this.recentAnswers.push({ ...answer });
+    while (this.recentAnswers.length > 12) this.recentAnswers.shift();
+    this.anchors.updateAnswer(answer);
+  }
 
   /**
    * Commits a structurally complete pending question after its stability
@@ -198,6 +211,10 @@ export class InterviewUnderstandingStateMachine {
     this.previousSpeaker = this.currentSpeaker;
     this.currentSpeaker = speaker;
     const rawText = input.rawText ?? input.text;
+    if (speaker === "candidate" || ["BACKCHANNEL", "FILLER", "CONFIRMATION_CHECK"].includes(classifySpeechActV3(input.text).speechAct)) {
+      const built = this.builder.build({ id: input.id, sessionId: this.sessionId, rawText, final: input.final, speaker, timestamp: now, anchors: this.anchors.snapshot(), activeProject: this.activeProject, now });
+      return { type: "NON_ACTIONABLE", frame: { ...built.frame, commitStatus: "REJECTED" }, gate: { decision: "REJECT", status: "REJECTED", reason: speaker === "candidate" ? "candidate-speech" : "non-question-backchannel", postCompletionReady: false } };
+    }
     if (!input.final) {
       const previous = this.pendingTurn?.speaker === speaker ? this.pendingTurn : undefined;
       const segmentIds = [...new Set([...(previous?.segmentIds ?? []), ...(input.segmentIds ?? [input.id])])];
@@ -207,7 +224,11 @@ export class InterviewUnderstandingStateMachine {
       return { type: "QUESTION_DRAFT_UPDATED", frame: built.frame, gate: { decision: "WAIT", status: "BUFFERING", reason: "interim-transcript", postCompletionReady: false } };
     }
 
-    const existingPending = this.pendingQuestion && shouldAppend(this.pendingQuestion, input.text) ? this.pendingQuestion : undefined;
+    const existingPending = this.pendingQuestion && now - this.pendingQuestion.updatedAt <= 8_000 && shouldAppend(this.pendingQuestion, input.text) ? this.pendingQuestion : undefined;
+    if (this.pendingQuestion && !existingPending) {
+      this.ledger.remove(this.pendingQuestion.id);
+      this.pendingQuestion = undefined;
+    }
     const pendingTurn = this.pendingTurn?.speaker === speaker ? this.pendingTurn : undefined;
     const rawSegments = input.rawSegments?.length ? input.rawSegments : pendingTurn ? [...pendingTurn.rawSegments, rawText] : [rawText];
     const segmentIds = input.segmentIds?.length ? input.segmentIds : pendingTurn ? [...new Set([...pendingTurn.segmentIds, input.id])] : [input.id];
@@ -242,6 +263,14 @@ export class InterviewUnderstandingStateMachine {
     if (gate.decision === "REJECT") {
       if (frame.entities.technologies[0] || frame.entities.concepts[0]) this.anchors.updateTopic(frame.entities.technologies[0] ?? frame.entities.concepts[0], frame.confidence.speechAct, now);
       return { type: "NON_ACTIONABLE", frame: { ...cloneFrame(frame), commitStatus: "REJECTED" }, gate };
+    }
+    const key = (text: string) => cleanQuestionDiscourse(text).replace(/[\s\p{P}\p{S}]/gu, "").replace(/^(?:那|那么)/u, "").toLowerCase();
+    const repeated = this.lastCommittedQuestion && now - this.lastCommittedQuestion.updatedAt <= 15_000
+      && (key(frame.canonicalQuestion) === key(this.lastCommittedQuestion.canonicalQuestion)
+        || analyzeSelfIntroductionIntent(frame.canonicalQuestion).matched && analyzeSelfIntroductionIntent(this.lastCommittedQuestion.canonicalQuestion).matched
+          && !analyzeSelfIntroductionIntent(frame.canonicalQuestion).hasAdditionalConstraint);
+    if (repeated && !/再说|再讲|重说|重新|没听清/u.test(frame.rawCombinedText)) {
+      return { type: "NON_ACTIONABLE", frame: { ...cloneFrame(frame), commitStatus: "REJECTED" }, gate: { decision: "REJECT", status: "REJECTED", reason: "duplicate-question", postCompletionReady: false } };
     }
     const committed: QuestionFrame = { ...cloneFrame(frame), commitStatus: "COMMITTED", stabilityState: "STABLE", updatedAt: now };
     this.lastCommittedQuestion = committed;
