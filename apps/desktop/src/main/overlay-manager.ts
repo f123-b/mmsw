@@ -226,7 +226,7 @@ export class OverlayManager {
   toggleShareMode(): void { this.setShareMode(!this.hudStateValue.shareMode); }
   setClickThrough(enabled: boolean): void { this.setMode(enabled ? "passive" : "interactive"); }
 
-  setNativeWindowBounds(panel: OverlayNativePanel, bounds: OverlayNativeBounds): void {
+  setNativeWindowBounds(panel: OverlayNativePanel, bounds: OverlayNativeBounds, persist = true): void {
     const writtenInteractiveDrag = panel === "question"
       && this.runtimeLayoutMode === "written_test"
       && this.hudStateValue.running
@@ -241,8 +241,12 @@ export class OverlayManager {
     const modePreferences = this.runtimeLayoutMode === "written_test" ? this.layoutPreferences.writtenTest : this.layoutPreferences.interview;
     const next = clampOverlayPanelBounds(panel, bounds, display.workArea, this.runtimeLayoutMode, modePreferences.layoutPreset);
     window.setBounds(next, false);
-    this.options.onNativeBoundsChanged?.(panel, next, display);
-    this.refreshLayout(display.workArea);
+    // Pointer moves may arrive faster than Chromium can service IPC. Keep the
+    // hot path to one native move and persist/broadcast only on pointer-up.
+    if (persist) {
+      this.options.onNativeBoundsChanged?.(panel, next, display);
+      this.refreshLayout(display.workArea);
+    }
   }
 
   setContentSize(panel: OverlayContentPanel, measuredHeight: number): boolean {

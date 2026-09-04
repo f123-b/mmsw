@@ -319,13 +319,13 @@ describe("OverlaySettingsStore", () => {
       const settings = new OverlaySettingsStore(database);
       const saved = settings.setPreferences({
         interview: { questionWindow: { width: 2_000, height: 1, fontSize: 40, backgroundOpacity: 0, textOpacity: 1, borderOpacity: 0 }, answerWindow: { width: 2_000, height: 1, fontSize: 40 }, controlBar: { x: 144, y: 280, positionMode: "custom", orientation: "vertical" } },
-        appearance: { mode: "text_only", radius: 99 },
+        appearance: { uiStyle: "written_reader", mode: "text_only", radius: 99 },
         behavior: { interactionMode: "full_passthrough", snapEnabled: false, snapThreshold: 99 }
       });
       expect(saved.interview.questionWindow).toMatchObject({ width: 900, height: 220, fontSize: 32, backgroundOpacity: 0, textOpacity: 1, borderOpacity: 0 });
       expect(saved.interview.answerWindow).toMatchObject({ width: 1_100, height: 220, fontSize: 40 });
       expect(saved.interview.controlBar).toMatchObject({ x: 144, y: 280, positionMode: "custom", orientation: "vertical" });
-      expect(saved.appearance).toMatchObject({ mode: "text_only", radius: 32 });
+      expect(saved.appearance).toMatchObject({ uiStyle: "written_reader", mode: "text_only", radius: 32 });
       expect(saved.behavior).toMatchObject({ interactionMode: "full_passthrough", mousePassthrough: true, snapEnabled: false, snapThreshold: 16 });
 
       const partial = settings.setPreferences({ interview: { controlBar: { x: 210, y: 310, width: 720, height: 72 } } });

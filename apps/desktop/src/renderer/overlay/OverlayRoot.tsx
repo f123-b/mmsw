@@ -184,12 +184,15 @@ export function DraggableResizablePanel({ panel, layout, onChange, onCommit, edi
     const nativeOrigin = nativePanel ? { x: window.screenX, y: window.screenY, width: window.outerWidth, height: window.outerHeight } : undefined;
     setDragging(true);
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* best effort */ }
+    let pendingBounds: { x: number; y: number; width: number; height: number } | undefined;
+    let raf = 0;
+    const flush = () => { raf = 0; if (nativePanel && pendingBounds) void window.interviewCopilot.overlay.setWindowBounds(nativePanel, pendingBounds, false); };
     const move = (next: PointerEvent) => {
       const nextLayout = { x: next.clientX - origin.x, y: next.clientY - origin.y };
       onChange(panel, nextLayout, next.altKey);
-      if (nativePanel && nativeOrigin) void window.interviewCopilot.overlay.setWindowBounds(nativePanel, { x: nativeOrigin.x + nextLayout.x - layout.x, y: nativeOrigin.y + nextLayout.y - layout.y, width: nativeOrigin.width, height: nativeOrigin.height });
+      if (nativePanel && nativeOrigin) { pendingBounds = { x: nativeOrigin.x + nextLayout.x - layout.x, y: nativeOrigin.y + nextLayout.y - layout.y, width: nativeOrigin.width, height: nativeOrigin.height }; if (!raf) raf = requestAnimationFrame(flush); }
     };
-    const end = () => { setDragging(false); window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end); window.removeEventListener("blur", end); cleanupRef.current = undefined; onCommit(); };
+    const end = () => { if (raf) cancelAnimationFrame(raf); if (nativePanel && pendingBounds) void window.interviewCopilot.overlay.setWindowBounds(nativePanel, pendingBounds, true); setDragging(false); window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end); window.removeEventListener("blur", end); cleanupRef.current = undefined; onCommit(); };
     cleanupRef.current = end;
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", end, { once: true });
@@ -202,13 +205,16 @@ export function DraggableResizablePanel({ panel, layout, onChange, onCommit, edi
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* best effort */ }
     const start = { x: event.clientX, y: event.clientY };
     const nativeOrigin = nativePanel ? { x: window.screenX, y: window.screenY, width: window.outerWidth, height: window.outerHeight } : undefined;
+    let pendingBounds: { x: number; y: number; width: number; height: number } | undefined;
+    let raf = 0;
+    const flush = () => { raf = 0; if (nativePanel && pendingBounds) void window.interviewCopilot.overlay.setWindowBounds(nativePanel, pendingBounds, false); };
     const move = (next: PointerEvent) => {
       const designerPanel: DesignerPanel = panel === "transcript" ? "question" : panel === "answer" ? "answer" : "controlBar";
       const resized = resizeDesignerRect({ x: layout.x, y: layout.y, width: layout.width, height: layout.height }, handle, { x: next.clientX - start.x, y: next.clientY - start.y }, { width: window.innerWidth, height: window.innerHeight }, boundsForPanel({ panel: designerPanel, mode: geometryMode, preset: geometryPreset }), next.altKey);
       onChange(panel, resized, next.altKey);
-      if (nativePanel && nativeOrigin) void window.interviewCopilot.overlay.setWindowBounds(nativePanel, { x: nativeOrigin.x + resized.x - layout.x, y: nativeOrigin.y + resized.y - layout.y, width: nativeOrigin.width + resized.width - layout.width, height: nativeOrigin.height + resized.height - layout.height });
+      if (nativePanel && nativeOrigin) { pendingBounds = { x: nativeOrigin.x + resized.x - layout.x, y: nativeOrigin.y + resized.y - layout.y, width: nativeOrigin.width + resized.width - layout.width, height: nativeOrigin.height + resized.height - layout.height }; if (!raf) raf = requestAnimationFrame(flush); }
     };
-    const end = () => { setDragging(false); window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end); window.removeEventListener("blur", end); cleanupRef.current = undefined; onCommit(); };
+    const end = () => { if (raf) cancelAnimationFrame(raf); if (nativePanel && pendingBounds) void window.interviewCopilot.overlay.setWindowBounds(nativePanel, pendingBounds, true); setDragging(false); window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end); window.removeEventListener("blur", end); cleanupRef.current = undefined; onCommit(); };
     setDragging(true);
     cleanupRef.current = end;
     window.addEventListener("pointermove", move);
@@ -459,7 +465,7 @@ export function OverlayRoot(props: OverlayRootProps): JSX.Element {
   }, [getCurrentLayout, nativeSurface, props.operationMode]);
   const effectiveProtectionEnabled = runtimeProtection?.requested ?? props.captureProtectionEnabled;
   const protectionTone = !effectiveProtectionEnabled ? "off" : runtimeProtection?.displayCaptureVerified === true ? "verified" : "requested";
-  return <main className="overlay-root" data-overlay-surface={nativeSurface ?? "designer"} data-hud-mode={props.hudState.mode} data-share-mode={props.hudState.shareMode ? "on" : "off"} data-overlay-mode={props.overlayMode} data-layout-edit-mode={layoutEditMode ? "on" : "off"} data-appearance-mode={preferences.appearance.mode} data-operation-mode={props.operationMode}>
+  return <main className="overlay-root" data-overlay-surface={nativeSurface ?? "designer"} data-hud-mode={props.hudState.mode} data-share-mode={props.hudState.shareMode ? "on" : "off"} data-overlay-mode={props.overlayMode} data-layout-edit-mode={layoutEditMode ? "on" : "off"} data-ui-style={preferences.appearance.uiStyle} data-appearance-mode={preferences.appearance.mode} data-operation-mode={props.operationMode}>
     {props.captureTest && !visualHidden && <div className="capture-test-marker">CAPTURE_PROTECTION_TEST_MARKER_7F32</div>}
     {transcriptVisible && (nativeSurface === "question" && !layoutEditMode
       ? <div ref={nativeContentRef} className="native-content-window native-window-shell question-panel" style={overlayWindowStyle(questionPreferences, preferences.appearance)}>{singleWrittenReader ? <WrittenTestReaderContent viewModel={answerViewModel} writtenTest={props.writtenTest} screenshot={props.screenshot} autoFollow={autoFollowAnswer} /> : writtenTestMode ? <WrittenQuestionContent viewModel={answerViewModel} writtenTest={props.writtenTest} /> : leftPanel === "dialogue" ? <DialogueOverlayContent blocks={dialogueBlocks} autoFollow={autoFollowQuestion} /> : <QuestionOverlayContent notice={props.runtimeNotice} groups={displayedGroups} viewModel={questionViewModel} autoFollow={autoFollowQuestion} />}</div>

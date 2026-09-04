@@ -2559,9 +2559,9 @@ function registerIpc(): void {
    });
    ipcMain.handle("overlay:enter-layout-edit", () => { overlayManager?.setLayoutEditMode(true); return true; });
    ipcMain.handle("overlay:finish-layout-edit", () => { overlayManager?.finishLayoutEditMode(); return true; });
-   ipcMain.handle("overlay:set-window-bounds", (_event, panel: OverlayNativePanel, bounds: OverlayNativeBounds) => {
+   ipcMain.handle("overlay:set-window-bounds", (_event, panel: OverlayNativePanel, bounds: OverlayNativeBounds, persist = true) => {
      if (!["question", "answer", "script", "control"].includes(panel) || !bounds || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)) return false;
-     overlayManager?.setNativeWindowBounds(panel, bounds);
+     overlayManager?.setNativeWindowBounds(panel, bounds, persist !== false);
      return true;
    });
    ipcMain.handle("overlay:set-share-mode", (_event, enabled: boolean) => { overlayManager?.setShareMode(Boolean(enabled)); return overlayManager?.hudState; });

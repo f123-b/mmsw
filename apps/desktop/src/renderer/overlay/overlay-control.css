@@ -1,3 +1,11 @@
 .control-overlay-root { width: 100%; height: 100%; min-width: 0; min-height: 0; }
 .control-overlay-root .toolbar-panel { width: 100%; height: 100%; }
 .control-overlay-root .floating-toolbar { width: 100%; height: 100%; }
+.control-overlay-root[data-ui-style="written_reader"] .floating-toolbar { border: 1px solid rgba(125, 146, 168, .34); border-radius: 12px; background: rgba(244, 248, 252, .96); color: #26384c; box-shadow: none; backdrop-filter: blur(10px); }
+.control-overlay-root[data-ui-style="written_reader"] .toolbar-divider { background: rgba(77, 101, 126, .2); }
+.control-overlay-root[data-ui-style="written_reader"] .toolbar-icon-action,
+.control-overlay-root[data-ui-style="written_reader"] .toolbar-screenshot-action { color: #40566e; background: rgba(75, 109, 140, .08); }
+.control-overlay-root[data-ui-style="written_reader"] .toolbar-mode-switch { background: rgba(75, 109, 140, .09); }
+.control-overlay-root[data-ui-style="written_reader"] .toolbar-mode-switch button { color: #60758a; }
+.control-overlay-root[data-ui-style="written_reader"] .toolbar-mode-switch button.selected { background: #dceaf3; color: #23465d; }
+.control-overlay-root[data-ui-style="written_reader"] .toolbar-end-button { border-color: #d69a94; color: #a5413a; background: #faecea; }

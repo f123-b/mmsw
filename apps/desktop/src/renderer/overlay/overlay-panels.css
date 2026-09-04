@@ -23,6 +23,35 @@
   line-height: var(--overlay-line-height, 1.5);
 }
 
+/* Optional reader skin: applies the calm written-test card language to every
+   interview surface while the classic skin remains the default. */
+.overlay-root[data-ui-style="written_reader"] .overlay-panel-card {
+  border: 1px solid rgba(125, 146, 168, .34);
+  border-radius: 14px;
+  background: rgba(244, 248, 252, .94);
+  backdrop-filter: blur(10px) saturate(108%);
+  color: #26384c;
+}
+.overlay-root[data-ui-style="written_reader"] .current-question-text,
+.overlay-root[data-ui-style="written_reader"] .answer-core,
+.overlay-root[data-ui-style="written_reader"] .dialogue-block p,
+.overlay-root[data-ui-style="written_reader"] .script-overlay-text { color: #26384c; text-shadow: none; }
+.overlay-root[data-ui-style="written_reader"] .answer-context-question,
+.overlay-root[data-ui-style="written_reader"] .overlay-content-status,
+.overlay-root[data-ui-style="written_reader"] .answer-content-status,
+.overlay-root[data-ui-style="written_reader"] .script-overlay-header span,
+.overlay-root[data-ui-style="written_reader"] .dialogue-block strong { color: #6d7f92; }
+.overlay-root[data-ui-style="written_reader"] .script-overlay-header,
+.overlay-root[data-ui-style="written_reader"] .script-reading-controls { border-color: rgba(91, 116, 143, .18); }
+.overlay-root[data-ui-style="written_reader"] .script-overlay-header strong { color: #26384c; }
+.overlay-root[data-ui-style="written_reader"] .script-overlay-header button,
+.overlay-root[data-ui-style="written_reader"] .script-reading-controls button,
+.overlay-root[data-ui-style="written_reader"] .script-reading-controls select { border-color: rgba(91, 116, 143, .24); background: #edf3f8; color: #31475e; }
+.overlay-root[data-ui-style="written_reader"] .dialogue-block p { background: rgba(71, 111, 148, .08); }
+.overlay-root[data-ui-style="written_reader"] .dialogue-candidate p { background: rgba(53, 132, 171, .12); color: #27526b; }
+.overlay-root[data-ui-style="written_reader"] .answer-feed-item,
+.overlay-root[data-ui-style="written_reader"] .current-follow-up { border-color: rgba(91, 116, 143, .17); }
+
 /* Runtime surfaces are deliberately quiet; the designer preview may retain
    its shadow so it still reads as a movable card. */
 .overlay-root[data-overlay-surface="question"] .overlay-panel-card,

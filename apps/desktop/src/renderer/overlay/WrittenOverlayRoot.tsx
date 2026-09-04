@@ -32,10 +32,11 @@ export function WrittenOverlayRoot(props: OverlayRootProps): JSX.Element {
     const start = { x: event.screenX, y: event.screenY };
     const origin = { x: window.screenX, y: window.screenY, width: window.outerWidth, height: window.outerHeight };
     let pending = origin;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const commit = () => { timer = undefined; void window.interviewCopilot.overlay.setWindowBounds("question", pending); };
-    const move = (e: PointerEvent) => { pending = nativeGestureBounds(origin, resize ? "se" : "move", e.screenX - start.x, e.screenY - start.y); if (!timer) timer = setTimeout(commit, 32); };
-    const end = () => { if (timer) { clearTimeout(timer); commit(); } window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end); try { target.releasePointerCapture(event.pointerId); } catch {} cleanup.current = undefined; };
+    let raf = 0;
+    let moved = false;
+    const flush = () => { raf = 0; void window.interviewCopilot.overlay.setWindowBounds("question", pending, false); };
+    const move = (e: PointerEvent) => { moved = true; pending = nativeGestureBounds(origin, resize ? "se" : "move", e.screenX - start.x, e.screenY - start.y); if (!raf) raf = requestAnimationFrame(flush); };
+    const end = () => { if (raf) cancelAnimationFrame(raf); if (moved) void window.interviewCopilot.overlay.setWindowBounds("question", pending, true); window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end); try { target.releasePointerCapture(event.pointerId); } catch {} cleanup.current = undefined; };
     try { target.setPointerCapture(event.pointerId); } catch {}
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", end, { once: true }); window.addEventListener("pointercancel", end, { once: true }); cleanup.current = end;
   };

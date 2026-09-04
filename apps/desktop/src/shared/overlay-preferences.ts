@@ -5,6 +5,7 @@ export type OverlayLayoutPreset = InterviewLayoutPreset | WrittenTestLayoutPrese
 export type InterviewLeftPanelMode = "dialogue" | "question" | "hidden";
 export type ScreenshotCaptureMode = "full_screen" | "current_display" | "fixed_region" | "last_region" | "interactive";
 export type OverlayAppearanceMode = "glass" | "translucent" | "text_only" | "custom";
+export type OverlayUiStyle = "classic" | "written_reader";
 export type OverlayTextShadow = "none" | "soft" | "medium";
 export type OverlayControlBarPositionMode = "top_left" | "top_center" | "top_right" | "bottom_left" | "bottom_center" | "bottom_right" | "custom";
 export type OverlayControlBarOrientation = "horizontal" | "vertical";
@@ -97,6 +98,8 @@ export interface OverlayBehaviorPreferences {
 }
 
 export interface OverlayAppearancePreferences {
+  /** Component skin. `classic` preserves the existing interview HUD. */
+  uiStyle: OverlayUiStyle;
   mode: OverlayAppearanceMode;
   blur: number;
   radius: number;
@@ -290,6 +293,7 @@ export const DEFAULT_OVERLAY_PREFERENCES: OverlayPreferences = {
     compactHeader: true
   },
   appearance: {
+    uiStyle: "classic",
     mode: "glass",
     blur: 18,
     radius: 12,

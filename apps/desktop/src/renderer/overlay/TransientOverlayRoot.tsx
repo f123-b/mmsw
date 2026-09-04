@@ -1,5 +1,6 @@
-import type { JSX } from "react";
+import { useEffect, useState, type JSX } from "react";
 import type { OverlayRootProps } from "./OverlayRoot";
+import { DEFAULT_OVERLAY_PREFERENCES, type OverlayUiStyle } from "../../shared/overlay-preferences";
 
 function ShortcutMenu({ props }: { props: OverlayRootProps }): JSX.Element {
   const endLabel = props.operationMode === "WRITTEN_TEST" ? "结束笔试" : "结束面试";
@@ -29,7 +30,14 @@ function EndConfirm({ props }: { props: OverlayRootProps }): JSX.Element {
 
 export function TransientOverlayRoot(props: OverlayRootProps): JSX.Element {
   const layer = props.hudState.transientLayer;
-  return <main className="overlay-root transient-overlay-root" data-overlay-surface="transient" data-transient-layer={layer}>
+  const [uiStyle, setUiStyle] = useState<OverlayUiStyle>(DEFAULT_OVERLAY_PREFERENCES.appearance.uiStyle);
+  useEffect(() => {
+    let disposed = false;
+    void window.interviewCopilot.overlay.getPreferences().then((next) => { if (!disposed) setUiStyle(next.appearance.uiStyle); });
+    const unsubscribe = window.interviewCopilot.events.onOverlayPreferences((next) => { if (!disposed) setUiStyle(next.appearance.uiStyle); });
+    return () => { disposed = true; unsubscribe(); };
+  }, []);
+  return <main className="overlay-root transient-overlay-root" data-overlay-surface="transient" data-ui-style={uiStyle} data-transient-layer={layer}>
     {layer === "shortcut" && <ShortcutMenu props={props} />}
     {layer === "end_confirm" && <EndConfirm props={props} />}
   </main>;

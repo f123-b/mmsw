@@ -31,11 +31,11 @@ export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
   if (!interviewMode) {
     const busy = ["CAPTURING", "ANALYZING", "SOLVING"].includes(props.writtenTest.screenshotStatus);
     const retry = props.writtenTest.screenshotStatus === "ERROR";
-    return <main className="overlay-root control-overlay-root written-camera-root" data-overlay-surface="control" data-hud-state={statusLabel} data-operation-mode={props.operationMode} style={overlayWindowStyle(controlPreferences, preferences.appearance)}>
+    return <main className="overlay-root control-overlay-root written-camera-root" data-overlay-surface="control" data-ui-style={preferences.appearance.uiStyle} data-hud-state={statusLabel} data-operation-mode={props.operationMode} style={overlayWindowStyle(controlPreferences, preferences.appearance)}>
       <WrittenScreenshotButton active={props.hudState.running && props.writtenTest.running && props.hudState.topBarVisible && !props.hudState.shareMode && props.hudState.transientLayer === "none" && !layoutEditMode} busy={busy} retry={retry} statusLabel={statusLabel} onScreenshot={props.onAnswerScreenshot} />
     </main>;
   }
-  return <main className="overlay-root control-overlay-root" data-overlay-surface="control" data-hud-state={statusLabel} data-operation-mode={props.operationMode} style={overlayWindowStyle(controlPreferences, preferences.appearance)}>
+  return <main className="overlay-root control-overlay-root" data-overlay-surface="control" data-ui-style={preferences.appearance.uiStyle} data-hud-state={statusLabel} data-operation-mode={props.operationMode} style={overlayWindowStyle(controlPreferences, preferences.appearance)}>
     {preferences.showToolbar && <DraggableResizablePanel panel="toolbar" nativePanel="control" geometryMode={props.operationMode === "WRITTEN_TEST" ? "writtenTest" : "interview"} geometryPreset={props.operationMode === "WRITTEN_TEST" ? writtenPreferences.layoutPreset : interviewPreferences.layoutPreset} layout={layout} onChange={(_panel, patch) => setLayout((current) => ({ ...current, ...patch }))} onCommit={() => undefined} editMode={layoutEditMode} className="toolbar-panel" windowPreferences={controlPreferences}>
       <div className="floating-toolbar hud-interactive-region" role="toolbar" aria-label={`${modeLabel}控制栏`}>
         <span className="toolbar-audio-mark" aria-hidden="true">≈</span>

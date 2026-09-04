@@ -93,7 +93,7 @@ const api = {
     setPreferences: (input: OverlayPreferencesPatch): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:set-preferences", input),
     enterLayoutEditMode: (): Promise<boolean> => ipcRenderer.invoke("overlay:enter-layout-edit"),
     finishLayoutEditMode: (): Promise<boolean> => ipcRenderer.invoke("overlay:finish-layout-edit"),
-    setWindowBounds: (panel: "question" | "answer" | "script" | "control", bounds: OverlayNativeBounds): Promise<boolean> => ipcRenderer.invoke("overlay:set-window-bounds", panel, bounds),
+    setWindowBounds: (panel: "question" | "answer" | "script" | "control", bounds: OverlayNativeBounds, persist = true): Promise<boolean> => ipcRenderer.invoke("overlay:set-window-bounds", panel, bounds, persist),
     setShareMode: (enabled: boolean): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:set-share-mode", enabled),
     toggleShareMode: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:toggle-share-mode"),
     setMode: (mode: OverlayMode) => ipcRenderer.invoke("overlay:set-mode", mode),

@@ -48,3 +48,10 @@
 .transient-actions button:hover { background: rgba(255, 255, 255, .1); }
 .transient-actions .confirm-danger { background: #d85f56; color: #fff; }
 .transient-actions .confirm-danger:hover { background: #e8756b; }
+
+.transient-overlay-root[data-ui-style="written_reader"] .transient-card { border-color: rgba(125, 146, 168, .36); border-radius: 14px; background: rgba(244, 248, 252, .97); color: #26384c; box-shadow: none; backdrop-filter: blur(10px); }
+.transient-overlay-root[data-ui-style="written_reader"] .confirm-card > p { color: #6d7f92; }
+.transient-overlay-root[data-ui-style="written_reader"] .transient-actions button:first-child { border-color: rgba(91, 116, 143, .3); color: #425970; }
+.transient-overlay-root[data-ui-style="written_reader"] .shortcut-actions button { color: #31475e; }
+.transient-overlay-root[data-ui-style="written_reader"] .shortcut-actions button:hover { background: rgba(71, 111, 148, .08); }
+.transient-overlay-root[data-ui-style="written_reader"] .shortcut-actions kbd { border-color: rgba(91, 116, 143, .25); color: #6d7f92; }

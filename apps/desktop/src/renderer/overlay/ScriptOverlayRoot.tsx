@@ -74,10 +74,11 @@ export function ScriptOverlayRoot(props: OverlayRootProps): JSX.Element {
     const start = { x: event.screenX, y: event.screenY };
     const origin = { x: window.screenX, y: window.screenY, width: window.outerWidth, height: window.outerHeight };
     let pending = origin;
-    let timer: number | undefined;
-    const commit = () => { timer = undefined; void window.interviewCopilot.overlay.setWindowBounds("script", pending); };
-    const move = (next: PointerEvent) => { pending = nativeGestureBounds(origin, gesture, next.screenX - start.x, next.screenY - start.y); if (timer === undefined) timer = window.setTimeout(commit, 32); };
-    const end = () => { if (timer !== undefined) { window.clearTimeout(timer); commit(); } window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end); window.removeEventListener("blur", end); try { target.releasePointerCapture(event.pointerId); } catch { /* pointer may have left */ } gestureCleanup.current = undefined; };
+    let raf = 0;
+    let moved = false;
+    const flush = () => { raf = 0; void window.interviewCopilot.overlay.setWindowBounds("script", pending, false); };
+    const move = (next: PointerEvent) => { moved = true; pending = nativeGestureBounds(origin, gesture, next.screenX - start.x, next.screenY - start.y); if (!raf) raf = requestAnimationFrame(flush); };
+    const end = () => { if (raf) cancelAnimationFrame(raf); if (moved) void window.interviewCopilot.overlay.setWindowBounds("script", pending, true); window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end); window.removeEventListener("blur", end); try { target.releasePointerCapture(event.pointerId); } catch { /* pointer may have left */ } gestureCleanup.current = undefined; };
     try { target.setPointerCapture(event.pointerId); } catch { /* best effort */ }
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", end, { once: true }); window.addEventListener("pointercancel", end, { once: true }); window.addEventListener("blur", end, { once: true });
     gestureCleanup.current = end;
@@ -85,7 +86,7 @@ export function ScriptOverlayRoot(props: OverlayRootProps): JSX.Element {
   const changeFont = (delta: number) => { void window.interviewCopilot.overlay.setPreferences({ interview: { scriptWindow: { fontSize: Math.max(12, Math.min(32, preferences.interview.scriptWindow.fontSize + delta)) } } }); };
   const scrollPosition = useScriptScrollPosition(scrollRef, `${script?.updatedAt ?? 0}:${script?.text.length ?? 0}`);
   const protectionEnabled = props.captureProtectionEnabled ?? true;
-  return <main className="overlay-root script-overlay-root" data-overlay-surface="script" data-layout-edit-mode={layoutEditMode ? "on" : "off"} data-hud-mode={props.hudState.mode} data-share-mode={props.hudState.shareMode ? "on" : "off"} data-overlay-mode={props.overlayMode} data-appearance-mode={preferences.appearance.mode} data-operation-mode={props.operationMode}>
+  return <main className="overlay-root script-overlay-root" data-overlay-surface="script" data-layout-edit-mode={layoutEditMode ? "on" : "off"} data-hud-mode={props.hudState.mode} data-share-mode={props.hudState.shareMode ? "on" : "off"} data-overlay-mode={props.overlayMode} data-ui-style={preferences.appearance.uiStyle} data-appearance-mode={preferences.appearance.mode} data-operation-mode={props.operationMode}>
     {visible && script && <div className="native-content-window native-window-shell script-panel" style={overlayWindowStyle(preferences.interview.scriptWindow, preferences.appearance)}>
       <section className="overlay-panel-card script-overlay-content" data-overlay-content="script" aria-label="演讲稿悬浮窗">
         <header className="script-overlay-header" onPointerDown={(event) => beginGesture("move", event)} title="拖动标题栏移动窗口"><strong>⠿ 演讲稿</strong><span title={script.filename}>{script.filename}</span><button onClick={props.onToggleScript} aria-label="隐藏演讲稿">−</button></header>

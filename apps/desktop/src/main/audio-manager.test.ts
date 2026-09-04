@@ -94,6 +94,13 @@ describe("AudioManager capability-driven lifecycle", () => {
     await expect(probeHandled).resolves.toMatchObject({ message: expect.stringContaining("AUDIO_PROBE_STOPPED") });
   });
 
+  it("replaces the optional level meter when a formal interview starts", async () => {
+    await manager.start({ meterOnly: true, autoRecover: false });
+    expect(manager.runningKind).toBe("meter");
+    await expect(manager.start({ meterOnly: false, autoRecover: true })).resolves.toBeUndefined();
+    expect(manager.runningKind).toBe("capture");
+  });
+
   it("deduplicates an in-flight probe for the same device selection", async () => {
     const first = manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });
     const second = manager.probe({ inputDeviceId: "mock-mic", outputDeviceId: "mock-system" });

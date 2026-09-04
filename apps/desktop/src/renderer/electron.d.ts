@@ -62,7 +62,7 @@ declare global {
         setPreferences(input: OverlayPreferencesPatch): Promise<OverlayPreferences>;
         enterLayoutEditMode(): Promise<boolean>;
         finishLayoutEditMode(): Promise<boolean>;
-        setWindowBounds(panel: "question" | "answer" | "script" | "control", bounds: OverlayNativeBounds): Promise<boolean>;
+        setWindowBounds(panel: "question" | "answer" | "script" | "control", bounds: OverlayNativeBounds, persist?: boolean): Promise<boolean>;
         setShareMode(enabled: boolean): Promise<HUDState | undefined>;
         toggleShareMode(): Promise<HUDState | undefined>;
         setMode(mode: OverlayMode): Promise<void>;

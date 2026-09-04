@@ -150,6 +150,10 @@ export class AudioManager extends EventEmitter {
   }
 
   async start(options: AudioStartOptions = {}): Promise<void> {
+    const requestedKind: AudioProcessKind = options.probeOnly ? "probe" : options.meterOnly ? "meter" : "capture";
+    // Starting a real interview should seamlessly replace the optional meter
+    // diagnostic instead of failing with AUDIO_BUSY.
+    if (this.isRunning && this.processKind === "meter" && requestedKind === "capture") await this.stop();
     if (this.isRunning && this.processKind !== "probe") throw new Error(`AUDIO_BUSY: ${this.processKind ?? "audio"} sidecar is still running`);
     if (this.pendingProbe) await this.stop();
     if (this.isRunning) throw new Error(`AUDIO_BUSY: ${this.processKind ?? "audio"} sidecar is still running`);
@@ -159,7 +163,7 @@ export class AudioManager extends EventEmitter {
     this.recoveryBackoff.reset();
     this.capability = undefined;
     this.currentOptions = { ...options, autoRecover: options.autoRecover ?? true };
-    const kind: AudioProcessKind = options.probeOnly ? "probe" : options.meterOnly ? "meter" : "capture";
+    const kind: AudioProcessKind = requestedKind;
     const ready = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!this.pendingStart) return;

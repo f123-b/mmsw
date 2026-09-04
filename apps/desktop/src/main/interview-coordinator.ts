@@ -719,7 +719,19 @@ export class InterviewCoordinator extends EventEmitter {
       this.transition("CONNECTING");
       this.asr.connect({ ...startOptions, ...asrSettings, providerType, url: connectUrl, language: asrSettings?.language ?? (startOptions.language as AsrLanguage | undefined), autoReconnect: true });
       this.options.onStartupTiming?.("ASR_READY");
-      const audioStart = Promise.resolve(this.options.audio.start({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true }));
+      const audioStart = (async () => {
+        const selected = { inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true };
+        try {
+          await this.options.audio.start(selected);
+        } catch (error) {
+          const message = String(error);
+          const staleSelection = Boolean(startOptions.inputDeviceId || startOptions.outputDeviceId)
+            && /NO_AUDIO_CHANNEL_AVAILABLE|AUDIO_DEVICE_GONE|AUDIO_STREAM_OPEN_FAILED|AUDIO_CAPTURE_TIMEOUT|AUDIO_DEVICE_FAILED/.test(message);
+          if (!staleSelection) throw error;
+          await Promise.resolve(this.options.audio.stop()).catch(() => undefined);
+          await this.options.audio.start({ meterOnly: false, autoRecover: true });
+        }
+      })();
       await abortableProviderTask(Promise.all([audioStart, warmup]), startup.signal);
       this.options.onStartupTiming?.("AUDIO_READY");
       return record.id;
