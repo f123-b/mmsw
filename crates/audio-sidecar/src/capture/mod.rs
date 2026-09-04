@@ -15,7 +15,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const CALLBACK_TIMEOUT: Duration = Duration::from_millis(2_500);
+// Some Realtek/WASAPI drivers need more than 2.5 seconds after stream.play(),
+// especially immediately after resume or a device format change.
+const CALLBACK_TIMEOUT: Duration = Duration::from_millis(4_500);
+const SINGLE_CHANNEL_GRACE: Duration = Duration::from_millis(650);
 
 pub fn run(input_id: Option<&str>, output_id: Option<&str>, meter_only: bool, probe_only: bool) -> Result<(), String> {
     let started = Instant::now();
@@ -106,6 +109,13 @@ pub fn run(input_id: Option<&str>, output_id: Option<&str>, meter_only: bool, pr
             emit_error("loopback", "AUDIO_DEVICE_GONE", error, true);
             return Err("AUDIO_DEVICE_GONE: system loopback callback stopped".to_string());
         }
+        if (!mic_usable && mic_now) || (!system_usable && system_now) {
+            if let Some(recovered_mode) = capture_mode_optional(&stats(&capture.mic_stats), &stats(&capture.system_stats)) {
+                emit_capability(&capture, recovered_mode, "late_callback_recovery");
+                emit_health(&capture, recovered_mode);
+                emit_state(if recovered_mode == "dual" { "READY" } else { "DEGRADED" }, Some(recovered_mode));
+            }
+        }
         mic_usable = mic_now;
         system_usable = system_now;
         if let Some(resampler) = mic_resampler.as_mut() {
@@ -148,11 +158,12 @@ pub fn run(input_id: Option<&str>, output_id: Option<&str>, meter_only: bool, pr
 }
 
 fn wait_for_callbacks(capture: &wasapi::CaptureHandle, started: Instant) {
+    let waiting_started = Instant::now();
     let deadline = Instant::now() + CALLBACK_TIMEOUT;
     while Instant::now() < deadline {
-        let mic_ready = capture.mic_stream.is_none() || stats(&capture.mic_stats).stream_ok();
-        let system_ready = capture.system_stream.is_none() || stats(&capture.system_stats).stream_ok();
-        if mic_ready && system_ready { break; }
+        let mic_ready = capture.mic_stream.is_some() && stats(&capture.mic_stats).stream_ok();
+        let system_ready = capture.system_stream.is_some() && stats(&capture.system_stats).stream_ok();
+        if (mic_ready && system_ready) || ((mic_ready || system_ready) && waiting_started.elapsed() >= SINGLE_CHANNEL_GRACE) { break; }
         thread::sleep(Duration::from_millis(10));
     }
     for (channel, stream, channel_stats) in [("mic", capture.mic_stream.is_some(), &capture.mic_stats), ("system", capture.system_stream.is_some(), &capture.system_stats)] {
@@ -164,7 +175,7 @@ fn wait_for_callbacks(capture: &wasapi::CaptureHandle, started: Instant) {
             } else {
                 snapshot.state = Some("TIMEOUT");
                 snapshot.code = Some("AUDIO_CAPTURE_TIMEOUT".to_string());
-                snapshot.error = Some(format!("{channel} produced no callback within {}ms", CALLBACK_TIMEOUT.as_millis()));
+                snapshot.error = Some(format!("{channel} produced no callback during the {}ms startup window", waiting_started.elapsed().as_millis()));
                 emit_trace("first_callback", Some(channel), started, Some("timeout".to_string()));
             }
         }

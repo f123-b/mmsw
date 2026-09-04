@@ -4035,7 +4035,7 @@ if (hasSingleInstanceLock) {
     if (!nativeModifierShortcutManager.start()) appLogger?.warn("NATIVE_MODIFIER_HELPER_NOT_STARTED");
   }
 
-  audioManager.on("event", (event) => { if (event.type === "audio_error") audioLogger?.error("audio error", { component: event.component, recoverable: event.recoverable }); broadcast("audio:event", event); });
+  audioManager.on("event", (event) => { if (event.type === "audio_error") audioLogger?.error("audio error", { component: event.component, code: event.code, reason: event.reason, recoverable: event.recoverable }); broadcast("audio:event", event); });
   audioManager.on("process", (state) => broadcast("audio:process", state));
   audioManager.on("diagnostic", (message) => { audioLogger?.warn(message); broadcast("audio:diagnostic", message); });
   realtimeSession.on("diagnostics", (diagnostics) => broadcast("realtime:diagnostics", diagnostics));

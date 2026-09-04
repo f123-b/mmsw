@@ -71,6 +71,11 @@ impl CaptureStats {
         self.ok = self.stream_ok;
         self.signal_detected = self.peak >= 0.01;
         self.state = Some(if self.signal_detected { "READY" } else { "SILENT" });
+        // WASAPI may report a transient underrun while a stream is warming up.
+        // A later callback proves the endpoint recovered, so do not keep a
+        // stale DEVICE_GONE error attached to an available channel.
+        self.error = None;
+        self.code = None;
     }
 
     pub fn stream_ok(&self) -> bool {
@@ -284,9 +289,13 @@ mod tests {
     #[test]
     fn silent_stream_is_ready_but_not_signal_detected() {
         let mut stats = CaptureStats::new(48_000, 2);
+        stats.error = Some("transient underrun".to_string());
+        stats.code = Some("AUDIO_DEVICE_GONE".to_string());
         stats.record(&[0.0, 0.0, 0.0, 0.0]);
         assert!(stats.stream_ok());
         assert!(stats.ok);
         assert!(!stats.signal_detected);
+        assert!(stats.error.is_none());
+        assert!(stats.code.is_none());
     }
 }

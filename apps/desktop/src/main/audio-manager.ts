@@ -48,7 +48,7 @@ export interface AudioDiagnosticsReport {
 
 const RECOVERY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 10_000] as const;
 const STABLE_READY_MS = 2_000;
-const DEFAULT_PROBE_TIMEOUT_MS = 4_500;
+const DEFAULT_PROBE_TIMEOUT_MS = 11_000;
 
 export function reconnectDelayMs(attempt: number): number {
   const index = Math.max(0, Math.min(Math.floor(attempt), RECOVERY_DELAYS_MS.length - 1));
@@ -83,7 +83,7 @@ function sidecarPath(): string {
 
 function probeTimeoutMs(): number {
   const value = Number(process.env.INTERVIEW_COPILOT_AUDIO_PROBE_TIMEOUT_MS ?? DEFAULT_PROBE_TIMEOUT_MS);
-  return Math.max(250, Math.min(Number.isFinite(value) ? value : DEFAULT_PROBE_TIMEOUT_MS, 5_000));
+  return Math.max(250, Math.min(Number.isFinite(value) ? value : DEFAULT_PROBE_TIMEOUT_MS, 12_000));
 }
 
 export class AudioManager extends EventEmitter {
@@ -170,7 +170,10 @@ export class AudioManager extends EventEmitter {
         this.pendingStart = undefined;
         reject(new Error("AUDIO_CAPTURE_TIMEOUT: audio capture did not report a capability in time"));
         void this.stop();
-      }, kind === "capture" ? 5_000 : 2_000);
+      // A blocked WASAPI driver is recovered by restarting the sidecar. Keep
+      // the caller pending long enough for one bounded restart instead of
+      // surfacing a false startup failure after the first attempt.
+      }, 25_000);
       this.pendingStart = { resolve, reject, timer };
     });
     try {
@@ -332,7 +335,6 @@ export class AudioManager extends EventEmitter {
         }
       }
       if (!wasExpected && options.autoRecover !== false) {
-        this.rejectPendingStart(new Error("NO_AUDIO_CHANNEL_AVAILABLE: audio sidecar exited before capture became usable"));
         this.emitEvent({ type: "audio_state", state: "DEGRADED", timestamp: Date.now() });
         if (code !== 0) this.emitEvent({ type: "audio_error", component: "process", code: "SIDECAR_PROCESS_FAILED", reason: `Audio Sidecar exited with code ${code ?? "unknown"}`, recoverable: true, timestamp: Date.now() });
         this.scheduleRecovery();

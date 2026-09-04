@@ -13,7 +13,10 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(2);
+// Keep a wedged Realtek shared-mode negotiation bounded. The desktop process
+// can restart this isolated sidecar, which is safer than leaving a driver call
+// blocked long enough to exhaust the whole interview startup window.
+const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_millis(2_500);
 
 pub struct CaptureHandle {
     pub mic_stream: Option<Stream>,
@@ -40,37 +43,23 @@ pub fn open(input: Option<&Device>, output: Option<&Device>) -> Result<CaptureHa
     let mic_stats = Arc::new(Mutex::new(CaptureStats::new(TARGET_SAMPLE_RATE, 1)));
     let system_stats = Arc::new(Mutex::new(CaptureStats::new(TARGET_SAMPLE_RATE, 2)));
 
-    let (sender, receiver) = mpsc::channel::<(&'static str, Result<OpenedStream, String>)>();
-    let mut pending = 0_u8;
-    if let Some(device) = input.cloned() {
-        pending += 1;
-        let sender = sender.clone();
+    // Realtek's shared-mode driver can deadlock when input and loopback are
+    // negotiated concurrently. Sequence the bounded workers so a slow
+    // endpoint cannot make both healthy devices look unavailable.
+    let mic_result = input.cloned().and_then(|device| {
+        let (sender, receiver) = mpsc::channel();
         let queue = Arc::clone(&mic_buffer);
         let stats = Arc::clone(&mic_stats);
-        thread::spawn(move || { let _ = sender.send(("mic", open_input_channel(device, queue, stats))); });
-    }
-    if let Some(device) = output.cloned() {
-        pending += 1;
-        let sender = sender.clone();
+        thread::spawn(move || { let _ = sender.send(open_input_channel(device, queue, stats)); });
+        receiver.recv_timeout(CHANNEL_OPEN_TIMEOUT).ok()
+    });
+    let system_result = output.cloned().and_then(|device| {
+        let (sender, receiver) = mpsc::channel();
         let queue = Arc::clone(&system_buffer);
         let stats = Arc::clone(&system_stats);
-        thread::spawn(move || { let _ = sender.send(("system", open_loopback_channel(device, queue, stats))); });
-    }
-    drop(sender);
-
-    let deadline = std::time::Instant::now() + CHANNEL_OPEN_TIMEOUT;
-    let mut mic_result = None;
-    let mut system_result = None;
-    while pending > 0 {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() { break; }
-        match receiver.recv_timeout(remaining) {
-            Ok(("mic", result)) => { mic_result = Some(result); pending -= 1; }
-            Ok(("system", result)) => { system_result = Some(result); pending -= 1; }
-            Err(_) => break,
-            Ok((_, _)) => break,
-        }
-    }
+        thread::spawn(move || { let _ = sender.send(open_loopback_channel(device, queue, stats)); });
+        receiver.recv_timeout(CHANNEL_OPEN_TIMEOUT).ok()
+    });
     if input.is_none() { mark_failure(&mic_stats, "UNAVAILABLE", "AUDIO_DEVICE_NOT_FOUND", "mic device unavailable".to_string()); }
     else if mic_result.is_none() { mark_failure(&mic_stats, "TIMEOUT", "AUDIO_CAPTURE_TIMEOUT", "mic configuration or stream build timed out".to_string()); }
     if output.is_none() { mark_failure(&system_stats, "UNAVAILABLE", "AUDIO_DEVICE_NOT_FOUND", "system loopback device unavailable".to_string()); }
