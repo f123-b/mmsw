@@ -1,3 +1,4 @@
+import { normalizeAsrSettings } from "@interview-copilot/shared";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -87,13 +88,7 @@ const DEFAULTS: Record<ProviderSection, ProviderSettings> = {
   reranker: { providerName: "Disabled", baseUrl: "", apiKey: "", model: "", timeoutMs: 10_000, maxRetries: 1 }
 };
 
-function normalizeQwenAsrSettings(settings: ProviderSettings): ProviderSettings {
-  if (settings.providerType !== "qwen") return settings;
-  const model = settings.model.trim() || QWEN_REALTIME_ASR_MODEL;
-  // Model choice is user data. Never rewrite it during load/save. The
-  // transport URL is derived from the selected model family instead.
-  return { ...settings, baseUrl: qwenAsrWebSocketUrl(model), model };
-}
+function normalizeQwenAsrSettings(settings: ProviderSettings): ProviderSettings { return normalizeAsrSettings(settings); }
 
 export class ProviderConfigStore {
   constructor(private readonly database: SqliteDatabase, private readonly secrets: SecretStore, private readonly defaults: Partial<Record<ProviderSection, Partial<ProviderSettings>>> = {}) {}
@@ -208,6 +203,13 @@ export class ProviderConfigStore {
 
   update(section: ProviderSection, input: Partial<ProviderSettings>): PublicProviderSettings {
     const current = this.get(section);
+    if (section === "asr") {
+      if (current.apiKey) this.secrets.set(`provider.asr.${current.providerType}.apiKey`, current.apiKey);
+      const changedProvider = input.providerType && input.providerType !== current.providerType;
+      input = { ...input, apiKey: input.apiKey ?? (changedProvider ? this.secrets.get(`provider.asr.${input.providerType}.apiKey`) ?? "" : current.apiKey) };
+      const target = `provider.asr.${input.providerType ?? current.providerType}.apiKey`;
+      if (input.apiKey) this.secrets.set(target, input.apiKey); else this.secrets.delete(target);
+    }
     const next = section === "asr" ? normalizeQwenAsrSettings({ ...current, ...input }) : { ...current, ...input };
     if (section === "llm") {
       const issues = validateLlmModelConfiguration(next);
@@ -297,7 +299,14 @@ function legacyInterviewPreset(value: unknown): InterviewLayoutPreset {
 export function migrateOverlayPreferences(input: unknown): { value: OverlayPreferencesPatch; migrated: boolean } {
   const source = objectValue(input);
   const version = typeof source.schemaVersion === "number" && Number.isFinite(source.schemaVersion) ? Math.floor(source.schemaVersion) : 1;
-  if (version >= OVERLAY_PREFERENCES_SCHEMA_VERSION && source.interview && source.writtenTest) return { value: source as OverlayPreferencesPatch, migrated: false };
+  if (version >= OVERLAY_PREFERENCES_SCHEMA_VERSION && source.interview && source.writtenTest) {
+    const written = objectValue(source.writtenTest);
+    const question = objectValue(written.questionWindow);
+    if (question.width === 920 && question.height === 560) {
+      return { value: { ...source, writtenTest: { ...written, layoutPreset: "single_reader", questionWindow: { ...question, width: 560, height: 700 } } } as OverlayPreferencesPatch, migrated: true };
+    }
+    return { value: source as OverlayPreferencesPatch, migrated: false };
+  }
   const oldBehavior = objectValue(source.behavior);
   const oldQuestion = objectValue(source.questionWindow);
   const oldAnswer = objectValue(source.answerWindow);
@@ -313,6 +322,7 @@ export function migrateOverlayPreferences(input: unknown): { value: OverlayPrefe
     questionWindow: { ...oldQuestion },
     dialogueWindow: { ...oldQuestion },
     answerWindow: { ...oldAnswer },
+    scriptWindow: { ...objectValue(oldInterview.scriptWindow) },
     controlBar: { ...oldControl },
     showAnswer
   };
@@ -347,10 +357,10 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
   const writtenInput = objectValue(raw.writtenTest);
   const interviewPreset = enumValue(interviewInput.layoutPreset ?? (input.layoutPreset ? legacyInterviewPreset(input.layoutPreset) : undefined), ["classic_split", "compact_split", "answer_focus", "minimal"] as const, DEFAULT_OVERLAY_PREFERENCES.interview.layoutPreset);
   const writtenPreset = enumValue(writtenInput.layoutPreset, ["single_reader", "split"] as const, DEFAULT_OVERLAY_PREFERENCES.writtenTest.layoutPreset);
-  type WindowContext = { mode: "interview" | "written_test"; preset: InterviewLayoutPreset | WrittenTestLayoutPreset; panel: "question" | "answer" | "control" };
+  type WindowContext = { mode: "interview" | "written_test"; preset: InterviewLayoutPreset | WrittenTestLayoutPreset; panel: "question" | "answer" | "script" | "control" };
   const windowPreferences = (value: Partial<OverlayWindowPreferences> | undefined, fallback: OverlayWindowPreferences, context: WindowContext): OverlayWindowPreferences => {
     const constraints = resolveOverlayGeometryConstraints(context);
-    const isQuestion = context.panel === "question";
+    const isQuestion = context.panel === "question" || context.panel === "script";
     const backgroundOpacity = number(value?.backgroundOpacity, number(value?.opacity, fallback.backgroundOpacity, 0, 1), 0, 1);
     return {
       width: number(value?.width, fallback.width, constraints.minWidth, constraints.maxWidth),
@@ -406,6 +416,7 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
   const leftGeometry = (value: Record<string, unknown>) => Object.fromEntries(["x", "y", "width", "height", "displayId", "scaleFactor"].filter((key) => Object.prototype.hasOwnProperty.call(value, key)).map((key) => [key, value[key]]));
   const interviewDialogueAlias = { ...interviewDialogue, ...leftGeometry(canonicalInterviewLeft) };
   const interviewAnswer = { ...legacyAnswer, ...objectValue(interviewInput.answerWindow) };
+  const interviewScript = { ...objectValue(DEFAULT_OVERLAY_PREFERENCES.interview.scriptWindow), ...objectValue(interviewInput.scriptWindow) };
   const interviewControl = { ...legacyControl, ...objectValue(interviewInput.controlBar) };
   const writtenQuestion = { ...objectValue(DEFAULT_OVERLAY_PREFERENCES.writtenTest.questionWindow), ...legacyAnswer, ...objectValue(writtenInput.questionWindow) };
   const writtenAnswer = { ...objectValue(DEFAULT_OVERLAY_PREFERENCES.writtenTest.answerWindow), ...legacyAnswer, ...objectValue(writtenInput.answerWindow) };
@@ -440,11 +451,13 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
       questionWindow: syncModeDisplay(windowPreferences(canonicalInterviewLeft, { ...DEFAULT_OVERLAY_PREFERENCES.interview.questionWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "interview", preset: interviewPreset, panel: "question" }), firstFinite(canonicalInterviewLeft.displayId, interviewDialogueAlias.displayId, interviewAnswer.displayId, interviewControl.displayId), firstFinite(canonicalInterviewLeft.scaleFactor, interviewDialogueAlias.scaleFactor, interviewAnswer.scaleFactor, interviewControl.scaleFactor)),
       dialogueWindow: syncModeDisplay(windowPreferences(interviewDialogueAlias, { ...DEFAULT_OVERLAY_PREFERENCES.interview.dialogueWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "interview", preset: interviewPreset, panel: "question" }), firstFinite(canonicalInterviewLeft.displayId, interviewDialogueAlias.displayId, interviewAnswer.displayId, interviewControl.displayId), firstFinite(canonicalInterviewLeft.scaleFactor, interviewDialogueAlias.scaleFactor, interviewAnswer.scaleFactor, interviewControl.scaleFactor)),
       answerWindow: syncModeDisplay(windowPreferences(interviewAnswer, { ...DEFAULT_OVERLAY_PREFERENCES.interview.answerWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "interview", preset: interviewPreset, panel: "answer" }), firstFinite(canonicalInterviewLeft.displayId, interviewDialogueAlias.displayId, interviewAnswer.displayId, interviewControl.displayId), firstFinite(canonicalInterviewLeft.scaleFactor, interviewDialogueAlias.scaleFactor, interviewAnswer.scaleFactor, interviewControl.scaleFactor)),
+      scriptWindow: syncModeDisplay(windowPreferences(interviewScript, { ...DEFAULT_OVERLAY_PREFERENCES.interview.scriptWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "interview", preset: interviewPreset, panel: "script" }), firstFinite(interviewScript.displayId, canonicalInterviewLeft.displayId, interviewDialogueAlias.displayId, interviewAnswer.displayId, interviewControl.displayId), firstFinite(interviewScript.scaleFactor, canonicalInterviewLeft.scaleFactor, interviewDialogueAlias.scaleFactor, interviewAnswer.scaleFactor, interviewControl.scaleFactor)),
       controlBar: syncModeDisplay(control(interviewControl, { ...DEFAULT_OVERLAY_PREFERENCES.interview.controlBar, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "interview", preset: interviewPreset, panel: "control" }), firstFinite(canonicalInterviewLeft.displayId, interviewDialogueAlias.displayId, interviewAnswer.displayId, interviewControl.displayId), firstFinite(canonicalInterviewLeft.scaleFactor, interviewDialogueAlias.scaleFactor, interviewAnswer.scaleFactor, interviewControl.scaleFactor)),
       showAnswer: flag(interviewInput.showAnswer ?? input.showAnswer, DEFAULT_OVERLAY_PREFERENCES.interview.showAnswer)
     },
     writtenTest: {
       layoutPreset: writtenPreset,
+      focusProtection: flag(writtenInput.focusProtection, DEFAULT_OVERLAY_PREFERENCES.writtenTest.focusProtection),
       questionWindow: syncModeDisplay(windowPreferences(writtenQuestion, { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.questionWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "written_test", preset: writtenPreset, panel: "question" }), firstFinite(writtenQuestion.displayId, writtenAnswer.displayId, writtenControl.displayId), firstFinite(writtenQuestion.scaleFactor, writtenAnswer.scaleFactor, writtenControl.scaleFactor)),
       answerWindow: syncModeDisplay(windowPreferences(writtenAnswer, { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.answerWindow, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "written_test", preset: writtenPreset, panel: "answer" }), firstFinite(writtenQuestion.displayId, writtenAnswer.displayId, writtenControl.displayId), firstFinite(writtenQuestion.scaleFactor, writtenAnswer.scaleFactor, writtenControl.scaleFactor)),
       controlBar: syncModeDisplay(control(writtenControl, { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.controlBar, backgroundOpacity, backgroundColor, textColor: fontColor }, { mode: "written_test", preset: writtenPreset, panel: "control" }), firstFinite(writtenQuestion.displayId, writtenAnswer.displayId, writtenControl.displayId), firstFinite(writtenQuestion.scaleFactor, writtenAnswer.scaleFactor, writtenControl.scaleFactor)),
@@ -544,6 +557,7 @@ export class OverlaySettingsStore {
         questionWindow: { ...current.interview.questionWindow, ...questionWindowInput },
         dialogueWindow: { ...current.interview.dialogueWindow, ...dialogueWindowInput, ...(!interviewInput.dialogueWindow && interviewInput.questionWindow ? leftGeometryPatch : {}) },
         answerWindow: { ...current.interview.answerWindow, ...(interviewInput.answerWindow ?? {}) },
+        scriptWindow: { ...current.interview.scriptWindow, ...(interviewInput.scriptWindow ?? {}) },
         controlBar: { ...current.interview.controlBar, ...(interviewInput.controlBar ?? {}) }
       },
       writtenTest: {
@@ -569,10 +583,12 @@ export class OverlaySettingsStore {
         questionWindow: { ...DEFAULT_OVERLAY_PREFERENCES.interview.questionWindow },
         dialogueWindow: { ...DEFAULT_OVERLAY_PREFERENCES.interview.dialogueWindow },
         answerWindow: { ...DEFAULT_OVERLAY_PREFERENCES.interview.answerWindow },
+        scriptWindow: { ...DEFAULT_OVERLAY_PREFERENCES.interview.scriptWindow },
         controlBar: { ...DEFAULT_OVERLAY_PREFERENCES.interview.controlBar }
       },
       writtenTest: {
         ...DEFAULT_OVERLAY_PREFERENCES.writtenTest,
+        focusProtection: current.writtenTest.focusProtection,
         questionWindow: { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.questionWindow },
         answerWindow: { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.answerWindow },
         controlBar: { ...DEFAULT_OVERLAY_PREFERENCES.writtenTest.controlBar }

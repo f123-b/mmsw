@@ -70,6 +70,6 @@ export interface ProjectQuestionBankImportReport {
   duplicatesMerged: number;
   failedQuestions: number;
   ids: string[];
-  /** Explicit user import is promoted to the trusted project-QA tier. */
-  verified: true;
+  /** Import is not verification; existing confirmed records are preserved. */
+  verified: boolean;
 }

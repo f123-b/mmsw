@@ -88,8 +88,8 @@ export function reduceRuntimeQuestion(state: RuntimePhaseState, event: QuestionE
 
 export function questionWaitingNotice(event: QuestionEvent): string | undefined {
   if (event.type !== "question_diagnostic") return undefined;
-  if (event.reason === "understanding-wait-asr") return `识别内容不确定，等待补充：${event.text}`;
-  if (event.reason === "understanding-wait-completion") return `正在等待问题说完整：${event.text}`;
+  // Partial and uncertain ASR stays internal. Showing a persistent "waiting"
+  // sentence looked like a failed answer and obscured the last useful output.
   return undefined;
 }
 

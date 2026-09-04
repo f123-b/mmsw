@@ -17,6 +17,8 @@ interface SidebarProps {
 const items: Array<{ page: AppPage; label: string; icon: string }> = [
   { page: "home", label: "新对话", icon: "＋" },
   { page: "interview", label: "开始面试", icon: "◉" },
+  { page: "written-test", label: "笔试解题", icon: "▣" },
+  { page: "speech-script", label: "上传演讲稿", icon: "▥" },
   { page: "preparation", label: "面试准备", icon: "✦" },
   { page: "profiles", label: "档案 / 简历", icon: "▱" },
   { page: "project-library", label: "项目库", icon: "⌘" },

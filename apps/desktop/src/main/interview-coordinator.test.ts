@@ -141,18 +141,36 @@ describe("InterviewCoordinator software E2E", () => {
     await coordinator.stop();
   });
 
-  it("uses verified project QA and approved self introduction directly without a provider request", async () => {
+  it("uses a saved project introduction and approved self introduction directly without a provider request", async () => {
     const audio = new FakeAudio();
     const realtime = new FakeRealtime();
     let modelCalls = 0;
     const provider: AnswerProvider = { stream: async function* () { modelCalls += 1; yield "不应调用模型"; } };
     const agent = new AnswerAgent({ "low-latency": provider }, new ModelRouter({ "low-latency": "test-model" }));
-    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, contextProvider: (question) => ({ preparedAnswer: { content: question.text.includes("项目") ? "项目题库已确认答案。" : "我是一名嵌入式工程师。", score: 1, verified: true }, answerSourcePlan: question.text.includes("项目") ? { mode: "project_qa_direct", projectAnchorAvailable: true, projectQuestionRequested: true, projectId: "p1", qaMatchLevel: "exact", preserveStoredAnswerFacts: true, allowProjectKnowledge: false, allowGeneralKnowledge: false, allowSessionEvidence: true, answerRewriteUsed: false } : { mode: "self_intro_direct", projectAnchorAvailable: false, projectQuestionRequested: false, qaMatchLevel: "none", preserveStoredAnswerFacts: true, allowProjectKnowledge: false, allowGeneralKnowledge: false, allowSessionEvidence: false, answerRewriteUsed: false }, questionTelemetry: { selfIntroductionDetected: !question.text.includes("项目"), projectQuestionRequested: question.text.includes("项目") } }) });
+    const coordinator = new InterviewCoordinator({ audio, realtime, session: new SessionStateMachine(), answerAgent: agent, contextProvider: (question) => ({ preparedAnswer: { content: question.text.includes("项目") ? "这是已保存、可直接口述的项目介绍。" : "我是一名嵌入式工程师。", score: 1, verified: true }, answerSourcePlan: question.text.includes("项目") ? { mode: "project_intro_direct", projectAnchorAvailable: true, projectQuestionRequested: true, projectId: "p1", qaMatchLevel: "exact", preserveStoredAnswerFacts: true, allowProjectKnowledge: false, allowGeneralKnowledge: false, allowSessionEvidence: true, answerRewriteUsed: false } : { mode: "self_intro_direct", projectAnchorAvailable: false, projectQuestionRequested: false, qaMatchLevel: "none", preserveStoredAnswerFacts: true, allowProjectKnowledge: false, allowGeneralKnowledge: false, allowSessionEvidence: false, answerRewriteUsed: false }, questionTelemetry: { selfIntroductionDetected: !question.text.includes("项目"), projectQuestionRequested: question.text.includes("项目") } }) });
     await coordinator.start({ profileId: "p1", projectId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
     await coordinator.answerQuestionText("介绍一下你的项目");
     await coordinator.answerQuestionText("请做个自我介绍");
     expect(modelCalls).toBe(0);
     await coordinator.stop();
+  });
+
+  it("preserves the entire selected self introduction verbatim, including numbers and paragraphs", async () => {
+    const original = "面试官好，我负责过 STM32F405 项目。\n\n采样频率 20 kHz，这是我保存的原稿。\n谢谢。";
+    let calls = 0;
+    const messages: unknown[] = [];
+    const coordinator = new InterviewCoordinator({
+      audio: new FakeAudio(), realtime: new FakeRealtime(), session: new SessionStateMachine(),
+      answerAgent: new AnswerAgent({ "low-latency": { stream: async function* () { calls++; yield "不应改写"; } } }, new ModelRouter({ "low-latency": "test-model" })),
+      contextProvider: () => ({ preparedAnswer: { content: original, score: 1, verified: true }, answerSourcePlan: { mode: "self_intro_direct", projectAnchorAvailable: false, projectQuestionRequested: false, qaMatchLevel: "none", preserveStoredAnswerFacts: true, allowProjectKnowledge: false, allowGeneralKnowledge: false, allowSessionEvidence: false, answerRewriteUsed: false } })
+    });
+    coordinator.on("event", (event: { type: string; message?: unknown }) => { if (event.type === "realtime_message") messages.push(event.message); });
+    await coordinator.start({ profileId: "p1", url: "wss://asr.test/realtime", automationMode: "MANUAL", answerMode: "NORMAL" });
+    try {
+      await coordinator.answerQuestionText("请用一分钟做个自我介绍");
+      expect(calls).toBe(0);
+      expect(messages).toContainEqual(expect.objectContaining({ type: "answer_end", text: original }));
+    } finally { await coordinator.stop(); }
   });
 
   it("carries candidate statements into the next personal follow-up", async () => {

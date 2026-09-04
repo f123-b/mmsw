@@ -19,6 +19,12 @@ describe("realtime protocol", () => {
     })).toThrow();
   });
 
+  it("preserves question-specific errors while accepting older unscoped events", () => {
+    const error = { type: "runtime_error", code: "PROJECT_EVIDENCE_REQUIRED", message: "资料不足" };
+    expect(realtimeServerMessageSchema.parse(error)).toMatchObject(error);
+    expect(realtimeServerMessageSchema.parse({ ...error, questionId: "q25" })).toMatchObject({ questionId: "q25" });
+  });
+
   it("carries question group state and answer relation metadata", () => {
     const answerStart = parseRealtimeServerMessage(JSON.stringify({
       type: "answer_start",

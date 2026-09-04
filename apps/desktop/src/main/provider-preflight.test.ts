@@ -14,6 +14,15 @@ const settings = (section: "llm" | "asr" | "embedding"): ProviderSettings => ({
 });
 
 describe("Provider preflight", () => {
+  it.each([
+    {apiProtocol:"openai-responses" as const,path:"responses",payload:{output:[{type:"message",content:[{type:"output_text",text:"OK"}]}]}},
+    {apiProtocol:"anthropic-messages" as const,path:"messages",payload:{content:[{type:"text",text:"OK"}]}}
+  ])("tests the same $apiProtocol endpoint as real answers", async ({apiProtocol,path,payload}) => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload),{status:200}));vi.stubGlobal("fetch",fetch);
+    await expect(testProviderConnection("llm", {...settings("llm"),apiProtocol})).resolves.toMatchObject({status:"ready"});
+    expect(String(fetch.mock.calls[0][0])).toBe(`https://example.test/v1/${path}`);
+    expect(JSON.parse(fetch.mock.calls[0][1].body).stream).toBe(false);
+  });
   afterEach(() => vi.unstubAllGlobals());
 
   it("blocks unconfigured providers before a request", async () => {

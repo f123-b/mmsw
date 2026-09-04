@@ -3,6 +3,7 @@ import type { CoreTechnicalQaCard } from "./core-technical-qa";
 
 export type AnswerSourceMode =
   | "project_qa_direct"
+  | "project_intro_direct"
   | "project_qa_augmented"
   | "project_qa_no_match"
   | "project_knowledge_generated"
@@ -220,3 +221,10 @@ export function planAnswerSource(input: AnswerSourcePlannerInput): AnswerSourceP
 }
 
 export const createAnswerSourcePlan = planAnswerSource;
+
+/** A missing curated Q&A is not a missing document. Only the retrieval layer
+ * may supply evidence scoped to this resolved project (never generic references). */
+export function withGroundedProjectFallback(plan: AnswerSourcePlan, projectEvidence: readonly string[]): AnswerSourcePlan {
+  if (plan.mode !== "project_qa_no_match" || !plan.projectId || !projectEvidence.some(text => text.trim().length >= 20)) return plan;
+  return { ...plan, mode: "project_knowledge_generated", allowProjectKnowledge: true, allowGeneralKnowledge: false, allowSessionEvidence: true, preserveStoredAnswerFacts: false, answerRewriteUsed: false };
+}

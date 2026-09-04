@@ -1,6 +1,6 @@
 {
   "name": "@interview-copilot/desktop",
-  "version": "0.1.1",
+  "version": "0.1.9",
   "private": true,
   "type": "module",
   "main": "./out/main/index.js",
@@ -13,6 +13,9 @@
     "smoke:production": "npm run build && node scripts/production-smoke.mjs",
     "capture-protection:smoke": "npm run build:capture-helper && npm run build && node scripts/capture-protection-smoke.mjs",
     "native:mouse-smoke": "npm run build:capture-helper && npm run build && node scripts/native-mouse-smoke.mjs",
+    "written:focus-smoke": "npm run build && node scripts/written-focus-smoke.mjs",
+    "written:hover-smoke": "npm run build && node scripts/written-focus-smoke.mjs --hover",
+    "interview:overlay-smoke": "npm run build && node scripts/interview-overlay-smoke.mjs",
     "verify:windows-native": "npm run build:capture-helper && npm run build && node scripts/native-mouse-smoke.mjs --require-pass",
     "performance:smoke": "npm run build && node scripts/performance-smoke.mjs",
     "visual:smoke": "npm run build && node scripts/visual-smoke.mjs",

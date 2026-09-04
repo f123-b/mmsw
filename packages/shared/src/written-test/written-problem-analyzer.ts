@@ -2,8 +2,8 @@ import { normalizeTechnicalTerms } from "../terminology";
 import { WRITTEN_QUESTION_TYPES, type WrittenProblemFrame, type WrittenQuestionType, type WrittenRequestedArtifacts } from "./written-test-types";
 
 const typeWords: Array<[WrittenQuestionType, RegExp]> = [
-  ["SINGLE_CHOICE", /单选|选择题|以下.*正确|以下.*错误/],
   ["MULTIPLE_CHOICE", /多选|不定项/],
+  ["SINGLE_CHOICE", /单选|选择题|以下.*正确|以下.*错误/],
   ["CALCULATION", /计算|求值|算出|推导|电阻|概率|时间复杂度/],
   ["CODE_DEBUGGING", /调试|错误|bug|为什么.*错|修复/i],
   ["CODE_READING", /阅读.*代码|代码.*输出|运行结果|执行结果/],
@@ -31,10 +31,10 @@ function linesAfter(text: string, labels: string[]): string[] {
 }
 
 export function analyzeWrittenProblem(rawText: string, hint?: Partial<WrittenProblemFrame>): WrittenProblemFrame {
-  const clean = normalizeTechnicalTerms(rawText).trim();
+  const clean = rawText.trim();
   const questionType = hint?.questionType ?? inferWrittenQuestionType(clean);
   const requestedArtifacts: WrittenRequestedArtifacts = {
-    code: hint?.requestedArtifacts?.code ?? ["PROGRAMMING", "CODE_DEBUGGING", "C_CPP", "DATABASE_SQL"].includes(questionType),
+    code: ["PROGRAMMING", "CODE_DEBUGGING"].includes(questionType) || /编写.*(?:代码|SQL|函数)|完整代码|实现.*函数/i.test(clean) || Boolean(hint?.requestedArtifacts?.code),
     diagram: hint?.requestedArtifacts?.diagram ?? ["FLOWCHART", "STATE_MACHINE", "SEQUENCE_DIAGRAM", "SYSTEM_DESIGN", "DIGITAL_LOGIC"].includes(questionType),
     table: hint?.requestedArtifacts?.table ?? /表格|真值表|对比|比较/.test(clean),
     formula: hint?.requestedArtifacts?.formula ?? ["CALCULATION", "DIGITAL_LOGIC"].includes(questionType),
@@ -69,4 +69,3 @@ export function parseWrittenProblem(value: unknown, fallbackText: string): Writt
     formulas: Array.isArray(input.formulas) ? input.formulas.map(String) : undefined
   });
 }
-

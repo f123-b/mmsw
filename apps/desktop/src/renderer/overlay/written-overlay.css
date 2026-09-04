@@ -1,0 +1,32 @@
+.written-workspace { box-sizing: border-box; width: 100vw; height: 100vh; display: flex; flex-direction: column; overflow: hidden; border: 1px solid #cbd2dc; border-radius: 14px; background: #f8fafc; color: #182237; font: 14px/1.65 "Microsoft YaHei", system-ui, sans-serif; box-shadow: inset 0 0 0 1px #e5e9ee; pointer-events: auto; }
+.written-workspace * { box-sizing: border-box; }
+.written-workspace-header { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid #e1e6ed; font-size: 12px; flex-shrink: 0; cursor: move; user-select: none; }
+.written-workspace-header strong { font-size: 14px; margin-right: auto; }
+.written-workspace-status { display: flex; align-items: center; gap: 7px; }
+.written-workspace-status i { width: 6px; height: 6px; background: #687789; border-radius: 50%; }
+.written-workspace-status i.busy { background: #3484b2; }
+.written-workspace .written-workspace-body { flex: 1; min-height: 0; padding: 18px 20px; overflow: auto; scrollbar-width: thin; }
+.written-workspace-question { margin: 0 0 18px; padding-bottom: 12px; border-bottom: 1px solid #e3e8ef; color: #576274; font-size: 13px; white-space: pre-wrap; }
+.written-workspace-answer p { white-space: pre-wrap; margin: 0 0 16px; }
+.written-workspace-answer .written-final-answer { font-weight: 600; font-size: 16px; }
+.written-workspace-answer h3 { font-size: 13px; margin: 20px 0 8px; color: #4d6077; }
+.written-workspace-answer pre { font: 13px/1.65 Consolas, monospace; overflow: auto; padding: 14px; background: #eef2f6; border: 1px solid #dde4ec; border-radius: 8px; white-space: pre; color: #17243b; }
+.written-workspace-answer ol { padding-left: 23px; }
+.written-workspace-answer li { padding-left: 3px; }
+.written-workspace-empty { padding: 25px 0; color: #7b8796; }
+.written-workspace-empty strong { color: #354459; font-size: 17px; }
+.written-workspace-empty p { margin: 8px 0; }
+.written-workspace-error, .written-workspace-warning { color: #a4472e; background: #fff3ed; border-radius: 6px; padding: 10px; white-space: pre-wrap; }
+.written-workspace-progress { color: #38718e; }
+.written-workspace-footer { display: flex; gap: 7px; padding: 9px 12px 10px; border-top: 1px solid #e1e6ed; flex-shrink: 0; background: #f8fafc; }
+.written-workspace-footer button { position: relative; display: flex; flex-direction: column; justify-content: center; align-items: flex-start; flex: 1; min-width: 0; padding: 7px 9px; background: #fff; color: #202e45; border: 1px solid #cdd6e1; border-radius: 8px; text-align: left; cursor: default !important; overflow: hidden; }
+.written-workspace-footer button:disabled, .written-workspace-footer button[aria-disabled="true"] { opacity: .4; }
+.written-workspace-footer button[data-hover-phase="arming"] { background: #eaf3f8; border-color: #8bb4c9; }
+.written-workspace-footer small { display: block; font-size: 10px; color: #68788b; white-space: nowrap; }
+.written-workspace-footer strong { font-size: 13px; }
+.written-workspace-footer .written-camera-control { flex: 1.55; flex-direction: row; align-items: center; justify-content: flex-start; gap: 7px; height: auto; box-shadow: none; }
+.written-workspace .written-camera-control, .written-workspace .written-camera-control * { cursor: default !important; }
+.written-workspace .written-capture-copy { display: block; }
+.written-workspace .written-camera-progress { position: absolute; height: 3px; left: 0; bottom: 0; background: #3583a8; animation: written-camera-dwell linear forwards; }
+.written-workspace-resize { position: absolute; right: 1px; bottom: 1px; width: 10px; height: 10px; cursor: se-resize; }
+@media (max-width: 470px) { .written-workspace-footer { gap: 4px; padding: 7px; } .written-workspace-footer button { padding: 6px; } .written-workspace-footer small { font-size: 9px; } .written-workspace-header { gap: 8px; padding: 10px 12px; } .written-workspace-header > span:last-child { display: none; } }

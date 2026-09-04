@@ -175,7 +175,7 @@ export const asrStatusSchema = z.object({
   message: z.string().optional()
 });
 
-export const asrProviderTypeSchema = z.enum(["deepgram", "qwen", "custom-gateway", "funasr-local"]);
+export const asrProviderTypeSchema = z.enum(["deepgram", "qwen", "openai", "groq", "siliconflow", "openai-compatible", "elevenlabs", "azure", "google", "assemblyai", "volcengine", "baidu", "tencent", "custom-gateway", "funasr-local"]);
 export const asrLanguageSchema = z.enum(["zh-CN", "en-US", "multi"]);
 
 export const connectionReadySchema = z.object({
@@ -285,6 +285,7 @@ export const questionGroupUpdatedSchema = z.object({
 
 export const runtimeErrorSchema = z.object({
   type: z.literal("runtime_error"),
+  questionId: z.string().min(1).optional(),
   code: z.enum([
     "AUDIO_DEVICE_NOT_FOUND",
     "AUDIO_DEVICE_INVALIDATED",

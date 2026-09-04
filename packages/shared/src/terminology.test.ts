@@ -94,5 +94,6 @@ describe("technical terminology normalization", () => {
     expect(resolveContextualTerminology("季度战", { contextText: "自我介绍 求职 熟悉 技术" }).text).toBe("技术栈");
     expect(resolveContextualTerminology("比如针头长度、命令字、序号、CRC。", { contextText: "数据帧格式 协议帧" }).text).toContain("帧头、长度");
     expect(resolveContextualTerminology("Woodloader版本。", { contextText: "固件版本 App 升级 版本管理" }).text).toContain("Bootloader");
+    expect(resolveContextualTerminology("详细介绍一下这个看准线", { contextText: "多少根线 怎么接 和 485 对比 总线" }).text).toContain("CAN 总线");
   });
 });

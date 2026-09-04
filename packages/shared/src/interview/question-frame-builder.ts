@@ -7,7 +7,7 @@ import { classifySpeechActV3 } from "./speech-act-v3";
 import { ContextualQuestionRewriter, type ContextualQuestionRewriteResult } from "./contextual-question-rewriter";
 import { resolveContextualQuestion } from "./contextual-question-resolution";
 import { buildQuestionRequirements } from "./question-requirements";
-import { isTopicOnlyFragment, spokenEntities } from "./question-subject";
+import { hasSpokenQuestionContent, isTopicOnlyFragment, spokenEntities } from "./question-subject";
 import type { ActiveProjectContext, EntityAnchor, QuestionContextSnapshot, QuestionFrame, QuestionFrameRelation, QuestionFrameType, ReferenceCandidate } from "./question-frame";
 
 export interface QuestionFrameBuildInput {
@@ -32,10 +32,10 @@ export interface QuestionFrameBuildResult {
   rewrite: ContextualQuestionRewriteResult;
 }
 
-const COMPONENTS = /(?:STM\d+[A-Z0-9]*|F405|MCU|芯片|控制器|编码器|传感器|栈|stack)/iu;
-const TECHNOLOGIES = /(?:DMA|ADC|PWM|CAN|UART|IIC|I2C|SPI|FOC|RTOS|FreeRTOS|Linux|Cortex-[MAR]|C\+\+)/iu;
-const CONCEPTS = /(?:中断|interrupt|exception|采样|实时性|缓存|队列|模式|原理|线程|指针|数组|内存)/iu;
-const REFERENCE_WORD = /(?:它|这个|那个|这个项目|该项目|这个芯片|这个模式|这种方式|这样|刚才那个|前面那个|多久|为什么这么做|那这个呢)/giu;
+const COMPONENTS = /(?:STM\d+[A-Z0-9]*|F405|MCU|芯片|控制器|编码器|传感器|定时器|栈|stack)/iu;
+const TECHNOLOGIES = /(?:DMA|ADC|PWM|CAN|UART|IIC|I2C|SPI|FOC|ABZ|RTOS|FreeRTOS|Linux|Cortex-[MAR]|C\+\+)/iu;
+const CONCEPTS = /(?:^Id$|^Iq$|中心对齐|摩擦状态机|抗齿槽补偿|中断|interrupt|exception|采样|实时性|缓存|队列|模式|原理|线程|指针|数组|内存)/iu;
+const REFERENCE_WORD = /(?:这个项目|该项目|这个芯片|这个模式|这种方式|刚才那个|前面那个|那这个呢|为什么这么做|它|这个|那个|这样|多久)/giu;
 const PROJECT_CUE = /(?:项目|平台|系统|方案|架构|项目里|项目中|你这个|你们的|简历|实际实现)/iu;
 
 function clean(value: string): string { return normalizeTechnicalTerms(value).replace(/\s+/g, " ").trim(); }
@@ -72,6 +72,10 @@ function resolveProject(text: string, input: QuestionFrameBuildInput): { project
     }
   }
   if (input.activeProject) return { project: input.activeProject, confidence: input.activeProject.confidence };
+  if (input.projectCandidates?.length === 1 && /(?:这个|该|你的|你们的|介绍|做过|参与过).{0,8}项目/u.test(text)) {
+    const candidate = input.projectCandidates[0];
+    return { project: { id: candidate.id, name: candidate.name, lockState: "CANDIDATE", confidence: 0.9, entities: [...(candidate.entities ?? [])], topics: [...(candidate.aliases ?? [])], source: "interviewer" }, confidence: 0.9 };
+  }
   if (!input.projectCandidates?.length) return { confidence: 0 };
   const resolution = new ProjectAliasResolver().resolve(text, input.projectCandidates);
   if (!resolution.projectId || resolution.ambiguous) return { confidence: resolution.confidence };
@@ -84,7 +88,13 @@ function referencesFor(text: string, anchors: ConversationAnchorSnapshot, entiti
   for (const raw of text.match(REFERENCE_WORD) ?? []) {
     let resolved: string | undefined;
     let type: ReferenceCandidate["type"];
-    if (/这个项目|该项目/u.test(raw)) { resolved = anchors.activeProject?.id; type = "project"; }
+    if (/这个项目|该项目/u.test(raw)) {
+      resolved = anchors.activeProject?.id;
+      type = "project";
+      // A concrete technical subject is answerable even without a personal project ID.
+      // Personal implementation details still require project evidence at answer routing.
+      if (!resolved) { resolved = entities.components[0] ?? entities.technologies[0]; type = resolved ? "technology" : undefined; }
+    }
     else if (/这个芯片/u.test(raw)) { resolved = entities.components[0] ?? anchors.activeComponent?.value; type = "component"; }
     else if (/这个模式|这种方式/u.test(raw)) { resolved = anchors.activeConcept?.value ?? anchors.lastQuestion?.entities.concepts[0]; type = resolved ? "concept" : undefined; }
     else if (/它|那个|这个|刚才|前面|多久|为什么这么做|那这个/u.test(raw)) {
@@ -138,12 +148,13 @@ export class QuestionFrameBuilder {
     const speech = classifySpeechActV3(rewrite.normalizedText, Boolean(input.anchors.lastQuestion || input.anchors.currentTopic));
     const effectiveSpeechAct = rewrite.unresolved.length > 0 ? "ASR_UNRESOLVED" as const : speech.speechAct;
     const contextualReferences: ReferenceCandidate[] = contextResolution.references.map((reference) => ({ raw: reference.raw, resolved: reference.resolved, type: ["project", "component", "technology", "question"].includes(reference.type) ? reference.type as ReferenceCandidate["type"] : "concept", confidence: reference.confidence, evidence: ["context-resolution", reference.type] }));
-    const references = [...referencesFor(contextResolution.canonicalQuestion, input.anchors, entityResult.entities), ...contextualReferences].filter((reference, index, all) => index === all.findIndex((candidate) => candidate.raw === reference.raw && candidate.resolved === reference.resolved));
-    const textHasSubject = spokenEntities(contextResolution.canonicalQuestion).length > 0 || Boolean(resolvedProject.project) || PROJECT_CUE.test(contextResolution.canonicalQuestion) || /自我介绍|你.*(?:问题|了解)|岗位|工作|团队|专业|学校|实习|毕业/u.test(contextResolution.canonicalQuestion);
-    const textHasObject = /(?:项目|系统|方案|模式|原因|区别|原理|作用|流程|方法|因素|工作|触发|采样|数据|芯片|平台|任务|栈|内核|中断|向量)/iu.test(contextResolution.canonicalQuestion) || entityResult.entities.components.length > 0 || entityResult.entities.technologies.length > 0;
+    const references = [...referencesFor(contextResolution.canonicalQuestion, { ...input.anchors, ...(resolvedProject.project ? { activeProject: resolvedProject.project } : {}) }, entityResult.entities), ...contextualReferences].filter((reference, index, all) => index === all.findIndex((candidate) => candidate.raw === reference.raw && candidate.resolved === reference.resolved));
+    const spokenContent = hasSpokenQuestionContent(contextResolution.canonicalQuestion);
+    const textHasSubject = spokenContent || spokenEntities(contextResolution.canonicalQuestion).length > 0 || Boolean(resolvedProject.project) || PROJECT_CUE.test(contextResolution.canonicalQuestion) || /自我介绍|你.*(?:问题|了解)|岗位|工作|团队|专业|学校|实习|毕业/u.test(contextResolution.canonicalQuestion);
+    const textHasObject = /(?:项目|系统|方案|模式|原因|区别|原理|作用|流程|方法|因素|工作|触发|采样|数据|芯片|平台|任务|栈|内核|中断|向量)/iu.test(contextResolution.canonicalQuestion) || entityResult.entities.components.length > 0 || entityResult.entities.technologies.length > 0 || entityResult.entities.concepts.length > 0;
     const questionType: QuestionFrameType = /(?:个人经历|简历|你做过|你的职责|你负责|面试经历)/iu.test(contextResolution.canonicalQuestion) ? "BEHAVIORAL" : resolvedProject.project && PROJECT_CUE.test(contextResolution.canonicalQuestion) ? "PROJECT" : /(?:项目|你这个平台|你这个系统|项目里|项目中)/iu.test(contextResolution.canonicalQuestion) ? "PROJECT" : /(?:自我介绍|简历)/iu.test(contextResolution.canonicalQuestion) ? "RESUME" : /(?:技术|原理|区别|怎么工作|如何工作|什么是|DMA|ADC|PWM|SPI|CAN|栈|中断|向量|内核)/iu.test(contextResolution.canonicalQuestion) ? "TECHNICAL" : "GENERAL";
     const slots = slotsFor(contextResolution.canonicalQuestion, questionType);
-    const completion = this.completion.evaluate({ text: contextResolution.canonicalQuestion, speechAct: effectiveSpeechAct, references, unresolvedAsr: rewrite.unresolved.length > 0 || contextResolution.unresolved.length > 0 || effectiveSpeechAct === "ASR_UNRESOLVED", hasSubject: textHasSubject, hasObject: textHasObject, slotCount: slots.length, currentTopic: input.anchors.currentTopic?.name });
+    const completion = this.completion.evaluate({ text: contextResolution.canonicalQuestion, speechAct: effectiveSpeechAct, references, unresolvedAsr: rewrite.unresolved.length > 0 || contextResolution.unresolved.length > 0 || effectiveSpeechAct === "ASR_UNRESOLVED", hasSubject: textHasSubject, hasObject: textHasObject || spokenContent, slotCount: slots.length, currentTopic: input.anchors.currentTopic?.name });
     const requirements = buildQuestionRequirements(contextResolution.canonicalQuestion, slots, questionType, resolvedProject.project?.id);
     const contextSnapshot: QuestionContextSnapshot = {
       id: `context-snapshot-${input.id}`,

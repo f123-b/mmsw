@@ -37,6 +37,26 @@ describe("HUD state lifecycle", () => {
     expect(state).toMatchObject({ panelVisible: true, transcriptVisible: true, answerVisible: false, mode: "FULL" });
   });
 
+  it("keeps the speech-script panel independent and restores it after share mode", () => {
+    let state = reduceHUDState(initialHUDState, { type: "start" });
+    state = reduceHUDState(state, { type: "toggle-script" });
+    expect(state).toMatchObject({ panelVisible: true, scriptVisible: true, transcriptVisible: true, answerVisible: true, mode: "FULL" });
+
+    state = reduceHUDState(state, { type: "set-share-mode", enabled: true });
+    expect(state).toMatchObject({ shareMode: true, panelVisible: false, scriptVisible: false, mode: "HIDDEN" });
+
+    state = reduceHUDState(state, { type: "set-script-visible", visible: false });
+
+    state = reduceHUDState(state, { type: "set-share-mode", enabled: false });
+    expect(state).toMatchObject({ shareMode: false, panelVisible: true, scriptVisible: false, mode: "FULL" });
+
+    state = reduceHUDState(state, { type: "set-script-visible", visible: true });
+    expect(state).toMatchObject({ panelVisible: true, scriptVisible: true, mode: "FULL" });
+
+    state = reduceHUDState(state, { type: "set-script-visible", visible: false });
+    expect(state).toMatchObject({ panelVisible: true, scriptVisible: false, transcriptVisible: true, answerVisible: true });
+  });
+
   it("owns exactly one transient layer and lets end confirmation replace shortcuts", () => {
     let state = reduceHUDState(reduceHUDState(initialHUDState, { type: "start" }), { type: "toggle-shortcuts" });
     expect(state.transientLayer).toBe("shortcut");

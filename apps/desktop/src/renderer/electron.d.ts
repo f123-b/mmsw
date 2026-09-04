@@ -20,6 +20,7 @@ import type { ProviderCheckResult, ProviderPreflightResult } from "../main/provi
 import type { LocalAsrHealthCheck, LocalAsrStartOptions } from "../main/local-asr-service-manager";
 import type { ModelCatalogResult } from "../main/model-catalog";
 import type { InterviewExportResult } from "../main/history-export";
+import type { SpeechScript } from "../main/speech-script";
 
 declare global {
   interface Window {
@@ -43,6 +44,7 @@ declare global {
         toggleAll(): Promise<boolean>;
         toggleTranscript(): Promise<boolean>;
         toggleAnswer(): Promise<boolean>;
+        toggleScript(): Promise<boolean>;
         requestEndInterview(): Promise<boolean>;
         cancelEndInterview(): Promise<boolean>;
         confirmEndInterview(): Promise<boolean>;
@@ -52,7 +54,7 @@ declare global {
         getState(): Promise<HUDState | undefined>;
         getLayout(): Promise<HUDLayout | undefined>;
         getDisplays(): Promise<OverlayDisplayInfo[]>;
-        getWindowBounds(panel: "question" | "answer" | "control"): Promise<OverlayNativeBounds | undefined>;
+        getWindowBounds(panel: "question" | "answer" | "script" | "control"): Promise<OverlayNativeBounds | undefined>;
         getTransientBounds(): Promise<OverlayNativeBounds | undefined>;
         getZOrderDiagnostics(): Promise<import("../main/overlay-z-order-controller").OverlayZOrderDiagnostics | undefined>;
         getPreferences(): Promise<OverlayPreferences>;
@@ -60,7 +62,7 @@ declare global {
         setPreferences(input: OverlayPreferencesPatch): Promise<OverlayPreferences>;
         enterLayoutEditMode(): Promise<boolean>;
         finishLayoutEditMode(): Promise<boolean>;
-        setWindowBounds(panel: "question" | "answer" | "control", bounds: OverlayNativeBounds): Promise<boolean>;
+        setWindowBounds(panel: "question" | "answer" | "script" | "control", bounds: OverlayNativeBounds): Promise<boolean>;
         setShareMode(enabled: boolean): Promise<HUDState | undefined>;
         toggleShareMode(): Promise<HUDState | undefined>;
         setMode(mode: OverlayMode): Promise<void>;
@@ -82,6 +84,11 @@ declare global {
         connect(options: RealtimeConnectOptions): Promise<boolean>;
         disconnect(): Promise<boolean>;
         getTranscript(): Promise<Partial<Record<"mic" | "remote", TranscriptSnapshot>>>;
+      };
+      speechScript: {
+        get(): Promise<SpeechScript | undefined>;
+        upload(input: { filename: string; mimeType: string; bytes: Uint8Array }): Promise<SpeechScript>;
+        clear(): Promise<boolean>;
       };
       localAsr: {
         health(options?: LocalAsrStartOptions): Promise<LocalAsrHealthCheck>;
@@ -107,6 +114,7 @@ declare global {
         answerScreenshot(): Promise<void>;
         getState(): Promise<WrittenTestState>;
         setAnswerMode(mode: "FAST" | "NORMAL" | "DEEP"): Promise<boolean>;
+        setNextScreenshotRelation(relation: "NEW_QUESTION" | "CONTINUATION" | "REPLACE_SCREENSHOT"): Promise<boolean>;
       };
       chat: {
         createConversation(input: { profileId?: string; projectId?: string; title?: string }): Promise<ConversationRecord>;
@@ -213,7 +221,7 @@ declare global {
         list(profileId?: string): Promise<ProjectRecord[]>;
         create(input: { name: string; profileId?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }): Promise<ProjectRecord | undefined>;
         rename(projectId: string, name: string): Promise<ProjectRecord | undefined>;
-        update(projectId: string, input: { name?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }): Promise<ProjectRecord | undefined>;
+        update(projectId: string, input: { name?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string; projectIntroduction?: string }): Promise<ProjectRecord | undefined>;
         delete(projectId: string): Promise<boolean>;
       };
       knowledge: {
@@ -290,6 +298,7 @@ declare global {
         onOverlayPreferences(listener: (preferences: OverlayPreferences) => void): () => void;
         onOverlayCommand(listener: (command: "show-all" | "hide-all" | "toggle-all" | "reset-layout" | "toggle-shortcuts" | "confirm-end") => void): () => void;
         onOverlayCaptureProtection(listener: (state: CaptureProtectionState) => void): () => void;
+        onSpeechScript(listener: (script: SpeechScript | undefined) => void): () => void;
         onShortcut(listener: (shortcut: string) => void): () => void;
         onAudioProcess(listener: (state: AudioProcessState) => void): () => void;
         onScreenshot(listener: (result: ScreenshotResult) => void): () => void;

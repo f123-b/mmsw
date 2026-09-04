@@ -46,6 +46,9 @@ const MEANINGFUL_OBJECT = /(?:项目|系统|模块|方案|协议|接口|链路|�
 const GENERIC_OBJECT_ONLY = /(?:问题|场景|情况|原因|区别|原理|作用|定位|排查|验证|风险|步骤|方法|结果|影响|哪些点|哪些方面|什么时候|什么情况)/iu;
 const OPEN_PREDICATE = /(?:能不能|可不可以|要不要|是否可以)\s*(?:用|开|启用|配|配置|设置|选择|调用|处理|接|放|加|改)(?:[。！？?！\s，,、]*$)/iu;
 const OPEN_SELECTION = /(?:为什么|为何)(?:要)?(?:选|选择)\s*[？?。！!\s，,、]*$/iu;
+// ASR often adds '?' while the speaker is pausing before the predicate/object.
+// A bare contextual “为什么？” stays valid; “这个项目为什么？” does not.
+const OPEN_SPOKEN_PREDICATE = /(?:项目|系统|方案|主控|控制器)\s*(?:为什么|为何)[？?。！!\s]*$|(?:是|你是|你们是)\s*(?:怎么|如何|怎样)[？?。！!\s]*$|(?:用的|使用的|选的)\s*什么[？?。！!\s]*$/iu;
 const OPEN_CONFIG_PREDICATE = /(?:这里|那个|这个|这种情况|这种场景|中断里|中断中)\s*(?:怎么|如何|怎样)\s*(?:用|开|启用|配|配置|设置|选择|调用|处理)(?:[。！？?！\s，,、]*$)/iu;
 const SHORT_OBJECT_COMPOSITION = /(?:怎么|如何|怎样)\s*(?:避免|防止|解决|降低|判断|保证|处理|定位|排查|修复)\s*[\u4e00-\u9fff](?:[？?。！？!])$/iu;
 const CONTEXTUAL_REPLACEMENT_QUESTION = /^(?:那|然后|如果|假设|若|再)?[^。！？?！]*?(?:换成|换为|改成|改为|迁到|切到)[^。！？?！]*[？?]$/iu;
@@ -72,7 +75,7 @@ export function hasContextReference(text: string): boolean {
 
 export function isOpenPredicate(text: string): boolean {
   const normalized = clean(text);
-  return OPEN_PREDICATE.test(normalized) || OPEN_CONFIG_PREDICATE.test(normalized) || OPEN_SELECTION.test(normalized);
+  return OPEN_PREDICATE.test(normalized) || OPEN_CONFIG_PREDICATE.test(normalized) || OPEN_SELECTION.test(normalized) || OPEN_SPOKEN_PREDICATE.test(normalized);
 }
 
 function isShortObjectComposition(text: string): boolean {

@@ -8,7 +8,7 @@ export const WRITTEN_QUESTION_TYPES = [
 export type WrittenQuestionType = typeof WRITTEN_QUESTION_TYPES[number];
 export type WrittenProblemRelation = "NEW_QUESTION" | "CONTINUATION" | "REPLACE_SCREENSHOT";
 export type WrittenSessionStatus = "RUNNING" | "COMPLETED" | "ABORTED";
-export type WrittenScreenshotStatus = "IDLE" | "CAPTURING" | "ANALYZING" | "SOLVING" | "SUCCESS" | "ERROR";
+export type WrittenScreenshotStatus = "IDLE" | "CAPTURING" | "ANALYZING" | "SOLVING" | "SUCCESS" | "NEEDS_INPUT" | "REVIEW" | "ERROR";
 
 export interface WrittenRequestedArtifacts {
   code?: boolean;
@@ -125,5 +125,6 @@ export interface WrittenTestSessionDetail {
 export interface WrittenTestResult {
   problem: WrittenProblemFrame;
   answer: WrittenAnswerDocument;
+  inputStatus: "COMPLETE" | "NEEDS_INPUT";
+  missingInformation: string[];
 }
-

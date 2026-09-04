@@ -268,13 +268,15 @@ describe("SQLite persistence", () => {
   it("applies migration 23 ownership and technical memory semantics", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(39);
-      expect(database.all<{ name: string }>("PRAGMA table_info(projects)").map((row) => row.name)).toEqual(expect.arrayContaining(["ownership_mode", "ownership_note"]));
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(40);
+      expect(database.all<{ name: string }>("PRAGMA table_info(projects)").map((row) => row.name)).toEqual(expect.arrayContaining(["ownership_mode", "ownership_note", "project_introduction"]));
       expect(database.all<{ name: string }>("PRAGMA table_info(project_facts)").map((row) => row.name)).toEqual(expect.arrayContaining(["experience_relation", "value_json"]));
       new SqliteProfileRepository(database).save({ id: "profile-v4", name: "V4", language: "zh-CN", skills: [], knowledgeBaseIds: [], createdAt: 1, updatedAt: 1 });
       const memory = new SqliteProjectMemoryRepository(database);
       const created = memory.createProject("profile-v4", "团队项目", 2, "team", "我负责控制链路");
       expect(created).toMatchObject({ ownershipMode: "team", ownershipNote: "我负责控制链路" });
+      const projectRepository = new SqliteProjectRepository(database);
+      expect(projectRepository.update(created.id, { projectIntroduction: "这是可以直接口述的项目介绍。" }, 2)?.projectIntroduction).toBe("这是可以直接口述的项目介绍。");
       memory.replaceSnapshot("profile-v4", { projects: [{ id: created.id, profileId: "profile-v4", name: created.name, description: "", role: "", hardware: [], software: [], technologyStack: [], sourceIds: [], confidence: 1, ownershipMode: "personal" }], modules: [], technicalPoints: [], problems: [], interviewQuestions: [], facts: [] }, 3);
       expect(memory.getProject(created.id)?.ownershipMode).toBe("team");
       const parameter = memory.addCandidateFact({ id: "v4-parameter", projectId: created.id, type: "parameter", title: "CAN 波特率", content: "CAN 波特率 500 kbps", confidence: 1, verified: false, sourceIds: ["v4-source"], evidence: [{ sourceId: "v4-source", quote: "CAN 波特率 500 kbps" }] });
@@ -415,7 +417,7 @@ describe("SQLite persistence", () => {
     } finally { database.close(); }
   });
 
-  it("imports trusted project QA into the existing question-bank schema without blanket invalidation", async () => {
+  it("imports project QA for review without promoting it or blanket-invalidating existing data", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
       const profiles = new SqliteProfileRepository(database);
@@ -424,13 +426,13 @@ describe("SQLite persistence", () => {
       const questionBank = new SqliteQuestionBankRepository(database);
       const report = questionBank.importProjectText(profile.id, project.id, "问题：ADC 怎么保证实时性？\n答案：PWM 中点触发 ADC，并通过 DMA 搬运。", "foc-questions.md");
 
-      expect(report).toMatchObject({ projectId: project.id, sourceRole: "question_bank", verified: true, recognizedQuestions: 1, importedAnswers: 1 });
+      expect(report).toMatchObject({ projectId: project.id, sourceRole: "question_bank", verified: false, recognizedQuestions: 1, importedAnswers: 1 });
       expect(questionBank.listQuestions({ scope: "project", projectId: project.id, exactProject: true, status: "all" })).toHaveLength(1);
       expect(questionBank.listQuestions({ scope: "project", projectId: "another-project", exactProject: true, status: "all" })).toHaveLength(0);
       expect(questionBank.listQuestions({ status: "all" })).toHaveLength(1);
       const saved = questionBank.listQuestions({ scope: "project", projectId: project.id, exactProject: true, status: "all" })[0];
-      expect(saved).toMatchObject({ scope: "project", projectId: project.id, bankType: "project", source: "imported", verified: true, stale: false });
-      expect(saved?.answerCards[0]).toMatchObject({ sourceType: "imported", verified: true, stale: false });
+      expect(saved).toMatchObject({ scope: "project", projectId: project.id, bankType: "project", source: "imported", verified: false, stale: false });
+      expect(saved?.answerCards[0]).toMatchObject({ sourceType: "imported", verified: false, stale: false });
 
       expect(questionBank.markProjectQuestionBankStale(project.id, 100)).toBe(0);
       expect(questionBank.getQuestion(saved?.id ?? "")).toMatchObject({ stale: false });
@@ -446,6 +448,8 @@ describe("SQLite persistence", () => {
       const project = memory.createProject(profile.id, "FOC");
       const pwmFact = memory.addCandidateFact({ id: "fact-pwm-frequency", projectId: project.id, profileId: profile.id, type: "parameter", title: "PWM 频率", content: "10kHz", confidence: 1, verified: false, sourceIds: ["doc-pwm"], evidence: [{ sourceId: "doc-pwm", quote: "PWM 频率 10kHz" }] });
       const canFact = memory.addCandidateFact({ id: "fact-can-arbitration", projectId: project.id, profileId: profile.id, type: "technology", title: "CAN 仲裁", content: "显性位优先", confidence: 1, verified: false, sourceIds: ["doc-can"], evidence: [{ sourceId: "doc-can", quote: "CAN 使用显性位仲裁" }] });
+      memory.confirmFactAsUser(pwmFact.id);
+      memory.confirmFactAsUser(canFact.id);
       const questionBank = new SqliteQuestionBankRepository(database);
       const pwmQuestion = questionBank.saveQuestion({ id: "qa-pwm", canonicalText: "PWM 频率是多少？", type: "project", bankType: "project", category: "project", scope: "project", profileId: profile.id, projectId: project.id, source: "imported", verified: true, factIds: [pwmFact.id] });
       questionBank.saveAnswerCard({ id: "qa-pwm-card", questionId: pwmQuestion.id, content: "10kHz", sourceType: "imported", verified: true, factIds: [pwmFact.id] });
@@ -530,7 +534,7 @@ describe("SQLite persistence", () => {
       first.close();
       const second = await SqliteDatabase.open(filePath);
       try {
-      expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(39);
+      expect(second.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(40);
         const repaired = new SqliteProjectMemoryRepository(second);
         repaired.repairProjectTechnicalSemantics("project-migration");
         expect(repaired.listFacts(profile.id, "project-migration", { includeStale: true, includeRejected: true })).toHaveLength(2);
@@ -569,7 +573,7 @@ describe("SQLite persistence", () => {
       expect(memory.getUnderstandingSnapshot(project.id, "hash-a")?.understanding.summary).toContain("可缓存");
       expect(memory.getSnapshot(profile.id).understandings?.[0]?.projectId).toBe(project.id);
       expect(memory.getUnderstandingSnapshot(project.id, "different-hash")).toBeUndefined();
-      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(39);
+      expect(database.first<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(40);
     } finally { database.close(); }
   });
 
@@ -647,6 +651,8 @@ describe("SQLite persistence", () => {
       expect(introductions.get(profile.id, "resume-b")).toMatchObject({ id: intro.id, status: "stale", approved: true });
       expect(() => introductions.approve(intro.id, "resume-b")).toThrow("SELF_INTRODUCTION_STALE");
       expect(introductions.rebindToCurrent(intro.id, "resume-b")?.resumeHash).toBe("resume-b");
+      introductions.save({ id: intro.id, profileId: profile.id, resumeHash: "resume-b", text: "", source: "manual", approved: true });
+      expect(introductions.get(profile.id, "resume-b")?.text).toBe("");
     } finally { database.close(); }
   });
 });

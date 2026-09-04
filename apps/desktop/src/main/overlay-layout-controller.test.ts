@@ -38,7 +38,7 @@ describe("OverlayLayoutController", () => {
 
   it("resolves written-test single-reader and split layouts independently", () => {
     const single = resolveOverlayNativeBounds(DEFAULT_OVERLAY_PREFERENCES, { display, defaults }, "written_test");
-    expect(single.question).toMatchObject({ x: -1420, y: 104, width: 920, height: 560 });
+    expect(single.question).toMatchObject({ x: -1240, y: 104, width: 560, height: 700 });
     expect(single.answer).toMatchObject({ x: -1310, y: 104, width: 700, height: 560 });
 
     const splitPreferences = {

@@ -35,6 +35,15 @@ export class ContextualQuestionRewriter {
     const candidates: ContextualQuestionRewriteResult["candidates"] = [];
     const unresolved: AsrAmbiguity[] = [];
     const context = contextText(input);
+    for (const [pattern, canonical] of [[/\bA\s+B\s+Z\b/giu, "ABZ"], [/\bI\s+D\b/giu, "Id"], [/\bI\s+Q\b/giu, "Iq"]] as const) {
+      normalizedText = normalizedText.replace(pattern, (raw) => { corrections.push({ raw, canonical, confidence: 0.99, reason: "spelled-technical-letters" }); return canonical; });
+    }
+    // ABC is only an ABZ candidate when the conversation explicitly already
+    // contains ABZ AND the current question is about encoder feedback.
+    if (/\bABC\b/iu.test(normalizedText) && /\bABZ\b/iu.test(context) && /编码器|速度反馈/iu.test(normalizedText)) {
+      normalizedText = normalizedText.replace(/\bABC\b/giu, "ABZ");
+      corrections.push({ raw: "ABC", canonical: "ABZ", confidence: 0.9, reason: "explicit-abz-encoder-context" });
+    }
     // Repeated comparison operands carry no usable distinction. Do not let
     // a fluent model invent fieldbus/Ethernet or NFC from corrupt ASR.
     if (/(现场)和\1|正常和近场/iu.test(normalizedText)) {

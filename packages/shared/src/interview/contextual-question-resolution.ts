@@ -1,5 +1,6 @@
 import { normalizeTechnicalTerms } from "../terminology";
 import type { ActiveProjectContext, ContextResolution, EntityAnchor, QuestionContextReference } from "./question-frame";
+import { spokenEntities } from "./question-subject";
 
 export interface ContextualQuestionResolutionInput {
   rawText: string;
@@ -11,7 +12,7 @@ export interface ContextualQuestionResolutionInput {
   normalizedText?: string;
 }
 
-const REFERENCE = /它|这个|那个|这个项目|该项目|这个芯片|这个模式|这种方式|这样|这么做|刚才那个|前面那个|多久|哪个|哪一个/giu;
+const REFERENCE = /这个项目|该项目|这个芯片|这个模式|这种方式|刚才那个|前面那个|这么做|这样|它|这个|那个|多久|哪一个|哪个/giu;
 
 function clean(value: string): string { return normalizeTechnicalTerms(value).replace(/\s+/g, " ").trim(); }
 function compact(value: string): string { return clean(value).replace(/[，。！？?！、；;：:\s]/gu, ""); }
@@ -19,7 +20,8 @@ function trimQuestion(value: string): string { return clean(value).replace(/[。
 function short(value: string, limit = 80): string { return trimQuestion(value).slice(0, limit); }
 
 function contextValues(input: ContextualQuestionResolutionInput): string[] {
-  return [input.currentTopic, input.activeProject?.name, ...(input.activeProject?.entities ?? []), ...(input.activeEntities ?? []).map((item) => item.value), input.previousQuestion, input.previousAnswer].filter((value): value is string => Boolean(value));
+  // The most recent spoken subject wins over a project's broad technology list.
+  return [...spokenEntities(input.previousQuestion ?? ""), ...[...(input.activeEntities ?? [])].sort((a, b) => b.createdAt - a.createdAt).map(item => item.value), input.currentTopic, input.previousQuestion, input.activeProject?.name, ...(input.activeProject?.entities ?? [])].filter((value): value is string => Boolean(value));
 }
 
 function referenceType(raw: string): string {
@@ -35,7 +37,7 @@ function resolveReference(raw: string, input: ContextualQuestionResolutionInput,
   const project = input.activeProject?.name;
   const technology = values.find((value) => /DMA|ADC|PWM|FOC|中断|异常|栈|SPI|CAN|RTOS/iu.test(value));
   const component = values.find((value) => /STM32|F\d{3,4}|MCU|芯片|控制器/iu.test(value));
-  const resolved = /项目/u.test(raw) ? project : /芯片/u.test(raw) ? component : /模式|方式/u.test(raw) ? technology : /多久/u.test(raw) ? technology ?? input.currentTopic : /这么做|这样|刚才|前面/u.test(raw) ? input.previousQuestion : component ?? technology ?? input.previousQuestion;
+  const resolved = /项目/u.test(raw) ? project : /芯片/u.test(raw) ? component : /模式|方式/u.test(raw) ? technology : /多久/u.test(raw) ? technology ?? input.currentTopic : /这么做|这样|刚才|前面/u.test(raw) ? input.previousQuestion : values[0] ?? input.previousQuestion;
   if (!resolved) return undefined;
   return { raw, resolved, type: referenceType(raw), confidence: /多久/u.test(raw) && !technology ? 0.62 : 0.93 };
 }
@@ -67,8 +69,14 @@ function canonicalize(text: string, input: ContextualQuestionResolutionInput, re
     const target = references.find((item) => item.confidence >= 0.8)?.resolved;
     const targetAlreadyPresent = target && (compact(value).includes(compact(target)) || /stack/iu.test(target) && /栈/iu.test(value) || /栈/iu.test(target) && /stack/iu.test(value));
     if (target && /^(?:多久|哪个|哪一个)/u.test(value) && !targetAlreadyPresent) value = `${target}${value}`;
+    if (target && !targetAlreadyPresent && !spokenEntities(value).length && /^(?:那|那么|所以)?\s*(?:它|这个|那个)/u.test(value)) {
+      const reference = references.find(item => item.confidence >= 0.8);
+      if (reference) value = value.replace(reference.raw, short(reference.resolved));
+    }
   }
-  if (hasProject && /(?:项目|系统|平台)/u.test(value) === false && input.currentTopic && /(?:怎么|如何|什么|为什么|哪个|多久)/u.test(value) && /^(?:它|这个|那个|哪个|哪一个|多久|为什么)/u.test(value)) value = `${input.currentTopic}：${value}`;
+  // A spoken subject wins over the previous topic. Otherwise an Id/Iq
+  // question after ADC was incorrectly rewritten into an ADC question.
+  if (hasProject && !spokenEntities(value).length && /(?:项目|系统|平台)/u.test(value) === false && input.currentTopic && /(?:怎么|如何|什么|为什么|哪个|多久)/u.test(value) && /^(?:它|这个|那个|哪个|哪一个|多久|为什么|什么模式|是怎么)/u.test(value)) value = `${input.currentTopic}：${value}`;
   return value + (/[？?]$/u.test(value) ? "" : /(?:什么|为什么|为何|怎么|如何|怎样|哪些|哪个|多久|吗|呢|区别|原理|作用|原因|选择|选)/iu.test(value) ? "？" : "");
 }
 

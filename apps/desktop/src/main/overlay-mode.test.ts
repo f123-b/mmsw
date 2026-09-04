@@ -4,6 +4,7 @@ import { applyOverlayMode, type OverlayWindowLike } from "./overlay-mode";
 function fakeWindow(): OverlayWindowLike & { setFocusable: ReturnType<typeof vi.fn>; setIgnoreMouseEvents: ReturnType<typeof vi.fn> } {
   return {
     isDestroyed: () => false,
+    isFocusable: () => true,
     setFocusable: vi.fn(),
     setIgnoreMouseEvents: vi.fn(),
     webContents: { send: vi.fn() }
@@ -11,6 +12,15 @@ function fakeWindow(): OverlayWindowLike & { setFocusable: ReturnType<typeof vi.
 }
 
 describe("applyOverlayMode", () => {
+  it("does not deactivate an already non-focusable overlay on repeated updates", () => {
+    const window = fakeWindow();
+    window.isFocusable = () => false;
+    applyOverlayMode(window, "interactive");
+    applyOverlayMode(window, "passive");
+    expect(window.setFocusable).not.toHaveBeenCalled();
+    expect(window.setIgnoreMouseEvents).toHaveBeenLastCalledWith(true, { forward: true });
+  });
+
   it("makes a bounded native panel interactive in interactive mode", () => {
     const window = fakeWindow();
     applyOverlayMode(window, "interactive");

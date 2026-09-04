@@ -8,6 +8,7 @@ export interface ProjectCollectionRecord {
   updatedAt: number;
   ownershipMode?: ProjectMemoryProject["ownershipMode"];
   ownershipNote?: string;
+  projectIntroduction?: string;
 }
 
 function placeholderProject(record: ProjectCollectionRecord): ProjectMemoryProject {
@@ -23,7 +24,8 @@ function placeholderProject(record: ProjectCollectionRecord): ProjectMemoryProje
     sourceIds: [],
     confidence: 0,
     ownershipMode: record.ownershipMode,
-    ownershipNote: record.ownershipNote
+    ownershipNote: record.ownershipNote,
+    projectIntroduction: record.projectIntroduction
   };
 }
 
@@ -36,7 +38,7 @@ export function mergeProjectCollection(records: ProjectCollectionRecord[], memor
   const memoryById = new Map(memoryProjects.map((project) => [project.id, project]));
   const collection = records.length > 0
     ? records
-    : memoryProjects.map((project) => ({ id: project.id, name: project.name, profileId: project.profileId, createdAt: 0, updatedAt: 0, ownershipMode: project.ownershipMode, ownershipNote: project.ownershipNote }));
+    : memoryProjects.map((project) => ({ id: project.id, name: project.name, profileId: project.profileId, createdAt: 0, updatedAt: 0, ownershipMode: project.ownershipMode, ownershipNote: project.ownershipNote, projectIntroduction: project.projectIntroduction }));
 
   return collection.map((record) => ({
     ...placeholderProject(record),
@@ -45,7 +47,8 @@ export function mergeProjectCollection(records: ProjectCollectionRecord[], memor
     name: record.name,
     ...(record.profileId ? { profileId: record.profileId } : {}),
     ...(record.ownershipMode ? { ownershipMode: record.ownershipMode } : {}),
-    ...(record.ownershipNote ? { ownershipNote: record.ownershipNote } : {})
+    ...(record.ownershipNote ? { ownershipNote: record.ownershipNote } : {}),
+    ...(record.projectIntroduction ? { projectIntroduction: record.projectIntroduction } : {})
   }));
 }
 

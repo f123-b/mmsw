@@ -1,0 +1,97 @@
+- main [ref=f2e3]:
+  - complementary [ref=f2e4]:
+    - generic [ref=f2e5]:
+      - button "新对话" [ref=f2e6] [cursor=pointer]:
+        - generic [ref=f2e13]:
+          - generic [ref=f2e14]: Interview Copilot
+          - generic [ref=f2e15]: AI 面试智能体
+      - button "↗ 开始一场面试 实时听题 · 生成回答" [ref=f2e16] [cursor=pointer]:
+        - generic [ref=f2e17]: ↗
+        - generic [ref=f2e18]:
+          - strong [ref=f2e19]: 开始一场面试
+          - generic [ref=f2e20]: 实时听题 · 生成回答
+    - generic [ref=f2e21]:
+      - navigation "主导航" [ref=f2e22]:
+        - button "新对话" [ref=f2e23] [cursor=pointer]:
+          - generic [aria-hidden] [ref=f2e24]: ＋
+        - button "开始面试" [ref=f2e26] [cursor=pointer]:
+          - generic [aria-hidden] [ref=f2e27]: ◉
+        - button "上传演讲稿" [ref=f2e29] [cursor=pointer]:
+          - generic [aria-hidden] [ref=f2e30]: ▥
+        - button "面试准备" [ref=f2e32] [cursor=pointer]:
+          - generic [aria-hidden] [ref=f2e33]: ✦
+        - button "档案 / 简历" [ref=f2e35] [cursor=pointer]:
+          - generic [aria-hidden] [ref=f2e36]: ▱
+        - button "项目库" [ref=f2e38] [cursor=pointer]:
+          - generic [aria-hidden] [ref=f2e39]: ⌘
+        - button "通用题库" [ref=f2e41] [cursor=pointer]:
+          - generic [aria-hidden] [ref=f2e42]: ☷
+        - button "岗位要求" [ref=f2e44] [cursor=pointer]:
+          - generic [aria-hidden] [ref=f2e45]: ⌗
+        - button "面试历史" [ref=f2e47] [cursor=pointer]:
+          - generic [aria-hidden] [ref=f2e48]: ◷
+        - button "资料库" [ref=f2e50] [cursor=pointer]:
+          - generic [aria-hidden] [ref=f2e51]: ▤
+      - generic [ref=f2e53]: 对话工作区
+      - generic [ref=f2e54]: 还没有项目
+      - generic [ref=f2e55]: 最近对话
+      - generic [ref=f2e56]: 还没有对话
+    - generic [ref=f2e57]:
+      - button "⚙ 设置" [ref=f2e58] [cursor=pointer]:
+        - generic [ref=f2e59]: ⚙
+        - generic [ref=f2e60]: 设置
+      - button "? 帮助" [ref=f2e61] [cursor=pointer]:
+        - generic [ref=f2e62]: "?"
+        - generic [ref=f2e63]: 帮助
+  - generic [ref=f2e64]:
+    - generic [ref=f2e65]:
+      - generic [ref=f2e66]:
+        - generic [ref=f2e67]: Interview Copilot
+        - generic [ref=f2e68]: /
+        - strong [ref=f2e69]: 工作台
+      - generic [ref=f2e70]:
+        - generic [ref=f2e71]: 未选择面试档案
+        - button "开始面试 ↗" [ref=f2e72] [cursor=pointer]:
+          - text: 开始面试
+          - generic [ref=f2e73]: ↗
+    - generic [ref=f2e74]:
+      - region "欢迎页" [ref=f2e76]:
+        - generic [ref=f2e85]: PERSONAL INTERVIEW AGENT
+        - heading "把准备，变成面试底气" [level=1] [ref=f2e86]
+        - heading "先准备，再上场。" [level=2] [ref=f2e87]
+        - paragraph [ref=f2e88]: 整理简历、JD 和项目经历，面试时实时听题、理解追问，生成一眼能读懂、也能自然说出口的回答。
+        - generic [ref=f2e89]:
+          - button "开始准备 ↗" [ref=f2e90] [cursor=pointer]
+          - button "整理项目经历" [ref=f2e91] [cursor=pointer]
+          - button "设置语言" [ref=f2e92] [cursor=pointer]
+          - button "刷新欢迎页" [ref=f2e93] [cursor=pointer]: ↻
+        - generic "核心能力" [ref=f2e94]:
+          - article [ref=f2e95]:
+            - text: "01"
+            - strong [ref=f2e96]: 面试档案
+            - paragraph [ref=f2e97]: 简历、JD、技能卡统一管理
+          - article [ref=f2e98]:
+            - text: "02"
+            - strong [ref=f2e99]: 实时应答
+            - paragraph [ref=f2e100]: 听题、识别意图、跟进追问
+          - article [ref=f2e101]:
+            - text: "03"
+            - strong [ref=f2e102]: 截图解题
+            - paragraph [ref=f2e103]: 笔试和案例题一键拆解
+      - generic [ref=f2e104]:
+        - generic [ref=f2e105]:
+          - generic [ref=f2e106]: 档案：未选择
+          - generic [ref=f2e107]: 项目：自动
+          - generic [ref=f2e108]: 知识：自动检索
+          - generic [ref=f2e109]: 事实策略：仅已确认
+        - region "面试准备输入框" [ref=f2e110]:
+          - generic [ref=f2e111]:
+            - button "选择会话" [ref=f2e112] [cursor=pointer]:
+              - text: 独立对话
+              - generic [ref=f2e113]: ⌄
+            - button "⊞ 创建项目" [ref=f2e114] [cursor=pointer]
+          - generic [ref=f2e115]:
+            - textbox "面试准备问题" [ref=f2e116]:
+              - /placeholder: 向 Interview Copilot 咨询任何面试准备问题...
+            - button "发送" [ref=f2e118] [cursor=pointer]: ↑
+          - generic [ref=f2e119]: Ctrl / ⌘ + Enter 发送

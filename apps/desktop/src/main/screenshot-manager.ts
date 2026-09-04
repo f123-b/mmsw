@@ -9,7 +9,7 @@ import type { ScreenshotImage } from "@interview-copilot/shared";
 export { selectPrimaryScreenSource } from "./screen-source-selection";
 export type { ScreenSourceLike } from "./screen-source-selection";
 
-const MAX_DIMENSION = 1_280;
+const MAX_DIMENSION = 2_560;
 const MAX_PNG_BYTES = 2 * 1024 * 1024;
 
 export interface ScreenshotResult extends ScreenshotImage {
@@ -111,7 +111,8 @@ export class ScreenshotManager {
     const primaryDisplay = screen.getPrimaryDisplay();
     const sources = await desktopCapturer.getSources({
       types: ["screen"],
-      thumbnailSize: { width: MAX_DIMENSION, height: MAX_DIMENSION }
+      // Preserve small text before cropping a selected region.
+      thumbnailSize: { width: 3_840, height: 3_840 }
     });
     const source = selectPrimaryScreenSource(sources, primaryDisplay.id);
     if (!source) throw new Error("No display source available");

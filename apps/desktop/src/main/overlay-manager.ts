@@ -1,6 +1,6 @@
 import { BrowserWindow, screen, type BrowserWindowConstructorOptions } from "electron";
 import { join } from "node:path";
-import { applyOverlayMode, nextOverlayMode, type OverlayMode } from "./overlay-mode";
+import { applyOverlayMode, ensureOverlayNonFocusable, nextOverlayMode, type OverlayMode } from "./overlay-mode";
 import { applyCaptureProtection, getCaptureProtectionCapabilities, type CaptureProtectionCapabilities, type CaptureProtectionState } from "./overlay-capture-protection";
 import { initialHUDState, reduceHUDState, type HUDAction, type HUDState, type OverlayTransientLayer } from "./hud-state";
 import { calculateHUDLayout, type HUDLayout, type HUDWorkArea } from "./hud-layout";
@@ -32,13 +32,14 @@ export interface OverlayDisplayInfo {
   scaleFactor: number;
 }
 
-export type OverlayWindowSurface = "question" | "answer" | "control" | "transient";
+export type OverlayWindowSurface = "question" | "answer" | "script" | "control" | "transient";
 
 export interface OverlayManagerOptions {
   preloadPath?: string;
   loadRenderer: (window: BrowserWindow, surface?: OverlayWindowSurface) => Promise<void>;
   getMainWindow?: () => BrowserWindow | undefined;
   captureProtectionEnabled?: boolean;
+  speechScriptAvailable?: boolean;
   onCaptureProtectionDiagnostic?: (event: string, fields: Record<string, unknown>) => void;
   onNativeBoundsChanged?: (panel: OverlayNativePanel, bounds: OverlayNativeBounds, display: OverlayDisplayInfo) => void;
   onHUDStateChange?: (state: HUDState) => void;
@@ -60,7 +61,7 @@ type OverlayWindowMap = Record<OverlayNativePanel, BrowserWindow | undefined>;
 
 /** Owns the native overlay windows and their lifecycle. Renderers only render their panel. */
 export class OverlayManager {
-  private windows: OverlayWindowMap = { question: undefined, answer: undefined, control: undefined };
+  private windows: OverlayWindowMap = { question: undefined, answer: undefined, script: undefined, control: undefined };
   private transientWindowValue: BrowserWindow | undefined;
   private readonly rendererLoads = new Map<OverlayWindowSurface, Promise<void>>();
   private readonly rendererReady = new Set<OverlayWindowSurface>();
@@ -75,6 +76,7 @@ export class OverlayManager {
   private hudStateValue: HUDState = { ...initialHUDState };
   private hudLayoutValue: HUDLayout = calculateHUDLayout({ x: 0, y: 0, width: 1440, height: 900 });
   private captureProtectionEnabled: boolean;
+  private speechScriptAvailable: boolean;
   private captureProtectionState: CaptureProtectionState;
   private readonly capabilities: CaptureProtectionCapabilities;
   private readonly zOrderController: OverlayZOrderController;
@@ -89,6 +91,7 @@ export class OverlayManager {
 
   constructor(private readonly options: OverlayManagerOptions) {
     this.captureProtectionEnabled = options.captureProtectionEnabled ?? true;
+    this.speechScriptAvailable = Boolean(options.speechScriptAvailable);
     this.capabilities = getCaptureProtectionCapabilities();
     this.captureProtectionState = {
       platform: this.capabilities.platform,
@@ -114,13 +117,14 @@ export class OverlayManager {
   get currentWindow(): BrowserWindow | undefined { return this.currentQuestionWindow; }
   get currentQuestionWindow(): BrowserWindow | undefined { return this.getWindow("question"); }
   get currentAnswerWindow(): BrowserWindow | undefined { return this.getWindow("answer"); }
+  get currentScriptWindow(): BrowserWindow | undefined { return this.getWindow("script"); }
   get currentControlWindow(): BrowserWindow | undefined { return this.getWindow("control"); }
   get currentTransientWindow(): BrowserWindow | undefined { const window = this.transientWindowValue; return window && !window.isDestroyed() ? window : undefined; }
   /** Compatibility alias for callers that only know the old confirm surface. */
   get currentConfirmWindow(): BrowserWindow | undefined { return this.currentTransientWindow; }
   get confirmWindowConfiguration(): ConfirmWindowConfiguration { return { frame: false, transparent: true, skipTaskbar: true, alwaysOnTop: true, hasShadow: false, focusable: false }; }
   get endInterviewConfirmOpen(): boolean { return this.hudStateValue.transientLayer === "end_confirm"; }
-  get currentWindows(): BrowserWindow[] { return (["question", "answer", "control"] as const).map((panel) => this.getWindow(panel)).filter((window): window is BrowserWindow => Boolean(window)); }
+  get currentWindows(): BrowserWindow[] { return (["question", "answer", "script", "control"] as const).map((panel) => this.getWindow(panel)).filter((window): window is BrowserWindow => Boolean(window)); }
   get captureProtection(): boolean { return this.captureProtectionEnabled; }
   get captureProtectionSupported(): boolean { return this.capabilities.captureProtectionSupported; }
   get captureProtectionStatus(): CaptureProtectionState { return this.captureProtectionState; }
@@ -163,6 +167,16 @@ export class OverlayManager {
   toggleAll(): void { this.transition({ type: "toggle-panels" }); }
   toggleTranscript(): void { this.transition({ type: "toggle-transcript" }); }
   toggleAnswer(): void { this.transition({ type: "toggle-answer" }); }
+  toggleScript(): void {
+    if (this.runtimeLayoutMode !== "interview" || !this.speechScriptAvailable) return;
+    this.transition({ type: "toggle-script" });
+  }
+  setSpeechScriptAvailable(available: boolean): void {
+    this.speechScriptAvailable = Boolean(available);
+    if (this.speechScriptAvailable && this.runtimeLayoutMode === "interview" && (this.hudStateValue.running || this.isLayoutEditMode)) this.ensureWindow("script");
+    if (!this.speechScriptAvailable && (this.hudStateValue.scriptVisible || this.hudStateValue.previousVisualState?.scriptVisible)) this.transition({ type: "set-script-visible", visible: false });
+    else this.syncPanelVisibility();
+  }
   toggleShortcuts(): void {
     const layer: OverlayTransientLayer = this.hudStateValue.transientLayer === "shortcut" ? "none" : "shortcut";
     this.setTransientLayer(layer);
@@ -180,6 +194,7 @@ export class OverlayManager {
     this.options.onStartupTiming?.("OVERLAY_PREPARE_BEGIN");
     this.ensureWindow("question");
     this.ensureWindow("answer");
+    if (this.speechScriptAvailable) this.ensureWindow("script");
     this.ensureWindow("control");
     this.ensureTransientWindow();
     await Promise.all([...this.rendererLoads.values()]);
@@ -210,7 +225,12 @@ export class OverlayManager {
   setClickThrough(enabled: boolean): void { this.setMode(enabled ? "passive" : "interactive"); }
 
   setNativeWindowBounds(panel: OverlayNativePanel, bounds: OverlayNativeBounds): void {
-    if (!this.isLayoutEditMode) return;
+    const writtenInteractiveDrag = panel === "question"
+      && this.runtimeLayoutMode === "written_test"
+      && this.hudStateValue.running
+      && !this.hudStateValue.shareMode
+      && this.mode === "interactive";
+    if (!this.isLayoutEditMode && !writtenInteractiveDrag && !(panel === "script" && this.hudStateValue.running && this.hudStateValue.scriptVisible && !this.hudStateValue.shareMode)) return;
     const window = this.getWindow(panel);
     if (!window) return;
     // Layout edit is constrained to the mode's target display. A drag whose
@@ -297,7 +317,7 @@ export class OverlayManager {
 
   handleGlobalWheel(x: number, y: number, deltaY: number): void {
     if (this.wheelRouting === "underlying_app" || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(deltaY)) return;
-    for (const panel of ["question", "answer"] as const) {
+    for (const panel of ["question", "answer", "script"] as const) {
       const window = this.getWindow(panel);
       if (!window) continue;
       const bounds = window.getBounds();
@@ -314,10 +334,14 @@ export class OverlayManager {
     this.options.onStartupTiming?.("OVERLAY_SHOW_REQUEST");
     const questionWindow = this.ensureWindow("question");
     this.ensureWindow("answer");
+    if (this.runtimeLayoutMode === "interview" && this.speechScriptAvailable) this.ensureWindow("script");
     this.ensureWindow("control");
     this.ensureTransientWindow();
     for (const panel of ["question", "answer", "control"] as const) {
-      if (this.rendererReady.has(panel)) this.options.onStartupTiming?.(panel === "question" ? "QUESTION_RENDERER_READY" : panel === "answer" ? "ANSWER_RENDERER_READY" : "CONTROL_RENDERER_READY");
+      if (!this.rendererReady.has(panel)) continue;
+      if (panel === "question") this.options.onStartupTiming?.("QUESTION_RENDERER_READY");
+      else if (panel === "answer") this.options.onStartupTiming?.("ANSWER_RENDERER_READY");
+      else this.options.onStartupTiming?.("CONTROL_RENDERER_READY");
     }
     this.applyNativeBounds();
     this.applyMode();
@@ -338,27 +362,37 @@ export class OverlayManager {
     const layoutEditing = this.isLayoutEditMode;
     if (!this.hudStateValue.shareMode && (layoutEditing || (this.hudStateValue.running && this.hudStateValue.panelVisible))) {
       const leftPanel = this.runtimeLayoutMode === "interview" ? this.layoutPreferences.interview.leftPanel : "question";
-      if (leftPanel !== "hidden") visible.add("question");
-      if (this.runtimeLayoutMode === "interview" ? (layoutEditing || this.hudStateValue.answerVisible) && this.layoutPreferences.interview.showAnswer : (layoutEditing || this.hudStateValue.answerVisible) && this.layoutPreferences.writtenTest.showAnswer && this.layoutPreferences.writtenTest.layoutPreset === "split") visible.add("answer");
+      if (leftPanel !== "hidden" && (layoutEditing || this.hudStateValue.transcriptVisible)) visible.add("question");
+      if (this.runtimeLayoutMode === "interview" && (layoutEditing || this.hudStateValue.answerVisible) && this.layoutPreferences.interview.showAnswer) visible.add("answer");
+      if (this.runtimeLayoutMode === "interview" && this.speechScriptAvailable && (layoutEditing || this.hudStateValue.scriptVisible)) visible.add("script");
     }
-    if (!this.hudStateValue.shareMode && (layoutEditing || (this.hudStateValue.running && this.hudStateValue.topBarVisible)) && (this.runtimeLayoutMode === "written_test" || this.layoutPreferences.showToolbar)) visible.add("control");
-    for (const panel of ["question", "answer", "control"] as const) {
+    if (this.runtimeLayoutMode === "interview" && !this.hudStateValue.shareMode && (layoutEditing || (this.hudStateValue.running && this.hudStateValue.topBarVisible)) && this.layoutPreferences.showToolbar) visible.add("control");
+    for (const panel of ["question", "answer", "script", "control"] as const) {
       const window = this.getWindow(panel);
       if (!window) continue;
       if (visible.has(panel)) {
+        const wasVisible = window.isVisible();
         window.showInactive();
+        if (!wasVisible && (panel === "control" || panel === "script")) {
+          // Reused transparent HWNDs can retain a stale Chromium hit-test region.
+          // Invalidate it on show, not on every frame/watchdog tick.
+          window.setIgnoreMouseEvents(true, { forward: true });
+          window.setIgnoreMouseEvents(false, { forward: true });
+        }
         if (panel === "control") {
           // Control is the emergency surface: it never inherits the content
           // panels' passthrough state, even while a mode transition is in
           // flight.
-          window.setFocusable(false);
+          ensureOverlayNonFocusable(window);
           window.setIgnoreMouseEvents(false, { forward: true });
           if (!this.controlClickableReported) {
             this.controlClickableReported = true;
             this.zOrderController.recordControlClickable({ source: "native-control-window" });
           }
         }
-        this.options.onStartupTiming?.(panel === "question" ? "QUESTION_VISIBLE" : panel === "answer" ? "ANSWER_VISIBLE" : "CONTROL_VISIBLE");
+        if (panel === "question") this.options.onStartupTiming?.("QUESTION_VISIBLE");
+        else if (panel === "answer") this.options.onStartupTiming?.("ANSWER_VISIBLE");
+        else if (panel === "control") this.options.onStartupTiming?.("CONTROL_VISIBLE");
       } else {
         window.hide();
         if (panel === "control") this.controlClickableReported = false;
@@ -393,8 +427,8 @@ export class OverlayManager {
     screen.removeListener("display-added", this.displayChangeHandler);
     screen.removeListener("display-removed", this.displayChangeHandler);
     this.lifecycleState = initialOverlayLifecycleState;
-    for (const panel of ["question", "answer", "control"] as const) this.getWindow(panel)?.destroy();
-    this.windows = { question: undefined, answer: undefined, control: undefined };
+    for (const panel of ["question", "answer", "script", "control"] as const) this.getWindow(panel)?.destroy();
+    this.windows = { question: undefined, answer: undefined, script: undefined, control: undefined };
     this.currentTransientWindow?.destroy();
     this.transientWindowValue = undefined;
     this.rendererLoads.clear();
@@ -404,12 +438,16 @@ export class OverlayManager {
   }
 
   private applyMode(): void {
-    const interactiveContent = this.isLayoutEditMode || this.mode === "interactive" || this.temporaryInteraction;
+    const interactiveContent = this.runtimeLayoutMode === "written_test" || this.isLayoutEditMode || this.mode === "interactive" || this.temporaryInteraction;
     const questionWindow = this.currentQuestionWindow;
     const answerWindow = this.currentAnswerWindow;
+    const scriptWindow = this.currentScriptWindow;
     const controlWindow = this.currentControlWindow;
     if (questionWindow) { applyOverlayMode(questionWindow, interactiveContent ? "interactive" : "passive"); questionWindow.setResizable(this.isLayoutEditMode); questionWindow.webContents.send("overlay:mode", interactiveContent ? "interactive" : "passive"); }
     if (answerWindow) { applyOverlayMode(answerWindow, interactiveContent ? "interactive" : "passive"); answerWindow.setResizable(this.isLayoutEditMode); answerWindow.webContents.send("overlay:mode", interactiveContent ? "interactive" : "passive"); }
+    // The teleprompter has its own bounded drag/scroll controls. Keep this
+    // surface interactive and non-focusable; other panels retain passthrough.
+    if (scriptWindow) { applyOverlayMode(scriptWindow, "interactive"); scriptWindow.setResizable(false); scriptWindow.webContents.send("overlay:mode", "interactive"); }
     if (controlWindow) { applyOverlayMode(controlWindow, "interactive"); controlWindow.setResizable(this.isLayoutEditMode); controlWindow.webContents.send("overlay:mode", "interactive"); }
     const transientWindow = this.currentTransientWindow;
     if (transientWindow) {
@@ -452,12 +490,14 @@ export class OverlayManager {
     const existing = this.getWindow(panel);
     if (existing) return existing;
     const bounds = this.nativeBounds(panel);
-    const window = new BrowserWindow({ ...bounds, title: panel === "control" ? "Interview Copilot Overlay Controls" : `Interview Copilot ${panel} Overlay`, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: false, acceptFirstMouse: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false } });
+    const window = new BrowserWindow({ ...bounds, title: panel === "control" ? "Interview Copilot Overlay Controls" : `Interview Copilot ${panel} Overlay`, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: false, acceptFirstMouse: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false } });
     this.windows[panel] = window;
     this.syncZOrderWindows();
     const load = Promise.resolve(this.options.loadRenderer(window, panel)).then(() => {
       this.rendererReady.add(panel);
-      this.options.onStartupTiming?.(panel === "question" ? "QUESTION_RENDERER_READY" : panel === "answer" ? "ANSWER_RENDERER_READY" : "CONTROL_RENDERER_READY");
+      if (panel === "question") this.options.onStartupTiming?.("QUESTION_RENDERER_READY");
+      else if (panel === "answer") this.options.onStartupTiming?.("ANSWER_RENDERER_READY");
+      else if (panel === "control") this.options.onStartupTiming?.("CONTROL_RENDERER_READY");
     }).catch(() => undefined);
     this.rendererLoads.set(panel, load);
     window.once("ready-to-show", () => { this.applyMode(); this.applyCaptureProtection(); this.sendHudState(); this.sendLayoutEditMode(); this.refreshLayout(window.getBounds()); this.syncZOrderWindows(); this.zOrderController.assertOverlayZOrder("renderer-ready"); });
@@ -500,7 +540,7 @@ export class OverlayManager {
     // The owner relationship keeps the popup out of the app's independent
     // window identity; disabling focus prevents shortcut/confirm from
     // stealing the foreground window underneath it.
-    window.setFocusable(false);
+    ensureOverlayNonFocusable(window);
     // Reapply the hit-test transition after a hidden transient is reused.
     // Chromium can otherwise retain the previous passive native region until
     // the next compositor commit.
@@ -542,6 +582,7 @@ export class OverlayManager {
     this.zOrderController.setWindows({
       question: this.currentQuestionWindow,
       answer: this.currentAnswerWindow,
+      script: this.currentScriptWindow,
       control: this.currentControlWindow,
       transient: this.currentTransientWindow
     });
@@ -555,13 +596,13 @@ export class OverlayManager {
     // Reassert this after every z-order/layout transition because Windows can
     // retain the previous click-through state when a transparent window is
     // hidden and shown again.
-    window.setFocusable(false);
+    ensureOverlayNonFocusable(window);
     window.setIgnoreMouseEvents(false, { forward: true });
   }
 
   private applyNativeBounds(): void {
     const bounds = this.nativeBounds();
-    for (const panel of ["question", "answer", "control"] as const) this.getWindow(panel)?.setBounds(bounds[panel], false);
+    for (const panel of ["question", "answer", "script", "control"] as const) this.getWindow(panel)?.setBounds(bounds[panel], false);
     this.refreshLayout(this.targetMonitorBounds());
     this.syncZOrderWindows();
     this.zOrderController.assertOverlayZOrder("bounds-applied");

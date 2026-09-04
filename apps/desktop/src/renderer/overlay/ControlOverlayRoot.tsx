@@ -3,6 +3,8 @@ import type { OverlayPreferences } from "../../shared/overlay-preferences";
 import { DEFAULT_OVERLAY_PREFERENCES } from "../../shared/overlay-preferences";
 import { DraggableResizablePanel, overlayWindowStyle, type OverlayPanelLayout, type OverlayRootProps } from "./OverlayRoot";
 import { primaryRuntimeStatus } from "./runtime-state";
+import { writtenStatusLabel } from "../written-test-status";
+import { WrittenScreenshotButton } from "./WrittenScreenshotButton";
 
 /** ControlWindow deliberately renders only the always-clickable toolbar. */
 export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
@@ -23,16 +25,14 @@ export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
   const interviewMode = props.operationMode !== "WRITTEN_TEST";
   const interviewPreferences = preferences.interview;
   const writtenPreferences = preferences.writtenTest;
-  const statusLabel = interviewMode ? primaryRuntimeStatus(props.runtimePhases) : props.writtenTest.screenshotStatus === "CAPTURING" ? "正在截图" : props.writtenTest.screenshotStatus === "ANALYZING" ? "正在识别题目" : props.writtenTest.screenshotStatus === "SOLVING" ? "正在生成答案" : props.writtenTest.screenshotStatus === "SUCCESS" ? "已保存答案" : props.writtenTest.screenshotStatus === "ERROR" ? "识别失败" : "等待截图";
+  const statusLabel = interviewMode ? primaryRuntimeStatus(props.runtimePhases) : writtenStatusLabel(props.writtenTest.screenshotStatus);
   const answerReady = props.runtimePhases.answerPhase === "READY";
   const controlPreferences = interviewMode ? interviewPreferences.controlBar : writtenPreferences.controlBar;
   if (!interviewMode) {
     const busy = ["CAPTURING", "ANALYZING", "SOLVING"].includes(props.writtenTest.screenshotStatus);
     const retry = props.writtenTest.screenshotStatus === "ERROR";
     return <main className="overlay-root control-overlay-root written-camera-root" data-overlay-surface="control" data-hud-state={statusLabel} data-operation-mode={props.operationMode} style={overlayWindowStyle(controlPreferences, preferences.appearance)}>
-      <button className="written-camera-control hud-interactive-region" type="button" disabled={busy} onClick={() => void props.onAnswerScreenshot()} title={retry ? "重试截图识别" : busy ? statusLabel : "截图识别并回答"} aria-label={retry ? "重试截图识别" : "截图识别并回答"}>
-        <span aria-hidden="true">{retry ? "↻" : "📷"}</span>
-      </button>
+      <WrittenScreenshotButton active={props.hudState.running && props.writtenTest.running && props.hudState.topBarVisible && !props.hudState.shareMode && props.hudState.transientLayer === "none" && !layoutEditMode} busy={busy} retry={retry} statusLabel={statusLabel} onScreenshot={props.onAnswerScreenshot} />
     </main>;
   }
   return <main className="overlay-root control-overlay-root" data-overlay-surface="control" data-hud-state={statusLabel} data-operation-mode={props.operationMode} style={overlayWindowStyle(controlPreferences, preferences.appearance)}>
@@ -45,6 +45,7 @@ export function ControlOverlayRoot(props: OverlayRootProps): JSX.Element {
         {answerReady && <span className="toolbar-answer-ready-dot" title="回答已就绪" aria-label="回答已就绪" />}
         {interviewMode && interviewPreferences.leftPanel !== "hidden" && <button className="toolbar-icon-action" onClick={props.onToggleTranscript} title="显示或隐藏左侧面板" aria-label="显示或隐藏左侧面板" aria-pressed={props.hudState.transcriptVisible}>◫</button>}
         {interviewMode && interviewPreferences.showAnswer && <button className="toolbar-icon-action" onClick={props.onToggleAnswer} title="显示或隐藏回答" aria-label="显示或隐藏回答" aria-pressed={props.hudState.answerVisible}>◧</button>}
+        {interviewMode && <button className="toolbar-icon-action" disabled={!props.speechScript} onClick={props.onToggleScript} title={props.speechScript ? "显示或隐藏演讲稿" : "请先上传演讲稿"} aria-label={props.speechScript ? "显示或隐藏演讲稿" : "请先上传演讲稿"} aria-pressed={props.hudState.scriptVisible}>▤</button>}
         {!interviewMode && writtenPreferences.layoutPreset === "split" && <button className="toolbar-icon-action" onClick={props.onToggleAnswer} title="显示或隐藏回答" aria-label="显示或隐藏回答" aria-pressed={props.hudState.answerVisible}>◧</button>}
         <button className="toolbar-icon-action" onClick={props.onToggleShortcuts} title="打开快捷操作" aria-label="打开快捷操作">…</button>
         <button className="toolbar-end-button" onClick={props.onRequestEndInterview} title={`结束${modeLabel} Ctrl+Alt+Q`} aria-label={`结束${modeLabel}`}>结束</button>

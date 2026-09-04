@@ -1,0 +1,2 @@
+.self-introduction-panel .detail-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+.self-introduction-panel .detail-actions > button, .self-introduction-panel .upload-project-action { width: auto; height: 40px; min-height: 40px; border-radius: 8px; padding: 9px 14px; flex: 0 0 auto; font-size: 13px; }

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import type { ClientControlMessage, RealtimeServerMessage, TranscriptSegment } from "@interview-copilot/protocol";
 import {
   AnswerAgent,
+  abortableProviderTask,
   analyzeAnswerIntent,
   classifyAnswerQuestion,
   FollowUpContextResolver,
@@ -323,6 +324,7 @@ export class InterviewCoordinator extends EventEmitter {
   private readonly answerTasks = new Set<Promise<void>>();
   private readonly questionTasks = new Set<Promise<void>>();
   private stopPromise: Promise<void> | undefined;
+  private startupController: AbortController | undefined;
   private lastProgressAt = Date.now();
   private runtimeSessionStartedAt = 0;
   private runtimeSessionId: string | undefined;
@@ -607,7 +609,9 @@ export class InterviewCoordinator extends EventEmitter {
   }
 
   async start(startOptions: InterviewStartOptions): Promise<string> {
-    if (this.activeInterviewId || this.stopPromise) await this.stop("user");
+    if (this.activeInterviewId || this.stopPromise || this.startupController) await this.stop("user");
+    const startup = new AbortController();
+    this.startupController = startup;
     this.runtimeSessionId = undefined;
     this.runtimeSessionStartedAt = 0;
     this.setRuntimeState("starting");
@@ -618,7 +622,7 @@ export class InterviewCoordinator extends EventEmitter {
       const providerType = asrSettings?.providerType ?? startOptions.providerType ?? "custom-gateway";
       const connectUrl = startOptions.url ?? asrSettings?.url ?? "";
       if (providerType === "custom-gateway" && !connectUrl.trim()) throw new Error("Custom ASR Gateway URL is required");
-      await this.options.audio.waitForIdle?.();
+      await abortableProviderTask(Promise.resolve(this.options.audio.waitForIdle?.()), startup.signal);
       if (this.options.audio.isRunning) throw new Error("AUDIO_BUSY: audio sidecar is still running");
       const automationMode = startOptions.automationMode ?? this.defaultAutomationMode;
       const runtimeMode = startOptions.runtimeMode ?? "FAST_PRACTICE";
@@ -642,11 +646,11 @@ export class InterviewCoordinator extends EventEmitter {
       this.activeOptions = { ...startOptions, automationMode, runtimeMode, features: this.activeFeatures };
       this.activeProfileId = startOptions.profileId;
       const providedLexicon = startOptions.terminologyLexicon ?? this.options.terminologyLexiconProvider?.(startOptions.profileId, startOptions.projectId, startOptions.jobTargetId);
-      if (providedLexicon && typeof (providedLexicon as PromiseLike<DynamicTechnicalLexicon>).then === "function") this.sessionTerminologyLexicon = await (providedLexicon as Promise<DynamicTechnicalLexicon>);
+      if (providedLexicon && typeof (providedLexicon as PromiseLike<DynamicTechnicalLexicon>).then === "function") this.sessionTerminologyLexicon = await abortableProviderTask(providedLexicon as Promise<DynamicTechnicalLexicon>, startup.signal);
       else this.sessionTerminologyLexicon = (providedLexicon as DynamicTechnicalLexicon | undefined) ?? buildDynamicTechnicalLexicon({ recentTopics: [startOptions.projectId].filter((value): value is string => Boolean(value)) });
       const providedTerminologyContext = startOptions.terminologyContext ?? this.options.terminologyContextProvider?.(startOptions.profileId, startOptions.projectId, startOptions.jobTargetId, startOptions.directionSelection);
       let terminologyContext: SessionTerminologyContext;
-      if (providedTerminologyContext && typeof (providedTerminologyContext as PromiseLike<SessionTerminologyContext>).then === "function") terminologyContext = await (providedTerminologyContext as Promise<SessionTerminologyContext>);
+      if (providedTerminologyContext && typeof (providedTerminologyContext as PromiseLike<SessionTerminologyContext>).then === "function") terminologyContext = await abortableProviderTask(providedTerminologyContext as Promise<SessionTerminologyContext>, startup.signal);
       else terminologyContext = providedTerminologyContext as SessionTerminologyContext | undefined ?? buildSessionTerminologyContext({ recentTopics: [startOptions.projectId].filter((value): value is string => Boolean(value)) });
       this.sessionTerminologyNormalizer.setContext(terminologyContext);
       this.sessionTerminologyContext = terminologyContext;
@@ -716,18 +720,23 @@ export class InterviewCoordinator extends EventEmitter {
       this.asr.connect({ ...startOptions, ...asrSettings, providerType, url: connectUrl, language: asrSettings?.language ?? (startOptions.language as AsrLanguage | undefined), autoReconnect: true });
       this.options.onStartupTiming?.("ASR_READY");
       const audioStart = Promise.resolve(this.options.audio.start({ inputDeviceId: startOptions.inputDeviceId, outputDeviceId: startOptions.outputDeviceId, meterOnly: false, autoRecover: true }));
-      await Promise.all([audioStart, warmup]);
+      await abortableProviderTask(Promise.all([audioStart, warmup]), startup.signal);
       this.options.onStartupTiming?.("AUDIO_READY");
       return record.id;
     } catch (error) {
-      await Promise.resolve(this.options.audio.stop()).catch(() => undefined);
+      if (startup.signal.aborted) throw error;
+      await withRuntimeTimeout(Promise.resolve().then(() => this.options.audio.stop()).catch(() => undefined), this.options.stopTimeoutMs ?? 2_000, () => undefined);
+      if (startup.signal.aborted) throw error;
       try { this.asr.disconnect(); } catch { /* best-effort start unwind */ }
       this.failInterview(String(error));
       throw error;
+    } finally {
+      if (this.startupController === startup) this.startupController = undefined;
     }
   }
 
   async stop(reason: "user" | "error" = "user"): Promise<void> {
+    this.startupController?.abort();
     if (this.stopPromise) return this.stopPromise;
     this.stopPromise = this.performStop(reason);
     try {
@@ -768,8 +777,17 @@ export class InterviewCoordinator extends EventEmitter {
     this.recordRuntimeTrace("RUNTIME_CLEANUP_STARTED", {}, { reasonCode: "abort-and-drain" });
 
     const answerTasks = [...this.answerTasks, ...this.questionTasks];
-    const drain = Promise.allSettled(answerTasks);
-    const stopTimeoutMs = Math.max(250, this.options.stopTimeoutMs ?? 4_000);
+    const stopTimeoutMs = Math.max(250, this.options.stopTimeoutMs ?? 2_000);
+    // One deadline for the whole shutdown, not three sequential deadlines.
+    // Capture stops immediately even if a remote answer never closes its stream.
+    const cleanup = async (name: string, action: () => unknown) => {
+      try { await action(); } catch (error) { this.emitDiagnostic(`${name} failed: ${String(error)}`); }
+    };
+    const drain = Promise.allSettled([
+      ...answerTasks,
+      cleanup("Audio stop", () => this.options.audio.stop()),
+      cleanup("ASR finalize", () => this.asr.finalize?.(1_000))
+    ]);
     const drained = await withRuntimeTimeout(drain, stopTimeoutMs, () => this.emitDiagnostic("RUNTIME_CLEANUP_TIMEOUT: answer task did not settle"));
     if (drained === undefined) {
       for (const answer of this.runtimeAnswers.values()) answer.detached = true;
@@ -778,12 +796,6 @@ export class InterviewCoordinator extends EventEmitter {
       this.runtimeAnswers.clear();
       this.runtimeAbortControllers.clear();
     }
-    try {
-      await withRuntimeTimeout(Promise.resolve(this.options.audio.stop()), stopTimeoutMs, () => this.emitDiagnostic("RUNTIME_CLEANUP_TIMEOUT: audio stop did not settle"));
-    } catch (error) { this.emitDiagnostic(`Audio stop failed: ${String(error)}`); }
-    try {
-      if (this.asr.finalize) await withRuntimeTimeout(this.asr.finalize(1_000), stopTimeoutMs, () => this.emitDiagnostic("RUNTIME_CLEANUP_TIMEOUT: ASR finalize did not settle"));
-    } catch (error) { this.emitDiagnostic(`ASR finalize failed: ${String(error)}`); }
     try { this.asr.disconnect(); } catch (error) { this.emitDiagnostic(`ASR disconnect failed: ${String(error)}`); }
 
     this.runtimeTimers.clear("runtime-context-persist");
@@ -1025,7 +1037,7 @@ export class InterviewCoordinator extends EventEmitter {
         this.markQuestionStateById(question.id, "cancelled");
         this.markQuestionGroup(question.id, "cancelled");
         this.history.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "blocked");
-        this.emitRealtimeMessage({ type: "runtime_error", code: "PROJECT_CONTEXT_MISMATCH", message: "项目资料与当前问题不一致，请确认项目后重新回答。", recoverable: true });
+        this.emitRealtimeMessage({ type: "runtime_error", questionId: question.id, code: "PROJECT_CONTEXT_MISMATCH", message: "项目资料与当前问题不一致，请确认项目后重新回答。", recoverable: true });
         return;
       }
       providerContext = { ...providerContext, questionTelemetry: { ...(providerContext.questionTelemetry ?? {}), ...(answerProjectId ? { activeProjectId: answerProjectId } : {}) } };
@@ -1033,7 +1045,6 @@ export class InterviewCoordinator extends EventEmitter {
       const routeIntent = analyzeAnswerIntent({ question: question.text, kind: routeKind });
       const projectQuestionRequested = routeKind === "project"
         || routeIntent.asksProjectImplementation
-        || routeIntent.allowsProjectEvidence
         || /(?:这个|该|当前)?项目|简历里|你们的系统|这套方案|实际实现|项目中|项目里/iu.test(question.text);
       // A V3 frame may carry a strong question-scoped project candidate even
       // while the sticky resolver is still waiting for a session-wide lock.
@@ -1044,16 +1055,23 @@ export class InterviewCoordinator extends EventEmitter {
         || question.projectId === answerProjectId
         || question.contextSnapshot?.project?.id === answerProjectId
       ));
-      const projectContextAvailable = Boolean(answerProjectId && (this.activeProjectId === answerProjectId || questionScopedProject));
+      const projectContextAvailable = Boolean(answerProjectId && (this.activeProjectId === answerProjectId || questionScopedProject) || (!answerProjectId && routedProjectId && providerContext.answerSourcePlan?.projectId === routedProjectId));
       if (projectQuestionRequested && !projectContextAvailable) {
-        const unresolvedPlan = planAnswerSource({ projectQuestion: true, projectAnchorAvailable: false });
+        const unresolvedPlan = {
+          mode: "project_knowledge_generated" as const,
+          projectAnchorAvailable: false,
+          projectQuestionRequested: true,
+          qaMatchLevel: "none" as const,
+          preserveStoredAnswerFacts: false,
+          allowProjectKnowledge: true,
+          allowGeneralKnowledge: true,
+          allowSessionEvidence: true,
+          answerRewriteUsed: false
+        };
         providerContext = {
           ...providerContext,
           answerSourcePlan: unresolvedPlan,
-          projectQaEvidence: [],
-          projectEvidence: [],
-          preparedAnswer: undefined,
-          currentProject: undefined,
+          profileInstructions: [providerContext.profileInstructions, "这是项目相关问题。优先使用已上传简历、项目库和本轮对话中可验证的信息直接回答；未锁定单一项目时，选择与问题实体最匹配的已有项目材料。不得输出‘项目未确定’或‘没有项目资料’，也不得编造个人经历、指标或职责；个人证据不足的部分用通用技术解释补足。"].filter(Boolean).join("\n"),
           questionTelemetry: {
             ...(providerContext.questionTelemetry ?? {}),
             projectQuestionRequested: true,
@@ -1064,23 +1082,31 @@ export class InterviewCoordinator extends EventEmitter {
           questionRequested: true,
           resolverStatus: this.activeProjectResolver.state.status,
           sourceMode: unresolvedPlan.mode
-        }, { questionId: question.id, providerRequestId, reasonCode: "project-hard-gate" });
+        }, { questionId: question.id, providerRequestId, reasonCode: "project-answer-first-fallback" });
+      }
+      // A project overview is a resume question, not a request for one project's
+      // implementation. Keep verified resume material available without a lock.
+      const projectOverview = /(?:做过|参与过|有哪些|哪些|什么|介绍|讲讲|说说).{0,10}项目|项目.{0,8}(?:经历|经验|介绍)/u.test(question.text)
+        && !/(?:怎么实现|如何实现|怎么设计|如何设计|为什么|芯片|参数|采样|中断|具体.*负责)/u.test(question.text);
+      if (projectOverview && ["project_context_unresolved", "project_qa_no_match"].includes(providerContext.answerSourcePlan?.mode ?? "")) {
+        providerContext = { ...providerContext, answerSourcePlan: planAnswerSource({ personalQuestion: true }),
+          profileInstructions: [providerContext.profileInstructions, "这是项目经历概览题。根据已确认简历概述项目、目标和职责；可介绍多个有证据的项目，不要求用户先选择一个。没有个人资料时，明确说明资料缺失并给出简短的填写框架，不能编造做过的项目。"].filter(Boolean).join("\n") };
       }
       const blockedProjectRoute = providerContext.answerSourcePlan?.mode === "project_context_unresolved" || providerContext.answerSourcePlan?.mode === "project_qa_no_match";
-      if (this.accurateInterview && blockedProjectRoute) {
-        const reasonCode = providerContext.answerSourcePlan?.mode === "project_qa_no_match" ? "strict-project-qa-no-match" : "project-context-unresolved";
-        this.recordRuntimeTrace(providerContext.answerSourcePlan?.mode === "project_qa_no_match" ? "PROJECT_QA_HOLD" : "PROJECT_CONTEXT_UNRESOLVED", {
-          sourceMode: providerContext.answerSourcePlan?.mode,
-          qaMatchLevel: providerContext.answerSourcePlan?.qaMatchLevel,
-          qaMargin: providerContext.answerSourcePlan?.projectQaMargin
-        }, { questionId: question.id, providerRequestId, reasonCode });
-        this.emitDiagnostic(reasonCode === "strict-project-qa-no-match" ? "项目问题未命中已验证项目题库，暂不生成答案" : "项目尚未锁定，暂不生成答案");
-        this.markQuestionStateById(question.id, "cancelled");
-        this.markQuestionGroup(question.id, "cancelled");
-        this.history.updateQuestionStatus?.(this.historyQuestionIds.get(question.id) ?? question.id, "blocked");
-        this.emitRealtimeMessage({ type: "runtime_error", code: "PROJECT_EVIDENCE_REQUIRED", message: reasonCode === "strict-project-qa-no-match" ? "当前项目没有匹配的已确认答案。请在项目题库补充并确认资料后重试。" : "当前项目尚未确定。请选择对应项目后重试。", recoverable: true });
-        this.recordRuntimeTrace("QUESTION_CANCELLED", {}, { questionId: question.id, providerRequestId, reasonCode });
-        return;
+      if (blockedProjectRoute) {
+        const fallbackProjectId = providerContext.answerSourcePlan?.projectId ?? answerProjectId ?? routedProjectId;
+        providerContext = {
+          ...providerContext,
+          answerSourcePlan: fallbackProjectId
+            ? planAnswerSource({ projectId: fallbackProjectId, projectQuestion: projectQuestionRequested, personalQuestion: !projectQuestionRequested, strictProjectQa: false })
+            : projectQuestionRequested
+              ? { mode: "project_knowledge_generated", projectAnchorAvailable: false, projectQuestionRequested: true, qaMatchLevel: "none", preserveStoredAnswerFacts: false, allowProjectKnowledge: true, allowGeneralKnowledge: true, allowSessionEvidence: true, answerRewriteUsed: false }
+              : planAnswerSource({ personalQuestion: true }),
+          profileInstructions: [providerContext.profileInstructions, projectQuestionRequested
+            ? "题库没有精确命中时，继续结合项目文档、简历和对话证据作答；不得要求用户重新选择项目，不得输出没有项目资料。"
+            : "这是独立的个人或通用问题。直接使用简历与个人资料回答，不继承上一题的项目资料缺失状态。"].filter(Boolean).join("\n")
+        };
+        this.recordRuntimeTrace("PROJECT_ANSWER_FALLBACK", { previousMode: providerContext.answerSourcePlan?.mode, projectQuestionRequested, fallbackProjectId }, { questionId: question.id, providerRequestId, reasonCode: "answer-first-no-hard-gate" });
       }
       const memorySnapshot = frozenContext.memory;
       const contextFinishedAt = this.now();
@@ -1103,7 +1129,7 @@ export class InterviewCoordinator extends EventEmitter {
         if ((contextTelemetry.projectOverviewHitCount ?? 0) > 0) this.recordRuntimeTrace("PROJECT_OVERVIEW_RETRIEVAL", { hitCount: contextTelemetry.projectOverviewHitCount, cacheHit: contextTelemetry.projectCacheHit }, { questionId: question.id, providerRequestId });
         if (providerContext.contextMode === "fast") this.recordRuntimeTrace("PROJECT_FAST_CONTEXT_READY", { route: contextSourceMode, cacheHit: contextTelemetry.projectCacheHit }, { questionId: question.id, providerRequestId });
       }
-      const projectQaContextDirect = providerContext.answerSourcePlan?.mode === "project_qa_direct" || providerContext.answerSourcePlan?.mode === "self_intro_direct" || providerContext.answerSourcePlan?.mode === "self_intro_rewrite";
+      const projectQaContextDirect = providerContext.answerSourcePlan?.mode === "project_qa_direct" || providerContext.answerSourcePlan?.mode === "project_intro_direct" || providerContext.answerSourcePlan?.mode === "self_intro_direct" || providerContext.answerSourcePlan?.mode === "self_intro_rewrite";
       const evidenceSnapshot: EvidenceSnapshot = this.contextLock.lock({
         questionId: question.id,
         profileId: this.activeProfileId,
@@ -1168,7 +1194,7 @@ export class InterviewCoordinator extends EventEmitter {
       const projectQaMode = lockedProviderContext.answerSourcePlan?.mode;
       const requiresClaimValidation = requiresPersonalGrounding || projectQaMode === "project_qa_direct" || projectQaMode === "project_qa_augmented";
       const selfIntroDirect = projectQaMode === "self_intro_direct";
-      const projectQaDirect = projectQaMode === "project_qa_direct";
+      const projectQaDirect = projectQaMode === "project_qa_direct" || projectQaMode === "project_intro_direct";
       const ordinaryQuestionBankDirect = !isProjectQuestion && !answerIntent.requiresPersonalIdentity && !requiresClaimValidation;
       if (preparedAnswer && preparedAnswer.verified && !preparedAnswer.stale && preparedAnswer.score >= 0.88 && !streamOptions.hasScreenshot && (ordinaryQuestionBankDirect || selfIntroDirect || projectQaDirect)) {
         this.emitDiagnostic("QUESTION_BANK_DIRECT_HIT");
@@ -1192,8 +1218,10 @@ export class InterviewCoordinator extends EventEmitter {
         this.answerFirstTokenAt = finishedAt;
         this.emitRealtimeMessage({ type: "answer_start", answerId, questionId: question.id, mode, model: directModel, ...(question.groupId ? { groupId: question.groupId, relation: answerRelationForQuestion(question) } : {}) });
         const preparedText = selfIntroDirect ? preparedAnswer.content : normalizeTechnicalTerms(preparedAnswer.content);
-        const projectTruth = new ProjectTruthGuard().check({ answer: preparedText, evidenceSnapshot });
-        const displayText = stripClaimGateAuditText(projectTruth.answer);
+        // The selected introduction is the user's script. Do not rewrite or
+        // strip it through model-output guards; project/generated answers keep them.
+        const projectTruth = selfIntroDirect ? { answer: preparedText, decision: "ALLOW" as const, blockedClaimCount: 0 } : new ProjectTruthGuard().check({ answer: preparedText, evidenceSnapshot });
+        const displayText = selfIntroDirect ? preparedText : stripClaimGateAuditText(projectTruth.answer);
         this.answerScheduler.markVisibleOutput(displayText);
         if (question.groupId) this.visibleAnswerGroups.add(question.groupId);
         const confirmedAt = this.questionConfirmedAt.get(question.id) ?? startedAt;
@@ -1473,7 +1501,7 @@ export class InterviewCoordinator extends EventEmitter {
       }
       this.emitDiagnostic(`LLM_FAILED: ${String(error)}`);
       if (streamOptions.screenshotRequestId) this.recordScreenshotTrace("VISION_RESPONSE_FAILED", streamOptions.screenshotRequestId, { providerRequestId, answerId: answerOperation?.answerId, status: "failed", reasonCode: contextWasActive ? "context-error" : "provider-error", fields: { error: String(error) } });
-      this.emitRealtimeMessage({ type: "runtime_error", code: "LLM_FAILED", message: "答案生成失败，请检查模型配置后重试", recoverable: true });
+      this.emitRealtimeMessage({ type: "runtime_error", questionId: question.id, code: "LLM_FAILED", message: "答案生成失败，请检查模型配置后重试", recoverable: true });
       if (streamOptions.screenshotRequestId) throw error;
     } finally {
       this.runtimeTimers.clear(`answer-total:${operationId}`);
@@ -1605,11 +1633,10 @@ export class InterviewCoordinator extends EventEmitter {
         this.recordRuntimeTrace("QUESTION_DRAFT_UPDATED", { textLength: segment.text.length, previewOnly: true }, { reasonCode: "canonical-assembly-preview" });
       }
       const anchor = this.anchorStore.snapshot(receivedAt);
-      const overdue = this.canonicalRemoteTurnAssembler.flushDue(receivedAt, "interviewer");
-      if (overdue.length > 0) {
-        this.clearRemoteAssemblyTimer();
-        overdue.forEach((turn) => this.enqueueFinalUtterance(turn));
-      }
+      // A newer partial is evidence the interviewer is still speaking. Do not
+      // flush the preceding final at its old deadline before seeing the tail.
+      // Explicit semantic/time boundaries remain owned by the assembler.
+      if (!segment.final) this.clearRemoteAssemblyTimer();
       const assembled = this.canonicalRemoteTurnAssembler.push(segment, receivedAt, {
         currentTopic: anchor.currentTopic,
         latestAnchor: anchor.latestAnchor,
@@ -1641,7 +1668,7 @@ export class InterviewCoordinator extends EventEmitter {
         this.clearRemoteAssemblyTimer();
         this.enqueueFinalUtterance(completed);
       }
-      if (segment.final && assembled.current) this.scheduleRemoteAssembly(assembled.current, segment);
+      if (assembled.current) this.scheduleRemoteAssembly(assembled.current, segment);
     });
     this.asr.on("message", (message: RealtimeServerMessage) => {
       if (!this.activeInterviewId || this.runtimeSessionState !== "running") {
@@ -1838,9 +1865,10 @@ export class InterviewCoordinator extends EventEmitter {
     // Keep an adaptive stability window after endpoint so a paused setup such
     // as “为什么要选……F405……什么原因” stays one V3 frame.
     const completeIndependent = semantic.completeness === "COMPLETE" && semantic.dependency === "INDEPENDENT";
-    const delay = completeIndependent
-      ? Math.max(80, Math.min(180, turn.commitDelayMs))
-      : Math.max(320, Math.min(2_500, turn.commitDelayMs));
+    const compoundLead = /为什么.*设计|哪些不足|哪些缺点/u.test(text);
+    const delay = !_latest.final ? 1_600 : completeIndependent
+      ? this.accurateInterview ? (compoundLead ? 2_300 : 450) : Math.max(80, Math.min(180, turn.commitDelayMs))
+      : Math.max(this.accurateInterview ? 800 : 320, Math.min(2_500, turn.commitDelayMs));
     if (endpointSignaled) this.recordRuntimeTrace("QUESTION_STABILIZATION_STARTED", { waitMs: delay, semanticCompleteness: semantic.completeness, dependency: semantic.dependency }, { reasonCode: "asr-endpoint-is-fragment-final" });
     this.recordRuntimeTrace("TURN_COMPLETION_STARTED", { textLength: text.length, dependency: semantic.dependency, completeness: semantic.completeness, speechAct: semantic.speechAct, recommendedWaitMs: delay, asrFinalIsTurnFinal: false }, { reasonCode: "canonical-turn-assembly" });
     this.interviewTelemetry.record({ questionDebounceMs: delay }, this.now());
@@ -2028,6 +2056,16 @@ export class InterviewCoordinator extends EventEmitter {
 
   private async observeFinalQuestion(utterance: TranscriptUtterance, sessionGeneration = this.sessionGeneration): Promise<void> {
     if (sessionGeneration !== this.sessionGeneration || !this.activeInterviewId) return;
+    if (this.accurateInterview) {
+      const previous = this.understandingV3.commitBeforeNewTurn(utterance.text);
+      if (previous?.type === "QUESTION_COMMITTED") {
+        const frame = previous.frame;
+        const pendingUtterance: TranscriptUtterance = { id: frame.id, source: "remote", text: frame.canonicalQuestion, rawText: frame.rawCombinedText, segmentIds: frame.segmentIds, startMs: 0, endMs: 0, final: true, finalizedAt: frame.updatedAt };
+        const previousTrace = this.currentQuestionTrace ?? new QuestionTrace({ questionTraceId: `question-trace-${frame.id}` });
+        this.pendingQuestionTrace = previousTrace;
+        this.handleUnderstandingV3Event(previous, previousTrace, pendingUtterance, this.turns.get(frame.id) ?? this.turnBuilder.build(pendingUtterance));
+      }
+    }
     const turn = this.turnBuilder.build(utterance);
     this.turns.set(turn.id, turn);
     const detectionStartedAt = this.now();

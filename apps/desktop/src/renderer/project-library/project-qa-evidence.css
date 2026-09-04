@@ -1,0 +1,20 @@
+.project-question-bank-panel .project-qa-evidence,
+.project-question-bank-panel .project-qa-match-check { margin-top: 12px; padding: 10px 12px; border: 1px solid #dce3ec; border-radius: 10px; background: #fff; overflow-wrap: anywhere; }
+.project-question-bank-panel .project-qa-evidence.has-risk { border-color: #dfb58f; }
+.project-question-bank-panel .project-qa-evidence summary,
+.project-question-bank-panel .project-qa-match-check summary { cursor: pointer; color: #425670; font-size: 13px; }
+.project-question-bank-panel .project-qa-review-note,
+.project-question-bank-panel .project-qa-match-check p { font-size: 12px; color: #637083; }
+.project-question-bank-panel .project-qa-evidence ul { padding-left: 20px; font-size: 12px; }
+.project-question-bank-panel .project-qa-evidence li { margin: 8px 0; }
+.project-question-bank-panel .project-qa-evidence blockquote { margin: 8px 0; padding: 8px 12px; border-left: 3px solid #cad5e2; background: #f5f7fa; white-space: pre-wrap; }
+.project-question-bank-panel .project-qa-fact-evidence { margin-top: 12px; font-size: 12px; }
+.project-question-bank-panel .project-qa-match-check form { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.project-question-bank-panel .project-qa-match-check label { flex: 1; min-width: 200px; }
+.project-question-bank-panel .project-qa-match-result { margin-top: 12px; font-size: 13px; }
+.project-question-bank-panel .project-qa-fact-picker { display: grid; gap: 6px; margin: 12px 0; font-size: 12px; }
+.project-question-bank-panel .project-qa-fact-picker select { width: 100%; padding: 8px; border: 1px solid #dce3ec; border-radius: 8px; font: inherit; }
+.project-qa-test-examples { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 12px 0; }
+.project-qa-test-examples button { padding: 5px 9px; border: 1px solid #ccd9e5; border-radius: 6px; color: #35546b; background: #f3f7fa; font-size: 12px; }
+.project-qa-test-answer { margin-top: 12px; padding: 14px; background: #f4f8f6; border: 1px solid #d7e6de; border-radius: 8px; }
+.project-qa-test-answer p { white-space: pre-wrap; }

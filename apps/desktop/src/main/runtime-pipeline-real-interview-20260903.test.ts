@@ -68,7 +68,7 @@ describe("September 3 desktop production chain regression", () => {
     } finally { await s.coordinator.stop(); }
   });
 
-  it("closes a blocked project question and still answers the next independent question", async () => {
+  it("answers a project question after a QA miss and still answers the next independent question", async () => {
     const s = await createSession((question) => /项目/u.test(question.text) ? {
       answerSourcePlan: { mode: "project_qa_no_match", projectAnchorAvailable: true, projectQuestionRequested: true, projectId: "foc", qaMatchLevel: "none", preserveStoredAnswerFacts: false, allowProjectKnowledge: false, allowGeneralKnowledge: false, allowSessionEvidence: false, answerRewriteUsed: false, strictProjectQa: true }
     } : {});
@@ -77,9 +77,9 @@ describe("September 3 desktop production chain regression", () => {
       await s.push("什么是SPI？", 12_000);
       await vi.advanceTimersByTimeAsync(3_000);
       const snapshot = s.history.snapshot(s.interviewId);
-      expect(snapshot.questions.map((question) => question.status)).toEqual(["blocked", "answered"]);
-      expect(s.requests).toHaveLength(1);
-      expect(s.events.some((event) => event.type === "realtime_message" && event.message.type === "runtime_error" && event.message.code === "PROJECT_EVIDENCE_REQUIRED")).toBe(true);
+      expect(snapshot.questions.map((question) => question.status)).toEqual(["answered", "answered"]);
+      expect(s.requests.length).toBeGreaterThanOrEqual(2);
+      expect(s.events.some((event) => event.type === "realtime_message" && event.message.type === "runtime_error" && event.message.code === "PROJECT_EVIDENCE_REQUIRED")).toBe(false);
     } finally { await s.coordinator.stop(); }
   });
 

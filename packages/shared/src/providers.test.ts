@@ -60,7 +60,7 @@ describe("OpenAICompatibleAnswerProvider", () => {
     for await (const delta of provider.stream({ model: "vision-model", sections: [{ name: "question", content: "分析截图" }], attachments: [{ mimeType: "image/png", dataUrl: image }] })) deltas.push(delta);
     const messages = requestBody?.messages as Array<{ content: unknown }>;
     const imagePart = (messages[1]?.content as Array<Record<string, unknown>>).find((part) => part.type === "image_url");
-    expect(imagePart?.image_url).toMatchObject({ url: image, mimeType: "image/png" });
+    expect(imagePart?.image_url).toEqual({ url: image, detail: "auto" });
     expect(deltas.join("")).toBe("看到了");
   });
 

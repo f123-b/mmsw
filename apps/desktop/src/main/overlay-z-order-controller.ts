@@ -1,4 +1,4 @@
-export type OverlayZOrderSurface = "question" | "answer" | "control" | "transient";
+export type OverlayZOrderSurface = "question" | "answer" | "script" | "control" | "transient";
 
 export interface OverlayZOrderWindow {
   isDestroyed(): boolean;
@@ -43,6 +43,7 @@ export class OverlayZOrderController {
   private diagnosticsValue: OverlayZOrderDiagnostics = { assertCount: 0, repairCount: 0, controlClickableCount: 0, endConfirmVisibleCount: 0, endConfirmNativeClickPassCount: 0, watchdogRunning: false };
   private readonly emittedReasons = new Set<string>();
   private lastWatchdogDiagnosticAt = 0;
+  private readonly appliedTopmost = new WeakMap<OverlayZOrderWindow, boolean>();
 
   constructor(options: OverlayZOrderControllerOptions = {}) {
     this.intervalMs = Math.max(300, Math.min(1_000, options.watchdogIntervalMs ?? 600));
@@ -82,7 +83,10 @@ export class OverlayZOrderController {
     if (!visible.length) return;
     const topmost = this.runtimeActive || this.preferenceEnabled;
     for (const window of visible) {
-      window.setAlwaysOnTop(topmost, topmost ? "screen-saver" : undefined);
+      if (this.appliedTopmost.get(window) !== topmost) {
+        window.setAlwaysOnTop(topmost, topmost ? "screen-saver" : undefined);
+        this.appliedTopmost.set(window, topmost);
+      }
       if (topmost) window.moveTop();
     }
     this.diagnosticsValue = {
@@ -139,14 +143,14 @@ export class OverlayZOrderController {
   }
 
   private orderedWindows(): OverlayZOrderWindow[] {
-    const ordered = (["question", "answer", "control", "transient"] as const)
+    const ordered = (["question", "answer", "script", "control", "transient"] as const)
       .map((surface) => this.windows[surface])
       .filter((window): window is OverlayZOrderWindow => Boolean(window && !window.isDestroyed()));
     return ordered;
   }
 
   private visibleSurfaces(): OverlayZOrderSurface[] {
-    return (["question", "answer", "control", "transient"] as const).filter((surface) => {
+    return (["question", "answer", "script", "control", "transient"] as const).filter((surface) => {
       const window = this.windows[surface];
       return Boolean(window && !window.isDestroyed() && window.isVisible());
     });

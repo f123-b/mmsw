@@ -1,3 +1,5 @@
+import { ASR_PRESETS, usesHttpAsr } from "@interview-copilot/shared";
+import { HttpStreamingAsrProvider } from "./http-asr-provider";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
@@ -57,7 +59,7 @@ export interface RealtimeSocket {
 export type RealtimeSocketFactory = (url: string) => RealtimeSocket;
 
 export interface AsrRuntimeDiagnostics {
-  provider: "Deepgram Direct" | "Qwen Direct" | "Custom Gateway" | "Local Fun-ASR-Nano" | "unknown";
+  provider: string;
   model: string;
   language: string;
   micState: "connecting" | "listening" | "error" | "stopped";
@@ -243,7 +245,7 @@ export class RealtimeSession extends EventEmitter {
     this.reconnectAttempt = 0;
     this.diagnostics = {
       ...this.diagnostics,
-      provider: options.providerType === "deepgram" ? "Deepgram Direct" : options.providerType === "qwen" ? "Qwen Direct" : options.providerType === "custom-gateway" ? "Custom Gateway" : options.providerType === "funasr-local" ? "Local Fun-ASR-Nano" : "unknown",
+      provider: options.providerType === "qwen" ? "Qwen Direct" : options.providerType === "deepgram" ? "Deepgram Direct" : options.providerType === "funasr-local" ? "Local Fun-ASR-Nano" : options.providerType === "custom-gateway" ? "Custom Gateway" : options.providerType ? ASR_PRESETS[options.providerType].name : "unknown",
       model: options.model ?? "",
       language: options.language ?? "",
       micState: "connecting",
@@ -343,7 +345,7 @@ export class RealtimeSession extends EventEmitter {
 
   private openSocket(): void {
     if (this.manualStop || !this.options) return;
-    if (this.options.providerType === "deepgram" || this.options.providerType === "qwen" || this.options.providerType === "funasr-local") {
+    if (this.options.providerType && this.options.providerType !== "custom-gateway") {
       void this.openDirectAsr();
       return;
     }
@@ -369,16 +371,17 @@ export class RealtimeSession extends EventEmitter {
     this.setState(this.reconnectAttempt === 0 ? "connecting" : "reconnecting");
     const settings = this.directAsrSettingsProvider?.();
     const providerType = options.providerType ?? settings?.providerType ?? "deepgram";
-    if (providerType !== "funasr-local" && !settings?.apiKey) {
-      this.handleDirectFailure(new ProviderError("AUTH_FAILED", `${providerType === "qwen" ? "千问" : "Deepgram"} API Key 未配置，请先在设置中保存 API Key`, false), generation);
+    if (providerType !== "funasr-local" && !settings?.apiKey && !/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/)/i.test(settings?.baseUrl ?? "")) {
+      this.handleDirectFailure(new ProviderError("AUTH_FAILED", `${ASR_PRESETS[providerType].name} API Key 未配置，请先在设置中保存 API Key`, false), generation);
       return;
     }
     const model = options.model || settings?.model || (providerType === "qwen" ? QWEN_REALTIME_ASR_MODEL : providerType === "funasr-local" ? "funasr-nano:q8" : "nova-3");
     const language = options.language || settings?.language || "zh-CN";
-    const createProvider = () => providerType === "funasr-local"
+    const httpSettings: ProviderSettings = { ...settings!, providerType, model, language, baseUrl: options.url || settings?.baseUrl || ASR_PRESETS[providerType].baseUrl };
+    const createProvider = () => usesHttpAsr(httpSettings) ? new HttpStreamingAsrProvider(httpSettings) : providerType === "funasr-local"
       ? new LocalFunASRProvider(this.localSocketFactory, "remote", { url: options.url || settings?.baseUrl, model, language, sampleRate: 16_000, channels: 1, vad: true })
       : providerType === "qwen"
-      ? usesQwenRealtimeProtocol(model)
+      ? (settings?.asrProtocol === "qwen-realtime" || settings?.asrProtocol !== "dashscope-streaming" && usesQwenRealtimeProtocol(model))
         ? new QwenRealtimeAsrProvider({ baseUrl: options.url || settings?.baseUrl, model, language, apiKey: settings?.apiKey ?? "" }, this.qwenSocketFactory)
         : new DashScopeTaskStreamingAsrProvider({ baseUrl: options.url || settings?.baseUrl, model, language, apiKey: settings?.apiKey ?? "" }, this.qwenSocketFactory)
       : new DeepgramStreamingAsrProvider({ baseUrl: options.url || settings?.baseUrl, model, language, apiKey: settings?.apiKey ?? "" }, this.directSocketFactory);

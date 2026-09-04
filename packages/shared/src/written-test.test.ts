@@ -3,7 +3,7 @@ import { analyzeWrittenProblem, checkWrittenAnswer, parseWrittenTestResult, rend
 
 describe("written test V2 structured pipeline", () => {
   it("classifies and preserves the problem frame instead of flattening it", () => {
-    const result = parseWrittenTestResult(JSON.stringify({ problem: { rawText: "计算电阻并画流程图", canonicalQuestion: "计算电阻并画流程图", questionType: "CALCULATION", requirements: ["写出公式", "给出单位"], requestedArtifacts: { formula: true, diagram: true }, confidence: 0.91 }, answer: { questionType: "CALCULATION", finalAnswer: "R = 10 Ω", steps: [{ title: "公式", content: "R=U/I" }], equations: ["R=U/I"], explanation: "代入得到结果", warnings: [], confidence: 0.86 } }), "");
+    const result = parseWrittenTestResult(JSON.stringify({ inputStatus: "COMPLETE", missingInformation: [], problem: { rawText: "计算电阻并画流程图", canonicalQuestion: "计算电阻并画流程图", questionType: "CALCULATION", requirements: ["写出公式", "给出单位"], requestedArtifacts: { formula: true, diagram: true }, confidence: 0.91 }, answer: { questionType: "CALCULATION", finalAnswer: "R = 10 Ω", steps: [{ title: "公式", content: "R=U/I" }], equations: ["R=U/I"], explanation: "代入得到结果", warnings: [], confidence: 0.86 } }), "");
     expect(result.problem.questionType).toBe("CALCULATION");
     expect(result.problem.requirements).toEqual(["写出公式", "给出单位"]);
     expect(result.answer.steps[0]?.title).toBe("公式");
@@ -18,4 +18,3 @@ describe("written test V2 structured pipeline", () => {
     expect(svg).not.toContain("ASCII");
   });
 });
-

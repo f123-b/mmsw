@@ -59,12 +59,14 @@ export interface OverlayInterviewPreferences {
   questionWindow: OverlayWindowPreferences;
   dialogueWindow: OverlayWindowPreferences;
   answerWindow: OverlayWindowPreferences;
+  scriptWindow: OverlayWindowPreferences;
   controlBar: OverlayControlBarPreferences;
   showAnswer: boolean;
 }
 
 export interface OverlayWrittenTestPreferences {
   layoutPreset: WrittenTestLayoutPreset;
+  focusProtection: boolean;
   questionWindow: OverlayWindowPreferences;
   answerWindow: OverlayWindowPreferences;
   controlBar: OverlayControlBarPreferences;
@@ -138,10 +140,11 @@ export interface OverlayPreferencesPatch {
   fontSize?: number;
   showToolbar?: boolean;
   showTimestamps?: boolean;
-  interview?: Partial<Omit<OverlayInterviewPreferences, "questionWindow" | "dialogueWindow" | "answerWindow" | "controlBar">> & {
+  interview?: Partial<Omit<OverlayInterviewPreferences, "questionWindow" | "dialogueWindow" | "answerWindow" | "scriptWindow" | "controlBar">> & {
     questionWindow?: Partial<OverlayWindowPreferences>;
     dialogueWindow?: Partial<OverlayWindowPreferences>;
     answerWindow?: Partial<OverlayWindowPreferences>;
+    scriptWindow?: Partial<OverlayWindowPreferences>;
     controlBar?: Partial<OverlayControlBarPreferences>;
   };
   writtenTest?: Partial<Omit<OverlayWrittenTestPreferences, "questionWindow" | "answerWindow" | "controlBar">> & {
@@ -213,6 +216,16 @@ const answerWindow = {
   opacity: 0.88
 };
 
+const scriptWindow = {
+  ...answerWindow,
+  width: 360,
+  height: 420,
+  fontSize: 14,
+  lineHeight: 1.65,
+  backgroundOpacity: 0.9,
+  opacity: 0.9
+};
+
 const controlBar = {
   width: 440,
   height: 44,
@@ -244,12 +257,14 @@ export const DEFAULT_OVERLAY_PREFERENCES: OverlayPreferences = {
     questionWindow: { ...questionWindow },
     dialogueWindow: { ...dialogueWindow },
     answerWindow: { ...answerWindow },
+    scriptWindow: { ...scriptWindow },
     controlBar: { ...controlBar },
     showAnswer: true
   },
   writtenTest: {
     layoutPreset: "single_reader",
-    questionWindow: { ...answerWindow, width: 920, height: 560 },
+    focusProtection: true,
+    questionWindow: { ...answerWindow, width: 560, height: 700 },
     answerWindow: { ...answerWindow, width: 700, height: 560 },
     controlBar: { ...controlBar, width: 360 },
     showAnswer: true

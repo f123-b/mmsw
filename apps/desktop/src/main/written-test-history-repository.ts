@@ -66,7 +66,7 @@ export class SqliteWrittenTestHistoryRepository {
   }
 
   updateQuestionFrame(questionId: string, input: { rawQuestionText: string; normalizedQuestion: string; questionType: WrittenQuestionType; requirements: string[]; confidence: number }): WrittenTestQuestion | undefined {
-    this.database.run("UPDATE written_test_questions SET raw_question = ?, normalized_question = ?, question_type = ?, requirements_json = ?, confidence = ? WHERE id = ?", [input.rawQuestionText, input.normalizedQuestion, input.questionType, JSON.stringify(input.requirements), input.confidence, questionId]);
+    this.database.run("UPDATE written_test_questions SET raw_question = ?, normalized_question = ?, question_type = ?, requirements_json = ?, confidence = ?, answer_json = NULL, answer_text = NULL, model = NULL, latency_ms = NULL, finished_at = NULL WHERE id = ?", [input.rawQuestionText, input.normalizedQuestion, input.questionType, JSON.stringify(input.requirements), input.confidence, questionId]);
     this.database.flush();
     return this.getQuestion(questionId);
   }

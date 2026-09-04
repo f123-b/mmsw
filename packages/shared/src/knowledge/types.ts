@@ -101,6 +101,8 @@ export interface ProjectMemoryProject {
   /** Defaults to personal for projects created before migration 23. */
   ownershipMode?: ProjectOwnershipMode;
   ownershipNote?: string;
+  /** User-approved, ready-to-speak introduction for broad project-introduction questions. */
+  projectIntroduction?: string;
 }
 
 export const PROJECT_FACT_TYPES = [

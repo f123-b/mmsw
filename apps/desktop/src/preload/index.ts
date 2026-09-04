@@ -24,6 +24,7 @@ import type { InterviewExportResult } from "../main/history-export";
 import type { ProfileAnalysisJob } from "../main/profile-analysis-job";
 import type { InterviewStartupEvent } from "../main/interview-startup-timing";
 import type { RuntimeOperationMode } from "../shared/runtime-operation-mode";
+import type { SpeechScript } from "../main/speech-script";
 
 let latestOverlayLayoutEditMode: boolean | undefined;
 ipcRenderer.on("overlay:layout-edit-mode", (_event, enabled: boolean) => {
@@ -36,6 +37,10 @@ ipcRenderer.on("overlay:state", (_event, state: HUDState) => {
 let latestRuntimeOperationMode: RuntimeOperationMode = "IDLE";
 ipcRenderer.on("overlay:operation-mode", (_event, mode: RuntimeOperationMode) => {
   latestRuntimeOperationMode = mode;
+});
+let latestSpeechScript: SpeechScript | undefined;
+ipcRenderer.on("speech-script:changed", (_event, script: SpeechScript | undefined) => {
+  latestSpeechScript = script;
 });
 
 function createRendererScreenshotRequestId(): string {
@@ -70,6 +75,7 @@ const api = {
     toggleAll: () => ipcRenderer.invoke("overlay:toggle-all"),
     toggleTranscript: () => ipcRenderer.invoke("overlay:toggle-transcript"),
     toggleAnswer: () => ipcRenderer.invoke("overlay:toggle-answer"),
+    toggleScript: (): Promise<boolean> => ipcRenderer.invoke("overlay:toggle-script"),
     requestEndInterview: () => ipcRenderer.invoke("overlay:request-end"),
     cancelEndInterview: (): Promise<boolean> => ipcRenderer.invoke("overlay:cancel-end"),
     confirmEndInterview: (): Promise<boolean> => ipcRenderer.invoke("overlay:confirm-end"),
@@ -79,7 +85,7 @@ const api = {
     getState: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:get-state"),
     getLayout: (): Promise<HUDLayout | undefined> => ipcRenderer.invoke("overlay:get-layout"),
     getDisplays: (): Promise<OverlayDisplayInfo[]> => ipcRenderer.invoke("overlay:get-displays"),
-    getWindowBounds: (panel: "question" | "answer" | "control"): Promise<OverlayNativeBounds | undefined> => ipcRenderer.invoke("overlay:get-window-bounds", panel),
+    getWindowBounds: (panel: "question" | "answer" | "script" | "control"): Promise<OverlayNativeBounds | undefined> => ipcRenderer.invoke("overlay:get-window-bounds", panel),
     getTransientBounds: (): Promise<OverlayNativeBounds | undefined> => ipcRenderer.invoke("overlay:get-transient-bounds"),
     getZOrderDiagnostics: (): Promise<unknown> => ipcRenderer.invoke("overlay:get-z-order-diagnostics"),
     getPreferences: (): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:get-preferences"),
@@ -87,7 +93,7 @@ const api = {
     setPreferences: (input: OverlayPreferencesPatch): Promise<OverlayPreferences> => ipcRenderer.invoke("overlay:set-preferences", input),
     enterLayoutEditMode: (): Promise<boolean> => ipcRenderer.invoke("overlay:enter-layout-edit"),
     finishLayoutEditMode: (): Promise<boolean> => ipcRenderer.invoke("overlay:finish-layout-edit"),
-    setWindowBounds: (panel: "question" | "answer" | "control", bounds: OverlayNativeBounds): Promise<boolean> => ipcRenderer.invoke("overlay:set-window-bounds", panel, bounds),
+    setWindowBounds: (panel: "question" | "answer" | "script" | "control", bounds: OverlayNativeBounds): Promise<boolean> => ipcRenderer.invoke("overlay:set-window-bounds", panel, bounds),
     setShareMode: (enabled: boolean): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:set-share-mode", enabled),
     toggleShareMode: (): Promise<HUDState | undefined> => ipcRenderer.invoke("overlay:toggle-share-mode"),
     setMode: (mode: OverlayMode) => ipcRenderer.invoke("overlay:set-mode", mode),
@@ -96,6 +102,11 @@ const api = {
     getCapabilities: (): Promise<CaptureProtectionCapabilities> => ipcRenderer.invoke("overlay:get-capabilities"),
     getTencentValidation: (): Promise<TencentValidationState> => ipcRenderer.invoke("overlay:get-tencent-validation"),
     setTencentValidation: (mode: "desktopShare" | "windowShare", status: TencentValidationStatus): Promise<TencentValidationState> => ipcRenderer.invoke("overlay:set-tencent-validation", mode, status)
+  },
+  speechScript: {
+    get: (): Promise<SpeechScript | undefined> => ipcRenderer.invoke("speech-script:get"),
+    upload: (input: { filename: string; mimeType: string; bytes: Uint8Array }): Promise<SpeechScript> => ipcRenderer.invoke("speech-script:upload", input),
+    clear: (): Promise<boolean> => ipcRenderer.invoke("speech-script:clear")
   },
   screenshot: {
     capture: (): Promise<ScreenshotResult> => ipcRenderer.invoke("screenshot:capture"),
@@ -136,7 +147,8 @@ const api = {
     stop: () => ipcRenderer.invoke("written-test:stop") as Promise<boolean>,
     answerScreenshot: () => requestScreenshotAnalysis("written-test:answer-screenshot"),
     getState: () => ipcRenderer.invoke("written-test:get-state") as Promise<WrittenTestState>,
-    setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => ipcRenderer.invoke("written-test:set-answer-mode", mode) as Promise<boolean>
+    setAnswerMode: (mode: "FAST" | "NORMAL" | "DEEP") => ipcRenderer.invoke("written-test:set-answer-mode", mode) as Promise<boolean>,
+    setNextScreenshotRelation: (relation: "NEW_QUESTION" | "CONTINUATION" | "REPLACE_SCREENSHOT") => ipcRenderer.invoke("written-test:set-next-relation", relation) as Promise<boolean>
   },
   chat: {
     createConversation: (input: { profileId?: string; projectId?: string; title?: string }): Promise<ConversationRecord> => ipcRenderer.invoke("chat:create-conversation", input),
@@ -243,7 +255,7 @@ const api = {
     list: (profileId?: string): Promise<ProjectRecord[]> => ipcRenderer.invoke("projects:list", profileId),
     create: (input: { name: string; profileId?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }): Promise<ProjectRecord | undefined> => ipcRenderer.invoke("projects:create", input),
     rename: (projectId: string, name: string): Promise<ProjectRecord | undefined> => ipcRenderer.invoke("projects:rename", projectId, name),
-    update: (projectId: string, input: { name?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string }): Promise<ProjectRecord | undefined> => ipcRenderer.invoke("projects:update", projectId, input),
+    update: (projectId: string, input: { name?: string; ownershipMode?: "personal" | "team" | "partial" | "reference"; ownershipNote?: string; projectIntroduction?: string }): Promise<ProjectRecord | undefined> => ipcRenderer.invoke("projects:update", projectId, input),
     delete: (projectId: string): Promise<boolean> => ipcRenderer.invoke("projects:delete", projectId)
   },
   knowledge: {
@@ -369,6 +381,12 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, state: CaptureProtectionState) => listener(state);
       ipcRenderer.on("overlay:capture-protection", handler);
       return () => ipcRenderer.removeListener("overlay:capture-protection", handler);
+    },
+    onSpeechScript: (listener: (script: SpeechScript | undefined) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, script: SpeechScript | undefined) => listener(script);
+      ipcRenderer.on("speech-script:changed", handler);
+      if (latestSpeechScript) listener(latestSpeechScript);
+      return () => ipcRenderer.removeListener("speech-script:changed", handler);
     },
     onShortcut: (listener: (shortcut: string) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, shortcut: string) => listener(shortcut);

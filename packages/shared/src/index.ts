@@ -630,7 +630,7 @@ export class QuestionDetector {
 }
 
 export * from "./answer";
-export { createAnswerSourcePlan, planAnswerSource } from "./answer/project-answer-source-planner";
+export { createAnswerSourcePlan, planAnswerSource, withGroundedProjectFallback } from "./answer/project-answer-source-planner";
 export type { AnswerSourceMode, AnswerSourcePlan, AnswerSourcePlannerInput } from "./answer/project-answer-source-planner";
 export { StrictProjectQaRouter } from "./answer/strict-project-qa-router";
 export type { StrictProjectQaMatchLevel, StrictProjectQaOptions, StrictProjectQaResult } from "./answer/strict-project-qa-router";
@@ -689,6 +689,7 @@ export type { TranscriptFragment, TranscriptSpeaker, TranscriptUtterance as Asse
 export { TranscriptAssembler } from "./transcript/transcript-assembler";
 export type { TranscriptAssemblerOptions, TranscriptAssemblerUpdate } from "./transcript/transcript-assembler";
 export * from "./answer/answer-thread-store";
+export * from "./answer/project-qa-evidence";
 export * from "./question-trace";
 export * from "./question";
 export * from "./profile-builder";
@@ -699,3 +700,4 @@ export * from "./chat-intent";
 export * from "./knowledge/index";
 export * from "./project-comprehension";
 export * from "./vision/written-problem-state";
+export * from "./asr-config";

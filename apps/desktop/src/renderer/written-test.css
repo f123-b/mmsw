@@ -1,0 +1,23 @@
+.written-test-status { margin-bottom: 12px; font-size: 13px; line-height: 1.6; }
+.written-focus-protection, .written-screenshot-relation { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
+.written-focus-protection small { opacity: .8; }
+.written-focus-protection button, .written-screenshot-relation button { color: inherit; background: rgba(120, 130, 150, .12); border: 1px solid #6c7688; border-radius: 6px; padding: 4px 8px; cursor: pointer; }
+.written-focus-protection button[aria-checked="true"], .written-screenshot-relation button[aria-pressed="true"] { border-color: #0891b2; background: rgba(8, 145, 178, .2); }
+.written-test-status button:disabled { opacity: .5; cursor: default; }
+.written-explanation, .written-reader-question, .written-equations pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.written-table-scroll { overflow-x: auto; margin: 12px 0; }
+.written-table-scroll table { border-collapse: collapse; width: 100%; }
+.written-table-scroll th, .written-table-scroll td { border: 1px solid #6c7688; padding: 6px 8px; text-align: left; white-space: pre-wrap; }
+.written-test-error { color: #e98465; white-space: pre-wrap; }
+.written-structured-answer { display: grid; gap: 10px; min-width: 0; }
+.written-answer-tabs { display: flex; gap: 5px; flex-wrap: wrap; }
+.written-answer-tabs button { border: 1px solid #6c7688; border-radius: 8px; padding: 4px 9px; background: #1e293b; color: #cbd5e1; cursor: pointer; }
+.written-answer-tabs button.active { border-color: #67e8f9; color: #ecfeff; background: #155e75; }
+.written-answer-tab-content { min-width: 0; }
+.written-code-block { max-height: 420px; overflow: auto; padding: 12px; border-radius: 9px; background: #020617; color: #dbeafe; white-space: pre; tab-size: 4; }
+.written-diagram, .written-original-image { display: block; max-width: 100%; max-height: 480px; object-fit: contain; border-radius: 10px; }
+.written-step-list { display: grid; gap: 10px; padding-left: 22px; }
+.written-step-list li { display: grid; gap: 3px; }
+.written-step-list span { white-space: pre-wrap; }
+.written-warning { display: block; margin-top: 5px; color: #dfae3b; }
+.history-entry .written-explanation { color: inherit; font: inherit; }

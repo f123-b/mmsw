@@ -15,6 +15,9 @@ export function createFallbackDiagram(type: WrittenQuestionType, title = "题目
 export function diagramSpecIsValid(value: unknown): value is DiagramSpec {
   if (!value || typeof value !== "object") return false;
   const input = value as DiagramSpec;
-  return Array.isArray(input.nodes) && Array.isArray(input.edges) && input.nodes.length > 0 && input.edges.every((edge) => input.nodes.some((node) => node.id === edge.from) && input.nodes.some((node) => node.id === edge.to));
+  if (!["FLOWCHART", "LOGIC", "STATE", "SEQUENCE", "ARCHITECTURE", "DIGITAL_LOGIC"].includes(input.kind) || (input.title != null && typeof input.title !== "string")) return false;
+  if (!Array.isArray(input.nodes) || !Array.isArray(input.edges) || !input.nodes.length || input.nodes.length > 80 || input.edges.length > 160) return false;
+  if (!input.nodes.every((node) => node && typeof node.id === "string" && node.id.trim() && typeof node.label === "string" && node.label.trim() && ["rectangle", "rounded", "diamond", "circle", "and", "or", "not", "xor"].includes(node.shape))) return false;
+  const ids = new Set(input.nodes.map((node) => node.id));
+  return ids.size === input.nodes.length && input.edges.every((edge) => edge && ids.has(edge.from) && ids.has(edge.to) && (edge.label == null || typeof edge.label === "string"));
 }
-

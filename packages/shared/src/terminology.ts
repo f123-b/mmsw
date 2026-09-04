@@ -66,6 +66,7 @@ export const EMBEDDED_TERMINOLOGY_RULES: readonly TerminologyRule[] = [
   { canonical: "技术栈", pattern: /季度战/g, context: /项目|简历|自我介绍|技术|使用|负责|开发/i, priority: 124, source: "contextual" },
   { canonical: "帧头、长度", pattern: /针头长度/g, context: /协议|帧|报文|解析|字段/i, priority: 124, source: "contextual" },
   { canonical: "Bootloader", pattern: /Woodloader/gi, context: /固件|启动|引导|升级|烧录|Bootloader/i, priority: 124, source: "contextual" },
+  { canonical: "CAN 总线", pattern: /看准线/g, context: /总线|接线|多少根线|怎么接|485|四八五|CAN/i, priority: 126, source: "contextual" },
   { canonical: "堆和栈", pattern: /(?:杯和盏|杯和栈|堆和盏|追和栈)/g, priority: 120 },
   { canonical: "堆和栈", pattern: /(?:追|堆)\s*(?:和|与|跟)\s*栈/g },
   { canonical: "堆", pattern: /追(?=\s*(?:栈|和|与|、)?\s*(?:栈|内存|管理|溢出|分配|malloc|free))/gi },

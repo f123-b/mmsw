@@ -10,7 +10,7 @@ export function mergeOverlayPreferencePatches(base: OverlayPreferencesPatch, nex
   const merged = { ...base, ...next } as OverlayPreferencesPatch;
   const interview = { ...(base.interview ?? {}), ...(next.interview ?? {}) };
   const writtenTest = { ...(base.writtenTest ?? {}), ...(next.writtenTest ?? {}) };
-  for (const key of ["questionWindow", "dialogueWindow", "answerWindow", "controlBar"] as const) {
+  for (const key of ["questionWindow", "dialogueWindow", "answerWindow", "scriptWindow", "controlBar"] as const) {
     const left = base.interview?.[key];
     const right = next.interview?.[key];
     if (left || right) interview[key] = { ...(left ?? {}), ...(right ?? {}) } as never;
@@ -40,6 +40,7 @@ function mergeDraft(current: OverlayPreferences, patch: OverlayPreferencesPatch)
       questionWindow: { ...current.interview.questionWindow, ...(interviewPatch.questionWindow ?? {}) },
       dialogueWindow: { ...current.interview.dialogueWindow, ...(interviewPatch.dialogueWindow ?? {}) },
       answerWindow: { ...current.interview.answerWindow, ...(interviewPatch.answerWindow ?? {}) },
+      scriptWindow: { ...current.interview.scriptWindow, ...(interviewPatch.scriptWindow ?? {}) },
       controlBar: { ...current.interview.controlBar, ...(interviewPatch.controlBar ?? {}) }
     },
     writtenTest: {

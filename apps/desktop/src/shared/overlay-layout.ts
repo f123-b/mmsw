@@ -1,7 +1,7 @@
 import type { InterviewLayoutPreset, OverlayControlBarPreferences, OverlayWindowPreferences, WrittenTestLayoutPreset } from "./overlay-preferences";
 
 export type OverlayLayoutMode = "interview" | "written_test";
-export type OverlayLayoutPanel = "question" | "answer" | "control";
+export type OverlayLayoutPanel = "question" | "answer" | "script" | "control";
 
 export interface OverlayGeometryContext {
   mode: OverlayLayoutMode;
@@ -35,6 +35,7 @@ export interface OverlayPresetGeometryOptions {
   preset: InterviewLayoutPreset | WrittenTestLayoutPreset;
   workArea: OverlayLayoutWorkArea;
   controlBar: Pick<OverlayControlBarPreferences, "width" | "height" | "orientation">;
+  scriptWindow?: Pick<OverlayWindowPreferences, "width" | "height">;
 }
 
 type PersistedWindowGeometry = Pick<OverlayWindowPreferences, "x" | "y" | "width" | "height"> &
@@ -46,25 +47,29 @@ type PersistedControlBarGeometry = Pick<OverlayControlBarPreferences, "x" | "y" 
 export interface OverlayPersistedGeometryOptions extends OverlayPresetGeometryOptions {
   questionWindow: PersistedWindowGeometry;
   answerWindow: PersistedWindowGeometry;
+  scriptWindow?: PersistedWindowGeometry;
   controlBar: PersistedControlBarGeometry;
 }
 
 const INTERVIEW_STABLE_CONSTRAINTS: Record<Exclude<OverlayLayoutPanel, "control">, OverlayGeometryConstraints> = {
   question: { minWidth: 320, maxWidth: 900, minHeight: 220, maxHeight: 840 },
-  answer: { minWidth: 480, maxWidth: 1_100, minHeight: 220, maxHeight: 840 }
+  answer: { minWidth: 480, maxWidth: 1_100, minHeight: 220, maxHeight: 840 },
+  script: { minWidth: 280, maxWidth: 700, minHeight: 180, maxHeight: 840 }
 };
 
 const INTERVIEW_MINIMAL_CONSTRAINTS: Record<Exclude<OverlayLayoutPanel, "control">, OverlayGeometryConstraints> = {
   question: { minWidth: 320, maxWidth: 760, minHeight: 88, maxHeight: 280 },
-  answer: { minWidth: 480, maxWidth: 1_000, minHeight: 132, maxHeight: 440 }
+  answer: { minWidth: 480, maxWidth: 1_000, minHeight: 132, maxHeight: 440 },
+  script: { minWidth: 280, maxWidth: 700, minHeight: 140, maxHeight: 440 }
 };
 
 const WRITTEN_CONSTRAINTS: Record<Exclude<OverlayLayoutPanel, "control">, OverlayGeometryConstraints> = {
   question: { minWidth: 480, maxWidth: 1_200, minHeight: 320, maxHeight: 840 },
-  answer: { minWidth: 480, maxWidth: 1_200, minHeight: 320, maxHeight: 840 }
+  answer: { minWidth: 480, maxWidth: 1_200, minHeight: 320, maxHeight: 840 },
+  script: { minWidth: 320, maxWidth: 900, minHeight: 220, maxHeight: 840 }
 };
 
-const CONTROL_CONSTRAINTS: OverlayGeometryConstraints = { minWidth: 240, maxWidth: 1_200, minHeight: 36, maxHeight: 100 };
+const CONTROL_CONSTRAINTS: OverlayGeometryConstraints = { minWidth: 360, maxWidth: 1_200, minHeight: 44, maxHeight: 100 };
 
 /** Single source of truth for Settings normalize, Designer and native Runtime geometry. */
 export function resolveOverlayGeometryConstraints(context: OverlayGeometryContext): OverlayGeometryConstraints {
@@ -141,12 +146,13 @@ export function resolveOverlayPresetGeometry(options: OverlayPresetGeometryOptio
   const control = clampBounds({ ...controlPosition(controlPositionMode, workArea, controlSize.width, controlSize.height), ...controlSize }, workArea, controlConstraints);
 
   if (isWritten) {
-    const height = panelHeight(workArea, 560, questionConstraints);
+    const height = panelHeight(workArea, writtenPreset === "single_reader" ? 700 : 560, questionConstraints);
     if (writtenPreset === "single_reader") {
-      const question = fitSize(Math.min(920, workArea.width - margin * 2), height, workArea, questionConstraints);
+      const question = fitSize(Math.min(560, workArea.width - margin * 2), height, workArea, questionConstraints);
       return {
         question: clampBounds({ x: centeredX(workArea, question.width), y: workArea.y + 104, ...question }, workArea, questionConstraints),
         answer: clampBounds({ x: centeredX(workArea, 700), y: workArea.y + 104, width: 700, height }, workArea, answerConstraints),
+        script: clampBounds({ x: workArea.x + margin, y: workArea.y + workArea.height - 260 - margin, width: 360, height: 260 }, workArea, resolveOverlayGeometryConstraints({ mode, preset: normalized, panel: "script" })),
         control
       };
     }
@@ -158,6 +164,7 @@ export function resolveOverlayPresetGeometry(options: OverlayPresetGeometryOptio
     return {
       question: clampBounds({ x: left, y: workArea.y + 104, width: questionWidth, height }, workArea, questionConstraints),
       answer: clampBounds({ x: left + questionWidth + gap, y: workArea.y + 104, width: answerWidth, height }, workArea, answerConstraints),
+      script: clampBounds({ x: workArea.x + margin, y: workArea.y + workArea.height - 260 - margin, width: 360, height: 260 }, workArea, resolveOverlayGeometryConstraints({ mode, preset: normalized, panel: "script" })),
       control
     };
   }
@@ -172,11 +179,14 @@ export function resolveOverlayPresetGeometry(options: OverlayPresetGeometryOptio
   const height = normalized === "minimal" ? sizes.height : panelHeight(workArea, sizes.height, questionConstraints);
   const question = fitSize(sizes.question, height, workArea, questionConstraints);
   const answer = fitSize(sizes.answer, height, workArea, answerConstraints);
+  const scriptConstraints = resolveOverlayGeometryConstraints({ mode, preset: normalized, panel: "script" });
+  const scriptSize = fitSize(options.scriptWindow?.width ?? 360, options.scriptWindow?.height ?? 420, workArea, scriptConstraints);
   const total = question.width + sizes.gap + answer.width;
   const left = centeredX(workArea, total);
   return {
     question: clampBounds({ x: left, y: workArea.y + (normalized === "minimal" ? 150 : 104), ...question }, workArea, questionConstraints),
     answer: clampBounds({ x: left + question.width + sizes.gap, y: workArea.y + (normalized === "minimal" ? 150 : 104), ...answer }, workArea, answerConstraints),
+    script: clampBounds({ x: workArea.x + margin, y: workArea.y + workArea.height - scriptSize.height - margin, ...scriptSize }, workArea, scriptConstraints),
     control
   };
 }
@@ -185,7 +195,7 @@ function hasPersistedPosition(value: Pick<OverlayWindowPreferences, "x" | "y">):
   return Number.isFinite(value.x) && Number.isFinite(value.y);
 }
 
-function persistedBounds(context: OverlayGeometryContext, value: Pick<OverlayWindowPreferences, "x" | "y" | "width" | "height">, fallback: OverlayLayoutBounds, workArea: OverlayLayoutWorkArea): OverlayLayoutBounds {
+function persistedBounds(context: OverlayGeometryContext, value: Partial<Pick<OverlayWindowPreferences, "x" | "y" | "width" | "height">>, fallback: OverlayLayoutBounds, workArea: OverlayLayoutWorkArea): OverlayLayoutBounds {
   const constraints = resolveOverlayGeometryConstraints(context);
   // A fresh preference has dimensions but no position. Keep the preset's
   // placement in that case while still honoring an explicitly customized
@@ -202,6 +212,7 @@ export function resolveOverlayPersistedGeometry(options: OverlayPersistedGeometr
   return {
     question: persistedBounds({ mode: options.mode, preset: options.preset, panel: "question" }, options.questionWindow, preset.question, options.workArea),
     answer: persistedBounds({ mode: options.mode, preset: options.preset, panel: "answer" }, options.answerWindow, preset.answer, options.workArea),
+    script: persistedBounds({ mode: options.mode, preset: options.preset, panel: "script" }, options.scriptWindow ?? {}, preset.script, options.workArea),
     control: persistedBounds({ mode: options.mode, preset: options.preset, panel: "control" }, options.controlBar, preset.control, options.workArea)
   };
 }
@@ -216,11 +227,12 @@ export function toRelativeOverlayBounds(bounds: OverlayLayoutBounds, workArea: O
  * only this returned rectangle is reserved for pointer interaction.
  */
 export function resolveWrittenTestCameraBounds(answer: OverlayLayoutBounds, workArea: OverlayLayoutWorkArea, gap = 8): OverlayLayoutBounds {
-  const size = 44;
+  const width = 128;
+  const height = 44;
   return {
-    width: size,
-    height: size,
-    x: clamp(answer.x + answer.width - size - gap, workArea.x, workArea.x + Math.max(0, workArea.width - size)),
-    y: clamp(answer.y + gap, workArea.y, workArea.y + Math.max(0, workArea.height - size))
+    width,
+    height,
+    x: clamp(answer.x + answer.width - width - gap, workArea.x, workArea.x + Math.max(0, workArea.width - width)),
+    y: clamp(answer.y + gap, workArea.y, workArea.y + Math.max(0, workArea.height - height))
   };
 }

@@ -2,7 +2,7 @@ import type { OverlayDisplayInfo } from "./overlay-manager";
 import { DEFAULT_OVERLAY_PREFERENCES, type OverlayPreferences } from "../shared/overlay-preferences";
 import { resolveOverlayGeometryConstraints, resolveOverlayPersistedGeometry, type OverlayLayoutBounds, type OverlayLayoutMode } from "../shared/overlay-layout";
 
-export type OverlayNativePanel = "question" | "answer" | "control";
+export type OverlayNativePanel = "question" | "answer" | "script" | "control";
 export type OverlayContentPanel = "question" | "answer";
 export type OverlayRuntimeLayoutMode = OverlayLayoutMode;
 export type OverlayNativeBounds = OverlayLayoutBounds;
@@ -15,7 +15,7 @@ export interface OverlayLayoutControllerOptions {
 
 export const OVERLAY_CONTENT_LIMITS: Record<OverlayContentPanel, { minHeight: number; maxHeight: number }> = {
   question: { minHeight: resolveOverlayGeometryConstraints({ mode: "interview", preset: "minimal", panel: "question" }).minHeight, maxHeight: resolveOverlayGeometryConstraints({ mode: "interview", preset: "minimal", panel: "question" }).maxHeight },
-  answer: { minHeight: resolveOverlayGeometryConstraints({ mode: "interview", preset: "minimal", panel: "answer" }).minHeight, maxHeight: resolveOverlayGeometryConstraints({ mode: "interview", preset: "minimal", panel: "answer" }).maxHeight }
+    answer: { minHeight: resolveOverlayGeometryConstraints({ mode: "interview", preset: "minimal", panel: "answer" }).minHeight, maxHeight: resolveOverlayGeometryConstraints({ mode: "interview", preset: "minimal", panel: "answer" }).maxHeight }
 };
 
 function clamp(value: number, minimum: number, maximum: number): number {
@@ -48,6 +48,7 @@ export function resolveOverlayNativeBounds(preferences: OverlayPreferences, opti
     workArea,
     questionWindow,
     answerWindow: modePreferences.answerWindow,
+    scriptWindow: mode === "interview" ? preferences.interview.scriptWindow : undefined,
     controlBar: modePreferences.controlBar
   });
 }

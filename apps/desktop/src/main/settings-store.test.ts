@@ -3,6 +3,38 @@ import { SqliteDatabase } from "./database";
 import { MemorySecretStore, OverlaySettingsStore, ProviderConfigStore } from "./settings-store";
 
 describe("ProviderConfigStore", () => {
+  it("keeps ASR keys isolated and restores the matching provider key", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const config = new ProviderConfigStore(database, new MemorySecretStore());
+      config.update("asr", { providerType: "qwen", apiKey: "qwen-secret", model: "qwen-audio-3.0-asr-flash", baseUrl: "wss://dashscope.aliyuncs.com/api-ws/v1/inference" });
+      expect(config.get("asr").baseUrl).toMatch(/^https:.*generation$/);
+      config.update("asr", { providerType: "groq", baseUrl: "https://api.groq.com/openai/v1", model: "whisper-large-v3" });
+      expect(config.get("asr").apiKey).toBe("");
+      config.update("asr", { apiKey: "groq-secret" });
+      config.update("asr", { providerType: "qwen", baseUrl: "https://dashscope.aliyuncs.com", model: "qwen-audio-3.0-asr-flash" });
+      expect(config.get("asr").apiKey).toBe("qwen-secret");
+      expect(JSON.stringify(config.getPublic())).not.toContain("qwen-secret");
+      config.update("asr", { apiKey: "" });
+      expect(config.get("asr").apiKey).toBe("");
+    } finally { database.close(); }
+  });
+  it("round-trips independent protocol profiles without exposing or mixing secrets", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const secrets = new MemorySecretStore();
+      const config = new ProviderConfigStore(database, secrets);
+      for (const protocol of ["openai-chat", "openai-responses", "anthropic-messages"] as const) {
+        config.saveLlmProfile({ id:protocol,name:protocol,apiProtocol:protocol,providerName:"Custom",baseUrl:"https://example.test/v1",model:"fixture-text",fastModel:"fixture-text",normalModel:"fixture-text",deepModel:"fixture-text",visionModel:"",apiKey:`secret-${protocol}`,timeoutMs:1000,maxRetries:0 });
+      }
+      const reloaded = new ProviderConfigStore(database, secrets);
+      for (const protocol of ["openai-chat", "openai-responses", "anthropic-messages"] as const) {
+        reloaded.activateLlmProfile(protocol);
+        expect(reloaded.get("llm")).toMatchObject({apiProtocol:protocol,apiKey:`secret-${protocol}`});
+      }
+      expect(JSON.stringify(reloaded.getPublic())).not.toContain("secret-");
+    } finally { database.close(); }
+  });
   it("keeps API keys in SecretStore and never returns them in public config", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
@@ -122,6 +154,25 @@ describe("ProviderConfigStore", () => {
 });
 
 describe("OverlaySettingsStore", () => {
+  it("defaults written-test focus protection on and retains an explicit opt-out", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      // Existing v4 settings have no focusProtection field.
+      database.run("INSERT INTO app_state(key, value) VALUES (?, ?)", ["overlay.preferences", JSON.stringify({ schemaVersion: 4, interview: {}, writtenTest: { layoutPreset: "split" } })]);
+      const settings = new OverlaySettingsStore(database);
+      expect(settings.getPreferences().writtenTest.focusProtection).toBe(true);
+      settings.setPreferences({ writtenTest: { focusProtection: false } });
+      settings.setPreferences({ writtenTest: { layoutPreset: "single_reader" }, behavior: { wheelRouting: "underlying_app" } });
+      const reloaded = new OverlaySettingsStore(database);
+      expect(reloaded.getPreferences().writtenTest.focusProtection).toBe(false);
+      expect(reloaded.previewPreferences({ writtenTest: { focusProtection: true } }).writtenTest.focusProtection).toBe(true);
+      expect(reloaded.getPreferences().writtenTest.focusProtection).toBe(false);
+      expect(reloaded.resetLayout().writtenTest.focusProtection).toBe(false);
+    } finally {
+      database.close();
+    }
+  });
+
   it("persists and validates overlay appearance and module preferences", async () => {
     const database = await SqliteDatabase.open(":memory:");
     try {
@@ -161,7 +212,7 @@ describe("OverlaySettingsStore", () => {
       expect(preferences.schemaVersion).toBe(4);
       expect(preferences.interview.questionWindow).toMatchObject({ width: 900, height: 500, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
       expect(preferences.interview.answerWindow).toMatchObject({ width: 900, height: 500, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
-      expect(preferences.writtenTest.questionWindow).toMatchObject({ width: 900, height: 560, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
+      expect(preferences.writtenTest.questionWindow).toMatchObject({ width: 900, height: 700, fontSize: 10, backgroundOpacity: 0, textColor: "#ffffff" });
       expect(preferences.behavior.interactionMode).toBe("click_through");
       expect(preferences.appearance.mode).toBe("glass");
       expect(new OverlaySettingsStore(database).setPreferences({ behavior: { mousePassthrough: true } }).behavior.interactionMode).toBe("click_through");

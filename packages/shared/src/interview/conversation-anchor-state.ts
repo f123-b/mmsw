@@ -58,8 +58,8 @@ export class ConversationAnchorState {
   addEntities(entities: EntityAnchor[]): void {
     for (const entity of entities) {
       const index = this.entities.findIndex((item) => item.value.toLowerCase() === entity.value.toLowerCase() && item.type === entity.type);
-      if (index >= 0) this.entities[index] = { ...this.entities[index], ...entity };
-      else this.entities.push({ ...entity });
+      if (index >= 0) this.entities.splice(index, 1);
+      this.entities.push({ ...entity });
     }
     while (this.entities.length > 32) this.entities.shift();
     this.component = [...this.entities].reverse().find((item) => item.type === "component") ?? this.component;
@@ -81,4 +81,3 @@ export class ConversationAnchorState {
     };
   }
 }
-

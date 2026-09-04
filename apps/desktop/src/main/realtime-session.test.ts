@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RealtimeSession, type RealtimeSocket } from "./realtime-session";
 import type { ProviderSettings, StreamingAsrSocket } from "@interview-copilot/shared";
 import type { VADProvider } from "@interview-copilot/shared/vad";
@@ -54,6 +54,26 @@ function fakeVAD(ready: boolean): VADProvider {
 }
 
 describe("RealtimeSession", () => {
+  it("routes live stereo audio to Qwen Flash HTTP and returns a final interviewer transcript", async () => {
+    const http = vi.fn(async () => Response.json({ output: { text: "你的优点是什么？" } }));
+    vi.stubGlobal("fetch", http);
+    const config: ProviderSettings = { ...qwenSettings, model: "qwen-audio-3.0-asr-flash", baseUrl: "wss://dashscope.aliyuncs.com/api-ws/v1/inference" };
+    const socketFactory = vi.fn(() => new FakeSocket());
+    const session = new RealtimeSession(socketFactory, () => config, undefined, undefined, undefined, undefined, () => fakeVAD(true));
+    const transcripts: Array<{ text: string; source: string; final: boolean }> = [];
+    session.on("transcript", (_snapshot, segment) => { if (segment) transcripts.push(segment); });
+    try {
+      session.connect({ providerType: "qwen", model: config.model, autoReconnect: false });
+      await vi.waitFor(() => expect(session.connectionState).toBe("connected"));
+      const stereo = Buffer.alloc(2560);
+      for (let i = 2; i < stereo.length; i += 4) stereo.writeInt16LE(1800, i);
+      for (let i = 0; i < 20; i++) session.sendAudio(stereo);
+      for (let i = 0; i < 17; i++) session.sendAudio(new Uint8Array(2560));
+      await vi.waitFor(() => expect(transcripts).toContainEqual(expect.objectContaining({ text: "你的优点是什么？", source: "remote", final: true })));
+      expect(http).toHaveBeenCalledTimes(1);
+      expect(socketFactory).not.toHaveBeenCalled();
+    } finally { session.disconnect(); vi.unstubAllGlobals(); }
+  });
   it("sends client_ready and keeps ASR partials out of final history", () => {
     const socket = new FakeSocket();
     const session = new RealtimeSession(() => socket);

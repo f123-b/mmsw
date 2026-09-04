@@ -19,7 +19,7 @@ export interface SemanticQuestionCompletionResult {
   reason: string;
 }
 
-const OPEN_SETUP = /(?:你能给我介绍一下|你这个项目为什么|为什么(?:要)?选|为什么(?:要)?选择|如果发生|如果让你|假设现在|首先比如说|比如说)[^？?。！？!]*[？?。！？!]?$/iu;
+const OPEN_SETUP = /(?:你能给我介绍一下|如果发生|如果让你|假设现在|首先比如说|比如说)[？?。！？!\s]*$/iu;
 const MISSING_OBJECT = /^(?:怎么衡量|如何衡量|为什么选|为什么选择|怎么做|如何做|怎么验证|如何验证)[？?。！？!\s]*$/iu;
 const MISSING_SUBJECT = /^(?:为什么|为何|怎么|如何|怎样|什么时候|多久|哪个|哪一个)[？?。！？!\s]*$/iu;
 

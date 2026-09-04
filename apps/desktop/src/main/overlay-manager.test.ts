@@ -5,6 +5,7 @@ describe("applyOverlayMode", () => {
   function makeWindow(): OverlayWindowLike {
     return {
       isDestroyed: () => false,
+      isFocusable: () => true,
       setFocusable: vi.fn(),
       setIgnoreMouseEvents: vi.fn(),
       webContents: { send: vi.fn() }

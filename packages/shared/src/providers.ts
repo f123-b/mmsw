@@ -1,14 +1,19 @@
 import type { AnswerProvider, AnswerProviderRequest, PromptSection } from "./answer";
 
-export type AsrProviderType = "deepgram" | "qwen" | "custom-gateway" | "funasr-local";
+export type AsrProviderType = "deepgram" | "qwen" | "openai" | "groq" | "siliconflow" | "openai-compatible" | "elevenlabs" | "azure" | "google" | "assemblyai" | "volcengine" | "baidu" | "tencent" | "custom-gateway" | "funasr-local";
 export type AsrLanguage = "zh-CN" | "en-US" | "multi";
+export type LlmApiProtocol = "openai-chat" | "openai-responses" | "anthropic-messages";
 
 export interface ProviderSettings {
   providerName: string;
   baseUrl: string;
   apiKey: string;
   model: string;
+  apiProtocol?: LlmApiProtocol;
   providerType?: AsrProviderType;
+  asrProtocol?: "auto" | "qwen-http" | "qwen-realtime" | "dashscope-streaming" | "openai-transcription";
+  /** Public application identifier (Volcengine App ID or Tencent SecretId). */
+  asrAppId?: string;
   language?: AsrLanguage;
   fastModel?: string;
   normalModel?: string;
@@ -45,6 +50,19 @@ export interface ModelConfigurationIssue {
 
 export type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
+export function llmApiProtocol(settings: ProviderSettings): LlmApiProtocol {
+  if (settings.apiProtocol) return settings.apiProtocol;
+  if (/\/responses\/?$/i.test(settings.baseUrl)) return "openai-responses";
+  if (/^https:\/\/api\.anthropic\.com(?:\/|$)/i.test(settings.baseUrl) || /\/messages\/?$/i.test(settings.baseUrl)) return "anthropic-messages";
+  return "openai-chat";
+}
+
+export function llmRequestHeaders(settings: ProviderSettings): Record<string, string> {
+  return { "content-type": "application/json", ...(llmApiProtocol(settings) === "anthropic-messages"
+    ? { "anthropic-version": "2023-06-01", ...(settings.apiKey ? { "x-api-key": settings.apiKey } : {}) }
+    : settings.apiKey ? { authorization: `Bearer ${settings.apiKey}` } : {}) };
+}
+
 function isDeepSeek(settings: ProviderSettings): boolean {
   try {
     return settings.providerName.toLowerCase().includes("deepseek") || new URL(settings.baseUrl).hostname.toLowerCase() === "api.deepseek.com";
@@ -69,7 +87,7 @@ export function providerCapabilities(settings: ProviderSettings): ProviderCapabi
     requiresApiKey: settings.requiresApiKey ?? (!local),
     supportsThinking: deepSeek,
     supportsVision: settings.supportsVision ?? true,
-    chatPath: deepSeek ? "chat/completions" : "v1/chat/completions",
+    chatPath: llmApiProtocol(settings) === "anthropic-messages" ? "v1/messages" : llmApiProtocol(settings) === "openai-responses" ? "v1/responses" : deepSeek ? "chat/completions" : "v1/chat/completions",
     embeddingPath: "v1/embeddings"
   };
 }
@@ -80,7 +98,7 @@ export function providerSupportsVision(settings: ProviderSettings): boolean {
 
 function cleanBaseUrl(baseUrl: string, settings: ProviderSettings): string {
   let base = baseUrl.trim().replace(/\/+$/, "");
-  base = base.replace(/\/(?:v1\/)?(?:chat\/completions|embeddings)$/i, "");
+  base = base.replace(/\/(?:chat\/completions|embeddings|responses|messages)$/i, "");
   if (isDeepSeek(settings)) base = base.replace(/\/v1$/i, "");
   return base;
 }
@@ -88,7 +106,9 @@ function cleanBaseUrl(baseUrl: string, settings: ProviderSettings): string {
 export function providerEndpoint(settings: ProviderSettings, path: string): string {
   let normalized = path.replace(/^\/+/, "");
   const base = cleanBaseUrl(settings.baseUrl, settings);
-  if (/\/v1$/i.test(base) && /^v1\//i.test(normalized)) normalized = normalized.slice(3);
+  // A supplied path is the API prefix, including Gemini's /v1beta/openai,
+  // Doubao's /api/v3 and arbitrary OpenAI-compatible gateways.
+  if (new URL(base).pathname.replace(/\/+$/, "") && /^v1\//i.test(normalized)) normalized = normalized.slice(3);
   return `${base}/${normalized}`;
 }
 
@@ -110,6 +130,7 @@ export function validateLlmModelConfiguration(settings: Partial<ProviderSettings
     }
   }
   if (!settings.model?.trim()) issues.push({ field: "model", message: "默认对话模型不能为空" });
+  if (settings.apiProtocol && !["openai-chat", "openai-responses", "anthropic-messages"].includes(settings.apiProtocol)) issues.push({ field: "apiProtocol", message: "不支持的 LLM API 协议" });
   for (const field of CHAT_MODEL_FIELDS) {
     const model = settings[field];
     if (typeof model !== "string" || !model.trim()) continue;
@@ -125,7 +146,7 @@ function buildMessages(sections: PromptSection[], attachments: Array<{ mimeType:
   const question = sections.find((section) => section.name === "question")?.content ?? "";
   const userContent: string | Array<Record<string, unknown>> = attachments.length === 0
     ? question
-    : [{ type: "text", text: question }, ...attachments.map((attachment) => ({ type: "image_url", image_url: { url: attachment.dataUrl, detail: "auto", mimeType: attachment.mimeType } }))];
+    : [{ type: "text", text: question }, ...attachments.map((attachment) => ({ type: "image_url", image_url: { url: attachment.dataUrl, detail: "auto" } }))];
   return [
     { role: "system", content: system },
     { role: "user", content: userContent }
@@ -149,9 +170,35 @@ function textFromContent(value: unknown): string {
   }).join("");
 }
 
+export function buildLlmHttpRequest(settings: ProviderSettings, request: AnswerProviderRequest, stream: boolean): { url: string; headers: Record<string, string>; body: Record<string, unknown> } {
+  const model = request.model || settings.model;
+  const protocol = llmApiProtocol(settings);
+  const messages = buildMessages(request.sections, request.attachments);
+  const system = messages[0].content;
+  const question = request.sections.find(section => section.name === "question")?.content ?? "";
+  const attachments = request.attachments ?? [];
+  let body: Record<string, unknown>;
+  if (protocol === "anthropic-messages") {
+    body = { model, system, stream, max_tokens: request.maxOutputTokens ?? 4096, messages: [{ role: "user", content: [{type:"text",text:question}, ...attachments.map(image => {
+      const data = /^data:([^;,]+);base64,(.+)$/s.exec(image.dataUrl);
+      return {type:"image",source:data ? {type:"base64",media_type:data[1],data:data[2]} : {type:"url",url:image.dataUrl}};
+    })] }] };
+  } else if (protocol === "openai-responses") {
+    body = { model, instructions: system, input: [{ role: "user", content: [{type:"input_text",text:question}, ...attachments.map(image => ({type:"input_image",image_url:image.dataUrl,detail:"auto"}))] }], store: false, stream, ...(request.maxOutputTokens ? {max_output_tokens:request.maxOutputTokens} : {}) };
+  } else {
+    const thinking = thinkingForRequest(settings, request);
+    const tokenKey = /^(?:gpt-5|o[134](?:-|$))/i.test(model) ? "max_completion_tokens" : "max_tokens";
+    body = {model,messages,stream,...(thinking ? {thinking} : {}), ...(request.maxOutputTokens ? {[tokenKey]:request.maxOutputTokens} : {})};
+  }
+  return {url:providerEndpoint(settings,providerCapabilities(settings).chatPath),headers:llmRequestHeaders(settings),body};
+}
+
 function extractDelta(value: unknown): string {
   if (!value || typeof value !== "object") return "";
   const record = value as Record<string, unknown>;
+  if (record.type === "content_block_delta") return (record.delta as {type?:string;text?:string})?.type === "text_delta" ? (record.delta as {text:string}).text : "";
+  if (record.type === "response.output_text.delta" || record.type === "response.refusal.delta") return String(record.delta ?? "");
+  if (typeof record.type === "string" && record.type.startsWith("response.")) return "";
   const choices = Array.isArray(record.choices) ? record.choices : [];
   const choice = choices[0] as Record<string, unknown> | undefined;
   const delta = choice?.delta as Record<string, unknown> | undefined;
@@ -169,6 +216,7 @@ function extractDelta(value: unknown): string {
 function streamFinished(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
+  if (record.type === "message_stop" || record.type === "response.completed") return true;
   const choices = Array.isArray(record.choices) ? record.choices : [];
   const choice = choices[0];
   if (!choice || typeof choice !== "object") return false;
@@ -176,9 +224,11 @@ function streamFinished(value: unknown): boolean {
   return typeof finishReason === "string" && finishReason.length > 0;
 }
 
-function extractCompletion(value: unknown): string {
+export function extractLlmCompletion(value: unknown): string {
   if (!value || typeof value !== "object") return "";
   const record = value as Record<string, unknown>;
+  if (Array.isArray(record.output)) return record.output.filter(item => item?.type === "message").map(item => textFromContent(item.content)).join("");
+  if (Array.isArray(record.content)) return textFromContent(record.content.filter(item => item?.type === "text"));
   const choices = Array.isArray(record.choices) ? record.choices : [];
   const choice = choices[0] as Record<string, unknown> | undefined;
   const message = choice?.message as Record<string, unknown> | undefined;
@@ -200,6 +250,30 @@ function abortError(): Error {
   return error;
 }
 
+/** Bound even a non-compliant gateway which ignores abort. */
+export function abortableProviderTask<T>(task: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) { void task.catch(() => undefined); return Promise.reject(abortError()); }
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => { signal.removeEventListener('abort', abort); reject(abortError()); };
+    signal.addEventListener('abort', abort, {once:true});
+    task.then(value => {signal.removeEventListener('abort',abort);resolve(value);}, error => {signal.removeEventListener('abort',abort);reject(error);});
+  });
+}
+
+function retryDelay(attempt: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const abort = () => {clearTimeout(timer);signal.removeEventListener('abort',abort);reject(abortError());};
+    const timer = setTimeout(() => {signal.removeEventListener('abort',abort);resolve();},250*(attempt+1));
+    signal.addEventListener('abort',abort,{once:true});
+    if (signal.aborted) abort();
+  });
+}
+
+function assertLlmPayload(value: unknown): void {
+  const payload = value as {error?: {message?:string}|string; type?:string; response?:{error?:{message?:string};incomplete_details?:{reason?:string}}};
+  if (payload?.error || payload?.type === 'response.failed' || payload?.type === 'response.incomplete') throw new Error(`Provider response failed: ${typeof payload.error === 'string' ? payload.error : payload.error?.message ?? payload.response?.error?.message ?? payload.response?.incomplete_details?.reason ?? payload.type}`);
+}
+
 async function readError(response: Response): Promise<string> {
   try {
     const body = await response.text();
@@ -218,9 +292,10 @@ async function* parseSse(response: Response, signal: AbortSignal, onFinish: (rea
   try {
     while (true) {
       if (signal.aborted) throw abortError();
-      const next = await reader.read();
+      const next = await abortableProviderTask(reader.read(), signal);
       if (next.done) break;
       buffer += decoder.decode(next.value, { stream: true });
+      if (buffer.length > 2_000_000) throw new Error("Provider SSE frame exceeds size limit");
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? "";
       for (const line of lines) {
@@ -235,6 +310,7 @@ async function* parseSse(response: Response, signal: AbortSignal, onFinish: (rea
         }
         try {
           const parsed = JSON.parse(payload);
+          assertLlmPayload(parsed);
           const delta = extractDelta(parsed);
           if (delta) yield delta;
           if (streamFinished(parsed)) {
@@ -259,6 +335,7 @@ async function* parseSse(response: Response, signal: AbortSignal, onFinish: (rea
       }
       if (payload) {
         const parsed = JSON.parse(payload);
+        assertLlmPayload(parsed);
         const delta = extractDelta(parsed);
         if (delta) yield delta;
         if (streamFinished(parsed)) {
@@ -272,6 +349,7 @@ async function* parseSse(response: Response, signal: AbortSignal, onFinish: (rea
     }
     if (!finished) throw new Error("Provider stream closed before completion");
   } finally {
+    void reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }
@@ -300,25 +378,18 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
       externalSignal.addEventListener("abort", abort, { once: true });
       let yielded = false;
       try {
-        const thinking = thinkingForRequest(this.settings, request);
-        const response = await this.fetchImpl(providerEndpoint(this.settings, providerCapabilities(this.settings).chatPath), {
+        const http = buildLlmHttpRequest(this.settings, request, true);
+        const response = await abortableProviderTask(this.fetchImpl(http.url, {
           method: "POST",
-          headers: {
-            "content-type": "application/json",
-            ...(this.settings.apiKey ? { authorization: `Bearer ${this.settings.apiKey}` } : {})
-          },
-          body: JSON.stringify({
-            model: request.model || this.settings.model,
-            messages: buildMessages(request.sections, request.attachments),
-            ...(thinking ? { thinking } : {}),
-            ...(request.maxOutputTokens ? { max_tokens: request.maxOutputTokens } : {}),
-            stream: true
-          }),
+          headers: http.headers,
+          body: JSON.stringify(http.body),
           signal: controller.signal
-        });
-        if (!response.ok) throw new Error(`Answer provider HTTP ${response.status}: ${await readError(response)}`);
+        }), controller.signal);
+        if (!response.ok) throw new Error(`Answer provider HTTP ${response.status}: ${await abortableProviderTask(readError(response), controller.signal)}`);
         if (response.headers.get("content-type")?.toLowerCase().includes("application/json")) {
-          const completion = extractCompletion(await response.json());
+          const payload = await abortableProviderTask(response.json(), controller.signal);
+          assertLlmPayload(payload);
+          const completion = extractLlmCompletion(payload);
           if (!completion.trim()) throw new Error("Answer provider returned an empty completion");
           this.lastStreamMetadata = { ...this.lastStreamMetadata, firstTokenAt: Date.now(), finishedAt: Date.now(), finishReason: "stop" };
           yielded = true;
@@ -341,12 +412,9 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
           throw timeoutError;
         }
         lastError = error;
-        if (yielded) break;
+        if (yielded || /HTTP (?:400|401|403|404|422)\b/.test(String(error))) break;
         if (attempt >= retries) break;
-        await new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(resolve, 250 * (attempt + 1));
-          externalSignal.addEventListener("abort", () => { clearTimeout(timer); reject(abortError()); }, { once: true });
-        });
+        await retryDelay(attempt, externalSignal);
       } finally {
         clearTimeout(timeout);
         externalSignal.removeEventListener("abort", abort);
@@ -368,34 +436,25 @@ export class OpenAICompatibleAnswerProvider implements AnswerProvider {
       const abort = () => controller.abort();
       externalSignal.addEventListener("abort", abort, { once: true });
       try {
-        const thinking = thinkingForRequest(this.settings, request);
-        const response = await this.fetchImpl(providerEndpoint(this.settings, providerCapabilities(this.settings).chatPath), {
+        const http = buildLlmHttpRequest(this.settings, request, false);
+        const response = await abortableProviderTask(this.fetchImpl(http.url, {
           method: "POST",
-          headers: {
-            "content-type": "application/json",
-            ...(this.settings.apiKey ? { authorization: `Bearer ${this.settings.apiKey}` } : {})
-          },
-          body: JSON.stringify({
-            model: request.model || this.settings.model,
-            messages: buildMessages(request.sections, request.attachments),
-            ...(thinking ? { thinking } : {}),
-            ...(request.maxOutputTokens ? { max_tokens: request.maxOutputTokens } : {}),
-            stream: false
-          }),
+          headers: http.headers,
+          body: JSON.stringify(http.body),
           signal: controller.signal
-        });
-        if (!response.ok) throw new Error(`Answer provider HTTP ${response.status}: ${await readError(response)}`);
-        const completion = extractCompletion(await response.json());
+        }), controller.signal);
+        if (!response.ok) throw new Error(`Answer provider HTTP ${response.status}: ${await abortableProviderTask(readError(response), controller.signal)}`);
+        const payload = await abortableProviderTask(response.json(), controller.signal);
+        assertLlmPayload(payload);
+        const completion = extractLlmCompletion(payload);
         if (!completion.trim()) throw new Error("Answer provider returned an empty completion");
         return completion;
       } catch (error) {
         if (externalSignal.aborted) throw abortError();
         lastError = error;
+        if (controller.signal.aborted || /HTTP (?:400|401|403|404|422)\b/.test(String(error))) break;
         if (attempt >= retries) break;
-        await new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(resolve, 250 * (attempt + 1));
-          externalSignal.addEventListener("abort", () => { clearTimeout(timer); reject(abortError()); }, { once: true });
-        });
+        await retryDelay(attempt, externalSignal);
       } finally {
         clearTimeout(timeout);
         externalSignal.removeEventListener("abort", abort);

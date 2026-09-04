@@ -1,4 +1,7 @@
+import { normalizeAsrSettings, usesHttpAsr } from "@interview-copilot/shared";
+import { HttpAsrError, transcribePcm } from "./http-asr-provider";
 import WebSocket from "ws";
+import { buildLlmHttpRequest, extractLlmCompletion, abortableProviderTask } from "@interview-copilot/shared";
 import { providerCapabilities, providerEndpoint, qwenAsrWebSocketUrl, QWEN_REALTIME_ASR_MODEL, usesQwenRealtimeProtocol, type ProviderSettings } from "@interview-copilot/shared";
 import type { ProviderSection } from "./settings-store";
 
@@ -88,26 +91,22 @@ function responseErrorText(body: string): string | undefined {
 async function testHttp(section: "llm" | "embedding", settings: ProviderSettings, signal: AbortSignal): Promise<ProviderCheckResult> {
   const isLlm = section === "llm";
   const capabilities = providerCapabilities(settings);
-  const response = await fetch(providerEndpoint(settings, isLlm ? capabilities.chatPath : capabilities.embeddingPath), {
+  const http = isLlm ? buildLlmHttpRequest(settings, {model:settings.model,thinking:false,maxOutputTokens:1024,sections:[{name:"question",content:"Reply with OK."}]}, false) : undefined;
+  const response = await abortableProviderTask(fetch(http?.url ?? providerEndpoint(settings, capabilities.embeddingPath), {
     method: "POST",
-    headers: { "content-type": "application/json", ...(settings.apiKey ? { authorization: `Bearer ${settings.apiKey}` } : {}) },
-    body: JSON.stringify(isLlm ? {
-      model: settings.model,
-      messages: [{ role: "system", content: "Return exactly OK." }, { role: "user", content: "ping" }],
-      stream: false,
-      max_tokens: 16,
-      ...(capabilities.supportsThinking ? { thinking: { type: "disabled" } } : {})
-    } : { model: settings.model, input: "test" }),
+    headers: http?.headers ?? { "content-type": "application/json", ...(settings.apiKey ? { authorization: `Bearer ${settings.apiKey}` } : {}) },
+    body: JSON.stringify(http?.body ?? { model: settings.model, input: "test" }),
     signal
-  });
+  }), signal);
   if (!response.ok) {
     const status = classifyHttp(response.status);
-    return { section, configured: true, reachable: false, status, message: statusMessage(status, settings, responseErrorText(await response.text())) };
+    return { section, configured: true, reachable: false, status, message: statusMessage(status, settings, responseErrorText(await abortableProviderTask(response.text(), signal))) };
   }
   let payload: Record<string, unknown>;
   try {
-    payload = await response.json() as Record<string, unknown>;
+    payload = await abortableProviderTask(response.json(), signal) as Record<string, unknown>;
   } catch (error) {
+    if (signal.aborted) throw error;
     return { section, configured: true, reachable: false, status: "invalid_response", message: `Provider 返回格式异常：${String(error)}` };
   }
   if (isLlm) {
@@ -115,7 +114,7 @@ async function testHttp(section: "llm" | "embedding", settings: ProviderSettings
     const choice = choices[0] as Record<string, unknown> | undefined;
     const message = choice?.message as Record<string, unknown> | undefined;
     const content = [message?.content, message?.reasoning_content, choice?.text].find((value) => typeof value === "string" && value.trim()) as string | undefined;
-    if (choices.length === 0 || !content) return { section, configured: true, reachable: false, status: "invalid_response", message: "Provider 返回格式异常：缺少 choices 中的 content、reasoning_content 或 text" };
+    if (!extractLlmCompletion(payload).trim() && !content) return { section, configured: true, reachable: false, status: "invalid_response", message: "Provider 返回格式异常：缺少可读取的文本，请检查 API 协议与模型能力" };
   } else {
     const vector = (Array.isArray(payload.data) ? payload.data[0] as Record<string, unknown> | undefined : undefined)?.embedding;
     if (!Array.isArray(vector) || !vector.every((item) => typeof item === "number")) return { section, configured: true, reachable: false, status: "invalid_response", message: "Provider 返回格式异常：Embedding 返回非法向量" };
@@ -128,8 +127,8 @@ async function testAsr(settings: ProviderSettings, signal: AbortSignal): Promise
   const isQwen = settings.providerType === "qwen";
   const isLocal = settings.providerType === "funasr-local";
   if (!configured(section, settings)) return { section, configured: false, reachable: false, status: "unconfigured", message: settings.providerType === "custom-gateway" ? "未配置 Custom Gateway" : isLocal ? "未配置本地 ASR 服务地址或模型" : isQwen ? "未配置千问 API Key" : "未配置 Deepgram API Key" };
-  const qwenRealtime = isQwen && usesQwenRealtimeProtocol(settings.model || QWEN_REALTIME_ASR_MODEL);
-  const url = new URL(isQwen ? qwenAsrWebSocketUrl(settings.model || QWEN_REALTIME_ASR_MODEL) : settings.baseUrl || "wss://api.deepgram.com/v1/listen");
+  const qwenRealtime = isQwen && (settings.asrProtocol === "qwen-realtime" || settings.asrProtocol !== "dashscope-streaming" && usesQwenRealtimeProtocol(settings.model || QWEN_REALTIME_ASR_MODEL));
+  const url = new URL(isQwen ? normalizeAsrSettings(settings).baseUrl : settings.baseUrl || "wss://api.deepgram.com/v1/listen");
   if (qwenRealtime) {
     url.searchParams.set("model", settings.model || QWEN_REALTIME_ASR_MODEL);
   } else if (settings.providerType !== "custom-gateway" && !isLocal) {
@@ -213,6 +212,15 @@ export async function testProviderConnection(section: ProviderSection, settings:
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.max(1_000, settings.timeoutMs));
   try {
+    if (section === "asr" && usesHttpAsr(settings)) {
+      try { await transcribePcm(settings, new Uint8Array(32000), controller.signal); return { section, configured: true, reachable: true, status: "ready", message: "语音转写接口已验证；正式识别将按停顿分段提交。" }; }
+      catch (error) {
+        if (!(error instanceof HttpAsrError)) throw error;
+        if (settings.providerType === "baidu" && error.providerCode === "3301") return { section, configured: true, reachable: true, status: "ready", message: "语音接口已响应；静音探测未识别出语音，可在设备测试中验证说话识别。" };
+        const status = classifyHttp(error.status);
+        return { section, configured: true, reachable: false, status, message: error.message };
+      }
+    }
     if (section === "asr") return await testAsr(settings, controller.signal);
     if (section === "llm" || section === "embedding") return await testHttp(section, settings, controller.signal);
     return { section, configured: true, reachable: true, status: "ready" };

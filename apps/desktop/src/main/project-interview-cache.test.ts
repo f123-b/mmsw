@@ -9,6 +9,14 @@ function question(id: string, text: string): QuestionBankQuestionRecord {
 const chunk: KnowledgeChunk = { id: "chunk-1", text: "支付项目使用 DMA 搬运采样数据。", metadata: { documentId: "doc-1", filename: "overview.md", documentType: "project" } };
 
 describe("ProjectInterviewCache", () => {
+  it("resolves a spoken FOC abbreviation, but never guesses between two FOC projects", () => {
+    const cache = new ProjectInterviewCache();
+    const project = { id:"foc", name:"基于 STM32 的 FOC 电机控制项目", aliases:[],questionBankIndex:[],questionAnswers:[],overviewChunks:[] };
+    cache.prepare({profileId:"profile",projects:[project]});
+    expect(cache.resolveProject("你来讲一下FOC项目").projectId).toBe("foc");
+    cache.prepare({profileId:"profile",projects:[project,{...project,id:"other",name:"FOC 学习项目"}]});
+    expect(cache.resolveProject("你来讲一下FOC项目").ambiguous).toBe(true);
+  });
   it("routes project QA and retrieves overview lexically without remote work", () => {
     const cache = new ProjectInterviewCache();
     cache.prepare({ profileId: "profile", projects: [{ id: "p1", name: "支付项目", aliases: ["支付"], questionBankIndex: [question("q1", "支付项目如何使用 DMA？")], questionAnswers: [], overviewChunks: [chunk] }] });

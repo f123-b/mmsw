@@ -1,4 +1,6 @@
+import { ASR_PRESETS } from "@interview-copilot/shared";
 import { providerEndpoint, QWEN_REALTIME_ASR_MODEL, type ProviderSettings } from "@interview-copilot/shared";
+import { llmRequestHeaders, abortableProviderTask } from "@interview-copilot/shared";
 import type { ProviderSection } from "./settings-store";
 
 export type ModelCategory = "fast" | "general" | "reasoning" | "vision" | "embedding" | "realtime-asr";
@@ -125,28 +127,36 @@ async function responseError(response: Response): Promise<string> {
 }
 
 export async function discoverProviderModels(section: ProviderSection, settings: ProviderSettings, fetchImpl: FetchLike = fetch): Promise<ModelCatalogResult> {
+  if (section === "asr") {
+    const preset = ASR_PRESETS[settings.providerType ?? "deepgram"];
+    const fallback = [...new Set([settings.model, ...preset.models])].filter(Boolean).map(id => ({ id, name: id, categories: ["realtime-asr" as const] }));
+    const result = (models: DiscoveredModel[], warning?: string): ModelCatalogResult => ({ section, provider: preset.name, source: warning ? "provider-api-with-fallback" : "provider-api", models: uniqueModels(models), fetchedAt: Date.now(), warning });
+    if (!["qwen", "openai", "groq", "siliconflow", "openai-compatible"].includes(settings.providerType ?? "") || !settings.apiKey) return result(fallback, "已加载内置目录；可直接输入供应商支持的新模型 ID。");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetchImpl(qwenProvider(settings) ? qwenModelsEndpoint(settings) : providerEndpoint(settings, "v1/models"), { headers: { Authorization: `Bearer ${settings.apiKey}` }, signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      const models = (qwenProvider(settings) ? parseQwenModels(payload) : parseOpenAiModels(payload)).filter(model => /asr|whisper|transcri|speech|sensevoice|scribe|paraformer/i.test(model.id));
+      return result([...models, ...fallback, ...(qwenProvider(settings) ? QWEN_STREAMING_ASR_MODELS : [])], "供应商目录已合并内置模型；实际可用性取决于账号权限和地域。");
+    } catch { return result(fallback, "模型目录暂不可用，已显示内置模型；仍可输入自定义 ID 并测试识别连接。"); }
+    finally { clearTimeout(timer); }
+  }
   if (!settings.apiKey && !/^https?:\/\/(?:localhost|127\.0\.0\.1)(?::|\/)/i.test(settings.baseUrl)) throw new Error("MODEL_CATALOG_AUTH_REQUIRED: 请先输入并保存 API Key");
   const isQwen = qwenProvider(settings);
-  const endpoint = isQwen ? qwenModelsEndpoint(settings) : providerEndpoint(settings, "models");
+  const endpoint = isQwen ? qwenModelsEndpoint(settings) : providerEndpoint(settings, deepSeekProvider(settings) ? "models" : "v1/models");
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.min(Math.max(settings.timeoutMs || 15_000, 5_000), 30_000));
   try {
-    const response = await fetchImpl(endpoint, { method: "GET", headers: { Accept: "application/json", ...(settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {}) }, signal: controller.signal });
-    if (!response.ok) throw new Error(`MODEL_CATALOG_REQUEST_FAILED: ${await responseError(response)}`);
-    const payload = await response.json() as unknown;
+    const response = await abortableProviderTask(fetchImpl(endpoint, { method: "GET", headers: { Accept: "application/json", ...llmRequestHeaders(settings) }, signal: controller.signal }), controller.signal);
+    if (!response.ok) throw new Error(`MODEL_CATALOG_REQUEST_FAILED: ${await abortableProviderTask(responseError(response), controller.signal)}`);
+    const payload = await abortableProviderTask(response.json(), controller.signal) as unknown;
     let models = isQwen ? parseQwenModels(payload) : parseOpenAiModels(payload);
     let warning: string | undefined;
-    if (section === "asr" && isQwen) {
-      const returnedCount = models.filter((model) => model.categories.includes("realtime-asr")).length;
-      models.push(...QWEN_STREAMING_ASR_MODELS);
-      warning = returnedCount < QWEN_STREAMING_ASR_MODELS.length
-        ? `供应商目录仅返回 ${returnedCount} 个实时语音模型；已合并官方兼容目录`
-        : undefined;
-    }
     models = uniqueModels(models);
     if (section === "llm") models = models.filter((model) => model.categories.some((category) => category === "fast" || category === "general" || category === "reasoning" || category === "vision"));
     if (section === "embedding") models = models.filter((model) => model.categories.includes("embedding"));
-    if (section === "asr") models = models.filter((model) => model.categories.includes("realtime-asr"));
     if (models.length === 0) throw new Error("MODEL_CATALOG_EMPTY: 供应商没有返回适用于当前用途的模型");
     return { section, provider: settings.providerName, source: warning ? "provider-api-with-fallback" : "provider-api", models, fetchedAt: Date.now(), warning };
   } catch (error) {

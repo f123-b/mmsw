@@ -10,7 +10,7 @@ describe("shared overlay geometry resolver", () => {
     expect(resolveOverlayGeometryConstraints({ mode: "interview", preset: "minimal", panel: "question" })).toEqual({ minWidth: 320, maxWidth: 760, minHeight: 88, maxHeight: 280 });
     expect(resolveOverlayGeometryConstraints({ mode: "interview", preset: "minimal", panel: "answer" })).toEqual({ minWidth: 480, maxWidth: 1000, minHeight: 132, maxHeight: 440 });
     expect(resolveOverlayGeometryConstraints({ mode: "written_test", preset: "split", panel: "answer" })).toEqual({ minWidth: 480, maxWidth: 1200, minHeight: 320, maxHeight: 840 });
-    expect(resolveOverlayGeometryConstraints({ mode: "interview", preset: "classic_split", panel: "control" })).toEqual({ minWidth: 240, maxWidth: 1200, minHeight: 36, maxHeight: 100 });
+    expect(resolveOverlayGeometryConstraints({ mode: "interview", preset: "classic_split", panel: "control" })).toEqual({ minWidth: 360, maxWidth: 1200, minHeight: 44, maxHeight: 100 });
   });
 
   it("uses the same classic template for a 1080p work area", () => {
@@ -72,11 +72,11 @@ describe("shared overlay geometry resolver", () => {
 
   it("anchors the written-test camera to the answer upper-right corner", () => {
     const camera = resolveWrittenTestCameraBounds({ x: 900, y: 120, width: 700, height: 520 }, { x: 0, y: 0, width: 1920, height: 1040 });
-    expect(camera).toEqual({ x: 1548, y: 128, width: 44, height: 44 });
+    expect(camera).toEqual({ x: 1464, y: 128, width: 128, height: 44 });
   });
 
   it("keeps the camera inside a secondary monitor work area", () => {
     const camera = resolveWrittenTestCameraBounds({ x: 3100, y: -200, width: 400, height: 300 }, { x: 1920, y: -100, width: 1280, height: 900 });
-    expect(camera).toEqual({ x: 3156, y: -100, width: 44, height: 44 });
+    expect(camera).toEqual({ x: 3072, y: -100, width: 128, height: 44 });
   });
 });

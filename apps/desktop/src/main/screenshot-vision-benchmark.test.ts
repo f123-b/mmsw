@@ -73,7 +73,7 @@ describe("screenshot vision benchmark", () => {
     const messages = requestBody?.messages as Array<{ content: unknown }>;
     const content = messages?.[1]?.content as Array<Record<string, unknown>>;
     const imagePart = content?.find((part) => part.type === "image_url");
-    expect(imagePart?.image_url).toMatchObject({ url: imageDataUrl, mimeType: "image/png" });
+    expect(imagePart?.image_url).toEqual({ url: imageDataUrl, detail: "auto" });
     expect(answer).toContain("截图已识别");
     expect(metrics.imageBytes).toBeGreaterThan(0);
     expect(metrics.providerFirstTokenMs).toBeGreaterThanOrEqual(0);

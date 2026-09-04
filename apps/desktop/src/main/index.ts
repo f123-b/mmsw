@@ -13,7 +13,12 @@ import { GLOBAL_SHORTCUTS } from "./shortcuts";
 import { RealtimeSession, type RealtimeConnectOptions } from "./realtime-session";
 import { analyzeAnswerIntent, analyzeInterview, analyzeProjectQuestionIntent, analyzeQuestionNucleus, analyzeSelfIntroductionIntent, createSelfIntroductionAnswerPlan, AnswerAgent, AgentToolRegistry, buildDynamicTechnicalLexicon, buildSessionTerminologyContext, buildProjectQaGenerationPrompt, buildStableInterviewPrefix, buildVisionInput, chunkText, createSkill, HybridKnowledgeRetriever, HybridRetriever, inferKnowledgeDocumentType, KeywordReranker, LocalQuestionClassifier, matchCoreTechnicalQa, ModelRouter, normalizeInterviewDirectionSelection, normalizeQuestionBankText, normalizeTechnicalTerms, OpenAICompatibleAnswerProvider, OpenAICompatibleEmbeddingProvider, parseProjectQaGeneration, parseStructuredChatResponse, planAnswerSource, planChatContext, PreparationAgentRuntime, ProjectAliasResolver, ProjectComprehensionRetriever, QuestionAnalyzer, QuestionDetector2, questionBankAnswerIsReady, StrictProjectQaRouter, resolveInterviewDomainContext, retrieveProfileExperience, routeKnowledge, SessionStateMachine, TechnicalTerminologyNormalizer, ToolApprovalPolicy, workspacePath, type AgentToolName, type AnswerProvider, type InterviewDirectionSelection, type InterviewTerminologyPreview, type KnowledgeChunk, type KnowledgeDocumentType, type KnowledgeDocumentTypeOption, type PreparationModel, type PreparationModelStep, type ProjectQaGenerationResult, type ProviderSettings, type RetrievalTiming, type ScreenshotImage, type TerminologyRolloutMode, type TranscriptSnapshot } from "@interview-copilot/shared";
 import { InterviewCoordinator, type InterviewContextSelection, type InterviewStartOptions } from "./interview-coordinator";
-import { WrittenTestController, type WrittenTestStartOptions } from "./written-test-controller";
+import { auditProjectQaEvidence, selectProjectQaGenerationFacts } from "@interview-copilot/shared";
+import { WrittenTestController, type WrittenTestStartOptions, type WrittenTestState } from "./written-test-controller";
+import { WrittenTestFocusGuard } from "./written-test-focus-guard";
+import { runWrittenTestFocusSmoke } from "./written-test-focus-smoke";
+import { runInterviewOverlaySmoke } from "./interview-overlay-smoke";
+import { runProjectGroundingSmoke } from "./project-grounding-smoke";
 import { openAppDatabase, SqliteConversationRepository, SqliteInterviewHistoryRepository, SqliteJobTargetRepository, SqliteKnowledgeAnalysisRepository, SqliteKnowledgeRepository, SqliteProfileBuilderRepository, SqliteProfileRepository, SqliteProjectAnalysisJobRepository, SqliteProjectMemoryRepository, SqliteProjectRepository, SqliteQuestionBankRepository, SqliteResumeAnalysisRepository, SqliteResumeProjectLinkRepository, SqliteProfileSelfIntroductionRepository, SqliteRetrievalRepository, SqliteSkillSuggestionRepository, SqliteTerminologyRepository, type SqliteDatabase } from "./database";
 import { SqliteWrittenTestHistoryRepository } from "./written-test-history-repository";
 import { WrittenTestArchiveService } from "./written-test-archive";
@@ -26,11 +31,15 @@ import { SafeLogger } from "./logger";
 import { buildConversationHistory } from "./chat-context";
 import { chatFailureText, classifyChatError, PROJECT_AGENT_TIMEOUT_MS } from "../shared/chat-errors";
 import { ShutdownController } from "./shutdown-controller";
+import { withGroundedProjectFallback, abortableProviderTask, providerCapabilities } from "@interview-copilot/shared";
+import { scopedProjectEvidence, projectResumeEvidence } from "./project-grounding";
 import { shutdownAwareIpcHandle } from "./ipc-lifecycle";
 import { MiddleMouseShortcutManager, middleMouseHelperCandidates, shouldHandleMiddleMouseShortcut } from "./middle-mouse-shortcut";
 import { NativeModifierShortcutManager } from "./native-modifier-shortcut";
 import { normalizeNativeScreenPoint } from "./native-screen-coordinates";
 import { DEFAULT_MAIN_WINDOW_BOUNDS, resolveMainWindowBounds, type MainWindowBounds } from "./main-window-bounds";
+import { normalizeSpeechScript, SPEECH_SCRIPT_MAX_BYTES, SPEECH_SCRIPT_MAX_TEXT_LENGTH, type SpeechScript } from "./speech-script";
+import { canUseSelfIntroduction } from "./self-introduction-policy";
 import { LocalAsrServiceManager, type LocalAsrStartOptions } from "./local-asr-service-manager";
 import { createProfileBuilderModel, createResumeAnalysisModel, ProfileBuilderService, resumeAnalysisHash } from "./profile-builder";
 import { adaptProfileToInterviewContext } from "./profile-context-adapter";
@@ -53,9 +62,12 @@ if (process.env.INTERVIEW_COPILOT_DISABLE_GPU === "1") {
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 let mainWindow: BrowserWindow | undefined;
+const writtenTestFocusGuard = new WrittenTestFocusGuard(() => mainWindow);
 let mainWindowBoundsSaveTimer: NodeJS.Timeout | undefined;
 let overlayManager: OverlayManager | undefined;
 let runtimeOperationMode: RuntimeOperationMode = "IDLE";
+let interviewStartupController: AbortController | undefined;
+let interviewStopTask: Promise<void> | undefined;
 const audioManager = new AudioManager();
 function firstExistingLocalPath(candidates: Array<string | undefined>): string | undefined {
   return candidates.find((candidate): candidate is string => Boolean(candidate && existsSync(candidate)));
@@ -257,7 +269,7 @@ let shutdownHardDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
 // snapshots in the main process so a newly mounted overlay can replay them
 // instead of waiting for the next ASR packet.
 let realtimeTranscriptSnapshots: Partial<Record<"mic" | "remote", TranscriptSnapshot>> = {};
-let pendingTranscriptBroadcast: TranscriptSnapshot | undefined;
+const pendingTranscriptBroadcast = new Map<"mic" | "remote", TranscriptSnapshot>();
 let transcriptBroadcastTimer: NodeJS.Timeout | undefined;
 let questionBankAnswerGeneration: Promise<import("./database").QuestionBankAnswerGenerationResult> | undefined;
 let projectQaGeneration: Promise<ProjectQaGenerationResult> | undefined;
@@ -266,6 +278,7 @@ const rendererFile = join(__dirname, "../renderer/index.html");
 const visualSmokeRequested = process.argv.includes("--visual-smoke");
 const captureProtectionSmokeRequested = process.argv.includes("--capture-protection-smoke");
 const nativeMouseSmokeRequested = process.argv.includes("--native-mouse-smoke");
+const writtenFocusSmokeRequested = process.argv.includes("--written-focus-smoke");
 const performanceSmokeRequested = process.argv.includes("--performance-smoke");
 const captureTestRequested = process.env.INTERVIEW_COPILOT_CAPTURE_TEST === "1";
 const productionSmokeRequested = process.argv.includes("--production-smoke") || visualSmokeRequested;
@@ -274,6 +287,41 @@ const screenshotTrace = new ScreenshotTraceBuffer();
 let mainRendererLoad: Promise<void> | undefined;
 const rendererAppReadyWindows = new Set<number>();
 const rendererAppReadyWaiters = new Map<number, Set<() => void>>();
+
+const SPEECH_SCRIPT_STATE_KEY = "speech-script.current";
+
+function getSpeechScript(): SpeechScript | undefined {
+  const stored = database?.first<{ value: string }>("SELECT value FROM app_state WHERE key = ?", [SPEECH_SCRIPT_STATE_KEY]);
+  if (!stored) return undefined;
+  try { return normalizeSpeechScript(JSON.parse(stored.value)); } catch { return undefined; }
+}
+
+async function saveSpeechScript(input: { filename?: unknown; mimeType?: unknown; bytes?: unknown }): Promise<SpeechScript> {
+  if (!database) throw new Error("SPEECH_SCRIPT_STORAGE_UNAVAILABLE: 本地存储尚未准备好");
+  if (typeof input.filename !== "string" || !input.filename.trim()) throw new Error("SPEECH_SCRIPT_FILENAME_INVALID: 演讲稿文件名无效");
+  const bytes = normalizeDocumentBytes(input.bytes);
+  if (bytes.byteLength > SPEECH_SCRIPT_MAX_BYTES) throw new Error("SPEECH_SCRIPT_TOO_LARGE: 演讲稿文件不能超过 12 MB");
+  const parsed = await parseDocument({ documentId: SPEECH_SCRIPT_STATE_KEY, filename: input.filename.trim(), mimeType: typeof input.mimeType === "string" ? input.mimeType : "application/octet-stream", bytes });
+  const text = parsed.text.trim();
+  if (!text) throw new Error("SPEECH_SCRIPT_EMPTY: 文件中没有可显示的文字");
+  if (text.length > SPEECH_SCRIPT_MAX_TEXT_LENGTH) throw new Error("SPEECH_SCRIPT_TEXT_TOO_LARGE: 演讲稿文字超过 150 万字");
+  const script = normalizeSpeechScript({ filename: parsed.filename, mimeType: parsed.mimeType, text, updatedAt: Date.now() });
+  if (!script) throw new Error("SPEECH_SCRIPT_INVALID: 演讲稿解析结果无效");
+  database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [SPEECH_SCRIPT_STATE_KEY, JSON.stringify(script)]);
+  database.flushNow();
+  overlayManager?.setSpeechScriptAvailable(true);
+  broadcast("speech-script:changed", script);
+  return script;
+}
+
+function clearSpeechScript(): boolean {
+  if (!database) return false;
+  database.run("DELETE FROM app_state WHERE key = ?", [SPEECH_SCRIPT_STATE_KEY]);
+  database.flushNow();
+  overlayManager?.setSpeechScriptAvailable(false);
+  broadcast("speech-script:changed", undefined);
+  return true;
+}
 
 function saveMainWindowBounds(): void {
   if (mainWindowBoundsSaveTimer) clearTimeout(mainWindowBoundsSaveTimer);
@@ -381,7 +429,7 @@ function verifyPreload(): boolean {
   return exists;
 }
 
-function attachRendererDiagnostics(window: BrowserWindow, windowName: "main" | "overlay-question" | "overlay-answer" | "overlay-control" | "overlay-transient"): void {
+function attachRendererDiagnostics(window: BrowserWindow, windowName: "main" | "overlay-question" | "overlay-answer" | "overlay-script" | "overlay-control" | "overlay-transient"): void {
   window.webContents.on("did-start-loading", () => {
     appLogger?.info("RENDERER_LOAD_STARTED", { window: windowName });
   });
@@ -477,22 +525,27 @@ function captureContainsTestMarker(dataUrl: string): boolean {
 }
 
 async function captureVisibleWindow(window: BrowserWindow): Promise<Buffer> {
+  let lastError: unknown;
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    await waitForRendererPaint(window);
-    const image = await Promise.race([
-      window.capturePage(),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("capturePage timeout")), 4_000))
-    ]);
-    const png = image.toPNG();
-    if (png.byteLength > 0 && hasVisiblePixels(png)) return png;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await waitForRendererPaint(window);
+      const image = await Promise.race([
+        window.capturePage(),
+        new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error("capturePage timeout")), 4_000); })
+      ]);
+      const png = image.toPNG();
+      if (png.byteLength > 0 && hasVisiblePixels(png)) return png;
+    } catch (error) { lastError = error; }
+    finally { if (timeout) clearTimeout(timeout); }
     if (attempt < 4) await new Promise<void>((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("Production screenshot contains no visible pixels");
+  throw new Error(`Production screenshot contains no visible pixels: ${String(lastError ?? "empty image")}`);
 }
 
 async function loadRenderer(window: BrowserWindow, overlay: false | OverlayWindowSurface = false): Promise<void> {
   const isOverlay = overlay !== false;
-  const windowMode = overlay === "control" ? "overlay-control" : overlay === "question" ? "overlay-question" : overlay === "answer" ? "overlay-answer" : overlay === "transient" ? "overlay-transient" : "main";
+  const windowMode = overlay === "control" ? "overlay-control" : overlay === "question" ? "overlay-question" : overlay === "answer" ? "overlay-answer" : overlay === "script" ? "overlay-script" : overlay === "transient" ? "overlay-transient" : "main";
   const windowName = isOverlay ? windowMode : "main";
   attachRendererDiagnostics(window, windowName);
   appLogger?.info("RENDERER_LOAD_STARTED", { window: windowName });
@@ -556,7 +609,12 @@ function broadcastToOverlayWindows(channel: string, payload: unknown): void {
 
 function setRuntimeOperationMode(mode: RuntimeOperationMode): void {
   runtimeOperationMode = mode;
+  syncWrittenTestFocusProtection();
   broadcast("overlay:operation-mode", mode);
+}
+
+function syncWrittenTestFocusProtection(preferences = overlaySettingsStore?.getPreferences()): void {
+  writtenTestFocusGuard.update(runtimeOperationMode, preferences?.writtenTest.focusProtection ?? true);
 }
 
 function broadcast(channel: string, payload: unknown): void {
@@ -568,28 +626,28 @@ function broadcast(channel: string, payload: unknown): void {
     // only partials into a 50 ms UI tick; final snapshots remain immediate so
     // the question/answer boundary is never delayed by rendering.
     if (snapshot.partial) {
-      pendingTranscriptBroadcast = snapshot;
+      pendingTranscriptBroadcast.set(snapshot.source, snapshot);
       if (!transcriptBroadcastTimer) {
         transcriptBroadcastTimer = setTimeout(() => {
           transcriptBroadcastTimer = undefined;
-          const pending = pendingTranscriptBroadcast;
-          pendingTranscriptBroadcast = undefined;
-          if (pending) broadcastToWindows("realtime:transcript", pending);
+          const pending = [...pendingTranscriptBroadcast.values()];
+          pendingTranscriptBroadcast.clear();
+          pending.forEach(item => broadcastToWindows("realtime:transcript", item));
         }, 50);
       }
       return;
     }
-    if (transcriptBroadcastTimer) clearTimeout(transcriptBroadcastTimer);
-    transcriptBroadcastTimer = undefined;
-    pendingTranscriptBroadcast = undefined;
+    pendingTranscriptBroadcast.delete(snapshot.source);
+    if (pendingTranscriptBroadcast.size === 0 && transcriptBroadcastTimer) { clearTimeout(transcriptBroadcastTimer); transcriptBroadcastTimer = undefined; }
   }
   broadcastToWindows(channel, payload);
 }
 
-function rendererWindowName(window: BrowserWindow | null): "main" | "overlay-question" | "overlay-answer" | "overlay-control" | "overlay-transient" | "unknown" {
+function rendererWindowName(window: BrowserWindow | null): "main" | "overlay-question" | "overlay-answer" | "overlay-script" | "overlay-control" | "overlay-transient" | "unknown" {
   if (window && window === mainWindow) return "main";
   if (window && window === overlayManager?.currentQuestionWindow) return "overlay-question";
   if (window && window === overlayManager?.currentAnswerWindow) return "overlay-answer";
+  if (window && window === overlayManager?.currentScriptWindow) return "overlay-script";
   if (window && window === overlayManager?.currentControlWindow) return "overlay-control";
   if (window && window === overlayManager?.currentTransientWindow) return "overlay-transient";
   return "unknown";
@@ -787,6 +845,7 @@ async function captureScreenshot(trigger = "screenshot-answer"): Promise<void> {
 
 async function answerCapturedScreenshot(mode: "interview" | "written-test" = "interview", screenshotRequestId = createScreenshotRequestId(), trigger = "ipc"): Promise<void> {
   const sessionId = screenshotSessionId();
+  const writtenSessionId = mode === "written-test" ? writtenTestController?.sessionId : undefined;
   let operation = screenshotOperations.get(screenshotRequestId);
   if (!operation) {
     try {
@@ -801,8 +860,11 @@ async function answerCapturedScreenshot(mode: "interview" | "written-test" = "in
   if (mode === "written-test") writtenTestController?.markCapturing();
   let capturedResult: Awaited<ReturnType<ScreenshotManager["capturePrimaryDisplay"]>> | undefined;
   try {
+    if (mode === "written-test" && !writtenSessionId) throw new Error("笔试模式尚未启动");
     recordScreenshotTrace("SCREENSHOT_CAPTURE_STARTED", screenshotRequestId, { fields: { mode } });
     capturedResult = await withScreenshotTimeout(screenshotManager.capturePrimaryDisplay(operation.controller.signal, configuredScreenshotRegion()), 3_000, () => operation.controller.abort());
+    operation.controller.signal.throwIfAborted();
+    if (mode === "written-test" && writtenTestController?.sessionId !== writtenSessionId) throw Object.assign(new Error("笔试会话已切换"), { name: "AbortError" });
     screenshotOperations.setCaptureBytes(screenshotRequestId, capturedResult.bytes.byteLength);
     recordScreenshotTrace("SCREENSHOT_CAPTURE_COMPLETED", screenshotRequestId, { imageMimeType: capturedResult.mimeType, imageBytes: capturedResult.bytes.byteLength, imageWidth: capturedResult.width, imageHeight: capturedResult.height, fields: { captureSource: screenshotFixtureRequested ? "test-fixture" : "primary-display" } });
     broadcast("screenshot:captured", capturedResult);
@@ -817,8 +879,10 @@ async function answerCapturedScreenshot(mode: "interview" | "written-test" = "in
     screenshotOperations.transition(screenshotRequestId, "provider_pending");
     if (mode === "written-test") {
       if (!writtenTestController?.sessionId || !writtenTestArchive || !writtenTestHistoryRepository) throw new Error("WRITTEN_TEST_NOT_READY: 笔试归档服务尚未准备好");
-      const archived = await writtenTestArchive.archiveScreenshot(writtenTestController.sessionId, capturedResult, writtenTestController.state.screenshotCount + 1);
-      await writtenTestController.answerScreenshot(`data:${visionInput.image.mimeType};base64,${visionInput.image.base64}`, { ...archived, dataUrl: `data:${visionInput.image.mimeType};base64,${visionInput.image.base64}` });
+      const archived = await writtenTestArchive.archiveScreenshot(writtenSessionId!, capturedResult, writtenTestController.state.screenshotCount + 1);
+      operation.controller.signal.throwIfAborted();
+      if (writtenTestController.sessionId !== writtenSessionId) throw Object.assign(new Error("笔试会话已切换"), { name: "AbortError" });
+      await writtenTestController.answerScreenshot(`data:${visionInput.image.mimeType};base64,${visionInput.image.base64}`, { ...archived, dataUrl: `data:${visionInput.image.mimeType};base64,${visionInput.image.base64}` }, operation.controller.signal);
     }
     else {
       const answer = await withScreenshotTimeout(runIndependentVisionAnswer(visionInput, screenshotRequestId, operation), 20_000, () => operation.controller.abort());
@@ -836,6 +900,7 @@ async function answerCapturedScreenshot(mode: "interview" | "written-test" = "in
     recordScreenshotTrace("SCREENSHOT_PIPELINE_COMPLETED", screenshotRequestId, { status: "completed" });
   } catch (error) {
     const message = userFacingError(error);
+    if (mode === "written-test" && writtenSessionId && writtenTestController?.state.screenshotStatus !== "ERROR") writtenTestController?.markCaptureFailed(message, writtenSessionId);
     const errorCode = String((error as { code?: string })?.code ?? (error instanceof Error ? error.message : ""));
     const imageFailure = ["EMPTY_IMAGE", "INVALID_PNG", "INVALID_JPEG", "IMAGE_TOO_LARGE"].includes(errorCode);
     const timedOut = error instanceof Error && error.name === "TimeoutError";
@@ -912,8 +977,11 @@ async function waitForRendererLoad(window: BrowserWindow): Promise<void> {
 }
 
 function runNativeMouseCommand(command: string): Promise<string> {
+  // Inputs are already physical pixels. A DPI-unaware PowerShell process
+  // virtualizes SetCursorPos again and misses controls on scaled displays.
+  const dpiSetup = 'Add-Type -TypeDefinition \'using System; using System.Runtime.InteropServices; public static class NativeTestDpi { [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr context); }\'; [NativeTestDpi]::SetProcessDpiAwarenessContext([IntPtr]::new(-4)) | Out-Null; ';
   return new Promise((resolve, reject) => {
-    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], { windowsHide: true }, (error, _stdout, stderr) => {
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", dpiSetup + command], { windowsHide: true }, (error, _stdout, stderr) => {
       if (error) reject(new Error(stderr.trim() || error.message));
       else resolve(String(_stdout));
     });
@@ -940,7 +1008,12 @@ public static class InterviewCopilotNativeMouse {
 }`;
 
 async function nativeMouseClick(x: number, y: number): Promise<void> {
-  const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${nativeMouseTypeDefinition}\n'@; if(-not [InterviewCopilotNativeMouse]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})){ throw 'SetCursorPos failed' }; Start-Sleep -Milliseconds 40; [InterviewCopilotNativeMouse]::LeftClick();`;
+  const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${nativeMouseTypeDefinition}\n'@; if(-not [InterviewCopilotNativeMouse]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})){ throw 'SetCursorPos failed' }; Start-Sleep -Milliseconds 80; [InterviewCopilotNativeMouse]::LeftButtonDown(); Start-Sleep -Milliseconds 80; [InterviewCopilotNativeMouse]::LeftButtonUp();`;
+  await runNativeMouseCommand(command);
+}
+
+async function nativeMouseMove(x: number, y: number): Promise<void> {
+  const command = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${nativeMouseTypeDefinition}\n'@; if(-not [InterviewCopilotNativeMouse]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})){ throw 'SetCursorPos failed' };`;
   await runNativeMouseCommand(command);
 }
 
@@ -1554,9 +1627,7 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
     broadcast("question:event", { type: "question_diagnostic", text: "那 DMA。", questionScore: 0.5, confidence: 0.5, candidate: true, confirmed: false, reason: "understanding-wait-completion" });
     await waitForRendererPaint(questionWindow);
     const waitingNotice = await questionWindow.webContents.executeJavaScript("document.querySelector('.overlay-runtime-notice')?.textContent", true);
-    if (!String(waitingNotice).includes("正在等待问题说完整")) throw new Error("WAITING_NOTICE_NOT_VISIBLE");
-    snapshots["overlay-waiting-notice.png"] = join(visualArtifactDirectory, "overlay-waiting-notice.png");
-    await writeFile(snapshots["overlay-waiting-notice.png"], await captureVisibleWindow(questionWindow));
+    if (waitingNotice) throw new Error("WAITING_NOTICE_SHOULD_BE_HIDDEN");
     broadcast("realtime:message", { type: "runtime_error", code: "PROJECT_EVIDENCE_REQUIRED", message: "当前项目没有匹配的已确认答案。请在项目题库补充并确认资料后重试。", recoverable: true });
     await waitForRendererPaint(answerWindow);
     const blockedNotice = await answerWindow.webContents.executeJavaScript("document.querySelector('.overlay-runtime-notice')?.textContent", true);
@@ -1612,20 +1683,47 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
 
     writtenTestController?.start({ profileId: "visual-smoke", answerMode: "NORMAL" });
     manager.enterWrittenTestMode();
+    setRuntimeOperationMode("WRITTEN_TEST");
     await applyVisualPreferences({ writtenTest: { layoutPreset: "single_reader", showAnswer: true } });
     await waitForWindowVisible(questionWindow);
-    await questionWindow.webContents.executeJavaScript("(() => { const q = document.querySelector('.written-reader-question'); if (q) q.textContent = '给定数组和目标值，请设计一个时间复杂度 O(n) 的查找算法。'; const answer = document.querySelector('.answer-core'); if (answer) answer.textContent = '使用哈希表保存已经遍历的元素，查询补数即可在 O(n) 时间内完成。'; })()", true);
+    const writtenFixture: WrittenTestState = {
+      ...writtenTestController!.state, screenshotStatus: "SUCCESS", questionCount: 1, screenshotCount: 1,
+      currentProblem: { rawText: "给定 U=10V，I=2A，计算电阻并列出表格。", canonicalQuestion: "给定 U=10V，I=2A，计算电阻并列出表格。", questionType: "CALCULATION", requirements: [], inputs: [], outputs: [], constraints: [], formulas: [], requestedArtifacts: { formula: true, table: true }, confidence: 0.95 },
+      currentAnswer: { questionType: "CALCULATION", finalAnswer: "R = 5 Ω", steps: [{ title: "代入", content: "R = U / I = 10 / 2 = 5 Ω" }], equations: ["R = U / I"], table: { columns: ["电压", "电流", "电阻"], rows: [["10 V", "2 A", "5 Ω"]] }, code: { language: "python", content: "# 中文与符号 Ω 保持原样\nprint(10 / 2)" }, complexity: "O(1)", explanation: "单位为欧姆。", warnings: [], confidence: 0.95 }
+    };
+    broadcast("written-test:state", writtenFixture);
     await waitForRendererPaint(questionWindow);
+    const writtenDom = await questionWindow.webContents.executeJavaScript("document.querySelector('.written-reader-content')?.textContent", true);
+    if (!["R = 5 Ω", "R = U / I", "10 V", "O(1)"].every((text) => String(writtenDom).includes(text))) throw new Error(`WRITTEN_FIELDS_NOT_RENDERED: ${String(writtenDom)}`);
     snapshots["written_single_reader.png"] = join(visualArtifactDirectory, "written_single_reader.png");
     await writeFile(snapshots["written_single_reader.png"], await captureVisibleWindow(questionWindow));
+    await questionWindow.webContents.executeJavaScript("[...document.querySelectorAll('.written-answer-tabs button')].find(button => button.textContent === '代码')?.click()", true);
+    await waitForRendererPaint(questionWindow);
+    if (!(await questionWindow.webContents.executeJavaScript("document.querySelector('.written-code-block')?.textContent", true))?.includes("中文与符号 Ω")) throw new Error("WRITTEN_CODE_NOT_RENDERED");
+    snapshots["written-code.png"] = join(visualArtifactDirectory, "written-code.png");
+    await writeFile(snapshots["written-code.png"], await captureVisibleWindow(questionWindow));
+    broadcast("written-test:state", { ...writtenFixture, screenshotStatus: "CAPTURING", currentAnswer: undefined });
+    await waitForRendererPaint(questionWindow); await waitForRendererPaint(controlWindow);
+    if (String(await questionWindow.webContents.executeJavaScript("document.querySelector('.written-reader-content')?.textContent", true)).includes("R = 5 Ω")) throw new Error("WRITTEN_STALE_ANSWER_VISIBLE");
+    if (!await controlWindow.webContents.executeJavaScript("document.querySelector('.written-camera-control')?.disabled", true)) throw new Error("WRITTEN_BUSY_BUTTON_NOT_DISABLED");
+    broadcast("written-test:state", { ...writtenFixture, screenshotStatus: "ERROR", currentAnswer: undefined, lastError: "测试截图失败，请重新截图" });
+    await waitForRendererPaint(questionWindow); await waitForRendererPaint(controlWindow);
+    if (await controlWindow.webContents.executeJavaScript("document.querySelector('.written-camera-control')?.disabled", true)) throw new Error("WRITTEN_RETRY_BUTTON_DISABLED");
+    snapshots["written-error.png"] = join(visualArtifactDirectory, "written-error.png");
+    await writeFile(snapshots["written-error.png"], await captureVisibleWindow(questionWindow));
+    broadcast("written-test:state", { ...writtenFixture, screenshotStatus: "NEEDS_INPUT", currentAnswer: undefined, lastError: "请补充：题目下半部分和选项", nextScreenshotRelation: "CONTINUATION" });
+    await waitForRendererPaint(questionWindow);
+    snapshots["written-needs-input.png"] = join(visualArtifactDirectory, "written-needs-input.png");
+    await writeFile(snapshots["written-needs-input.png"], await captureVisibleWindow(questionWindow));
+    broadcast("written-test:state", writtenFixture);
     await applyVisualPreferences({ writtenTest: { layoutPreset: "split", showAnswer: true } });
     await waitForWindowVisible(answerWindow);
-    await answerWindow.webContents.executeJavaScript("(() => { const context = document.querySelector('.answer-context-question'); if (context) context.textContent = '笔试截图题：如何设计 O(n) 查找？'; const core = document.querySelector('.answer-core'); if (core) core.textContent = '使用哈希表保存已经遍历的元素，查询补数即可在 O(n) 时间内完成。'; })()", true);
     await waitForRendererPaint(answerWindow);
     snapshots["written_split.png"] = join(visualArtifactDirectory, "written_split.png");
     await writeFile(snapshots["written_split.png"], await captureVisibleWindow(answerWindow));
     writtenTestController?.stop();
     manager.exitWrittenTestMode();
+    setRuntimeOperationMode("INTERVIEW");
     await applyVisualPreferences({ interview: { layoutPreset: "classic_split", leftPanel: "question" } });
 
     manager.toggleShortcuts();
@@ -1877,20 +1975,23 @@ function currentResumeHash(profileId: string): string {
 }
 
 async function stopInterview(): Promise<void> {
-  try {
-    screenshotOperations.abortAll();
-    await coordinator().stop("user");
-  } finally {
-    releaseInterviewCaches();
-    // The HUD is a session-scoped window. Always restore the normal app even
-    // when ASR/audio shutdown reports an error or an answer is still flushing.
-    overlayManager?.exitInterviewMode();
-    setRuntimeOperationMode("IDLE");
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show();
-      mainWindow.focus();
-    }
+  interviewStartupController?.abort();
+  interviewStartupController = undefined;
+  if (interviewStopTask) return interviewStopTask;
+  screenshotOperations.abortAll();
+  releaseInterviewCaches();
+  // Exit is a UI state transition, not a remote cleanup acknowledgement.
+  // Hide the HUD and restore the app immediately; coordinator cleanup keeps a
+  // hard deadline and finishes without holding the user inside the interview.
+  overlayManager?.exitInterviewMode();
+  setRuntimeOperationMode("IDLE");
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
   }
+  const task = coordinator().stop("user");
+  interviewStopTask = task;
+  try { await task; } finally { if (interviewStopTask === task) interviewStopTask = undefined; }
 }
 
 function prepareInterviewContextCache(key: InterviewContextCacheKey): void {
@@ -1939,7 +2040,7 @@ function prepareInterviewContextCache(key: InterviewContextCacheKey): void {
     ...(interviewProfile?.candidate.salaryExpectation ? { salaryExpectation: interviewProfile.candidate.salaryExpectation } : {}),
     ...(project ? { currentProject: project.name } : {}),
     stableInterviewPrefix,
-    ...(cachedSelfIntroduction?.status === "current" && cachedSelfIntroduction.approved ? { selfIntroduction: { id: cachedSelfIntroduction.id, text: cachedSelfIntroduction.text, approved: true, language: cachedSelfIntroduction.language, ...(cachedSelfIntroduction.targetDurationSeconds ? { targetDurationSeconds: cachedSelfIntroduction.targetDurationSeconds } : {}) } } : {})
+    ...(cachedSelfIntroduction && canUseSelfIntroduction(cachedSelfIntroduction) ? { selfIntroduction: { id: cachedSelfIntroduction.id, text: cachedSelfIntroduction.text, approved: true, language: cachedSelfIntroduction.language, ...(cachedSelfIntroduction.targetDurationSeconds ? { targetDurationSeconds: cachedSelfIntroduction.targetDurationSeconds } : {}) } } : {})
   });
   const resumeProjects = resumeAnalysisRepository?.get(key.profileId, resumeHash)?.artifact?.projects ?? [];
   const projectRecords = projectMemoryRepository?.listProjects(key.profileId) ?? projectSnapshot.projects.map((item) => ({ id: item.id, name: item.name, profileId: key.profileId, aliases: [], sourceIds: [], ownershipMode: item.ownershipMode, ownershipNote: item.ownershipNote }));
@@ -1949,10 +2050,9 @@ function prepareInterviewContextCache(key: InterviewContextCacheKey): void {
     links: resumeProjectLinkRepository?.list(key.profileId, resumeHash) ?? [],
     projects: projectRecords.map((record) => {
       const matchingProject = projectSnapshot.projects.find((item) => item.id === record.id);
-      const sourceIds = (projectMemoryRepository?.listProjectSources(record.id) ?? []).filter((source) => source.sourceRole === "overview" && source.sourceType === "document").map((source) => source.sourceId);
-      const overviewChunks = knowledgeRepository?.listChunksByDocumentIds(sourceIds) ?? [];
+      const overviewChunks = projectKnowledgeChunks(key.profileId, record.id).filter(chunk => chunk.metadata.scope === "project");
       const fallbackText = matchingProject ? [matchingProject.name, matchingProject.description, matchingProject.role, ...matchingProject.technologyStack].filter(Boolean).join("\n") : record.name;
-      const fallbackChunk = fallbackText.trim() ? [{ id: `project-overview-${record.id}`, text: fallbackText, metadata: { documentId: `project-overview-${record.id}`, filename: `${record.name}-overview`, documentType: "project" as const, scope: "project" as const, projectId: record.id, sourceRole: "overview" } }] : [];
+      const fallbackChunk = fallbackText.trim().length > record.name.length + 20 ? [{ id: `project-overview-${record.id}`, text: fallbackText, metadata: { documentId: `project-overview-${record.id}`, filename: `${record.name}-overview`, documentType: "project" as const, scope: "project" as const, projectId: record.id, sourceRole: "overview" } }] : [];
       const questionBank = questionBankRepository?.listQuestions({ status: "active", scope: "project", profileId: key.profileId, projectId: record.id, exactProject: true, limit: 5000 }) ?? [];
       return { id: record.id, name: record.name, aliases: record.aliases ?? [], questionBankIndex: questionBank, questionAnswers: questionBank, overviewChunks: overviewChunks.length ? overviewChunks : fallbackChunk };
     })
@@ -2094,6 +2194,8 @@ function chatContext(profileId?: string, userMessage = "", projectId?: string): 
   if (project) {
     const ownershipMode = normalizeProjectOwnershipMode(project.ownershipMode);
     sections.push(`当前项目：${project.name}\n项目 ID：${project.id}\n项目归属模式：${ownershipMode}${project.ownershipNote ? `\n归属说明：${project.ownershipNote}` : ""}`);
+    const savedProjectIntroduction = projectRepository?.get(project.id)?.projectIntroduction?.trim();
+    if (savedProjectIntroduction) sections.push(`PREPARED_PROJECT_INTRODUCTION（用户已保存，可直接回答“介绍一下这个项目”等概览问题）：\n${savedProjectIntroduction}`);
     const projectFacts = snapshot?.facts ?? [];
     const facts = projectFacts.filter((fact) => fact.projectId === project.id && isFactEligible(fact)).slice(0, 24);
     const currentProjectFacts = projectFacts.filter((fact) => fact.projectId === project.id && fact.status !== "rejected" && !fact.stale);
@@ -2381,6 +2483,9 @@ function registerIpc(): void {
   ipcMain.handle("audio:probe", (_event, options: AudioStartOptions) => appShuttingDown ? undefined : audioManager.probe(options));
   ipcMain.handle("audio:list-devices", () => productionSmokeRequested ? { inputs: [], outputs: [] } : audioManager.listDevices());
   ipcMain.handle("audio:get-diagnostics", () => audioManager.getDiagnostics());
+  ipcMain.handle("speech-script:get", () => getSpeechScript());
+  ipcMain.handle("speech-script:upload", (_event, input: { filename?: unknown; mimeType?: unknown; bytes?: unknown }) => saveSpeechScript(input));
+  ipcMain.handle("speech-script:clear", () => clearSpeechScript());
    ipcMain.handle("overlay:show", () => { overlayManager?.enterInterviewMode(); return true; });
    ipcMain.handle("overlay:toggle", () => { overlayManager?.toggle(); return true; });
    ipcMain.handle("overlay:show-all", () => { overlayManager?.showAll(); return true; });
@@ -2388,6 +2493,7 @@ function registerIpc(): void {
    ipcMain.handle("overlay:toggle-all", () => { overlayManager?.toggleAll(); return true; });
    ipcMain.handle("overlay:toggle-transcript", () => { overlayManager?.toggleTranscript(); return true; });
    ipcMain.handle("overlay:toggle-answer", () => { overlayManager?.toggleAnswer(); return true; });
+   ipcMain.handle("overlay:toggle-script", () => { overlayManager?.toggleScript(); return overlayManager?.hudState.scriptVisible ?? false; });
    ipcMain.handle("overlay:request-end", () => { if (coordinator().running || writtenTestController?.running || overlayManager?.hudState.running) overlayManager?.requestEndInterviewConfirmation("control-renderer"); return true; });
    ipcMain.handle("overlay:cancel-end", () => { overlayManager?.cancelEndInterviewConfirmation(); return true; });
    ipcMain.handle("overlay:confirm-end", async () => { overlayManager?.confirmEndInterviewConfirmation(); if (runtimeOperationMode === "WRITTEN_TEST") stopWrittenTest(); else await stopInterview(); return true; });
@@ -2397,6 +2503,7 @@ function registerIpc(): void {
        overlayManager?.applyPreferences(next.behavior);
        overlayManager?.applyLayoutPreferences(next);
        overlayManager?.resetLayout();
+       syncWrittenTestFocusProtection(next);
        broadcast("overlay:preferences", next);
      } else {
        overlayManager?.resetLayout();
@@ -2418,19 +2525,19 @@ function registerIpc(): void {
    ipcMain.handle("overlay:preview-preferences", (_event, input: OverlayPreferencesPatch) => {
      if (appShuttingDown) return undefined;
      const next = overlaySettingsStore?.previewPreferences(input);
-     if (next) { overlayManager?.applyPreferences(next.behavior); overlayManager?.applyLayoutPreferences(next); broadcastToOverlayWindows("overlay:preferences", next); }
+     if (next) { overlayManager?.applyPreferences(next.behavior); overlayManager?.applyLayoutPreferences(next); syncWrittenTestFocusProtection(next); broadcastToOverlayWindows("overlay:preferences", next); }
      return next;
    });
    ipcMain.handle("overlay:set-preferences", (_event, input: OverlayPreferencesPatch) => {
      if (appShuttingDown) return undefined;
      const next = overlaySettingsStore?.setPreferences(input);
-     if (next) { overlayManager?.applyPreferences(next.behavior); overlayManager?.applyLayoutPreferences(next); broadcast("overlay:preferences", next); }
+     if (next) { overlayManager?.applyPreferences(next.behavior); overlayManager?.applyLayoutPreferences(next); syncWrittenTestFocusProtection(next); broadcast("overlay:preferences", next); }
      return next;
    });
    ipcMain.handle("overlay:enter-layout-edit", () => { overlayManager?.setLayoutEditMode(true); return true; });
    ipcMain.handle("overlay:finish-layout-edit", () => { overlayManager?.finishLayoutEditMode(); return true; });
    ipcMain.handle("overlay:set-window-bounds", (_event, panel: OverlayNativePanel, bounds: OverlayNativeBounds) => {
-     if (!["question", "answer", "control"].includes(panel) || !bounds || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)) return false;
+     if (!["question", "answer", "script", "control"].includes(panel) || !bounds || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)) return false;
      overlayManager?.setNativeWindowBounds(panel, bounds);
      return true;
    });
@@ -2482,20 +2589,24 @@ function registerIpc(): void {
   ipcMain.handle("realtime:get-transcript", () => ({ ...realtimeTranscriptSnapshots }));
   ipcMain.handle("interview:start", async (_event, options: InterviewStartOptions) => {
     if (appShuttingDown) return undefined;
+    if (runtimeOperationMode !== "IDLE" || interviewStartupController) throw new Error("SESSION_BUSY: 请先结束当前模式");
+    const startup = new AbortController();
+    interviewStartupController = startup;
     interviewStartupTiming = new InterviewStartupTiming(Date.now, pendingStartupButtonClickAt ?? Date.now());
     markInterviewStartup("START_BUTTON_CLICK");
     let coordinatorStarted = false;
     let overlayShown = false;
     try {
+      await abortableProviderTask(interviewStopTask ?? Promise.resolve(), startup.signal);
       if (!profileRepository?.get(options.profileId)) throw new Error("PROFILE_NOT_FOUND: 面试档案不存在");
       prepareInterviewContextCache({ profileId: options.profileId, projectId: options.projectId, jobTargetId: options.jobTargetId });
       if (options.projectId && !projectMemoryRepository?.getSnapshot(options.profileId).projects.some((project) => project.id === options.projectId)) throw new Error("PROJECT_NOT_FOUND: 重点项目不属于当前档案");
       if (options.jobTargetId && jobTargetRepository?.get(options.jobTargetId)?.profileId !== options.profileId) throw new Error("JOB_TARGET_NOT_FOUND: 目标岗位不属于当前档案");
       const llm = providerConfigStore?.get("llm") ?? environmentLlmSettings;
-      if (!llm.apiKey) throw new Error("LLM_NOT_CONFIGURED: 未配置 LLM API Key");
+      if (providerCapabilities(llm).requiresApiKey && !llm.apiKey) throw new Error("LLM_NOT_CONFIGURED: 未配置 LLM API Key");
       const asr = providerConfigStore?.get("asr");
       const asrProviderType = options.providerType ?? asr?.providerType ?? "deepgram";
-      if (asrProviderType !== "custom-gateway" && asrProviderType !== "funasr-local" && !asr?.apiKey) throw new Error(`ASR_AUTH_FAILED: 未配置${asrProviderType === "qwen" ? "千问" : " Deepgram"} API Key`);
+      if (asrProviderType !== "custom-gateway" && asrProviderType !== "funasr-local" && !asr?.apiKey && !/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/)/i.test(asr?.baseUrl ?? "")) throw new Error(`ASR_AUTH_FAILED: 未配置${asrProviderType === "qwen" ? "千问" : " Deepgram"} API Key`);
       // Show the prewarmed HUD before provider checks and local service startup.
       // A slow network or model boot must not leave the user staring at a frozen main window.
       mainWindow?.hide();
@@ -2505,14 +2616,14 @@ function registerIpc(): void {
       markInterviewStartup("OVERLAY_SHOW_REQUEST");
       if (asrProviderType === "funasr-local") {
         markInterviewStartup("LOCAL_ASR_PREPARE_BEGIN");
-        await localAsrServiceManager.ensureRunning({
+        await abortableProviderTask(localAsrServiceManager.ensureRunning({
           webSocketUrl: options.url ?? asr?.baseUrl,
           model: options.model ?? asr?.model
-        });
+        }), startup.signal);
         markInterviewStartup("LOCAL_ASR_PREPARE_END");
       }
       markInterviewStartup("PREFLIGHT_BEGIN");
-      const preflight = await runProviderPreflight({ llm, asr: asr ?? { providerName: "ASR", providerType: "custom-gateway", baseUrl: options.url ?? "", apiKey: "", model: options.model ?? "", timeoutMs: 10_000, maxRetries: 0 }, embedding: providerConfigStore?.get("embedding") ?? { providerName: "Embedding", baseUrl: "", apiKey: "", model: "", timeoutMs: 10_000, maxRetries: 0 } }, true, providerPreflightCache);
+      const preflight = await abortableProviderTask(runProviderPreflight({ llm, asr: asr ?? { providerName: "ASR", providerType: "custom-gateway", baseUrl: options.url ?? "", apiKey: "", model: options.model ?? "", timeoutMs: 10_000, maxRetries: 0 }, embedding: providerConfigStore?.get("embedding") ?? { providerName: "Embedding", baseUrl: "", apiKey: "", model: "", timeoutMs: 10_000, maxRetries: 0 } }, true, providerPreflightCache), startup.signal);
       markInterviewStartup("PREFLIGHT_END");
       if (!preflight.llm.reachable) throw new Error(`LLM_CONNECT_FAILED: ${preflight.llm.message ?? preflight.llm.status}`);
       if (!preflight.asr.reachable) throw new Error(`ASR_CONNECT_FAILED: ${preflight.asr.message ?? preflight.asr.status}`);
@@ -2521,12 +2632,13 @@ function registerIpc(): void {
       const projectCandidates = snapshot.projects.map((project) => ({ id: project.id, name: project.name, entities: [...project.hardware, ...project.software, ...project.technologyStack] }));
       const cachedStartContext = interviewContextCache.get({ profileId: options.profileId, projectId: options.projectId, jobTargetId: options.jobTargetId });
       const interviewStartOptions: InterviewStartOptions = { ...options, runtimeMode: options.runtimeMode ?? "ACCURATE_INTERVIEW", projectCandidates, ...(cachedStartContext?.stableInterviewPrefix ? { stableInterviewPrefix: cachedStartContext.stableInterviewPrefix } : {}) };
-      const interviewId = await coordinator().start(interviewStartOptions);
+      const interviewId = await abortableProviderTask(coordinator().start(interviewStartOptions), startup.signal);
       coordinatorStarted = true;
       markInterviewStartup("INTERVIEW_READY");
       finishInterviewStartupTrace();
       return interviewId;
     } catch (error) {
+      if (startup.signal.aborted) return undefined;
       // If window creation fails after the coordinator has started, unwind the
       // session and restore the main window before reporting the error.
       if (overlayShown || coordinatorStarted || coordinator().running) {
@@ -2547,6 +2659,8 @@ function registerIpc(): void {
       broadcast("runtime:error", { code: mappedCode, message, recoverable: mappedCode !== "PROFILE_NOT_FOUND" && mappedCode !== "SIDECAR_NOT_FOUND" });
       finishInterviewStartupTrace();
       throw new Error(`${mappedCode}: ${message}`);
+    } finally {
+      if (interviewStartupController === startup) interviewStartupController = undefined;
     }
   });
   ipcMain.handle("interview:stop", () => stopInterview());
@@ -2564,21 +2678,28 @@ function registerIpc(): void {
   ipcMain.handle("interview:set-answer-mode", (_event, mode: "FAST" | "NORMAL" | "DEEP") => { coordinator().setAnswerMode(mode); return true; });
   ipcMain.handle("written-test:start", (_event, options: WrittenTestStartOptions) => {
     if (appShuttingDown) return undefined;
+    if (interviewStartupController || interviewStopTask || runtimeOperationMode !== "IDLE") throw new Error("SESSION_BUSY: 请等待当前模式结束");
     if (!profileRepository?.get(options.profileId)) throw new Error("PROFILE_NOT_FOUND: 笔试档案不存在");
     if (coordinator().running) throw new Error("INTERVIEW_RUNNING: 请先结束当前面试");
     const llm = providerConfigStore?.get("llm") ?? environmentLlmSettings;
-    if (!llm.apiKey) throw new Error("LLM_NOT_CONFIGURED: 未配置 LLM API Key");
+    if (providerCapabilities(llm).requiresApiKey && !llm.apiKey) throw new Error("LLM_NOT_CONFIGURED: 未配置 LLM API Key");
     if (!writtenTestController) throw new Error("WRITTEN_TEST_NOT_READY: 笔试控制器尚未准备好");
-    writtenTestController.start({ profileId: options.profileId, answerMode: options.answerMode });
-    mainWindow?.hide();
-    overlayManager?.enterWrittenTestMode();
-    setRuntimeOperationMode("WRITTEN_TEST");
-    return true;
+    try {
+      writtenTestController.start({ profileId: options.profileId, answerMode: options.answerMode });
+      setRuntimeOperationMode("WRITTEN_TEST");
+      mainWindow?.hide();
+      overlayManager?.enterWrittenTestMode();
+      return true;
+    } catch (error) {
+      stopWrittenTest();
+      throw error;
+    }
   });
   ipcMain.handle("written-test:stop", () => { stopWrittenTest(); return true; });
   ipcMain.handle("written-test:answer-screenshot", (_event, input?: { screenshotRequestId?: string }) => appShuttingDown ? undefined : answerCapturedScreenshot("written-test", input?.screenshotRequestId, "renderer-ipc"));
   ipcMain.handle("written-test:get-state", () => writtenTestController?.state ?? { running: false, answerMode: "NORMAL" as const, screenshotStatus: "IDLE" as const, questionCount: 0, screenshotCount: 0 });
   ipcMain.handle("written-test:set-answer-mode", (_event, mode: "FAST" | "NORMAL" | "DEEP") => { writtenTestController?.setAnswerMode(mode); return true; });
+  ipcMain.handle("written-test:set-next-relation", (_event, relation: "NEW_QUESTION" | "CONTINUATION" | "REPLACE_SCREENSHOT") => { writtenTestController?.setNextScreenshotRelation(relation); return true; });
   ipcMain.handle("chat:create-conversation", (_event, input: { profileId?: string; projectId?: string; title?: string }) => {
     if (!conversationRepository) throw new Error("Chat database is still initializing");
     return conversationRepository.create(input.profileId, input.projectId, input.title);
@@ -2660,7 +2781,8 @@ function registerIpc(): void {
   ipcMain.handle("self-introduction:upload", async (_event, input: { profileId: string; resumeHash: string; filename: string; mimeType: string; bytes: Uint8Array; targetDurationSeconds?: number; language?: string }) => {
     if (appShuttingDown) return undefined;
     const parsed = await parseDocument({ documentId: `self-introduction-${Date.now()}`, filename: input.filename, mimeType: input.mimeType, bytes: input.bytes });
-    const result = profileSelfIntroductionRepository?.save({ profileId: input.profileId, resumeHash: input.resumeHash || currentResumeHash(input.profileId), text: parsed.text, source: "uploaded", approved: false, targetDurationSeconds: input.targetDurationSeconds, language: input.language });
+    if (!parsed.text.trim()) throw new Error("SELF_INTRODUCTION_REQUIRED: 稿件没有可读取的文字");
+    const result = profileSelfIntroductionRepository?.save({ profileId: input.profileId, resumeHash: input.resumeHash || currentResumeHash(input.profileId), text: parsed.text, source: "uploaded", approved: true, targetDurationSeconds: input.targetDurationSeconds, language: input.language });
     releaseInterviewCaches();
     return result;
   });
@@ -3012,7 +3134,7 @@ function registerIpc(): void {
   ipcMain.handle("projects:list", (_event, profileId?: string) => projectRepository?.list(profileId) ?? []);
   ipcMain.handle("projects:create", (_event, input: { name: string; profileId?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => { const created = projectRepository?.create(input.name, input.profileId, Date.now(), input.ownershipMode, input.ownershipNote); releaseInterviewCaches(); return created; });
   ipcMain.handle("projects:rename", (_event, projectId: string, name: string) => { const renamed = projectRepository?.rename(projectId, name); releaseInterviewCaches(); return renamed; });
-  ipcMain.handle("projects:update", (_event, projectId: string, input: { name?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string }) => { const updated = projectRepository?.update(projectId, input); releaseInterviewCaches(); return updated; });
+  ipcMain.handle("projects:update", (_event, projectId: string, input: { name?: string; ownershipMode?: import("@interview-copilot/shared").ProjectOwnershipMode; ownershipNote?: string; projectIntroduction?: string }) => { const updated = projectRepository?.update(projectId, input); releaseInterviewCaches(); return updated; });
   ipcMain.handle("projects:delete", (_event, projectId: string) => { projectRepository?.delete(projectId); releaseInterviewCaches(); return true; });
 }
 
@@ -3068,13 +3190,13 @@ async function generateProjectQuestionBank(projectId: string): Promise<ProjectQa
     const settings = providerConfigStore?.get("llm") ?? environmentLlmSettings;
     if (!settings.apiKey) throw new Error("LLM_NOT_CONFIGURED: 请先配置 LLM API Key，再生成项目题库");
     const snapshot = projectMemoryRepository.getSnapshot(project.profileId);
-    const facts = (snapshot.facts ?? []).filter((fact) => fact.projectId === projectId && !fact.stale && fact.status !== "rejected" && fact.title.trim() && fact.content.trim()).slice(0, 80);
-    if (facts.length === 0) throw new Error("PROJECT_QA_FACTS_EMPTY: 当前项目没有可用于生成题库的有效事实");
-    const understanding = snapshot.understandings?.find((item) => item.projectId === projectId) ?? (snapshot.understanding?.projectId === projectId ? snapshot.understanding : undefined);
+    const projectFacts = (snapshot.facts ?? []).filter((fact) => fact.projectId === projectId);
+    const facts = selectProjectQaGenerationFacts(projectFacts, projectId);
+    const excludedFactCount = projectFacts.filter((fact) => !isFactEligible(fact) || !fact.title.trim() || !fact.content.trim()).length;
+    if (facts.length === 0) throw new Error("PROJECT_QA_FACTS_EMPTY: 当前项目没有可用于生成题库的已核实事实，请先补充来源、确认职责或处理冲突");
     const prompt = buildProjectQaGenerationPrompt({
       projectName: project.name,
-      facts: facts.map((fact) => ({ id: fact.id, type: fact.type, title: fact.title, content: fact.content })),
-      understanding: understanding ? JSON.stringify(understanding) : undefined
+      facts
     });
     let raw = "";
     for await (const delta of answerProvider.stream({
@@ -3089,8 +3211,16 @@ async function generateProjectQuestionBank(projectId: string): Promise<ProjectQa
     let generated = 0;
     let skipped = 0;
     let failed = 0;
+    let rejected = 0;
+    // A source can change while the provider is streaming. Do not save answers
+    // against a different revision from the one supplied to the model.
+    const currentFacts = projectMemoryRepository.getSnapshot(project.profileId).facts ?? [];
+    const evidenceRevision = (fact: typeof facts[number] | undefined): string => JSON.stringify(fact && { content: fact.content, value: fact.value, evidence: fact.evidence, status: fact.status, ownership: fact.ownership, evidenceLevel: fact.evidenceLevel, verified: fact.verified, stale: fact.stale, conflictStatus: fact.conflictStatus });
     for (const candidate of candidates) {
       try {
+        const audit = auditProjectQaEvidence({ projectId, answer: candidate.answer, factIds: candidate.factIds, facts: currentFacts });
+        const changedEvidence = candidate.factIds.some((factId) => evidenceRevision(facts.find((fact) => fact.id === factId)) !== evidenceRevision(currentFacts.find((fact) => fact.id === factId && fact.projectId === projectId)));
+        if (audit.blocked || changedEvidence) { rejected += 1; continue; }
         const digest = createHash("sha256").update(`${projectId}\n${candidate.question}`).digest("hex").slice(0, 20);
         const questionId = `project-qa-ai-${digest}`;
         const existing = questionBankRepository.getQuestion(questionId);
@@ -3108,7 +3238,7 @@ async function generateProjectQuestionBank(projectId: string): Promise<ProjectQa
       }
     }
     if (candidates.length === 0) throw new Error("PROJECT_QA_GENERATION_EMPTY: 模型没有返回可保存的项目题目");
-    const result: ProjectQaGenerationResult = { requested: candidates.length, generated, skipped, failed, factCount: facts.length };
+    const result: ProjectQaGenerationResult = { requested: candidates.length, generated, skipped, failed, factCount: facts.length, rejected, excludedFactCount };
     broadcast("question-bank:project-generation-progress", { status: "completed", projectId, ...result });
     return result;
   })();
@@ -3148,12 +3278,15 @@ async function generateSelfIntroduction(profileId: string, targetDurationSeconds
 }
 
 function stopWrittenTest(): void {
-  writtenTestController?.stop();
-  overlayManager?.exitWrittenTestMode();
-  setRuntimeOperationMode("IDLE");
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.show();
-    mainWindow.focus();
+  try {
+    writtenTestController?.stop();
+  } finally {
+    try {
+      overlayManager?.exitWrittenTestMode();
+    } finally {
+      setRuntimeOperationMode("IDLE");
+      writtenTestFocusGuard.revealMainWindow();
+    }
   }
 }
 
@@ -3197,10 +3330,7 @@ function registerShortcuts(): void {
 
 if (hasSingleInstanceLock) {
   app.on("second-instance", () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+    writtenTestFocusGuard.revealMainWindow();
   });
 
   app.whenReady().then(async () => {
@@ -3332,9 +3462,9 @@ if (hasSingleInstanceLock) {
       const selfIntroIntent = analyzeSelfIntroductionIntent(question.text);
       const cachedIntro = cached.selfIntroduction;
       if (selfIntroIntent.matched && cachedIntro?.approved) {
-        const selfIntroMode = selfIntroIntent.hasAdditionalConstraint ? "self_intro_rewrite" as const : "self_intro_direct" as const;
+        const selfIntroMode = "self_intro_direct" as const;
         const selfIntroPreparedAnswer = { content: cachedIntro.text, score: 1, verified: true, source: "self-introduction", answerCardId: cachedIntro.id };
-        const selfIntroPlan = createSelfIntroductionAnswerPlan(selfIntroMode === "self_intro_rewrite" ? "rewrite" : "direct");
+        const selfIntroPlan = createSelfIntroductionAnswerPlan("direct");
         return {
           ...cached,
           contextMode: "fast" as const,
@@ -3343,19 +3473,48 @@ if (hasSingleInstanceLock) {
           answerSourcePlan: selfIntroPlan,
           projectQaEvidence: [],
           retrievedKnowledge: [],
-          experienceContext: selfIntroMode === "self_intro_rewrite" ? [cachedIntro.text] : [],
+          experienceContext: [],
           questionTelemetry: {
             normalizedText: fastNormalizedQuestion,
             canonicalText: fastNormalizedQuestion,
             selfIntroductionDetected: true,
             selfIntroductionDirect: selfIntroMode === "self_intro_direct",
-            selfIntroductionRewrite: selfIntroMode === "self_intro_rewrite"
+            selfIntroductionRewrite: false
           }
         };
       }
       const fastCoreTechnicalQa = matchCoreTechnicalQa(fastNormalizedQuestion);
       const fastResolution = fastProjectIntent.projectQuestionRequested ? projectInterviewCache.resolveProject(fastNormalizedQuestion, { explicitProjectId: fastTargetProjectId }) : { reason: "none" as const, score: 0, ambiguous: false };
       const resolvedProjectId = fastResolution.projectId;
+      const preparedProjectIntroduction = resolvedProjectId && /(?:介绍|讲讲|说说|概述|展开讲|详细讲).{0,12}(?:这个|该|你的|你们的)?项目|项目.{0,8}(?:介绍|概述)/u.test(fastNormalizedQuestion)
+        ? projectRepository?.get(resolvedProjectId)?.projectIntroduction?.trim()
+        : undefined;
+      if (resolvedProjectId && preparedProjectIntroduction) {
+        return {
+          ...cached,
+          contextMode: "fast" as const,
+          recentTranscript: recentTranscript.slice(-8),
+          currentProject: projectInterviewCache.get(profileId, resolvedProjectId)?.name,
+          preparedAnswer: { content: preparedProjectIntroduction, score: 1, verified: true, source: "project-introduction", answerCardId: `project-introduction-${resolvedProjectId}` },
+          answerSourcePlan: {
+            mode: "project_intro_direct" as const,
+            projectAnchorAvailable: true,
+            projectQuestionRequested: true,
+            projectId: resolvedProjectId,
+            qaMatchLevel: "exact" as const,
+            preserveStoredAnswerFacts: true,
+            allowProjectKnowledge: false,
+            allowGeneralKnowledge: false,
+            allowSessionEvidence: true,
+            answerRewriteUsed: false
+          },
+          projectQaEvidence: [preparedProjectIntroduction],
+          projectEvidence: [],
+          retrievedKnowledge: [],
+          experienceContext: [],
+          questionTelemetry: { normalizedText: fastNormalizedQuestion, canonicalText: fastNormalizedQuestion, projectQuestionRequested: true, projectIntroductionDirect: true, projectAutoAnchorId: resolvedProjectId, projectCacheHit: true }
+        };
+      }
       const fastProjectQa = resolvedProjectId ? projectInterviewCache.routeProjectQuestion(fastNormalizedQuestion, resolvedProjectId) : undefined;
       const fastOverviewHits = resolvedProjectId && fastProjectIntent.projectQuestionRequested ? projectInterviewCache.searchOverview(fastNormalizedQuestion, resolvedProjectId, 4) : [];
       const fastRoute = fastProjectQa || (fastProjectIntent.projectQuestionRequested && !resolvedProjectId) ? undefined : questionBankRepository?.routeQuestion(fastNormalizedQuestion, {
@@ -3368,7 +3527,10 @@ if (hasSingleInstanceLock) {
       const fastCard = fastMatch?.question.answerCards.find((card) => card.verified && !card.stale) ?? fastMatch?.question.answerCards.find((card) => card.mode === "standard") ?? fastMatch?.question.answerCards[0];
       const fastPreparedAnswer = fastMatch && fastCard ? { content: `${fastCard.content}${fastCard.codeContent ? `\n代码：\n${fastCard.codeContent}` : ""}${fastCard.complexity ? `\n复杂度：${fastCard.complexity}` : ""}${fastCard.limitations ? `\n边界与限制：${fastCard.limitations}` : ""}`, score: fastMatch.score, verified: fastCard.verified, stale: fastCard.stale, answerCardId: fastCard.id, questionId: fastMatch.question.id } : undefined;
       const fastPersonalQuestion = fastAnswerIntent.requiresPersonalIdentity || fastAnswerIntent.requiresPersonalOwnership || fastAnswerIntent.requiresPersonalMetric || fastAnswerIntent.requiresPersonalResult || fastAnswerIntent.asksBehavioralEpisode;
-      const fastSourcePlan = planAnswerSource({
+      const fastProject = resolvedProjectId ? projectInterviewCache.get(profileId, resolvedProjectId) : undefined;
+      const fastResume = fastProject ? projectResumeEvidence(cached.verifiedResumeEvidence ?? [], [fastProject.name, ...fastProject.aliases]) : [];
+      const fastEvidence = [...scopedProjectEvidence(resolvedProjectId, fastOverviewHits), ...fastResume];
+      const fastSourcePlan = withGroundedProjectFallback(planAnswerSource({
         projectId: resolvedProjectId,
         projectAnchorAvailable: fastProjectIntent.projectAnchorAvailable || Boolean(resolvedProjectId),
         projectQuestion: fastProjectIntent.projectQuestionRequested,
@@ -3377,7 +3539,7 @@ if (hasSingleInstanceLock) {
         strictProjectQa: interviewContext?.strictProjectQa === true,
         coreTechnicalQa: fastCoreTechnicalQa,
         ...(fastPreparedAnswer ? { preparedAnswer: fastPreparedAnswer } : {})
-      });
+      }), fastEvidence);
       const fastStrictProjectQaNoMatch = fastSourcePlan.mode === "project_qa_no_match";
       // Project/personal turns get the same immediate cached answer lane. The
       // old full retrieval path is intentionally detached and can enrich a
@@ -3392,13 +3554,14 @@ if (hasSingleInstanceLock) {
         ...cached,
         contextMode: "fast" as const,
         recentTranscript: recentTranscript.slice(-8),
+        ...(fastProject ? { currentProject: fastProject.name } : {}),
         currentTopic: cached.currentTopic ?? interviewContext?.followUpContext?.relatedTechnicalTopic,
         questionBankMatches: fastRoute?.hits ?? [],
         ...(fastCoreTechnicalQa ? { coreTechnicalQa: fastCoreTechnicalQa } : {}),
         ...(fastPreparedAnswer && !fastStrictProjectQaNoMatch ? { preparedAnswer: fastPreparedAnswer } : {}),
         answerSourcePlan: fastSourcePlan,
         projectQaEvidence: fastSourcePlan.mode === "project_qa_direct" && fastPreparedAnswer ? [fastPreparedAnswer.content] : [],
-        projectEvidence: fastStrictProjectQaNoMatch || fastSourcePlan.mode === "project_qa_direct" ? [] : fastOverviewHits.map((chunk) => `[PROJECT_SOURCE] ${chunk.metadata.filename}: ${chunk.text}`),
+        projectEvidence: fastStrictProjectQaNoMatch || fastSourcePlan.mode === "project_qa_direct" ? [] : fastEvidence,
         retrievedKnowledge: fastProjectIntent.projectQuestionRequested
           ? []
           : fastTechnicalOnly
@@ -3430,7 +3593,8 @@ if (hasSingleInstanceLock) {
     const questionAnalysis = new QuestionAnalyzer().analyze(normalizedQuestion, projectSnapshot.projects.map((project) => project.name));
     const projectAlias = new ProjectAliasResolver().resolve(normalizedQuestion, projectSnapshot.projects.map((project) => ({ id: project.id, name: project.name, entities: [project.description, project.role, ...project.technologyStack, ...project.hardware, ...project.software] })));
     const detectedProjectId = questionAnalysis.project ? projectSnapshot.projects.find((project) => project.name.toLowerCase() === questionAnalysis.project?.toLowerCase())?.id : undefined;
-    const targetProjectId = interviewContext?.projectId ?? (projectAlias.ambiguous ? undefined : projectAlias.projectId ?? detectedProjectId);
+    const soleProjectId = projectSnapshot.projects.length === 1 && /(?:这个|该|你的|你们的|介绍|做过|参与过).{0,8}项目/u.test(normalizedQuestion) ? projectSnapshot.projects[0]?.id : undefined;
+    const targetProjectId = interviewContext?.projectId ?? (projectAlias.ambiguous ? undefined : projectAlias.projectId ?? detectedProjectId ?? soleProjectId);
     const targetProject = targetProjectId ? projectSnapshot.projects.find((project) => project.id === targetProjectId) : undefined;
     const answerIntent = analyzeAnswerIntent(normalizedQuestion);
     const intentGateStartedAt = performance.now();
@@ -3492,7 +3656,7 @@ if (hasSingleInstanceLock) {
     const chunks = earlyProjectQaDirect
       ? []
       : projectQuestionRequested && targetProjectId
-        ? projectKnowledgeChunks(profileId, targetProjectId)
+        ? projectKnowledgeChunks(profileId, targetProjectId).filter(chunk => chunk.metadata.scope === "project")
         : generalTechnicalKnowledgeChunks(profileId, profile?.knowledgeBaseIds ?? []);
     const retrievalOptions = { chunks, topK: 3, candidateK: 12, reranker: new KeywordReranker() };
     const keywordTiming: RetrievalTiming = {};
@@ -3572,7 +3736,7 @@ if (hasSingleInstanceLock) {
       ? candidateCard
       : undefined;
     const preparedAnswerContent = preparedCard ? `${preparedCard.content}${preparedCard.codeContent ? `\n代码：\n${preparedCard.codeContent}` : ""}${preparedCard.complexity ? `\n复杂度：${preparedCard.complexity}` : ""}${preparedCard.limitations ? `\n边界与限制：${preparedCard.limitations}` : ""}` : undefined;
-    const sourcePlan = planAnswerSource({
+    let sourcePlan = planAnswerSource({
       projectId: targetProjectId,
       projectAnchorAvailable,
       projectQuestion: projectQuestionRequested,
@@ -3600,6 +3764,9 @@ if (hasSingleInstanceLock) {
       retrieved = await new HybridKnowledgeRetriever({ ...retrievalOptions, embeddingProvider: { embed: () => queryEmbedding }, timings: embeddingTiming }).search(normalizedQuestion);
       retrievalDiagnostics = { ...retrievalDiagnostics, embeddingMs: cachedVector ? 0 : retrievalDiagnostics.embeddingMs, rerankMs: embeddingTiming.rerankMs ?? 0, totalRetrievalMs: embeddingTiming.totalRetrievalMs ?? retrievalDiagnostics.totalRetrievalMs };
     }
+    const groundedProjectEvidence = scopedProjectEvidence(targetProjectId, retrieved, trustedFactExperience);
+    const groundedResume = targetProject ? projectResumeEvidence(resumeExperience, [targetProject.name, ...(projectMemoryRepository?.getProject(targetProject.id)?.aliases ?? [])]) : [];
+    sourcePlan = withGroundedProjectFallback(sourcePlan, [...groundedProjectEvidence, ...groundedResume]);
     const strictProjectQaNoMatch = sourcePlan.mode === "project_qa_no_match";
     const retrievedKnowledge = strictProjectQaNoMatch || sourcePlan.mode === "project_qa_direct" || sourcePlan.mode === "general_core_qa" ? [] : [
       ...(projectQuestionRequested && targetProject ? [`项目回答视角政策：${resolveProjectAnswerPerspective(targetProject, relevantFactMatches[0]?.fact ?? { type: "background", title: "项目", content: "", id: "", projectId: targetProject.id, confidence: 0, verified: false, sourceIds: [] }).instruction}`] : []),
@@ -3662,7 +3829,8 @@ if (hasSingleInstanceLock) {
       skills: earlyProjectQaDirect ? [] : (interviewProfile?.candidate.skills ?? []),
       experienceContext: earlyProjectQaDirect ? [] : experience,
       personalMemoryEvidence: earlyProjectQaDirect ? [] : personalEvidence,
-      projectEvidence: earlyProjectQaDirect || strictProjectQaNoMatch ? [] : trustedFactExperience.slice(0, 8),
+      projectEvidence: earlyProjectQaDirect || strictProjectQaNoMatch ? [] : [...groundedProjectEvidence, ...groundedResume],
+      ...(targetProject ? { currentProject: targetProject.name } : {}),
       verifiedResumeEvidence: earlyProjectQaDirect ? [] : [...artifactExperience, ...resumeExperience].slice(0, 6),
       verifiedPersonalProjectFacts: earlyProjectQaDirect || strictProjectQaNoMatch ? [] : trustedPersonalProjectFacts.slice(0, 6),
       preparedAnswer: !strictProjectQaNoMatch && preparedCard && questionBankMatch && preparedAnswerContent ? { content: preparedAnswerContent, score: questionBankMatch.score, verified: preparedCard.verified, source: questionBankMatch.question.scope === "project" ? "project-question-bank" : "question-bank", answerCardId: preparedCard.id, questionId: questionBankMatch.question.id, stale: preparedCard.stale } : undefined,
@@ -3777,6 +3945,7 @@ if (hasSingleInstanceLock) {
     loadRenderer: (window, surface = "question") => loadRenderer(window, surface),
     getMainWindow: () => mainWindow,
     captureProtectionEnabled: overlaySettingsStore?.get().captureProtection ?? true,
+    speechScriptAvailable: Boolean(getSpeechScript()),
     onCaptureProtectionDiagnostic: (event, fields) => {
       appLogger?.info(event, fields);
       broadcast("overlay:capture-protection-diagnostic", { event, fields });
@@ -3786,7 +3955,7 @@ if (hasSingleInstanceLock) {
       if (!current) return;
       const mode = runtimeOperationMode === "WRITTEN_TEST" ? "writtenTest" : "interview";
       const leftKey = "questionWindow";
-      const key = panel === "answer" ? "answerWindow" : panel === "control" ? "controlBar" : leftKey;
+      const key = panel === "answer" ? "answerWindow" : panel === "script" ? "scriptWindow" : panel === "control" ? "controlBar" : leftKey;
       const sectionKey = mode === "writtenTest" ? "writtenTest" : "interview";
       const next = overlaySettingsStore?.setPreferences({ [sectionKey]: { [key]: { x: bounds.x - display.workArea.x, y: bounds.y - display.workArea.y, width: bounds.width, height: bounds.height, displayId: display.id, scaleFactor: display.scaleFactor } } });
       if (next) broadcast("overlay:preferences", next);
@@ -3805,6 +3974,7 @@ if (hasSingleInstanceLock) {
     }
   });
   const initialOverlayPreferences = overlaySettingsStore?.getPreferences();
+  overlayManager.setSpeechScriptAvailable(Boolean(getSpeechScript()));
   overlayManager.applyPreferences(initialOverlayPreferences?.behavior ?? {
     alwaysOnTop: true,
     interactionMode: "click_through",
@@ -3843,7 +4013,7 @@ if (hasSingleInstanceLock) {
     if (event.type === "session_state") {
       if (event.state === "CREATING" || event.state === "IDLE" || event.state === "ENDED") {
         realtimeTranscriptSnapshots = {};
-        pendingTranscriptBroadcast = undefined;
+        pendingTranscriptBroadcast.clear();
         if (transcriptBroadcastTimer) clearTimeout(transcriptBroadcastTimer);
         transcriptBroadcastTimer = undefined;
       }
@@ -3909,6 +4079,29 @@ if (hasSingleInstanceLock) {
       process.exitCode = environmentReason ? 0 : 1;
       app.quit();
     }
+  } else if (process.argv.includes("--interview-overlay-smoke") && process.env.INTERVIEW_COPILOT_TEST_DATA_PATH) {
+    try {
+      await mainRendererLoad;
+      const grounding = await runProjectGroundingSmoke({profiles:profileRepository!,projects:projectRepository!,memory:projectMemoryRepository!,knowledge:knowledgeRepository!,prepare:prepareInterviewContextCache,context:answerContextProvider});
+      process.stdout.write(`PROJECT_GROUNDING_SMOKE_RESULT ${JSON.stringify(grounding)}\n`);
+      releaseInterviewCaches();
+      const result = await runInterviewOverlaySmoke({ main: createdMainWindow, manager: overlayManager, broadcast, setMode: setRuntimeOperationMode, click: nativeMouseClick, elementCenter, drag: nativeMouseDrag, windowAt: nativeWindowAt });
+      process.stdout.write(`INTERVIEW_OVERLAY_SMOKE_RESULT ${JSON.stringify(result)}\n`);
+      app.quit();
+    } catch (error) {
+      process.stdout.write(`INTERVIEW_OVERLAY_SMOKE_RESULT ${JSON.stringify({ok:false,error:error instanceof Error ? error.stack : String(error)})}\n`);
+      app.exit(1);
+    }
+  } else if (writtenFocusSmokeRequested) {
+    try {
+      await mainRendererLoad;
+      const result = await runWrittenTestFocusSmoke({ main: createdMainWindow, manager: overlayManager, click: nativeMouseClick, move: nativeMouseMove, elementCenter, foreground: nativeForegroundWindow, windowAt: nativeWindowAt, cursor: nativeCursorPosition, hoverOnly: process.argv.includes("--written-hover-only") });
+      process.stdout.write(`WRITTEN_FOCUS_SMOKE_RESULT ${JSON.stringify(result)}\n`);
+      app.quit();
+    } catch (error) {
+      process.stdout.write(`WRITTEN_FOCUS_SMOKE_RESULT ${JSON.stringify({ ok: false, error: error instanceof Error ? error.stack : String(error) })}\n`);
+      app.exit(1);
+    }
   } else if (nativeMouseSmokeRequested) await runNativeMouseSmoke(createdMainWindow).catch((error) => { const detail = error instanceof Error ? error.stack ?? error.message : String(error); process.stdout.write(`NATIVE_MOUSE_SMOKE_RESULT ${JSON.stringify({ ok: false, result: "FAIL", error: detail })}\n`); overlayManager?.destroy(); app.exit(1); });
   else if (performanceSmokeRequested) await runPerformanceSmoke(createdMainWindow).catch((error) => { const result = { ok: false, result: "FAIL", error: String(error) }; appLogger?.error("PERFORMANCE_SMOKE_FAILED", result); process.stdout.write(`PERFORMANCE_SMOKE_RESULT ${JSON.stringify(result)}\n`); app.exit(1); });
   else if (productionSmokeRequested) await runProductionSmoke(createdMainWindow);
@@ -3919,6 +4112,8 @@ if (hasSingleInstanceLock) {
 
 app.on("before-quit", (event) => {
   appShuttingDown = true;
+  interviewStartupController?.abort();
+  interviewStartupController = undefined;
   if (shutdownController.isComplete) return;
   event.preventDefault();
   if (shutdownController.inProgress) return;

@@ -10,12 +10,34 @@ describe("overlay view models", () => {
     expect(view).toMatchObject({ currentQuestion: "当前问题", currentFollowUp: "补充一下？", hasHistory: true, historyCount: 1, status: "detected" });
   });
 
-  it("keeps only the latest answer visible while exposing an older-answer affordance", () => {
+  it("retains all answers in chronological order and identifies the latest", () => {
     const view = buildAnswerOverlayViewModel([
       { groupId: "old", questionId: "old-q", title: "旧问题", answers: [{ answerId: "old-a", questionId: "old-q", groupId: "old", questionText: "旧问题", answerText: "旧回答", relation: "PRIMARY", status: "complete", visible: true, startedAt: 0, finishedAt: 0 }], createdAt: 0, updatedAt: 0 },
       { groupId: "current", questionId: "current-q", title: "当前问题", answers: [{ answerId: "current-a", questionId: "current-q", groupId: "current", questionText: "当前问题", answerText: "当前回答", relation: "PRIMARY", status: "complete", visible: true, startedAt: 0, finishedAt: 0 }], createdAt: 0, updatedAt: 0 }
     ], "current");
     expect(view).toMatchObject({ question: "当前问题", answer: "当前回答", streaming: false, hasOlderAnswers: true, olderAnswerCount: 1 });
+    expect(view.items.map(item => [item.question, item.answer])).toEqual([["旧问题", "旧回答"], ["当前问题", "当前回答"]]);
+  });
+
+  it("shows queued and evidence-blocked questions without dropping or duplicating them", () => {
+    const view = buildAnswerOverlayViewModel([], undefined, undefined, "", false, [{ items: [
+      { questionId: "queued", text: "DMA 是什么？", answerable: true, state: "queued" },
+      { questionId: "blocked", text: "项目参数是多少？", answerable: true, state: "cancelled" },
+      { questionId: "blocked", text: "重复事件", answerable: true, state: "cancelled" },
+      { questionId: "noise", text: "嗯", answerable: false, state: "confirmed" }
+    ] }], { blocked: "当前项目资料不足，请补充确认后重试。" });
+    expect(view.items).toHaveLength(2);
+    expect(view.items[0]).toMatchObject({ questionId: "queued", status: "queued" });
+    expect(view.items[1]).toMatchObject({ questionId: "blocked", status: "blocked", answer: expect.stringContaining("资料不足") });
+  });
+
+  it("keeps more than eight dialogue blocks and replaces a growing partial in place", () => {
+    const remote = { source: "remote" as const, final: Array.from({ length: 58 }, (_, id) => ({ id: `${id}`, source: "remote" as const, text: `面试问题 ${id}`, startMs: id * 1000, endMs: id * 1000 + 100, final: true })), partial: { id: "live", source: "remote" as const, text: "新的", startMs: 60000, endMs: 60100, final: false } };
+    expect(buildDialogueOverlayViewModel(remote, undefined)).toHaveLength(59);
+    remote.partial.text = "新的实时提问继续更新";
+    const blocks = buildDialogueOverlayViewModel(remote, undefined);
+    expect(blocks).toHaveLength(59);
+    expect(blocks.at(-1)).toMatchObject({ id: "remote-partial-live", text: "新的实时提问继续更新" });
   });
 
   it("projects recent interviewer and candidate speaking blocks in chronological order", () => {

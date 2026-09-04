@@ -1,4 +1,5 @@
 import initSqlJs, { type SqlJsStatic } from "sql.js";
+import { auditProjectQaEvidence } from "@interview-copilot/shared";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
@@ -944,6 +945,9 @@ export class SqliteDatabase {
         );
         CREATE INDEX IF NOT EXISTS interview_runtime_context_updated_idx ON interview_runtime_context(updated_at DESC);
       `],
+      [40, `
+        ALTER TABLE projects ADD COLUMN project_introduction TEXT;
+      `],
     ];
     for (const [version, sql] of migrations) {
       if (version <= current) continue;
@@ -1285,7 +1289,7 @@ export class SqliteProfileSelfIntroductionRepository {
 
   save(input: ProfileSelfIntroductionInput, now = Date.now()): ProfileSelfIntroductionRecord {
     const text = input.text.trim();
-    if (!input.profileId || !input.resumeHash || !text) throw new Error("SELF_INTRODUCTION_REQUIRED");
+    if (!input.profileId || !input.resumeHash) throw new Error("SELF_INTRODUCTION_REQUIRED");
     const existing = input.id ? this.getById(input.id) : undefined;
     const recordId = input.id ?? id("self-introduction", now);
     this.database.run("INSERT INTO profile_self_introductions(id, profile_id, resume_hash, text, source, approved, target_duration_seconds, language, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET profile_id=excluded.profile_id, resume_hash=excluded.resume_hash, text=excluded.text, source=excluded.source, approved=excluded.approved, target_duration_seconds=excluded.target_duration_seconds, language=excluded.language, updated_at=excluded.updated_at", [recordId, input.profileId, input.resumeHash, text, input.source ?? "manual", input.approved ? 1 : 0, input.targetDurationSeconds ?? null, input.language ?? "zh-CN", existing?.createdAt ?? now, now]);
@@ -1390,6 +1394,7 @@ export interface ProjectRecord {
   updatedAt: number;
   ownershipMode?: ProjectOwnershipMode;
   ownershipNote?: string;
+  projectIntroduction?: string;
 }
 
 export interface ConversationRecord {
@@ -1426,13 +1431,13 @@ export class SqliteProjectRepository {
 
   list(profileId?: string): ProjectRecord[] {
     const query = profileId
-      ? "SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects WHERE profile_id = ? ORDER BY updated_at DESC"
-      : "SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects ORDER BY updated_at DESC";
+      ? "SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt, ownership_mode AS ownershipMode, ownership_note AS ownershipNote, project_introduction AS projectIntroduction FROM projects WHERE profile_id = ? ORDER BY updated_at DESC"
+      : "SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt, ownership_mode AS ownershipMode, ownership_note AS ownershipNote, project_introduction AS projectIntroduction FROM projects ORDER BY updated_at DESC";
     return this.database.all<Record<string, unknown>>(query, profileId ? [profileId] : []).map((row) => this.hydrate(row));
   }
 
   get(projectId: string): ProjectRecord | undefined {
-    const row = this.database.first<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt, ownership_mode AS ownershipMode, ownership_note AS ownershipNote FROM projects WHERE id = ?", [projectId]);
+    const row = this.database.first<Record<string, unknown>>("SELECT id, name, profile_id AS profileId, created_at AS createdAt, updated_at AS updatedAt, ownership_mode AS ownershipMode, ownership_note AS ownershipNote, project_introduction AS projectIntroduction FROM projects WHERE id = ?", [projectId]);
     return row ? this.hydrate(row) : undefined;
   }
 
@@ -1445,16 +1450,16 @@ export class SqliteProjectRepository {
     return this.get(project.id) as ProjectRecord;
   }
 
-  update(projectId: string, input: { name?: string; ownershipMode?: ProjectOwnershipMode; ownershipNote?: string }, now = Date.now()): ProjectRecord | undefined {
+  update(projectId: string, input: { name?: string; ownershipMode?: ProjectOwnershipMode; ownershipNote?: string; projectIntroduction?: string }, now = Date.now()): ProjectRecord | undefined {
     const current = this.get(projectId);
     if (!current) return undefined;
-    this.database.run("UPDATE projects SET name = ?, ownership_mode = ?, ownership_note = ?, updated_at = ? WHERE id = ?", [input.name?.trim() || current.name, normalizeProjectOwnershipMode(input.ownershipMode ?? current.ownershipMode), input.ownershipNote === undefined ? current.ownershipNote ?? null : input.ownershipNote.trim() || null, now, projectId]);
+    this.database.run("UPDATE projects SET name = ?, ownership_mode = ?, ownership_note = ?, project_introduction = ?, updated_at = ? WHERE id = ?", [input.name?.trim() || current.name, normalizeProjectOwnershipMode(input.ownershipMode ?? current.ownershipMode), input.ownershipNote === undefined ? current.ownershipNote ?? null : input.ownershipNote.trim() || null, input.projectIntroduction === undefined ? current.projectIntroduction ?? null : input.projectIntroduction.trim() || null, now, projectId]);
     this.database.flushNow();
     return this.get(projectId);
   }
 
   private hydrate(row: Record<string, unknown>): ProjectRecord {
-    return { id: String(row.id), name: String(row.name), ...(row.profileId ? { profileId: String(row.profileId) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt), ownershipMode: normalizeProjectOwnershipMode(row.ownershipMode), ...(row.ownershipNote ? { ownershipNote: String(row.ownershipNote) } : {}) };
+    return { id: String(row.id), name: String(row.name), ...(row.profileId ? { profileId: String(row.profileId) } : {}), createdAt: Number(row.createdAt), updatedAt: Number(row.updatedAt), ownershipMode: normalizeProjectOwnershipMode(row.ownershipMode), ...(row.ownershipNote ? { ownershipNote: String(row.ownershipNote) } : {}), ...(row.projectIntroduction ? { projectIntroduction: String(row.projectIntroduction) } : {}) };
   }
 
   rename(projectId: string, name: string, now = Date.now()): ProjectRecord | undefined {
@@ -2992,8 +2997,7 @@ export class SqliteQuestionBankRepository {
       for (const variant of input.variants.map((item) => item.trim()).filter(Boolean)) this.database.run("INSERT INTO question_bank_variants(id, question_id, text, normalized_text, created_at) VALUES (?, ?, ?, ?, ?)", [id("bank-variant", now), questionId, variant, normalizeQuestionBankText(variant), now]);
     }
     if (input.factIds) {
-      this.database.run("DELETE FROM question_bank_question_facts WHERE question_id = ?", [questionId]);
-      for (const factId of input.factIds) this.database.run("INSERT OR IGNORE INTO question_bank_question_facts(question_id, fact_id) VALUES (?, ?)", [questionId, factId]);
+      this.replaceQuestionFactLinks(questionId, input.factIds, now);
     }
     if (input.skillIds) {
       this.database.run("DELETE FROM question_bank_question_skills WHERE question_id = ?", [questionId]);
@@ -3014,13 +3018,28 @@ export class SqliteQuestionBankRepository {
     if (question.scope === "project" && (input.sourceType === "generated" || input.sourceType === "ai-generated") && !(input.factIds?.length || question.factIds?.length)) throw new Error("PROJECT_ANSWER_FACTS_REQUIRED: 项目答案必须关联 Project Facts");
     const cardId = input.id ?? id("bank-answer", now);
     const current = input.id ? this.getAnswerCard(input.id) : undefined;
-    this.database.run("INSERT INTO question_bank_answer_cards(id, question_id, mode, content, code_content, key_points_json, complexity, limitations, source_type, verified, stale, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET question_id=excluded.question_id, mode=excluded.mode, content=excluded.content, code_content=excluded.code_content, key_points_json=excluded.key_points_json, complexity=excluded.complexity, limitations=excluded.limitations, source_type=excluded.source_type, verified=excluded.verified, stale=excluded.stale, version=excluded.version, updated_at=excluded.updated_at", [cardId, input.questionId, input.mode ?? "standard", input.content.trim(), input.codeContent?.trim() || null, JSON.stringify(input.keyPoints ?? []), input.complexity?.trim() || null, input.limitations?.trim() || null, input.sourceType ?? current?.sourceType ?? "manual", input.verified ? 1 : 0, input.stale ?? current?.stale ?? false ? 1 : 0, input.version ?? (current?.version ?? 0) + 1, current?.createdAt ?? now, now]);
-    if (input.factIds) {
-      this.database.run("DELETE FROM question_bank_question_facts WHERE question_id = ?", [input.questionId]);
-      for (const factId of input.factIds) this.database.run("INSERT OR IGNORE INTO question_bank_question_facts(question_id, fact_id) VALUES (?, ?)", [input.questionId, factId]);
+    if (question.scope === "project" && input.verified && question.projectId) {
+      const factIds = input.factIds ?? question.factIds ?? [];
+      const memories = new SqliteProjectMemoryRepository(this.database);
+      const facts = factIds.flatMap((factId) => { const fact = memories.getFact(factId); return fact ? [fact] : []; });
+      const audit = auditProjectQaEvidence({ projectId: question.projectId, answer: [input.content, input.codeContent, input.complexity, input.limitations].filter(Boolean).join("\n"), factIds, facts });
+      if (audit.blocked) throw new Error(`PROJECT_QA_EVIDENCE_REVIEW_REQUIRED: ${audit.issues.filter((issue) => issue.severity === "error").map((issue) => issue.message).join(" ")}`);
     }
+    if (input.factIds) this.replaceQuestionFactLinks(input.questionId, input.factIds, now);
+    this.database.run("INSERT INTO question_bank_answer_cards(id, question_id, mode, content, code_content, key_points_json, complexity, limitations, source_type, verified, stale, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET question_id=excluded.question_id, mode=excluded.mode, content=excluded.content, code_content=excluded.code_content, key_points_json=excluded.key_points_json, complexity=excluded.complexity, limitations=excluded.limitations, source_type=excluded.source_type, verified=excluded.verified, stale=excluded.stale, version=excluded.version, updated_at=excluded.updated_at", [cardId, input.questionId, input.mode ?? "standard", input.content.trim(), input.codeContent?.trim() || null, JSON.stringify(input.keyPoints ?? []), input.complexity?.trim() || null, input.limitations?.trim() || null, input.sourceType ?? current?.sourceType ?? "manual", input.verified ? 1 : 0, input.stale ?? current?.stale ?? false ? 1 : 0, input.version ?? (current?.version ?? 0) + 1, current?.createdAt ?? now, now]);
     this.database.flushNow();
     return this.getAnswerCard(cardId) as QuestionBankAnswerCardRecord;
+  }
+
+  private replaceQuestionFactLinks(questionId: string, factIds: string[], now: number): void {
+    const next = [...new Set(factIds)].sort();
+    const before = this.database.all<{ factId: string }>("SELECT fact_id AS factId FROM question_bank_question_facts WHERE question_id = ?", [questionId]).map((row) => row.factId).sort();
+    if (JSON.stringify(before) === JSON.stringify(next)) return;
+    // The current schema shares links across all answers to one question.
+    // Rebinding one answer must not silently re-approve its siblings.
+    this.database.run("UPDATE question_bank_answer_cards SET stale = 1, updated_at = ? WHERE question_id = ? AND EXISTS (SELECT 1 FROM question_bank_questions WHERE id = ? AND scope = 'project')", [now, questionId, questionId]);
+    this.database.run("DELETE FROM question_bank_question_facts WHERE question_id = ?", [questionId]);
+    for (const factId of next) this.database.run("INSERT OR IGNORE INTO question_bank_question_facts(question_id, fact_id) VALUES (?, ?)", [questionId, factId]);
   }
 
   deleteAnswerCard(answerCardId: string): void {
@@ -3129,7 +3148,7 @@ export class SqliteQuestionBankRepository {
     const includeBehavioral = options.includeBehavioral ?? true;
     const projectImport = Boolean(options.projectId);
     const importedSource = options.source ?? "imported";
-    const verifyImported = options.verifyImported ?? projectImport;
+    const verifyImported = options.verifyImported ?? false;
     let recognizedQuestions = 0;
     let importedQuestions = 0;
     let importedAnswers = 0;
@@ -3155,10 +3174,13 @@ export class SqliteQuestionBankRepository {
         if (existing) {
           const mergedVariants = [...new Set([...existing.variants, ...variants, canonicalText].filter((item) => normalizeQuestionBankText(item) !== existing.normalizedText))];
           if (mergedVariants.length !== existing.variants.length || projectImport) {
-            const updated = this.saveQuestion({ id: existing.id, canonicalText: existing.canonicalText, type: projectImport ? type : existing.type, bankType: projectImport ? "project" : existing.bankType, category: projectImport ? "project" : existing.category, scope: projectImport ? "project" : existing.scope, profileId: projectImport ? options.profileId : existing.profileId, projectId: projectImport ? options.projectId : existing.projectId, difficulty: existing.difficulty, jobRole: existing.jobRole, variants: mergedVariants, source: projectImport ? importedSource : existing.source, verified: projectImport ? true : existing.verified, stale: projectImport ? false : existing.stale });
+            const updated = this.saveQuestion({ id: existing.id, canonicalText: existing.canonicalText, variants: mergedVariants, verified: existing.verified, stale: existing.stale });
             existingByNormalized.set(normalizedText, updated);
           }
-          if (answer && !existing.answerCards.some((card) => card.content.trim() === answer.trim() && !card.stale)) this.saveAnswerCard({ questionId: existing.id, content: answer, sourceType: importedSource, verified: verifyImported, stale: false });
+          if (answer && !this.getQuestion(existing.id)?.answerCards.some((card) => card.content.trim() === answer.trim() && !card.stale)) {
+            this.saveAnswerCard({ questionId: existing.id, content: answer, sourceType: importedSource, verified: verifyImported, stale: false });
+            importedAnswers += 1;
+          }
           ids.push(existing.id);
           duplicatesMerged += 1;
           return;
@@ -3198,8 +3220,8 @@ export class SqliteQuestionBankRepository {
   importProjectText(profileId: string, projectId: string, text: string, filename = "项目题库导入"): ProjectQuestionBankImportReport {
     const project = this.database.first<{ profileId: string }>("SELECT profile_id AS profileId FROM projects WHERE id = ?", [projectId]);
     if (!project || project.profileId !== profileId) throw new Error("PROJECT_QA_SCOPE_INVALID: 项目不属于当前档案");
-    const result = this.importText(text, filename, { includeProject: true, includeBehavioral: true, profileId, projectId, source: "imported", verifyImported: true });
-    return { projectId, filename, sourceRole: "question_bank", verified: true, ...result };
+    const result = this.importText(text, filename, { includeProject: true, includeBehavioral: true, profileId, projectId, source: "imported", verifyImported: false });
+    return { projectId, filename, sourceRole: "question_bank", verified: false, ...result };
   }
 
   invalidateProjectQaDependencies(projectId: string, factIds: string[], now = Date.now()): number {

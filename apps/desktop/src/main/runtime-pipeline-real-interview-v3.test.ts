@@ -57,7 +57,7 @@ async function replayCase(item: typeof fixture[number]): Promise<{ confirmed: Qu
 }
 
 describe("accurate interview V3 runtime replay", () => {
-  it("degrades a complete low-confidence question after the bounded stability window", async () => {
+  it("answers a complete low-confidence question without a second waiting window", async () => {
     vi.useFakeTimers();
     try {
       const audio = new ReplayAudio();
@@ -79,10 +79,12 @@ describe("accurate interview V3 runtime replay", () => {
       await settle();
       expect(confirmed).toHaveLength(0);
 
-      vi.advanceTimersByTime(800);
+      // Only the short transcript assembly boundary remains; there is no
+      // additional confidence-based question waiting window.
+      vi.advanceTimersByTime(1_200);
       await settle();
       expect(confirmed).toHaveLength(1);
-      expect(coordinator.getRuntimeTrace(500).some((event) => event.reasonCode === "stability-timeout-degraded-commit")).toBe(true);
+      expect(coordinator.getRuntimeTrace(500).some((event) => event.reasonCode === "answer-first-direct-question")).toBe(true);
       await coordinator.stop();
     } finally {
       vi.useRealTimers();
@@ -115,7 +117,7 @@ describe("accurate interview V3 runtime replay", () => {
     vi.useRealTimers();
   });
 
-  it("holds a locked-project question instead of falling back after a strict QA miss", async () => {
+  it("answers a locked-project question from project knowledge after a strict QA miss", async () => {
     vi.useFakeTimers();
     const audio = new ReplayAudio();
     const realtime = new ReplayRealtime();
@@ -156,9 +158,9 @@ describe("accurate interview V3 runtime replay", () => {
     vi.advanceTimersByTime(2_500);
     await settle();
     const traceNames = coordinator.getRuntimeTrace(500).map((event) => event.name);
-    expect(providerCalls).toBe(0);
-    expect(traceNames).toContain("PROJECT_QA_HOLD");
-    expect(traceNames).not.toContain("PROVIDER_REQUEST_SENT");
+    expect(providerCalls).toBeGreaterThan(0);
+    expect(traceNames).toContain("PROJECT_ANSWER_FALLBACK");
+    expect(traceNames).toContain("PROVIDER_REQUEST_SENT");
     await coordinator.stop();
     vi.useRealTimers();
   });

@@ -43,6 +43,13 @@ function activeProjectFrom(input: UnderstandingMachineOptions, current?: ActiveP
   return input.activeProject ?? current;
 }
 
+function isDirectAnswerableQuestion(text: string): boolean {
+  const compact = text.replace(/[\s\p{P}\p{S}]/gu, "");
+  if (compact.length < 4 || /(?:为什么.*(?:要)?选|(?:是)?用的什么)[？?。！!，,、\s]*$/u.test(text)) return false;
+  return /(?:为何|为什么|怎么|如何|哪(?:个|些|一种)|多少|是否|是不是|能否|可否|区别|优点|缺点|优势|劣势|作用|原理|(?:是|有|做|负责|用|选|包含|包括)什么|什么(?:是|区别|作用|原理|优势|项目|原因|特点|问题))/u.test(text)
+    || /(?:介绍|讲述|讲讲|说说).{0,12}(?:项目|经历|自己|优势|技术|系统)|(?:项目|经历).{0,8}(?:介绍|讲述|讲讲|说说)/u.test(text);
+}
+
 function shouldAppend(frame: QuestionFrame, text: string): boolean {
   if (!text.trim()) return false;
   const nextEntities = spokenEntities(text);
@@ -205,26 +212,35 @@ export class InterviewUnderstandingStateMachine {
     return this.commitFrame({ ...cloneFrame(pending), updatedAt: this.now() }, stabilizedGate);
   }
 
+  /** Preserve a complete question before the next independent topic replaces it. */
+  commitBeforeNewTurn(text: string): UnderstandingEvent | undefined {
+    if (!this.pendingQuestion || shouldAppend(this.pendingQuestion, text)) return undefined;
+    return this.commitPending("FAST_PRACTICE");
+  }
+
   process(input: UnderstandingSegmentInput, projectCandidates: readonly ProjectAliasCandidate[] = []): UnderstandingEvent {
     const now = input.timestamp ?? this.now();
     const speaker = input.speaker ?? "interviewer";
     this.previousSpeaker = this.currentSpeaker;
     this.currentSpeaker = speaker;
     const rawText = input.rawText ?? input.text;
-    if (speaker === "candidate" || ["BACKCHANNEL", "FILLER", "CONFIRMATION_CHECK"].includes(classifySpeechActV3(input.text).speechAct)) {
+    const initialSpeechAct = classifySpeechActV3(input.text).speechAct;
+    if (speaker === "candidate" || ["BACKCHANNEL", "FILLER"].includes(initialSpeechAct) || (initialSpeechAct === "CONFIRMATION_CHECK" && !isDirectAnswerableQuestion(input.text))) {
       const built = this.builder.build({ id: input.id, sessionId: this.sessionId, rawText, final: input.final, speaker, timestamp: now, anchors: this.anchors.snapshot(), activeProject: this.activeProject, now });
       return { type: "NON_ACTIONABLE", frame: { ...built.frame, commitStatus: "REJECTED" }, gate: { decision: "REJECT", status: "REJECTED", reason: speaker === "candidate" ? "candidate-speech" : "non-question-backchannel", postCompletionReady: false } };
     }
     if (!input.final) {
       const previous = this.pendingTurn?.speaker === speaker ? this.pendingTurn : undefined;
       const segmentIds = [...new Set([...(previous?.segmentIds ?? []), ...(input.segmentIds ?? [input.id])])];
-      const rawSegments = [...(previous?.rawSegments ?? []), rawText];
+      // Interim events replace one live preview; do not concatenate every
+      // revision (or let a long utterance grow this buffer without a bound).
+      const rawSegments = [rawText];
       this.pendingTurn = { segmentIds, rawSegments, rawCombinedText: rawSegments.join(" "), speaker, firstSeenAt: previous?.firstSeenAt ?? now, lastUpdatedAt: now };
       const built = this.builder.build({ id: input.id, sessionId: this.sessionId, rawText, rawSegments: [rawText], segmentIds: input.segmentIds, final: false, speaker, timestamp: now, asrConfidence: input.asrConfidence, anchors: this.anchors.snapshot(), activeProject: activeProjectFrom({}, this.activeProject), projectCandidates, now });
       return { type: "QUESTION_DRAFT_UPDATED", frame: built.frame, gate: { decision: "WAIT", status: "BUFFERING", reason: "interim-transcript", postCompletionReady: false } };
     }
 
-    const existingPending = this.pendingQuestion && now - this.pendingQuestion.updatedAt <= 8_000 && shouldAppend(this.pendingQuestion, input.text) ? this.pendingQuestion : undefined;
+    const existingPending = this.pendingQuestion && now - this.pendingQuestion.updatedAt <= 12_000 && shouldAppend(this.pendingQuestion, input.text) ? this.pendingQuestion : undefined;
     if (this.pendingQuestion && !existingPending) {
       this.ledger.remove(this.pendingQuestion.id);
       this.pendingQuestion = undefined;

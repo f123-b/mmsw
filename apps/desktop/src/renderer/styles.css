@@ -396,6 +396,16 @@ body { background: #f1f1ee; color: var(--text-primary); }
 /* Logical knowledge domains */
 .upload-project-action { position: relative; overflow: hidden; cursor: pointer; display: inline-flex; align-items: center; }
 .upload-project-action input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.speech-script-page { max-width: 980px; }
+.speech-script-card { overflow: hidden; border: 1px solid #e5e7eb; border-radius: 16px; background: #fff; }
+.speech-script-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; border-bottom: 1px solid #edf0f3; }
+.speech-script-card-heading div { display: grid; gap: 5px; min-width: 0; }
+.speech-script-card-heading strong { overflow: hidden; color: #1d2735; text-overflow: ellipsis; white-space: nowrap; }
+.speech-script-card-heading small { color: #8a94a3; }
+.speech-script-preview { max-height: 520px; margin: 0; overflow: auto; padding: 20px; color: #4b5563; font: inherit; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.speech-script-empty { margin-top: 20px; }
+.speech-script-help { display: grid; gap: 6px; margin-top: 20px; padding: 16px 18px; border-radius: 12px; background: #f5f7fa; color: #6b7280; line-height: 1.6; }
+.speech-script-help strong { color: #374151; }
 .project-library-stats { margin-top: 8px; }
 .project-library-status-grid, .job-target-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
 .project-library-status-card, .job-target-summary, .job-requirements-card { padding: 22px; }
@@ -1382,3 +1392,6 @@ body { background: #f1f1ee; color: var(--text-primary); }
 .project-header-more-menu button { border-radius: 7px; padding: 8px 10px; background: transparent; color: #52627a; text-align: left; font-size: 12px; }
 .project-header-more-menu button:hover { background: #f4f7fa; }
 @media (max-width: 720px) { .project-library-page-heading { display: grid; gap: 10px; } .project-library-heading-actions { justify-content: flex-start; } .project-picker { flex: 1 1 100%; } }
+.project-introduction-editor { display: grid; gap: 18px; padding: 28px 0; }
+.project-introduction-editor textarea { width: 100%; min-height: 300px; resize: vertical; border: 1px solid var(--border, #d8dee8); border-radius: 14px; padding: 18px; font: inherit; line-height: 1.75; color: inherit; background: var(--surface, #fff); box-sizing: border-box; }
+.project-introduction-editor textarea:focus { outline: 2px solid rgba(47, 98, 190, .18); border-color: #5d7fb7; }

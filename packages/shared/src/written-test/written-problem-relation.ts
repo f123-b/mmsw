@@ -5,6 +5,7 @@ export function resolveWrittenProblemRelation(current: WrittenProblemFrame | und
   if (!current) return "NEW_QUESTION";
   const currentText = `${current.canonicalQuestion} ${current.rawText}`.toLowerCase();
   const previousText = `${previous.canonicalQuestion} ${previous.rawText}`.toLowerCase();
+  if (currentText === previousText) return "REPLACE_SCREENSHOT";
   const continuation = /继续|补充|上图|如下|第二问|第[二三四]部分|基于.*图|同一题/.test(currentText);
   if (continuation || (previousText.length > 18 && currentText.includes(previousText.slice(0, 18)))) return "CONTINUATION";
   if (currentText === previousText || (current.canonicalQuestion.length > 16 && previous.canonicalQuestion.includes(current.canonicalQuestion))) return "REPLACE_SCREENSHOT";

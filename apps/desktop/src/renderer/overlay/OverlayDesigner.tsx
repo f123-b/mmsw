@@ -13,8 +13,7 @@ const INTERVIEW_PRESETS: Array<[InterviewLayoutPreset, string, string]> = [
   ["minimal", "极简悬浮", "内容驱动的小窗"]
 ];
 const WRITTEN_PRESETS: Array<[WrittenTestLayoutPreset, string, string]> = [
-  ["single_reader", "单阅读器", "题目与回答在同一窗口"],
-  ["split", "左右分栏", "左题目 · 右回答"]
+  ["single_reader", "笔试小窗", "题目、完整回答与截图操作在同一窗口"]
 ];
 
 type TextWindowKey = "questionWindow" | "dialogueWindow" | "answerWindow" | "controlBar";
@@ -183,9 +182,10 @@ export function OverlayDesigner({ value, onChange, onPreview, onReset }: { value
     };
     if (preset !== "custom") updateActiveTextWindow(patches[preset], true);
   };
-  const writtenShowAnswerControl = draftValue.writtenTest.layoutPreset === "split"
-    ? <section className="designer-section"><label className="designer-check-row"><input type="checkbox" checked={draftValue.writtenTest.showAnswer} onChange={(event) => applyPatch({ writtenTest: { showAnswer: event.target.checked } })} /><span><strong>显示回答窗口</strong><small>分栏布局允许单独隐藏回答窗口</small></span></label></section>
-    : <section className="designer-section"><p className="designer-inline-note">单阅读器：回答显示在题目窗口内，无独立回答窗口开关。</p></section>;
+  const writtenShowAnswerControl = <>
+    <section className="designer-section"><label className="designer-check-row"><input type="checkbox" checked={draftValue.writtenTest.focusProtection} onChange={(event) => applyPatch({ writtenTest: { focusProtection: event.target.checked } })} /><span><strong>焦点屏蔽</strong><small>笔试期间阻止主窗口抢占焦点，悬浮窗保持不激活；结束练习后恢复。</small></span></label></section>
+    <section className="designer-section"><p className="designer-inline-note">题目、结论、代码与解题过程直接显示在笔试小窗内，截图操作位于底部。</p></section>
+  </>;
 
   return <section className="settings-service-card overlay-preferences-card overlay-designer-card">
     <header className="overlay-designer-header"><div><span className="page-kicker">悬浮窗设计器</span><h2>面试与笔试悬浮窗</h2><p>两种工作流分别保存窗口位置和尺寸；运行时窗口稳定，内容在内部滚动。</p></div><button className="outline-pill" onClick={resetPreferences}>恢复布局默认</button></header>

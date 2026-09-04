@@ -1,4 +1,4 @@
-import { isDanglingQuestionTail, isStyleOnly } from "./semantic-answerability";
+import { isDanglingQuestionTail, isOpenPredicate, isStyleOnly } from "./semantic-answerability";
 
 export type TurnCompletionState = "complete" | "incomplete" | "topic_announcement" | "instruction_modifier" | "filler" | "ambiguous";
 
@@ -37,7 +37,7 @@ export function decideTurnCompletion(text: string, context: TurnCompletionContex
   if (isStyleOnly(normalized) || INSTRUCTION_MODIFIER.test(normalized)) return { state: "instruction_modifier", confidence: 0.97, reason: "instruction-modifier", recommendedWaitMs: 260 };
   if (TOPIC_ANNOUNCEMENT.test(normalized) && !QUESTION_FORM.test(normalized)) return { state: "topic_announcement", confidence: 0.96, reason: "topic-announcement", recommendedWaitMs: 180 };
   if (CONDITIONAL_OPEN.test(normalized) && !/(?:怎么|如何|怎样|怎么办|会不会|是否|能不能|可不可以|吗|呢|[？?])/iu.test(normalized)) return { state: "incomplete", confidence: 0.94, reason: "conditional-clause-open", recommendedWaitMs: 760 };
-  if (isDanglingQuestionTail(normalized)) return { state: "incomplete", confidence: 0.91, reason: "dangling-question-tail", recommendedWaitMs: 760 };
+  if (isOpenPredicate(normalized) || isDanglingQuestionTail(normalized)) return { state: "incomplete", confidence: 0.96, reason: "dangling-question-tail", recommendedWaitMs: 1_200 };
   // A terminal question mark closes the semantic turn even when the final
   // Chinese character also matches a generic open-tail heuristic (for
   // example, “是干什么的？”).

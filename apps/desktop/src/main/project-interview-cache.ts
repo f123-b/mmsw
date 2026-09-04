@@ -25,7 +25,7 @@ export interface ProjectInterviewCacheInput {
 
 export interface ProjectResolution {
   projectId?: string;
-  reason: "session" | "confirmed_link" | "explicit_name" | "alias" | "ambiguous" | "none";
+  reason: "session" | "confirmed_link" | "explicit_name" | "alias" | "single_project" | "ambiguous" | "none";
   score: number;
   ambiguous: boolean;
 }
@@ -97,12 +97,13 @@ export class ProjectInterviewCache {
       .map((resumeProject) => this.confirmedLinks.get(resumeProject.id))
       .filter((projectId): projectId is string => Boolean(projectId && this.projects.has(projectId)));
     if (confirmedMatches.length === 1) return { projectId: confirmedMatches[0], reason: "confirmed_link", score: 0.99, ambiguous: false };
-    const matches = [...this.projects.values()].flatMap((project) => [project.name, ...project.aliases].filter(Boolean).map((name) => ({ projectId: project.id, name: name.trim() })))
+    const matches = [...this.projects.values()].flatMap((project) => [project.name, ...project.aliases, ...(project.name.match(/[A-Za-z][A-Za-z0-9+#-]{2,}/g) ?? [])].filter(Boolean).map((name) => ({ projectId: project.id, name: name.trim() })))
       .filter((item) => item.name && text.includes(item.name.toLocaleLowerCase()))
       .sort((left, right) => right.name.length - left.name.length || left.projectId.localeCompare(right.projectId));
     const ids = [...new Set(matches.map((item) => item.projectId))];
     if (ids.length === 1) return { projectId: ids[0], reason: matches[0].name === this.projects.get(ids[0])?.name ? "explicit_name" : "alias", score: Math.min(0.98, 0.65 + matches[0].name.length / 100), ambiguous: false };
     if (ids.length > 1) return { reason: "ambiguous", score: 0, ambiguous: true };
+    if (this.projects.size === 1 && /(?:这个|该|你的|你们的|介绍|做过|参与过).{0,8}项目/u.test(question)) return { projectId: [...this.projects.keys()][0], reason: "single_project", score: 0.9, ambiguous: false };
     return { reason: "none", score: 0, ambiguous: false };
   }
 
