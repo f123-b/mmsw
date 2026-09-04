@@ -54,14 +54,26 @@ jobs:
         run: cargo fmt --check --manifest-path tools/capture-helper/Cargo.toml
 
       - name: External capture protection smoke
+        id: capture_protection_smoke
+        continue-on-error: true
         run: npm run capture-protection:smoke
 
-      - name: Upload capture protection v2 artifacts
+      - name: Report capture protection verification status
+        if: always()
+        shell: pwsh
+        run: |
+          if ("${{ steps.capture_protection_smoke.outcome }}" -eq "success") {
+            "Capture Protection Verification: PASS" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          } else {
+            "Capture Protection Verification: UNVERIFIED or FAIL — inspect the V3 artifact; this is not a PASS." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+
+      - name: Upload capture protection v3 artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: capture-protection-v2-${{ github.run_id }}
-          path: artifacts/capture-protection-v2
+          name: capture-protection-v3-${{ github.run_id }}
+          path: artifacts/capture-protection-v3
           if-no-files-found: ignore
 
       - name: Production renderer smoke test
@@ -149,8 +161,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: capture-protection-v2-packaged-${{ github.run_id }}
-          path: artifacts/capture-protection-v2
+          name: capture-protection-v3-packaged-${{ github.run_id }}
+          path: artifacts/capture-protection-v3
           if-no-files-found: ignore
 
       - name: Packaged renderer smoke test

@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain as nativeIpcMain, Menu, nativeImage, screen } from "electron";
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, relative, resolve, sep } from "node:path";
 import { version as osVersion } from "node:os";
@@ -1754,7 +1754,10 @@ async function runProductionSmoke(main: BrowserWindow): Promise<void> {
 type CaptureHelperResult = {
   ok: boolean;
   unsupported?: boolean;
-  mode?: "window" | "display";
+  mode?: "window" | "display" | "affinity";
+  affinity?: number | null;
+  affinityName?: "WDA_NONE" | "WDA_MONITOR" | "WDA_EXCLUDEFROMCAPTURE" | "UNKNOWN";
+  lastError?: number;
   backend?: string;
   image?: string;
   width?: number;
@@ -1825,6 +1828,22 @@ function nativeWindowId(window: BrowserWindow): string {
   return nativeHandle.length >= 8 ? nativeHandle.readBigUInt64LE(0).toString() : nativeHandle.readUInt32LE(0).toString();
 }
 
+function verifyNativeCaptureAffinity(window: { getNativeWindowHandle?: () => Buffer }) {
+  if (!window.getNativeWindowHandle) return { ok: false, affinity: null, affinityName: "UNKNOWN" as const, error: "Native window handle is unavailable" };
+  const executable = captureHelperExecutable();
+  if (!existsSync(executable)) return { ok: false, affinity: null, affinityName: "UNKNOWN" as const, error: `Capture helper is missing: ${executable}` };
+  const nativeHandle = window.getNativeWindowHandle();
+  const target = nativeHandle.length >= 8 ? nativeHandle.readBigUInt64LE(0).toString() : nativeHandle.readUInt32LE(0).toString();
+  const result = spawnSync(executable, ["--mode", "affinity", "--target", target], { windowsHide: true, encoding: "utf8", timeout: 5_000 });
+  const line = result.stdout?.trim().split(/\r?\n/).filter(Boolean).at(-1);
+  try {
+    const value = line ? JSON.parse(line) as CaptureHelperResult : undefined;
+    return { ok: value?.ok === true, affinity: value?.affinity ?? null, affinityName: value?.affinityName ?? "UNKNOWN", ...(value?.lastError === undefined ? {} : { lastError: value.lastError }), ...(value?.error ? { error: value.error } : {}) };
+  } catch {
+    return { ok: false, affinity: null, affinityName: "UNKNOWN" as const, error: result.stderr || result.stdout || "Invalid affinity helper result" };
+  }
+}
+
 function captureProtectionEnvironmentReason(error: unknown): string | undefined {
   const message = error instanceof Error ? error.message : String(error);
   if (process.env.GITHUB_ACTIONS === "true" && /no visible pixels|returned no frame|desktop DC unavailable|Graphics Capture returned no frame/i.test(message)) {
@@ -1835,10 +1854,12 @@ function captureProtectionEnvironmentReason(error: unknown): string | undefined 
 
 async function runCaptureProtectionSmoke(main: BrowserWindow): Promise<void> {
   await mainRendererLoad;
-  const artifactDirectory = process.env.INTERVIEW_COPILOT_CAPTURE_ARTIFACT_DIR ?? join(process.cwd(), "artifacts", "capture-protection-v2");
+  const artifactDirectory = process.env.INTERVIEW_COPILOT_CAPTURE_ARTIFACT_DIR ?? join(process.cwd(), "artifacts", "capture-protection-v3");
   await mkdir(artifactDirectory, { recursive: true });
   const manager = overlayManager;
-  const overlay = manager?.show();
+  manager?.setCaptureProtection(false);
+  manager?.setSpeechScriptAvailable(true);
+  const overlay = manager?.enterInterviewMode();
   const unsupported = !manager?.captureProtectionSupported;
   if (!overlay || unsupported) {
     const result = { ok: false, supported: false, result: "UNSUPPORTED_ENVIRONMENT", environmentReason: !manager ? "Overlay manager was not created" : "Capture protection API is not supported on this platform", windowCapture: "UNSUPPORTED_ENVIRONMENT", displayCapture: "UNSUPPORTED_ENVIRONMENT" };
@@ -1849,22 +1870,24 @@ async function runCaptureProtectionSmoke(main: BrowserWindow): Promise<void> {
 
   await waitForRendererLoad(overlay);
   await waitForRendererReady(overlay);
+  await overlay.webContents.executeJavaScript(`(() => { let marker = document.getElementById("capture-protection-v3-smoke-marker"); if (!marker) { marker = document.createElement("div"); marker.id = "capture-protection-v3-smoke-marker"; marker.textContent = "CAPTURE_PROTECTION_TEST_MARKER_7F32"; Object.assign(marker.style, { position: "fixed", zIndex: "2147483647", left: "50px", top: "50px", width: "200px", height: "120px", background: "#ff00ff", color: "#000", display: "grid", placeItems: "center" }); document.body.appendChild(marker); } return true; })()`);
   await waitForWindowVisible(overlay);
+  process.stdout.write(`CAPTURE_PROTECTION_V3_INITIAL_STATE ${JSON.stringify(manager.captureProtectionStatus)}\n`);
   const nativeWindow = nativeWindowId(overlay);
   const primary = screen.getPrimaryDisplay();
   const virtual = screen.getAllDisplays().reduce((bounds, display) => ({ left: Math.min(bounds.left, display.bounds.x), top: Math.min(bounds.top, display.bounds.y), right: Math.max(bounds.right, display.bounds.x + display.bounds.width), bottom: Math.max(bounds.bottom, display.bounds.y + display.bounds.height) }), { left: primary.bounds.x, top: primary.bounds.y, right: primary.bounds.x + primary.bounds.width, bottom: primary.bounds.y + primary.bounds.height });
   const displayScale = primary.scaleFactor || 1;
-  const roi = `${Math.round((primary.bounds.x - virtual.left) * displayScale + 50 * displayScale)},${Math.round((primary.bounds.y - virtual.top) * displayScale + 50 * displayScale)},${Math.round(200 * displayScale)},${Math.round(120 * displayScale)}`;
+  const overlayBounds = overlay.getBounds();
+  const roi = `${Math.round((overlayBounds.x - virtual.left) * displayScale)},${Math.round((overlayBounds.y - virtual.top) * displayScale)},${Math.round(overlayBounds.width * displayScale)},${Math.round(overlayBounds.height * displayScale)}`;
   const waitForCaptureFrame = async () => {
     await waitForRendererPaint(overlay);
     await new Promise<void>((resolve) => setTimeout(resolve, 160));
   };
   const captureExternal = async (mode: "window" | "display", name: string): Promise<CaptureHelperResult> => {
     const path = join(artifactDirectory, name);
-    return await runCaptureHelper(["--mode", mode, "--output", path, ...(mode === "window" ? ["--target", nativeWindow, "--roi", "50,50,200,120"] : ["--roi", roi])]);
+    return await runCaptureHelper(["--mode", mode, "--output", path, ...(mode === "window" ? ["--target", nativeWindow] : ["--roi", roi])]);
   };
 
-  manager.setCaptureProtection(false);
   await waitForCaptureFrame();
   await writeFile(join(artifactDirectory, "local-overlay-off.png"), await captureVisibleWindow(overlay));
   const windowOff = await captureExternal("window", "external-window-off.png");
@@ -1917,8 +1940,8 @@ async function runCaptureProtectionSmoke(main: BrowserWindow): Promise<void> {
     errors: [windowOff, windowOn, displayOff, displayOn].map((probe) => probe.error).filter(Boolean),
     artifacts: { directory: artifactDirectory, localOff: join(artifactDirectory, "local-overlay-off.png"), localOn: join(artifactDirectory, "local-overlay-on.png") }
   };
-  const v2Report = [
-    "# Capture Protection v2 Test Report",
+  const v3Report = [
+    "# Capture Protection V3",
     "",
     `FINAL COMMIT: pending`,
     `WINDOWS VERSION: ${result.windowsVersion}`,
@@ -1927,7 +1950,7 @@ async function runCaptureProtectionSmoke(main: BrowserWindow): Promise<void> {
     `PASS/FAIL: ${manager.captureProtectionStatus.lastError ? "FAIL" : "PASS"}`,
     `isContentProtected: ${manager.captureProtectionStatus.osFlagApplied ? "PASS" : "FAIL"}`,
     `LOCAL OVERLAY: ${result.localOverlayVisible ? "PASS" : "FAIL"}`,
-    `INDEPENDENT CAPTURE HELPER: ${[windowOff, windowOn, displayOff, displayOn].every((probe) => probe.ok || probe.unsupported) ? "PASS" : "FAIL"}`,
+    `INDEPENDENT CAPTURE HELPER: ${[windowOff, windowOn, displayOff, displayOn].every((probe) => probe.ok) ? "PASS" : environmentUnsupported ? "UNVERIFIED" : "FAIL"}`,
     `WINDOW CAPTURE CONTROL OFF: ${windowControl ? "PASS" : windowStatus}`,
     `WINDOW CAPTURE PROTECTED ON: ${windowControl && windowProtected ? "PASS" : windowStatus}`,
     `DISPLAY CAPTURE CONTROL OFF: ${displayControl ? "PASS" : displayStatus}`,
@@ -1939,7 +1962,7 @@ async function runCaptureProtectionSmoke(main: BrowserWindow): Promise<void> {
     "npm test: PASS (separate validation)",
     "typecheck: PASS (separate validation)",
     "build: PASS",
-    `capture-protection:smoke: ${environmentUnsupported ? "ENV_UNSUPPORTED" : result.ok ? "PASS" : "FAIL"}`,
+    `capture-protection:smoke: ${environmentUnsupported ? "UNVERIFIED" : result.ok ? "PASS" : "FAIL"}`,
     `package:win: ${app.isPackaged ? "PASS (installer/unpacked package verified separately)" : "pending"}`,
     "CI: pending",
     "Run ID: pending",
@@ -1948,10 +1971,10 @@ async function runCaptureProtectionSmoke(main: BrowserWindow): Promise<void> {
     `KNOWN LIMITATIONS: ${environmentUnsupported ? "The current capture session did not expose an independently observable desktop." : displayStatus === "FAIL" ? "The independent Windows Graphics Capture display image did not contain the OFF control marker; display result is FAIL." : "No known local limitation."}`,
     `ARTIFACTS: ${artifactDirectory}`,
     "",
-    result.result === "UNSUPPORTED_ENVIRONMENT" ? `Result: UNSUPPORTED_ENVIRONMENT (${result.environmentReason})` : result.result === "PASS" ? "Result: PASS" : "Result: FAIL (the selected independent capture path did not satisfy the OFF control and ON protected experiment)."
+    result.result === "UNSUPPORTED_ENVIRONMENT" ? `FINAL RESULT: UNVERIFIED (${result.environmentReason})` : result.result === "PASS" ? "FINAL RESULT: LOCAL_CAPTURE_PROTECTION_PASS\nREAL_MEETING_VALIDATION_PENDING" : "FINAL RESULT: FAIL (the selected independent capture path did not satisfy the OFF control and ON protected experiment)."
   ].join("\n");
-  await writeFile(join(artifactDirectory, "CAPTURE_PROTECTION_V2_REPORT.md"), v2Report, "utf8");
-  if (app.isPackaged) await writeFile(join(artifactDirectory, "PACKAGED_CAPTURE_TEST_REPORT.md"), v2Report, "utf8");
+  await writeFile(join(artifactDirectory, "CAPTURE_PROTECTION_V3_REPORT.md"), v3Report, "utf8");
+  if (app.isPackaged) await writeFile(join(artifactDirectory, "PACKAGED_CAPTURE_TEST_REPORT.md"), v3Report, "utf8");
   appLogger?.info("CAPTURE_PROTECTION_SMOKE_RESULT", result);
   process.stdout.write(`CAPTURE_PROTECTION_EXTERNAL_WINDOW_${windowStatus}\n`);
   process.stdout.write(`CAPTURE_PROTECTION_EXTERNAL_DISPLAY_${displayStatus}\n`);
@@ -2569,7 +2592,7 @@ function registerIpc(): void {
     captureProtectionSupported: process.platform === "win32"
   });
   ipcMain.handle("overlay:get-tencent-validation", () => overlaySettingsStore?.getTencentValidation() ?? { desktopShare: "unverified", windowShare: "unverified" });
-  ipcMain.handle("overlay:set-tencent-validation", (_event, mode: "desktopShare" | "windowShare", status: "unverified" | "verified" | "failed") => {
+  ipcMain.handle("overlay:set-tencent-validation", (_event, mode: "desktopShare" | "windowShare", status: "unverified" | "verified" | "failed" | "stale") => {
     const next = overlaySettingsStore?.setTencentValidation(mode, status) ?? { desktopShare: "unverified", windowShare: "unverified" };
     const event = status === "verified" ? mode === "desktopShare" ? "TENCENT_DESKTOP_SHARE_VERIFIED" : "TENCENT_WINDOW_SHARE_VERIFIED" : status === "failed" ? mode === "desktopShare" ? "TENCENT_DESKTOP_SHARE_FAILED" : "TENCENT_WINDOW_SHARE_FAILED" : "TENCENT_MEETING_REMOTE_VERIFICATION";
     appLogger?.info(event, { mode, status });
@@ -3945,6 +3968,8 @@ if (hasSingleInstanceLock) {
     loadRenderer: (window, surface = "question") => loadRenderer(window, surface),
     getMainWindow: () => mainWindow,
     captureProtectionEnabled: overlaySettingsStore?.get().captureProtection ?? true,
+    captureProtectionScope: "application",
+    verifyNativeAffinity: verifyNativeCaptureAffinity,
     speechScriptAvailable: Boolean(getSpeechScript()),
     onCaptureProtectionDiagnostic: (event, fields) => {
       appLogger?.info(event, fields);

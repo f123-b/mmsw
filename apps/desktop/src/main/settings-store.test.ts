@@ -422,7 +422,14 @@ describe("OverlaySettingsStore", () => {
       expect(settings.getTencentValidation()).toEqual({ desktopShare: "unverified", windowShare: "unverified" });
       settings.setTencentValidation("desktopShare", "verified");
       settings.setTencentValidation("windowShare", "failed");
-      expect(settings.getTencentValidation()).toEqual({ desktopShare: "verified", windowShare: "failed" });
+      expect(settings.getTencentValidation()).toMatchObject({
+        desktopShare: "verified",
+        windowShare: "failed",
+        records: {
+          desktopShare: { status: "verified", meetingApp: "tencent", mode: "desktopShare" },
+          windowShare: { status: "failed", meetingApp: "tencent", mode: "windowShare" }
+        }
+      });
     } finally { database.close(); }
   });
 

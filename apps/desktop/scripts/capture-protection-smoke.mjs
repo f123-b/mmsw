@@ -10,7 +10,7 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(scriptDirectory, "..", "..", "..");
 const desktopDirectory = join(repositoryRoot, "apps", "desktop");
 const outputDirectory = join(desktopDirectory, "out");
-const artifactDirectory = process.env.INTERVIEW_COPILOT_CAPTURE_ARTIFACT_DIR ?? join(repositoryRoot, "artifacts", "capture-protection-v2");
+const artifactDirectory = process.env.INTERVIEW_COPILOT_CAPTURE_ARTIFACT_DIR ?? join(repositoryRoot, "artifacts", "capture-protection-v3");
 const electronExecutable = process.env.ELECTRON_EXECUTABLE ?? (process.platform === "win32" ? join(repositoryRoot, "node_modules", "electron", "dist", "electron.exe") : join(repositoryRoot, "node_modules", "electron", "dist", "electron"));
 const packaged = process.env.ELECTRON_PACKAGED === "true";
 
@@ -56,7 +56,7 @@ child.once("exit", (code, signal) => {
     process.exitCode = 1;
     return;
   }
-  const status = result.result ?? (result.environmentUnsupported ? "UNSUPPORTED_ENVIRONMENT" : result.ok === true ? "PASS" : "FAIL");
-  if (status === "UNSUPPORTED_ENVIRONMENT") console.warn(`CAPTURE_PROTECTION_UNSUPPORTED_ENVIRONMENT ${result.environmentReason ?? "No independent desktop composition was observable"}`);
-  process.exitCode = (status === "PASS" || status === "UNSUPPORTED_ENVIRONMENT") && code === 0 ? 0 : 1;
+  const status = result.result === "UNSUPPORTED_ENVIRONMENT" ? "UNVERIFIED" : result.result ?? (result.environmentUnsupported ? "UNVERIFIED" : result.ok === true ? "PASS" : "FAIL");
+  if (status === "UNVERIFIED" || status === "UNSUPPORTED") console.warn(`CAPTURE_PROTECTION_VERIFICATION_${status} ${result.environmentReason ?? "No independent desktop composition was observable"}`);
+  process.exitCode = status === "PASS" && code === 0 ? 0 : status === "UNVERIFIED" || status === "UNSUPPORTED" ? 2 : 1;
 });

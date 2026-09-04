@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { release as osRelease } from "node:os";
 import { qwenAsrWebSocketUrl, QWEN_REALTIME_ASR_MODEL, validateLlmModelConfiguration, type AsrLanguage, type AsrProviderType, type ProviderSettings } from "@interview-copilot/shared";
 import { APP_DATA_DIRECTORY, type SqliteDatabase } from "./database";
 import { DEFAULT_OVERLAY_PREFERENCES, type InterviewLayoutPreset, type InterviewLeftPanelMode, type LegacyOverlayLayoutPreset, type OverlayAppearancePreferences, type OverlayBehaviorPreferences, type OverlayControlBarPreferences, type OverlayPreferences, type OverlayPreferencesPatch, type OverlayRegion, type OverlayScreenshotPreferences, type OverlayWindowPreferences, type WrittenTestLayoutPreset } from "../shared/overlay-preferences";
@@ -471,12 +472,25 @@ export function normalizeOverlayPreferences(input: OverlayPreferencesPatch): Ove
   };
 }
 
-export type TencentValidationStatus = "unverified" | "verified" | "failed";
+export type TencentValidationStatus = "unverified" | "verified" | "failed" | "stale";
 export type AutomationMode = "AUTO" | "MANUAL";
+
+export interface MeetingValidationRecord {
+  status: TencentValidationStatus;
+  verifiedAt?: number;
+  appVersion?: string;
+  electronVersion?: string;
+  osVersion?: string;
+  osBuild?: string;
+  meetingApp: "tencent";
+  meetingAppVersion?: string;
+  mode: "desktopShare" | "windowShare";
+}
 
 export interface TencentValidationState {
   desktopShare: TencentValidationStatus;
   windowShare: TencentValidationStatus;
+  records?: Partial<Record<"desktopShare" | "windowShare", MeetingValidationRecord>>;
 }
 
 export class OverlaySettingsStore {
@@ -632,15 +646,22 @@ export class OverlaySettingsStore {
     if (!stored) return fallback;
     try {
       const value = JSON.parse(stored.value) as Partial<TencentValidationState>;
-      return {
-        desktopShare: value.desktopShare === "verified" || value.desktopShare === "failed" ? value.desktopShare : "unverified",
-        windowShare: value.windowShare === "verified" || value.windowShare === "failed" ? value.windowShare : "unverified"
+      const records = value.records ?? {};
+      const current = { appVersion: process.env.npm_package_version ?? "0.1.9", electronVersion: process.versions.electron, osVersion: process.platform, osBuild: process.platform === "win32" ? osRelease() : undefined };
+      const status = (mode: "desktopShare" | "windowShare"): TencentValidationStatus => {
+        const raw = value[mode];
+        const record = records[mode];
+        if (raw === "verified" && record && (record.appVersion !== current.appVersion || record.electronVersion !== current.electronVersion || record.osVersion !== current.osVersion || record.osBuild !== current.osBuild)) return "stale";
+        return raw === "verified" || raw === "failed" || raw === "stale" ? raw : "unverified";
       };
+      return { desktopShare: status("desktopShare"), windowShare: status("windowShare"), ...(Object.keys(records).length ? { records } : {}) };
     } catch { return fallback; }
   }
 
   setTencentValidation(mode: "desktopShare" | "windowShare", status: TencentValidationStatus): TencentValidationState {
-    const next = { ...this.getTencentValidation(), [mode]: status };
+    const current = this.getTencentValidation();
+    const record: MeetingValidationRecord = { status, ...(status === "verified" || status === "failed" ? { verifiedAt: Date.now() } : {}), appVersion: process.env.npm_package_version ?? "0.1.9", electronVersion: process.versions.electron, osVersion: process.platform, osBuild: process.platform === "win32" ? osRelease() : undefined, meetingApp: "tencent", mode };
+    const next = { ...current, [mode]: status, records: { ...current.records, [mode]: record } };
     this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.tencentValidationKey, JSON.stringify(next)]);
     this.database.flushNow();
     return next;

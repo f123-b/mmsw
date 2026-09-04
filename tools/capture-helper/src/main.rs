@@ -143,6 +143,7 @@ mod windows_capture {
         fn PrintWindow(hwnd: Hwnd, hdc: Hdc, flags: u32) -> Bool;
         fn GetSystemMetrics(index: i32) -> i32;
         fn IsWindow(hwnd: Hwnd) -> Bool;
+        fn GetWindowDisplayAffinity(hwnd: Hwnd, affinity: *mut u32) -> Bool;
         fn SetWindowsHookExW(
             idHook: i32,
             callback: Option<unsafe extern "system" fn(i32, usize, isize) -> isize>,
@@ -191,6 +192,7 @@ mod windows_capture {
         output: String,
         target: Option<String>,
         roi: Option<(i32, i32, i32, i32)>,
+        backend: Option<String>,
     }
 
     #[derive(Clone)]
@@ -257,6 +259,7 @@ mod windows_capture {
         let mut output = None;
         let mut target = None;
         let mut roi = None;
+        let mut backend = None;
         let mut iter = std::env::args().skip(1);
         while let Some(arg) = iter.next() {
             let value =
@@ -268,6 +271,7 @@ mod windows_capture {
                 "--mode" => mode = Some(value("--mode", &mut iter)?),
                 "--output" => output = Some(value("--output", &mut iter)?),
                 "--target" => target = Some(value("--target", &mut iter)?),
+                "--backend" => backend = Some(value("--backend", &mut iter)?),
                 "--roi" => {
                     let raw = value("--roi", &mut iter)?;
                     let values: Vec<i32> = raw
@@ -286,7 +290,7 @@ mod windows_capture {
             }
         }
         let mode = mode.ok_or_else(|| "missing --mode".to_string())?;
-        let output = if mode == "mouse-watch" || mode == "keyboard-watch" {
+        let output = if mode == "mouse-watch" || mode == "keyboard-watch" || mode == "affinity" {
             output.unwrap_or_default()
         } else {
             output.ok_or_else(|| "missing --output".to_string())?
@@ -296,6 +300,7 @@ mod windows_capture {
             output,
             target,
             roi,
+            backend,
         })
     }
 
@@ -307,6 +312,26 @@ mod windows_capture {
             raw.parse::<isize>()
                 .map_err(|_| format!("invalid window target: {raw}"))
         }
+    }
+
+    fn affinity_name(value: u32) -> &'static str {
+        match value {
+            0 => "WDA_NONE",
+            1 => "WDA_MONITOR",
+            0x11 => "WDA_EXCLUDEFROMCAPTURE",
+            _ => "UNKNOWN",
+        }
+    }
+
+    fn query_affinity(hwnd: Hwnd) -> Result<u32, String> {
+        if unsafe { IsWindow(hwnd) } == 0 {
+            return Err(format!("target is not a window: {hwnd}"));
+        }
+        let mut affinity = 0u32;
+        if unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) } == 0 {
+            return Err(format!("GetWindowDisplayAffinity failed: {}", unsafe { GetLastError() }));
+        }
+        Ok(affinity)
     }
 
     fn make_bitmap_info(width: i32, height: i32) -> BitmapInfo {
@@ -401,21 +426,26 @@ mod windows_capture {
     fn capture_display(
         output: &str,
         roi: Option<(i32, i32, i32, i32)>,
+        backend: Option<&str>,
     ) -> Result<CapturedFrame, String> {
-        if let Ok(frame) = modern_capture("display", None, output, roi) {
+        if backend.is_none() || backend == Some("windows-graphics-capture") {
+          if let Ok(frame) = modern_capture("display", None, output, roi) {
             return Ok(frame);
+          }
+          if backend.is_some() { return Err("Windows Graphics Capture display backend failed".to_string()); }
         }
+        if let Some(value) = backend { if value != "gdi-bitblt" { return Err(format!("backend {value} does not support display capture")); } }
         let x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
         let y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
         let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
         let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
-        let (width, height, rgba) = capture_from_dc(0, x, y, width, height, false)?;
+        let (width, height, rgba) = capture_from_dc(0, x, y, width, height, "gdi-bitblt")?;
         let marker = marker_pixels(&rgba, width, height, roi);
         Ok(CapturedFrame {
             width,
             height,
             rgba,
-            backend: "gdi-fallback",
+            backend: "gdi-bitblt",
             marker,
         })
     }
@@ -424,13 +454,19 @@ mod windows_capture {
         hwnd: Hwnd,
         output: &str,
         roi: Option<(i32, i32, i32, i32)>,
+        backend: Option<&str>,
     ) -> Result<CapturedFrame, String> {
         if unsafe { IsWindow(hwnd) } == 0 {
             return Err(format!("target is not a window: {hwnd}"));
         }
-        if let Ok(frame) = modern_capture("window", Some(hwnd), output, roi) {
+        if backend.is_none() || backend == Some("windows-graphics-capture") {
+          if let Ok(frame) = modern_capture("window", Some(hwnd), output, roi) {
             return Ok(frame);
+          }
+          if backend.is_some() { return Err("Windows Graphics Capture window backend failed".to_string()); }
         }
+        let dc_backend = backend.unwrap_or("printwindow");
+        if dc_backend != "printwindow" && dc_backend != "gdi-bitblt" { return Err(format!("backend {dc_backend} does not support window capture")); }
         let mut rect = Rect {
             left: 0,
             top: 0,
@@ -447,13 +483,13 @@ mod windows_capture {
         if width <= 0 || height <= 0 {
             return Err(format!("window has invalid size: {width}x{height}"));
         }
-        let (width, height, rgba) = capture_from_dc(hwnd, 0, 0, width, height, true)?;
+        let (width, height, rgba) = capture_from_dc(hwnd, 0, 0, width, height, dc_backend)?;
         let marker = marker_pixels(&rgba, width, height, roi);
         Ok(CapturedFrame {
             width,
             height,
             rgba,
-            backend: "gdi-fallback",
+            backend: if dc_backend == "printwindow" { "printwindow" } else { "gdi-bitblt" },
             marker,
         })
     }
@@ -464,10 +500,10 @@ mod windows_capture {
         source_y: i32,
         width: i32,
         height: i32,
-        window: bool,
+        backend: &str,
     ) -> Result<(i32, i32, Vec<u8>), String> {
         let source = unsafe {
-            if window {
+            if hwnd != 0 {
                 GetWindowDC(hwnd)
             } else {
                 GetDC(0)
@@ -481,7 +517,7 @@ mod windows_capture {
         let memory = unsafe { CreateCompatibleDC(source) };
         if memory.is_null() {
             unsafe {
-                if window {
+                if hwnd != 0 {
                     ReleaseDC(hwnd, source);
                 } else {
                     ReleaseDC(0, source);
@@ -496,7 +532,7 @@ mod windows_capture {
         if bitmap.is_null() || pixels.is_null() {
             unsafe {
                 DeleteDC(memory);
-                if window {
+                if hwnd != 0 {
                     ReleaseDC(hwnd, source);
                 } else {
                     ReleaseDC(0, source);
@@ -505,21 +541,8 @@ mod windows_capture {
             return Err("DIB section unavailable".to_string());
         }
         let previous = unsafe { SelectObject(memory, bitmap as Hgdiobj) };
-        let captured = if window {
-            unsafe {
-                PrintWindow(hwnd, memory, PW_RENDERFULLCONTENT) != 0
-                    || BitBlt(
-                        memory,
-                        0,
-                        0,
-                        width,
-                        height,
-                        source,
-                        0,
-                        0,
-                        SRCCOPY | CAPTUREBLT,
-                    ) != 0
-            }
+        let captured = if backend == "printwindow" {
+            unsafe { PrintWindow(hwnd, memory, PW_RENDERFULLCONTENT) != 0 }
         } else {
             unsafe {
                 BitBlt(
@@ -554,7 +577,7 @@ mod windows_capture {
             SelectObject(memory, previous);
             DeleteObject(bitmap as Hgdiobj);
             DeleteDC(memory);
-            if window {
+            if hwnd != 0 {
                 ReleaseDC(hwnd, source);
             } else {
                 ReleaseDC(0, source);
@@ -791,10 +814,33 @@ mod windows_capture {
                 }
             };
         }
+        if args.mode == "affinity" {
+            let hwnd = match args.target.as_deref().map(parse_hwnd).transpose() {
+                Ok(Some(value)) => value,
+                Ok(None) => {
+                    println!(r#"{{"ok":false,"unsupported":false,"mode":"affinity","error":"affinity mode requires --target HWND"}}"#);
+                    return 2;
+                }
+                Err(error) => {
+                    println!(r#"{{"ok":false,"unsupported":false,"mode":"affinity","error":"{}"}}"#, json_string(&error));
+                    return 2;
+                }
+            };
+            return match query_affinity(hwnd) {
+                Ok(affinity) => {
+                    println!(r#"{{"ok":true,"unsupported":false,"mode":"affinity","hwnd":"{}","affinity":{},"affinityHex":"0x{:08X}","affinityName":"{}","lastError":0}}"#, hwnd, affinity, affinity, affinity_name(affinity));
+                    0
+                }
+                Err(error) => {
+                    println!(r#"{{"ok":false,"unsupported":false,"mode":"affinity","target":{},"affinity":null,"affinityName":"UNKNOWN","error":"{}"}}"#, hwnd, json_string(&error));
+                    2
+                }
+            };
+        }
         let capture = match args.mode.as_str() {
-            "display" => capture_display(&args.output, args.roi),
+            "display" => capture_display(&args.output, args.roi, args.backend.as_deref()),
             "window" => match args.target.as_deref().map(parse_hwnd).transpose() {
-                Ok(Some(hwnd)) => capture_window(hwnd, &args.output, args.roi),
+                Ok(Some(hwnd)) => capture_window(hwnd, &args.output, args.roi, args.backend.as_deref()),
                 Ok(None) => Err("window mode requires --target HWND".to_string()),
                 Err(error) => Err(error),
             },
@@ -814,7 +860,7 @@ mod windows_capture {
         if let Some(parent) = Path::new(&args.output).parent() {
             let _ = fs::create_dir_all(parent);
         }
-        if captured.backend == "gdi-fallback" {
+        if captured.backend != "windows-graphics-capture" {
             if let Err(error) = fs::write(
                 &args.output,
                 encode_png(captured.width, captured.height, &captured.rgba),

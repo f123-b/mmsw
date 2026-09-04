@@ -1,7 +1,7 @@
 import { BrowserWindow, screen, type BrowserWindowConstructorOptions } from "electron";
 import { join } from "node:path";
 import { applyOverlayMode, ensureOverlayNonFocusable, nextOverlayMode, type OverlayMode } from "./overlay-mode";
-import { applyCaptureProtection, getCaptureProtectionCapabilities, type CaptureProtectionCapabilities, type CaptureProtectionState } from "./overlay-capture-protection";
+import { CaptureProtectionManager, getCaptureProtectionCapabilities, type CaptureProtectionCapabilities, type CaptureProtectionScope, type CaptureProtectionState, type CaptureProtectionWindowLike, type NativeAffinityResult } from "./overlay-capture-protection";
 import { initialHUDState, reduceHUDState, type HUDAction, type HUDState, type OverlayTransientLayer } from "./hud-state";
 import { calculateHUDLayout, type HUDLayout, type HUDWorkArea } from "./hud-layout";
 import { DEFAULT_OVERLAY_PREFERENCES, type MouseInteractionMode, type OverlayBehaviorPreferences, type OverlayPreferences, type WheelRoutingMode } from "../shared/overlay-preferences";
@@ -41,6 +41,8 @@ export interface OverlayManagerOptions {
   captureProtectionEnabled?: boolean;
   speechScriptAvailable?: boolean;
   onCaptureProtectionDiagnostic?: (event: string, fields: Record<string, unknown>) => void;
+  captureProtectionScope?: CaptureProtectionScope;
+  verifyNativeAffinity?: (window: CaptureProtectionWindowLike) => NativeAffinityResult;
   onNativeBoundsChanged?: (panel: OverlayNativePanel, bounds: OverlayNativeBounds, display: OverlayDisplayInfo) => void;
   onHUDStateChange?: (state: HUDState) => void;
   onStartupTiming?: (event: InterviewStartupEvent) => void;
@@ -79,6 +81,7 @@ export class OverlayManager {
   private speechScriptAvailable: boolean;
   private captureProtectionState: CaptureProtectionState;
   private readonly capabilities: CaptureProtectionCapabilities;
+  private readonly captureProtectionManager: CaptureProtectionManager;
   private readonly zOrderController: OverlayZOrderController;
   private controlClickableReported = false;
   private endConfirmVisibleReported = false;
@@ -93,17 +96,16 @@ export class OverlayManager {
     this.captureProtectionEnabled = options.captureProtectionEnabled ?? true;
     this.speechScriptAvailable = Boolean(options.speechScriptAvailable);
     this.capabilities = getCaptureProtectionCapabilities();
-    this.captureProtectionState = {
-      platform: this.capabilities.platform,
-      supported: this.capabilities.captureProtectionSupported,
+    this.captureProtectionManager = new CaptureProtectionManager({
       requested: this.captureProtectionEnabled,
-      osFlagApplied: false,
-      enabled: this.captureProtectionEnabled,
-      applied: false,
-      externalCaptureVerified: null,
-      displayCaptureVerified: null,
-      windowCaptureVerified: null
-    };
+      scope: options.captureProtectionScope ?? "application",
+      capabilities: this.capabilities,
+      verifyNativeAffinity: options.verifyNativeAffinity,
+      onDiagnostic: options.onCaptureProtectionDiagnostic
+    });
+    const mainWindow = options.getMainWindow?.();
+    if (mainWindow) this.initializeProtectedWindow("main", mainWindow);
+    this.captureProtectionState = this.captureProtectionManager.state;
     this.zOrderController = new OverlayZOrderController({ onDiagnostic: options.onZOrderDiagnostic });
     screen.on("display-metrics-changed", this.displayChangeHandler);
     screen.on("display-added", this.displayChangeHandler);
@@ -372,6 +374,7 @@ export class OverlayManager {
       if (!window) continue;
       if (visible.has(panel)) {
         const wasVisible = window.isVisible();
+        if (!this.captureProtectionManager.canShow(panel)) { this.hide(); break; }
         window.showInactive();
         if (!wasVisible && (panel === "control" || panel === "script")) {
           // Reused transparent HWNDs can retain a stale Chromium hit-test region.
@@ -409,15 +412,30 @@ export class OverlayManager {
   }
   toggleMode(): OverlayMode { this.setMode(nextOverlayMode(this.mode)); return this.mode; }
 
-  setCaptureProtection(enabled: boolean): void { this.captureProtectionEnabled = enabled; this.applyCaptureProtection(); }
+  setCaptureProtection(enabled: boolean): void {
+    this.captureProtectionEnabled = enabled;
+    this.captureProtectionState = this.captureProtectionManager.setRequested(enabled);
+    if (enabled) {
+      const mainWindow = this.options.getMainWindow?.();
+      if (mainWindow) this.captureProtectionState = this.initializeProtectedWindow("main", mainWindow);
+      for (const panel of ["question", "answer", "script", "control"] as const) {
+        const window = this.getWindow(panel);
+        if (window) this.captureProtectionState = this.initializeProtectedWindow(panel, window);
+      }
+      const transient = this.currentTransientWindow;
+      if (transient) this.captureProtectionState = this.initializeProtectedWindow("transient", transient);
+      this.captureProtectionState = this.captureProtectionManager.protectAll();
+    }
+    this.sendToWindows("overlay:capture-protection", this.captureProtectionState);
+  }
   applyCaptureProtection(): void {
-    let state = this.captureProtectionState;
-    for (const window of this.allWindows()) state = applyCaptureProtection(window, this.captureProtectionEnabled, this.capabilities, this.options.onCaptureProtectionDiagnostic);
-    this.captureProtectionState = state;
-    this.sendToWindows("overlay:capture-protection", state);
+    const mainWindow = this.options.getMainWindow?.();
+    if (mainWindow) this.captureProtectionManager.register("main", mainWindow);
+    this.captureProtectionState = this.captureProtectionManager.protectAll();
+    this.sendToWindows("overlay:capture-protection", this.captureProtectionState);
   }
   recordExternalCaptureVerification(mode: "window" | "display", verified: boolean, fields: Record<string, unknown> = {}): void {
-    this.captureProtectionState = { ...this.captureProtectionState, externalCaptureVerified: verified, ...(mode === "window" ? { windowCaptureVerified: verified } : { displayCaptureVerified: verified }) };
+    this.captureProtectionState = this.captureProtectionManager.recordExternalVerification(mode, verified);
     this.options.onCaptureProtectionDiagnostic?.(verified ? `CAPTURE_PROTECTION_EXTERNAL_${mode === "window" ? "WINDOW" : "DISPLAY"}_PASS` : `CAPTURE_PROTECTION_EXTERNAL_${mode === "window" ? "WINDOW" : "DISPLAY"}_FAIL`, { mode, verified, ...fields });
     this.sendToWindows("overlay:capture-protection", this.captureProtectionState);
   }
@@ -486,12 +504,34 @@ export class OverlayManager {
   private sendLayoutEditMode(): void { this.sendToWindows("overlay:layout-edit-mode", this.isLayoutEditMode); }
   private sendToWindows(channel: string, payload: unknown): void { for (const window of this.allWindows()) if (!window.webContents.isDestroyed()) window.webContents.send(channel, payload); }
 
+  /**
+   * Electron only commits display affinity after an HWND has entered native
+   * composition on some Windows builds. Bootstrap it fully transparent before
+   * renderer content can be displayed, verify the real affinity, then restore
+   * the original visibility. No sensitive frame is exposed.
+   */
+  private initializeProtectedWindow(panel: "main" | OverlayWindowSurface, window: BrowserWindow): CaptureProtectionState {
+    if (!this.captureProtectionEnabled || !this.capabilities.captureProtectionSupported) return this.captureProtectionManager.register(panel, window);
+    const wasVisible = window.isVisible();
+    const opacity = window.getOpacity();
+    try {
+      window.setOpacity(0);
+      window.setContentProtection(true);
+      if (!wasVisible) window.showInactive();
+      return this.captureProtectionManager.register(panel, window);
+    } finally {
+      if (!wasVisible) window.hide();
+      window.setOpacity(opacity);
+    }
+  }
+
   private ensureWindow(panel: OverlayNativePanel): BrowserWindow {
     const existing = this.getWindow(panel);
     if (existing) return existing;
     const bounds = this.nativeBounds(panel);
     const window = new BrowserWindow({ ...bounds, title: panel === "control" ? "Interview Copilot Overlay Controls" : `Interview Copilot ${panel} Overlay`, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: false, acceptFirstMouse: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false } });
     this.windows[panel] = window;
+    this.captureProtectionState = this.initializeProtectedWindow(panel, window);
     this.syncZOrderWindows();
     const load = Promise.resolve(this.options.loadRenderer(window, panel)).then(() => {
       this.rendererReady.add(panel);
@@ -501,7 +541,7 @@ export class OverlayManager {
     }).catch(() => undefined);
     this.rendererLoads.set(panel, load);
     window.once("ready-to-show", () => { this.applyMode(); this.applyCaptureProtection(); this.sendHudState(); this.sendLayoutEditMode(); this.refreshLayout(window.getBounds()); this.syncZOrderWindows(); this.zOrderController.assertOverlayZOrder("renderer-ready"); });
-    window.on("closed", () => { if (this.windows[panel] === window) this.windows[panel] = undefined; this.rendererLoads.delete(panel); this.rendererReady.delete(panel); });
+    window.on("closed", () => { if (this.windows[panel] === window) this.windows[panel] = undefined; this.captureProtectionState = this.captureProtectionManager.unregister(panel); this.rendererLoads.delete(panel); this.rendererReady.delete(panel); });
     return window;
   }
 
@@ -512,11 +552,12 @@ export class OverlayManager {
     const configuration: BrowserWindowConstructorOptions = { ...this.transientBounds("shortcut"), title: "Interview Copilot Transient", parent: owner, modal: false, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: false, acceptFirstMouse: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false } };
     const window = new BrowserWindow(configuration);
     this.transientWindowValue = window;
+    this.captureProtectionState = this.initializeProtectedWindow("transient", window);
     this.syncZOrderWindows();
     const load = Promise.resolve(this.options.loadRenderer(window, "transient")).then(() => { this.rendererReady.add("transient"); }).catch(() => undefined);
     this.rendererLoads.set("transient", load);
     window.once("ready-to-show", () => { this.syncTransientWindow(); this.applyCaptureProtection(); this.sendHudState(); this.syncZOrderWindows(); this.zOrderController.assertOverlayZOrder("transient-ready"); });
-    window.on("closed", () => { if (this.transientWindowValue === window) this.transientWindowValue = undefined; this.rendererLoads.delete("transient"); this.rendererReady.delete("transient"); });
+    window.on("closed", () => { if (this.transientWindowValue === window) this.transientWindowValue = undefined; this.captureProtectionState = this.captureProtectionManager.unregister("transient"); this.rendererLoads.delete("transient"); this.rendererReady.delete("transient"); });
     return window;
   }
 
@@ -547,6 +588,7 @@ export class OverlayManager {
     window.setIgnoreMouseEvents(true, { forward: true });
     window.setIgnoreMouseEvents(false, { forward: true });
     window.webContents.send("overlay:transient-layer", layer);
+    if (!this.captureProtectionManager.canShow("transient")) { this.hide(); return; }
     window.showInactive();
     if (layer === "end_confirm" && !this.endConfirmVisibleReported) {
       this.endConfirmVisibleReported = true;

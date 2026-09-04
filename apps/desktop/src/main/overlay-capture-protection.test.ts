@@ -1,49 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
-import { applyCaptureProtection, getCaptureProtectionCapabilities, type CaptureProtectionWindowLike } from "./overlay-capture-protection";
-
-function makeWindow(): CaptureProtectionWindowLike & { setContentProtection: ReturnType<typeof vi.fn>; isContentProtected: ReturnType<typeof vi.fn> } {
-  return { isDestroyed: () => false, setContentProtection: vi.fn(), isContentProtected: vi.fn(() => true) };
+import { CaptureProtectionManager, affinityName, applyCaptureProtection, getCaptureProtectionCapabilities, type CaptureProtectionWindowLike } from "./overlay-capture-protection";
+function makeWindow(protectedValue = true): CaptureProtectionWindowLike & { setContentProtection: ReturnType<typeof vi.fn>; hide: ReturnType<typeof vi.fn> } {
+  return { isDestroyed: () => false, setContentProtection: vi.fn(), isContentProtected: vi.fn(() => protectedValue), hide: vi.fn(), getNativeWindowHandle: () => Buffer.alloc(8) };
 }
-
-describe("capture protection", () => {
-  it("applies the Windows API for both on and off without changing mode concerns", () => {
-    const window = makeWindow();
-    expect(applyCaptureProtection(window, false, getCaptureProtectionCapabilities("win32")).osFlagApplied).toBe(true);
-    expect(applyCaptureProtection(window, true, getCaptureProtectionCapabilities("win32")).osFlagApplied).toBe(true);
-    expect(window.setContentProtection).toHaveBeenNthCalledWith(1, false);
-    expect(window.setContentProtection).toHaveBeenNthCalledWith(2, true);
-  });
-
-  it("does not call Electron on unsupported platforms", () => {
-    const window = makeWindow();
-    const result = applyCaptureProtection(window, true, getCaptureProtectionCapabilities("linux"));
-    expect(result).toMatchObject({ supported: false, requested: true, osFlagApplied: false, externalCaptureVerified: null, displayCaptureVerified: null, windowCaptureVerified: null });
-    expect(window.setContentProtection).not.toHaveBeenCalled();
-  });
-
-  it("does not call Electron after the window is destroyed", () => {
-    const window = makeWindow();
-    window.isDestroyed = () => true;
-    applyCaptureProtection(window, true, getCaptureProtectionCapabilities("win32"));
-    expect(window.setContentProtection).not.toHaveBeenCalled();
-  });
-
-  it("contains API failures and reports them as diagnostics", () => {
-    const window = makeWindow();
-    window.setContentProtection.mockImplementation(() => { throw new Error("unsupported capture backend"); });
-    const diagnostic = vi.fn();
-    const result = applyCaptureProtection(window, true, getCaptureProtectionCapabilities("win32"), diagnostic);
-    expect(result).toMatchObject({ supported: true, requested: true, osFlagApplied: false, lastError: "Error: unsupported capture backend" });
-    expect(diagnostic).toHaveBeenCalledWith("OVERLAY_CAPTURE_PROTECTION_FAILED", expect.objectContaining({ platform: "win32", enabled: true }));
-  });
-
-  it("fails closed when Electron reports that the OS flag did not stick", () => {
-    const window = makeWindow();
-    window.isContentProtected.mockReturnValue(false);
-    const diagnostic = vi.fn();
-    const result = applyCaptureProtection(window, true, getCaptureProtectionCapabilities("win32"), diagnostic);
-    expect(result.osFlagApplied).toBe(false);
-    expect(result.lastError).toContain("OS_FLAG_FAILED");
-    expect(diagnostic).toHaveBeenCalledWith("CAPTURE_PROTECTION_OS_FLAG_FAILED", expect.objectContaining({ isContentProtected: false }));
-  });
+const modern = getCaptureProtectionCapabilities("win32", "10.0.22631");
+const old = getCaptureProtectionCapabilities("win32", "10.0.18363");
+const native = (name: "WDA_EXCLUDEFROMCAPTURE" | "WDA_MONITOR" = "WDA_EXCLUDEFROMCAPTURE") => () => ({ ok: true, affinity: name === "WDA_EXCLUDEFROMCAPTURE" ? 0x11 : 1, affinityName: name });
+describe("capture protection V3", () => {
+  it("maps affinity values", () => expect([affinityName(0), affinityName(1), affinityName(0x11), affinityName(7)]).toEqual(["WDA_NONE", "WDA_MONITOR", "WDA_EXCLUDEFROMCAPTURE", "UNKNOWN"]));
+  it("maps Windows builds", () => { expect(modern.requestedAffinity).toBe("WDA_EXCLUDEFROMCAPTURE"); expect(old.requestedAffinity).toBe("WDA_MONITOR"); });
+  it("reports unsupported systems", () => { expect(getCaptureProtectionCapabilities("linux").captureProtectionSupported).toBe(false); expect(getCaptureProtectionCapabilities("win32", "10.0.17134").captureProtectionSupported).toBe(false); });
+  it("requires native verification", () => { const manager = new CaptureProtectionManager({ capabilities: modern }); expect(manager.register("question", makeWindow()).health).toBe("FAILED"); });
+  it("protects a verified window", () => { const manager = new CaptureProtectionManager({ capabilities: modern, verifyNativeAffinity: native() }); const window = makeWindow(); expect(manager.register("question", window).health).toBe("PROTECTED"); expect(window.setContentProtection).toHaveBeenCalledWith(true); });
+  it("uses WDA_MONITOR on older Windows", () => { const manager = new CaptureProtectionManager({ capabilities: old, verifyNativeAffinity: native("WDA_MONITOR") }); expect(manager.register("answer", makeWindow()).health).toBe("PROTECTED"); });
+  it("aggregates five overlay windows", () => { const manager = new CaptureProtectionManager({ capabilities: modern, scope: "overlays", verifyNativeAffinity: native() }); for (const panel of ["question", "answer", "script", "control", "transient"] as const) manager.register(panel, makeWindow()); expect(manager.state).toMatchObject({ health: "PROTECTED", fullyProtected: true, partiallyProtected: false }); expect(manager.state.windows).toHaveLength(5); });
+  it("fails closed for one wrong affinity", () => { let calls = 0; const manager = new CaptureProtectionManager({ capabilities: modern, verifyNativeAffinity: () => ++calls === 2 ? { ok: true, affinity: 1, affinityName: "WDA_MONITOR" } : { ok: true, affinity: 0x11, affinityName: "WDA_EXCLUDEFROMCAPTURE" } }); const question = makeWindow(); const answer = makeWindow(); manager.register("question", question); const state = manager.register("answer", answer); expect(state).toMatchObject({ health: "PARTIALLY_PROTECTED", failClosed: true }); expect(question.hide).toHaveBeenCalled(); expect(answer.hide).toHaveBeenCalled(); });
+  it("fails closed for a false Electron flag", () => { const manager = new CaptureProtectionManager({ capabilities: modern, verifyNativeAffinity: native() }); const window = makeWindow(false); expect(manager.register("control", window).health).toBe("FAILED"); expect(window.hide).toHaveBeenCalled(); });
+  it("disables without fail closing", () => { const manager = new CaptureProtectionManager({ capabilities: modern, verifyNativeAffinity: native() }); const window = makeWindow(); manager.register("question", window); expect(manager.setRequested(false)).toMatchObject({ health: "DISABLED", failClosed: false, applied: false }); expect(window.setContentProtection).toHaveBeenLastCalledWith(false); });
+  it("application scope includes main", () => { const manager = new CaptureProtectionManager({ capabilities: modern, scope: "application", verifyNativeAffinity: native() }); manager.register("main", makeWindow()); manager.register("question", makeWindow()); expect(manager.state.windows.map((item) => item.panel)).toEqual(["main", "question"]); });
+  it("overlay scope excludes main", () => { const manager = new CaptureProtectionManager({ capabilities: modern, scope: "overlays", verifyNativeAffinity: native() }); manager.register("main", makeWindow()); manager.register("question", makeWindow()); expect(manager.state.windows.find((item) => item.panel === "main")?.requested).toBe(false); expect(manager.state.health).toBe("PROTECTED"); });
+  it("records external modes separately", () => { const manager = new CaptureProtectionManager({ capabilities: modern, verifyNativeAffinity: native() }); manager.register("question", makeWindow()); manager.recordExternalVerification("window", true); expect(manager.recordExternalVerification("display", false)).toMatchObject({ windowCaptureVerified: true, displayCaptureVerified: false, externalCaptureVerified: false }); });
+  it("keeps the compatibility helper", () => expect(applyCaptureProtection(makeWindow(), true, modern)).toMatchObject({ health: "PROTECTED", osFlagApplied: true }));
 });
