@@ -136,12 +136,14 @@ describe("Answer routing and generation", () => {
     expect(prompt).toContain("我负责通信模块");
   });
 
-  it("keeps code answers complete instead of slicing the tail", () => {
+  it("returns detailed code reasoning in auto mode and full code only in manual mode", () => {
     const code = "思路：双指针。\n```cpp\nint main() { return 0; }\n```\n复杂度 O(1)。";
     expect(new InterviewAnswerFormatter().format(code, "NORMAL", "code")).toBe(code);
-    const output = new PromptBuilder().build({ id: "code", text: "请写代码实现二分查找" }, "NORMAL", new ContextRouter().route("请写代码实现二分查找"));
-    expect(output.find((section) => section.name === "output-format")?.content).toContain("完整代码");
-    expect(output.find((section) => section.name === "output-format")?.content).toContain("给面试官的思路");
+    const automatic = new PromptBuilder().build({ id: "code", text: "请写代码实现二分查找" }, "NORMAL", new ContextRouter().route("请写代码实现二分查找"));
+    expect(automatic.find((section) => section.name === "output-format")?.content).toContain("禁止输出完整代码块");
+    const manual = new PromptBuilder().build({ id: "code", text: "请写代码实现二分查找" }, "NORMAL", new ContextRouter().route("请写代码实现二分查找", { allowFullCode: true }));
+    expect(manual.find((section) => section.name === "output-format")?.content).toContain("完整可编译代码");
+    expect(classifyAnswerQuestion("你可不可以把这个代码迁移到 ROS2 上？")).not.toBe("code");
   });
 
   it("keeps all sub-questions in one ordered answer", () => {

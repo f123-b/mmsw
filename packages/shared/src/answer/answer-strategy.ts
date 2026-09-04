@@ -43,7 +43,8 @@ export function classifyAnswerQuestion(text: string, hint?: string): AnswerQuest
   const normalized = normalizeTechnicalTerms(text);
   if (hint === "follow-up" || hint === "FOLLOW_UP") return /具体|怎么|如何|设计|实现|分层|架构|排查|原因|取舍|为什么/iu.test(normalized) ? "deep-follow-up" : "short-clarification";
   if (hint && ANSWER_KIND_HINTS[hint]) return ANSWER_KIND_HINTS[hint];
-  if (/代码|编程|手写|实现一个|写一个|补全|伪代码|算法题|时间复杂度|空间复杂度|输出结果|leetcode|debug|修复这段|code\b/i.test(normalized)) return "code";
+  const explicitCodeRequest = /(?:手写|编程|算法题|伪代码|leetcode|debug|修复这段|补全代码|(?:请|帮我)?写一个|写(?:一段|出|下)?代码|给(?:出|我)?.{0,6}代码|输出.{0,6}代码|实现(?:一个|一下)?.{0,8}(?:函数|接口|算法|代码)|代码.{0,8}(?:怎么写|如何写|实现|补全|输出)|时间复杂度|空间复杂度|code\b)/i.test(normalized);
+  if (explicitCodeRequest) return "code";
   if (/系统设计|架构设计|设计一个系统|高并发|可扩展|容灾|降级|限流|服务拆分|数据库设计|缓存设计|消息队列/.test(normalized)) return "system-design";
   if (/区别|对比|比较|优缺点|取舍|权衡|为什么不用|选型|差异/.test(normalized)) return "comparison";
   if (/低速抖动|IIC.*卡死|HardFault|DMA.*异常|CAN.*丢帧|丢帧|数据异常/.test(normalized)) return "embedded-debugging";

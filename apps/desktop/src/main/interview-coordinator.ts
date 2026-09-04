@@ -1156,6 +1156,7 @@ export class InterviewCoordinator extends EventEmitter {
       });
       const lockedProviderContext: AnswerContextInput = {
         ...providerContext,
+        allowFullCode: this.automationMode === "MANUAL",
         profileSummary: evidenceSnapshot.profileSummary,
         jobDescriptionSummary: evidenceSnapshot.jobDescriptionSummary,
         profileInstructions: evidenceSnapshot.profileInstructions,

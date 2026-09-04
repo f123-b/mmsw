@@ -229,6 +229,8 @@ export interface AnswerContextInput {
   /** Requirements and frozen context emitted by Understanding V3. */
   questionRequirements?: QuestionRequirement[];
   contextSnapshot?: QuestionContextSnapshot;
+  /** Full source code is reserved for explicit manual-answer sessions. */
+  allowFullCode?: boolean;
 }
 
 export interface ContextPack {
@@ -265,6 +267,7 @@ export interface ContextPack {
   interviewMemo?: string;
   questionRequirements: QuestionRequirement[];
   contextSnapshot?: QuestionContextSnapshot;
+  allowFullCode: boolean;
 }
 
 function answerTokenBudget(mode: AnswerMode, kind: AnswerQuestionKind, plan?: AnswerPlan): number {
@@ -333,6 +336,7 @@ export class ContextRouter {
       ...(input.interviewMemo ? { interviewMemo: input.interviewMemo } : {}),
       questionRequirements: (input.questionRequirements ?? []).map((item) => ({ ...item })),
       ...(input.contextSnapshot ? { contextSnapshot: { ...input.contextSnapshot, activeEntities: { ...input.contextSnapshot.activeEntities }, references: input.contextSnapshot.references.map((item) => ({ ...item })) } } : {}),
+      allowFullCode: input.allowFullCode === true,
       sessionEvidence: routedSessionEvidence.map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) })),
       candidateStatements: routedSessionEvidence.map((item) => ({ ...item, extractedClaims: item.extractedClaims.map((claim) => ({ ...claim })) }))
       ,...(input.questionTelemetry ? { questionTelemetry: { ...input.questionTelemetry } } : {})
@@ -424,7 +428,9 @@ export class PromptBuilder {
         ? mode === "FAST" ? "先给最小可运行代码和一句解释" : "完整代码、关键解释、复杂度和边界情况"
         : mode === "FAST" ? "60-120" : mode === "DEEP" ? "240-576" : "120-288";
     const strategy = {
-      code: "严格按四段输出：①“给面试官的思路”用可直接口述的短句说明数据结构、算法和选择原因；②给完整代码：必须是可编译运行的代码块（题目未指定语言时默认 C++17，包含必要头文件、函数/类定义和可执行入口或清晰调用方式）；③解释关键代码；④时间/空间复杂度、边界情况和可追问点。代码不要只写片段，也不要声称来自候选人的项目。",
+      code: context.allowFullCode
+        ? "当前是手动回答模式。严格按四段输出：①“给面试官的思路”说明数据结构、算法和选择原因；②给完整可编译代码；③解释关键代码；④时间/空间复杂度、边界情况和可追问点。"
+        : "当前是自动回答模式。只输出可直接口述的详细代码思路：说明输入输出、数据结构、核心算法、关键步骤、复杂度、边界条件和验证方式。禁止输出完整代码块；如有必要最多给一两行关键伪代码。",
       "system-design": "按需求和约束、整体架构、核心链路、数据一致性/稳定性、扩展性和权衡回答；只有明确问到项目时才引用项目。",
       comparison: "先给结论，再按核心差异、适用场景、优缺点和选型依据对比，不要强行加入项目经历。",
       troubleshooting: "按现象、可能原因、定位步骤、修复方案和验证方式回答；不要把排查方案包装成候选人已经做过的经历。",

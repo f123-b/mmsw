@@ -2657,6 +2657,12 @@ function registerIpc(): void {
       const interviewStartOptions: InterviewStartOptions = { ...options, runtimeMode: options.runtimeMode ?? "ACCURATE_INTERVIEW", projectCandidates, ...(cachedStartContext?.stableInterviewPrefix ? { stableInterviewPrefix: cachedStartContext.stableInterviewPrefix } : {}) };
       const interviewId = await abortableProviderTask(coordinator().start(interviewStartOptions), startup.signal);
       coordinatorStarted = true;
+      // Put the approved introduction on the answer panel immediately. This
+      // avoids relying on ASR to assemble short prompts such as “先介绍一下”
+      // while preserving the normal detector for every later question.
+      if (cachedStartContext?.selfIntroduction?.approved) {
+        await abortableProviderTask(coordinator().answerQuestionText("请做自我介绍"), startup.signal);
+      }
       markInterviewStartup("INTERVIEW_READY");
       finishInterviewStartupTrace();
       return interviewId;
