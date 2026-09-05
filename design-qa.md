@@ -1,55 +1,39 @@
-# Interview HUD Design QA
+# 有招 0.1.15 Design QA
 
 ## Source visual truth
 
-- Source: `C:/Users/lenovo/AppData/Local/Temp/codex-clipboard-104dbdc2-94f6-42b1-a58b-097b7358b3a7.png`
-- Source pixels: 1750 × 928.
-- Reference state: active interview with populated interviewer transcript, answer panel, long control bar, and visible labels.
+- Reference: `C:/Users/lenovo/AppData/Local/Temp/codex-clipboard-fbf4aeda-e9e6-4696-b94b-be9f864cb8ec.png`
+- Icon source: `D:/面试记录/页面ui/ChatGPT Image 2026年9月5日 00_04_14.png`
+- Target: iOS/macOS liquid-glass desktop shell with an ice-blue atmosphere, translucent left rail, glass hero, restrained blue accent, and four functional cards.
 
-## Implementation evidence
+## Final implementation evidence
 
-- Empty-state capture: `D:/电脑面试/artifacts/ui/overlay-hud-refinement-final.png`
-- Interview-run capture: `D:/电脑面试/artifacts/functional/10-interview-running.png`
-- Implementation pixels: 2562 × 1530; estimated Electron CSS viewport 1281 × 765 at device scale 2.
-- State: overlay running with the revised control bar and empty transcript/answer content. The functional E2E reached this screen but then waited for its mock ASR question stream, so populated transcript content was not available for capture.
+- Desktop capture: `D:/电脑面试/artifacts/ui/youzhao-0.1.14-final.png` (visual design unchanged in 0.1.15)
+- Installer: `D:/电脑面试/apps/desktop/release/有招 Setup 0.1.15.exe`
+- Product executable: `D:/电脑面试/apps/desktop/release/win-unpacked/有招.exe`
 
-## Comparison
+## Side-by-side judgment
 
-Full-view comparison confirms the revised control bar is materially shorter, centered, capsule-shaped, and uses icon-only controls for the two panels and shortcut popover. The revised empty panels no longer show the removed waiting/placeholder copy.
+- Brand: visible product name is now “有招”; the supplied glass waveform image is used for the installed app icon, sidebar brand, and hero artwork.
+- Layout: the desktop shell follows the reference hierarchy—frosted left rail, dominant glass hero, primary action group, and four capability cards. The layout responsively collapses at narrower widths.
+- Materials: sidebar, toolbar, forms, cards, dialogs, and content panels share translucent white surfaces, high-key borders, soft inner highlights, background blur, and blue-tinted shadows.
+- Typography: large dark headline, blue-to-violet emphasis, muted secondary copy, and compact navigation hierarchy match the reference direction.
+- Color: blue remains the only primary interaction color; purple, green, and orange are limited to small capability-card icon states.
+- Product flow: existing interview, written-test, profile, project, knowledge, history, help, and settings routes remain functional and inherit the new shell.
+- Responsive behavior: the welcome composer is hidden until a conversation starts, preserving the reference landing composition and returning the full height to the hero/cards.
+- Window chrome: the Windows title bar and outer padding are removed; the rounded glass shell is the visible window edge. The red, yellow, and green controls invoke close, minimize, and maximize/restore respectively.
+- Drag stability: a continuous 38 px drag strip spans the safe top area, while traffic lights, navigation, inputs, and buttons are explicitly excluded from dragging to prevent missed drags and accidental closes.
+- Transparent-window stability: maximize uses the active display work area and a saved restore rectangle instead of Electron's unreliable native maximize path for transparent Windows windows.
+- Icon: the second supplied RGBA artwork replaces the previous opaque source in the renderer, executable, and installer icon set.
 
-Focused comparison of the toolbar confirms:
+## Verification
 
-- the left and right panel controls are different icons and have independent pressed/hidden states;
-- the shortcut action is icon-only;
-- the end-interview control remains visible and reachable;
-- the toolbar and panel typography is smaller and denser than the source capture.
-
-The reference contains populated transcript and answer data while the smoke capture is intentionally empty. That is a state difference, not a layout mismatch; the transcript implementation now aligns interviewer bubbles left and self bubbles right in code and reducer tests cover the independent visibility states.
-
-## Required fidelity surfaces
-
-- Typography: reduced HUD control, transcript, answer, and shortcut text sizes; retained the existing Segoe/Inter/Microsoft YaHei fallback stack.
-- Spacing/layout: toolbar width is capped at 680px and height at 50px; panels keep their two-column composition with denser padding.
-- Colors/tokens: retained the existing translucent blue glass treatment and status colors, with a stronger capsule radius and active/inactive icon affordance.
-- Image/assets: no new raster assets were required; the existing icon system was extended with distinct left/right panel icons.
-- Copy/content: removed empty waiting text and replaced shortcut labels with concise action-oriented copy.
-
-## Comparison history
-
-1. Initial implementation showed an empty `KEYWORDS` label when no answer existed. Fixed by rendering answer metadata only when answer content exists.
-2. Final visual smoke capture verified the fix; no actionable P0/P1/P2 visual findings remain.
-
-## Implementation checklist
-
-- [x] Independent left transcript and right answer visibility controls.
-- [x] Compact capsule toolbar with icon-only panel and shortcut controls.
-- [x] Left/right speaker alignment and smaller text density.
-- [x] Simplified shortcut panel copy and one-row shortcut layout.
-- [x] Empty-state copy removed.
-- [x] Typecheck, unit tests, build, and visual smoke passed.
-
-## Follow-up Polish
-
-- [P3] Re-run the existing functional E2E with a working mock ASR stream to capture populated transcript bubbles at the same state as the reference.
+- TypeScript: passed.
+- Unit/integration tests: 85 files passed, 448 tests passed, 2 intentionally skipped.
+- Production build: passed.
+- Windows NSIS packaging: passed.
+- Packaged-window control smoke: passed; drag strip is active, traffic lights are non-draggable, and maximize, restore, minimize, and close all returned the expected state.
+- Packaged-resource verification: passed; required binaries, VAD model, classifier resources, and renderer output are present; no user database, secrets, or logs are bundled.
+- Actual Windows desktop capture inspected against the supplied reference; no blocking clipping, overlap, contrast, or asset failures remain.
 
 final result: passed

@@ -56,6 +56,11 @@ function requestScreenshotAnalysis(channel: "interview:answer-screenshot" | "wri
 }
 
 const api = {
+  windowControls: {
+    minimize: (): Promise<boolean> => ipcRenderer.invoke("window:minimize"),
+    toggleMaximize: (): Promise<boolean> => ipcRenderer.invoke("window:toggle-maximize"),
+    close: (): Promise<boolean> => ipcRenderer.invoke("window:close")
+  },
   diagnostics: {
     markRendererReady: () => ipcRenderer.send("diagnostics:renderer-ready"),
     markStartup: (event: InterviewStartupEvent) => ipcRenderer.send("diagnostics:startup-mark", event)

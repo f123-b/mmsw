@@ -35,7 +35,10 @@ const smokeUserDataDirectory = join(tmpdir(), `interview-copilot-smoke-${process
 // make visual capture look like a window/compositor hang.
 const smokeDataDirectory = join(tmpdir(), `interview-copilot-smoke-data-${process.pid}`);
 const smokeArguments = ["--production-smoke", ...(visualSmoke ? ["--visual-smoke"] : [])];
-const electronSwitches = ["--disable-gpu", "--in-process-gpu", `--user-data-dir=${smokeUserDataDirectory}`];
+const electronSwitches = [
+  ...(process.env.UI_HARDWARE_CAPTURE === "true" ? [] : ["--disable-gpu", "--in-process-gpu"]),
+  `--user-data-dir=${smokeUserDataDirectory}`
+];
 const electronArguments = packaged ? [...electronSwitches, ...smokeArguments] : [...electronSwitches, desktopDirectory, ...smokeArguments];
 
 const exitCode = await new Promise((resolve) => {

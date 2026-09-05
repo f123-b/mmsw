@@ -4,7 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { release as osRelease } from "node:os";
-import { qwenAsrWebSocketUrl, QWEN_REALTIME_ASR_MODEL, validateLlmModelConfiguration, type AsrLanguage, type AsrProviderType, type ProviderSettings } from "@interview-copilot/shared";
+import { providerCapabilities, qwenAsrWebSocketUrl, QWEN_REALTIME_ASR_MODEL, validateLlmModelConfiguration, type AsrLanguage, type AsrProviderType, type ProviderSettings } from "@interview-copilot/shared";
 import { APP_DATA_DIRECTORY, type SqliteDatabase } from "./database";
 import { DEFAULT_OVERLAY_PREFERENCES, type InterviewLayoutPreset, type InterviewLeftPanelMode, type LegacyOverlayLayoutPreset, type OverlayAppearancePreferences, type OverlayBehaviorPreferences, type OverlayControlBarPreferences, type OverlayPreferences, type OverlayPreferencesPatch, type OverlayRegion, type OverlayScreenshotPreferences, type OverlayWindowPreferences, type WrittenTestLayoutPreset } from "../shared/overlay-preferences";
 import { resolveOverlayGeometryConstraints } from "../shared/overlay-layout";
@@ -172,7 +172,22 @@ export class ProviderConfigStore {
       this.writeActiveLlmProfileId(id);
     }
     const storedActiveId = this.readActiveLlmProfileId();
-    const activeId = profiles.some((profile) => profile.id === storedActiveId) ? storedActiveId as string : profiles[0].id;
+    let activeId = profiles.some((profile) => profile.id === storedActiveId) ? storedActiveId as string : profiles[0].id;
+    // Versions before 0.1.12 could save the first real provider as a new
+    // profile while leaving the empty bootstrap profile active. Connection
+    // tests targeted the new profile explicitly, but interview/written-test
+    // startup read the empty active profile and reported a missing API key.
+    // Promote the first configured profile only from that untouched bootstrap
+    // state so existing installations repair themselves on their next launch.
+    const activeProfile = profiles.find((profile) => profile.id === activeId);
+    const activeSettings = activeProfile ? this.profileSettings(activeProfile) : undefined;
+    if (activeId === "llm-profile-default" && activeSettings && providerCapabilities(activeSettings).requiresApiKey && !activeSettings.apiKey) {
+      const configuredProfile = profiles.find((profile) => profile.id !== activeId && Boolean(this.secrets.get(this.profileSecretKey(profile.id))));
+      if (configuredProfile) {
+        activeId = configuredProfile.id;
+        this.writeStoredProvider("llm", this.profileSettings(configuredProfile));
+      }
+    }
     if (activeId !== storedActiveId) this.writeActiveLlmProfileId(activeId);
     return { profiles, activeId };
   }
@@ -647,7 +662,7 @@ export class OverlaySettingsStore {
     try {
       const value = JSON.parse(stored.value) as Partial<TencentValidationState>;
       const records = value.records ?? {};
-      const current = { appVersion: process.env.npm_package_version ?? "0.1.9", electronVersion: process.versions.electron, osVersion: process.platform, osBuild: process.platform === "win32" ? osRelease() : undefined };
+      const current = { appVersion: process.env.npm_package_version ?? "0.1.12", electronVersion: process.versions.electron, osVersion: process.platform, osBuild: process.platform === "win32" ? osRelease() : undefined };
       const status = (mode: "desktopShare" | "windowShare"): TencentValidationStatus => {
         const raw = value[mode];
         const record = records[mode];
@@ -660,7 +675,7 @@ export class OverlaySettingsStore {
 
   setTencentValidation(mode: "desktopShare" | "windowShare", status: TencentValidationStatus): TencentValidationState {
     const current = this.getTencentValidation();
-    const record: MeetingValidationRecord = { status, ...(status === "verified" || status === "failed" ? { verifiedAt: Date.now() } : {}), appVersion: process.env.npm_package_version ?? "0.1.9", electronVersion: process.versions.electron, osVersion: process.platform, osBuild: process.platform === "win32" ? osRelease() : undefined, meetingApp: "tencent", mode };
+    const record: MeetingValidationRecord = { status, ...(status === "verified" || status === "failed" ? { verifiedAt: Date.now() } : {}), appVersion: process.env.npm_package_version ?? "0.1.12", electronVersion: process.versions.electron, osVersion: process.platform, osBuild: process.platform === "win32" ? osRelease() : undefined, meetingApp: "tencent", mode };
     const next = { ...current, [mode]: status, records: { ...current.records, [mode]: record } };
     this.database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [OverlaySettingsStore.tencentValidationKey, JSON.stringify(next)]);
     this.database.flushNow();

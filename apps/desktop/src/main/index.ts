@@ -62,6 +62,7 @@ if (process.env.INTERVIEW_COPILOT_DISABLE_GPU === "1") {
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 let mainWindow: BrowserWindow | undefined;
+let mainWindowRestoreBounds: Electron.Rectangle | undefined;
 const writtenTestFocusGuard = new WrittenTestFocusGuard(() => mainWindow);
 let mainWindowBoundsSaveTimer: NodeJS.Timeout | undefined;
 let overlayManager: OverlayManager | undefined;
@@ -327,7 +328,7 @@ function saveMainWindowBounds(): void {
   if (mainWindowBoundsSaveTimer) clearTimeout(mainWindowBoundsSaveTimer);
   mainWindowBoundsSaveTimer = undefined;
   if (!database || !mainWindow || mainWindow.isDestroyed()) return;
-  database.run("INSERT INTO app_state(key, value) VALUES ('main_window_bounds', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [JSON.stringify(mainWindow.getBounds())]);
+  database.run("INSERT INTO app_state(key, value) VALUES ('main_window_bounds', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [JSON.stringify(mainWindowRestoreBounds ?? mainWindow.getBounds())]);
   database.flush(120);
 }
 
@@ -934,8 +935,12 @@ function createMainWindow(): BrowserWindow {
     ...bounds,
     minWidth: 920,
     minHeight: 620,
-    title: "Interview Copilot",
-    backgroundColor: "#0b1020",
+    title: "有招",
+    frame: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    hasShadow: true,
+    roundedCorners: true,
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
@@ -2495,6 +2500,32 @@ async function readWorkspaceFile(root: string, requestedPath: string): Promise<s
 
 function registerIpc(): void {
   const ipcMain = { on: nativeIpcMain.on.bind(nativeIpcMain), handle: shutdownAwareIpcHandle(nativeIpcMain, () => appShuttingDown) };
+  ipcMain.handle("window:minimize", (event) => {
+    const target = BrowserWindow.fromWebContents(event.sender);
+    if (!target || target !== mainWindow) return false;
+    target.minimize();
+    return true;
+  });
+  ipcMain.handle("window:toggle-maximize", (event) => {
+    const target = BrowserWindow.fromWebContents(event.sender);
+    if (!target || target !== mainWindow) return false;
+    if (mainWindowRestoreBounds) {
+      const restoreBounds = mainWindowRestoreBounds;
+      mainWindowRestoreBounds = undefined;
+      target.setBounds(restoreBounds, true);
+      return false;
+    }
+    mainWindowRestoreBounds = target.getBounds();
+    const workArea = screen.getDisplayMatching(mainWindowRestoreBounds).workArea;
+    target.setBounds(workArea, true);
+    return true;
+  });
+  ipcMain.handle("window:close", (event) => {
+    const target = BrowserWindow.fromWebContents(event.sender);
+    if (!target || target !== mainWindow) return false;
+    target.close();
+    return true;
+  });
   ipcMain.on("screenshot:trace", (_event, payload: { name?: string; screenshotRequestId?: string; fields?: Record<string, unknown> }) => {
     const allowed = new Set<ScreenshotTraceEventName>(["SCREENSHOT_ACTION_REQUESTED", "SCREENSHOT_RENDERER_HANDLER_ENTERED", "SCREENSHOT_IPC_SENT"]);
     if (!payload || typeof payload.screenshotRequestId !== "string" || !allowed.has(payload.name as ScreenshotTraceEventName)) return;

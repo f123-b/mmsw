@@ -533,7 +533,7 @@ export class OverlayManager {
     const existing = this.getWindow(panel);
     if (existing) return existing;
     const bounds = this.nativeBounds(panel);
-    const window = new BrowserWindow({ ...bounds, title: panel === "control" ? "Interview Copilot Overlay Controls" : `Interview Copilot ${panel} Overlay`, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: false, acceptFirstMouse: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false } });
+    const window = new BrowserWindow({ ...bounds, title: panel === "control" ? "有招悬浮窗控制" : `有招 ${panel} 悬浮窗`, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: false, acceptFirstMouse: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false } });
     this.windows[panel] = window;
     this.captureProtectionState = this.initializeProtectedWindow(panel, window);
     this.syncZOrderWindows();
@@ -553,7 +553,7 @@ export class OverlayManager {
     const existing = this.currentTransientWindow;
     if (existing) return existing;
     const owner = this.currentControlWindow ?? this.ensureWindow("control");
-    const configuration: BrowserWindowConstructorOptions = { ...this.transientBounds("shortcut"), title: "Interview Copilot Transient", parent: owner, modal: false, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: false, acceptFirstMouse: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false } };
+    const configuration: BrowserWindowConstructorOptions = { ...this.transientBounds("shortcut"), title: "有招快捷浮窗", parent: owner, modal: false, frame: false, transparent: true, backgroundColor: "#00000000", resizable: false, alwaysOnTop: true, skipTaskbar: true, hasShadow: false, show: false, focusable: false, acceptFirstMouse: true, webPreferences: { preload: this.options.preloadPath ?? join(__dirname, "../preload/index.mjs"), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false } };
     const window = new BrowserWindow(configuration);
     this.transientWindowValue = window;
     this.captureProtectionState = this.initializeProtectedWindow("transient", window);
@@ -681,3 +681,4 @@ export class OverlayManager {
 }
 
 export { OverlayManager as HUDWindowManager };
+

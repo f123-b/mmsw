@@ -1,6 +1,6 @@
 {
   "name": "@interview-copilot/desktop",
-  "version": "0.1.11",
+  "version": "0.1.15",
   "private": true,
   "type": "module",
   "main": "./out/main/index.js",
@@ -36,6 +36,7 @@
     "@interview-copilot/shared": "0.1.0",
     "@types/sql.js": "^1.4.11",
     "jszip": "^3.10.1",
+    "lucide-react": "^1.41.0",
     "mammoth": "^1.12.1",
     "onnxruntime-node": "^1.20.1",
     "pdf-parse": "^2.4.5",
@@ -58,7 +59,7 @@
   },
   "build": {
     "appId": "com.interviewcopilot.desktop",
-    "productName": "Interview Copilot",
+    "productName": "有招",
     "electronDist": "../../node_modules/electron/dist",
     "directories": {
       "output": "release"
@@ -126,6 +127,7 @@
       }
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "nsis",

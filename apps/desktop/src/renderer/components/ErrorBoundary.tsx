@@ -45,6 +45,7 @@ export class RootErrorBoundary extends Component<{ children: ReactNode }, ErrorB
 
   render(): ReactNode {
     if (!this.state.error) return this.props.children;
-    return <main className="renderer-error-page renderer-root-error"><span className="page-kicker">INTERVIEW COPILOT</span><h1>Interview Copilot 页面发生异常</h1><p>应用已阻止错误继续扩散，原始资料不会因此丢失。</p><p className="renderer-error-code">错误代码：RENDERER_RUNTIME_ERROR</p>{import.meta.env.DEV && <pre className="renderer-error-detail">{safeErrorMessage(this.state.error)}</pre>}<div className="detail-actions"><button className="dark-pill" onClick={() => window.location.reload()}>重新加载</button><button className="outline-pill" onClick={() => void this.copyError()}>复制错误信息</button></div></main>;
+    return <main className="renderer-error-page renderer-root-error"><span className="page-kicker">有招</span><h1>有招 页面发生异常</h1><p>应用已阻止错误继续扩散，原始资料不会因此丢失。</p><p className="renderer-error-code">错误代码：RENDERER_RUNTIME_ERROR</p>{import.meta.env.DEV && <pre className="renderer-error-detail">{safeErrorMessage(this.state.error)}</pre>}<div className="detail-actions"><button className="dark-pill" onClick={() => window.location.reload()}>重新加载</button><button className="outline-pill" onClick={() => void this.copyError()}>复制错误信息</button></div></main>;
   }
 }
+

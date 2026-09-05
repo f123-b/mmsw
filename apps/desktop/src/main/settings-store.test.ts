@@ -110,10 +110,9 @@ describe("ProviderConfigStore", () => {
       const first = config.saveLlmProfile({ name: "小米 Mimo", providerName: "Xiaomi", baseUrl: "https://mimo.test/v1", model: "mimo-pro", fastModel: "mimo-fast", questionRecognitionModel: "mimo-classifier", profileBuilderModel: "mimo-profile", questionBankModel: "mimo-bank", chatModel: "mimo-chat", postInterviewModel: "mimo-review", preparationModel: "mimo-prep", timeoutMs: 30_000, maxRetries: 2, apiKey: "mimo-key" });
       const mimoProfile = first.llmProfiles.find((profile) => profile.name === "小米 Mimo");
       expect(mimoProfile).toBeDefined();
-      expect(first.activeLlmProfileId).not.toBe(mimoProfile?.id);
+      expect(first.activeLlmProfileId).toBe(mimoProfile?.id);
       expect(mimoProfile).toMatchObject({ name: "小米 Mimo", model: "mimo-pro", fastModel: "mimo-fast", questionRecognitionModel: "mimo-classifier", profileBuilderModel: "mimo-profile", questionBankModel: "mimo-bank", chatModel: "mimo-chat", postInterviewModel: "mimo-review", preparationModel: "mimo-prep", hasApiKey: true });
-
-      config.activateLlmProfile(mimoProfile?.id ?? "");
+      expect(config.get("llm")).toMatchObject({ model: "mimo-pro", apiKey: "mimo-key" });
 
       const second = config.saveLlmProfile({ name: "DeepSeek", providerName: "DeepSeek", baseUrl: "https://deepseek.test/v1", model: "deepseek-chat", timeoutMs: 30_000, maxRetries: 2, apiKey: "deepseek-key" });
       expect(second.llmProfiles).toHaveLength(3);
@@ -126,6 +125,27 @@ describe("ProviderConfigStore", () => {
       expect(JSON.stringify(switched)).not.toContain("mimo-key");
       expect(JSON.stringify(switched)).not.toContain("deepseek-key");
       expect(config.getLlmProfile(mimoProfile?.id ?? "")).toMatchObject({ model: "mimo-pro", apiKey: "mimo-key" });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("repairs an older fresh-install state whose empty bootstrap profile stayed active", async () => {
+    const database = await SqliteDatabase.open(":memory:");
+    try {
+      const secrets = new MemorySecretStore();
+      const config = new ProviderConfigStore(database, secrets);
+      const saved = config.saveLlmProfile({ name: "Configured", providerName: "Custom", baseUrl: "https://llm.test/v1", model: "chat-model", timeoutMs: 30_000, maxRetries: 2, apiKey: "configured-key" });
+      const configuredProfile = saved.llmProfiles.find((profile) => profile.name === "Configured");
+      expect(configuredProfile).toBeDefined();
+
+      database.run("INSERT INTO app_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ["provider.llm.activeProfileId", JSON.stringify("llm-profile-default")]);
+      database.flushNow();
+
+      const reloaded = new ProviderConfigStore(database, secrets);
+      const repaired = reloaded.getPublic();
+      expect(repaired.activeLlmProfileId).toBe(configuredProfile?.id);
+      expect(reloaded.get("llm")).toMatchObject({ model: "chat-model", apiKey: "configured-key" });
     } finally {
       database.close();
     }

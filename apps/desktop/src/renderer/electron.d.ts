@@ -25,6 +25,11 @@ import type { SpeechScript } from "../main/speech-script";
 declare global {
   interface Window {
     interviewCopilot: {
+      windowControls: {
+        minimize(): Promise<boolean>;
+        toggleMaximize(): Promise<boolean>;
+        close(): Promise<boolean>;
+      };
       diagnostics: {
         markRendererReady(): void;
         markStartup(event: import("../main/interview-startup-timing").InterviewStartupEvent): void;
